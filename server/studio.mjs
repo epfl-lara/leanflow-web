@@ -20,6 +20,7 @@ import { acquireServerLease } from './lease.mjs'
 import { repairProjectSetup } from './setup-repair.mjs'
 import { GitPublisher } from './git-publish.mjs'
 import { proofTargetReference } from './proof-target.mjs'
+import { loadCapacity } from './capacity.mjs'
 
 const projectDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -64,7 +65,8 @@ const runMetadata = (job) => {
       .filter((key) => job[key] !== undefined)
       .map((key) => [key, job[key]]),
   )
-  if (job.proofTarget) result.proofTarget = proofTargetReference(job.proofTarget)
+  if (job.proofTarget)
+    result.proofTarget = proofTargetReference(job.proofTarget)
   if (Array.isArray(job.liveChanges))
     result.liveChanges = job.liveChanges.map((change) => ({
       path: change.path,
@@ -79,7 +81,9 @@ const chatTranscript = (job, eventCursor) => ({
   messageTruncated: !!job.messageTruncated,
   followups: (job.followups || []).map((entry) => ({
     ...entry,
-    ...(entry.proofTarget ? { proofTarget: proofTargetReference(entry.proofTarget) } : {}),
+    ...(entry.proofTarget
+      ? { proofTarget: proofTargetReference(entry.proofTarget) }
+      : {}),
   })),
   changeCount: job.changes?.length || 0,
   liveChangeCount: job.liveChanges?.length || 0,
@@ -105,6 +109,7 @@ export async function createStudio({
   runtime: suppliedRuntime,
   config: suppliedConfig,
   titleGenerator: suppliedTitleGenerator,
+  capacity = loadCapacity(),
 } = {}) {
   dataDir = path.resolve(dataDir)
   await fs.mkdir(dataDir, { recursive: true, mode: 0o700 })
@@ -116,7 +121,10 @@ export async function createStudio({
     new Runtime({
       dataDir,
       scope: 'server',
-      maxConcurrent: Number(process.env.STUDIO_MAX_WORKERS || 6),
+      maxConcurrent: capacity.workers,
+      maxQueue: capacity.workerQueue,
+      cpus: capacity.workerCpus,
+      memory: capacity.workerMemory,
     })
   await runtime.init()
   const workspaces = new WorkspaceStore({
@@ -142,6 +150,8 @@ export async function createStudio({
     settings,
     chats,
     assertCanStart: (owner, projectId) => requireNoGit(projectId, owner),
+    maxConcurrent: capacity.agents,
+    maxQueue: capacity.agentQueue,
   })
   const jobs = new JobManager({ runtime, workspaces, events })
   const app = express(),
@@ -241,7 +251,8 @@ export async function createStudio({
       req.body.expectedUserId !== user.id
     )
       return res.status(409).json({
-        error: 'This token belongs to a different account. Use the access token for the workspace you have open.',
+        error:
+          'This token belongs to a different account. Use the access token for the workspace you have open.',
       })
     res.setHeader(
       'Set-Cookie',
@@ -267,6 +278,7 @@ export async function createStudio({
   app.get('/api/session', (req, res) =>
     res.json({
       user: auth.public(req.user),
+      capacity,
       runtime: runtime.info(),
       models: config.models,
       defaultModel: config.defaultModel,
@@ -666,7 +678,7 @@ export async function createStudio({
   })
   let searches = 0
   app.post('/api/search', async (req, res) => {
-    if (searches >= 4)
+    if (searches >= capacity.searches)
       throw Object.assign(new Error('Search is busy. Try again shortly.'), {
         status: 429,
       })
@@ -712,7 +724,10 @@ export async function createStudio({
       return reject('404 Not Found')
     }
     if (project.status !== 'ready') return reject('409 Conflict')
-    if (sockets.size >= 4 || (languageServers.get(project.id) || 0) >= 2)
+    if (
+      sockets.size >= capacity.editors ||
+      (languageServers.get(project.id) || 0) >= capacity.editorsPerProject
+    )
       return reject('429 Too Many Requests')
     wss.handleUpgrade(req, socket, head, (ws) =>
       wss.emit('connection', ws, req, project),

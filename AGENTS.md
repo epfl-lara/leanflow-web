@@ -60,6 +60,13 @@ link and command checks, not new tests. Report checks run and any failures.
 
 ## Runtime and credentials
 
+- When moving to a larger server, review every capacity setting in
+  `.env.example`; do not carry over the local trial limits automatically.
+  Editors, agents, setup, and verification share worker slots. Leave headroom
+  for interactive work and checks, and review CPU/RAM caps, queue sizes,
+  disk retention, and provider quotas. Before a 100-user rollout, separate
+  interactive and batch capacity and load-test representative Lean projects.
+
 - Keep checks isolated in `.runtime/` or temporary directories. Use fixtures;
   do not edit user projects or call a paid provider just to test the interface.
 - Never interrupt active proof runs to validate or deploy a change. Check for

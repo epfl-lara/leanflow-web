@@ -74,6 +74,7 @@ export class AgentManager {
     optimizationMeasure = async (...args) =>
       (await import('./optimization.mjs')).measureOptimization(...args),
     maxConcurrent = 2,
+    maxQueue = 12,
   }) {
     Object.assign(this, {
       runtime,
@@ -85,6 +86,7 @@ export class AgentManager {
       assertCanStart,
       optimizationMeasure,
       maxConcurrent,
+      maxQueue,
     })
     this.active = new Map()
     this.queue = []
@@ -210,7 +212,7 @@ export class AgentManager {
         { status: 409 },
       )
     this.assertCanStart(owner, projectId)
-    if (this.queue.length >= 12)
+    if (this.queue.length >= this.maxQueue)
       throw Object.assign(
         new Error('The assistant queue is full. Try again shortly.'),
         { status: 429 },
