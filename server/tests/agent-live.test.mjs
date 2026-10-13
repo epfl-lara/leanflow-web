@@ -229,17 +229,17 @@ test('final flush mirrors the latest completed candidate after the timer is stop
 test('run policy defaults to live edits, allows review first, and keeps search read only', async (t) => {
   const { manager } = await fixture(t)
   const input = { mode: 'prove', prompt: 'Prove the theorem.' }
-  assert.equal(manager.start('alice', 'p1', input).liveEdits, true)
+  assert.equal((await manager.start('alice', 'p1', input)).liveEdits, true)
   assert.equal(
-    manager.start('alice', 'p2', { ...input, liveEdits: false }).liveEdits,
+    (await manager.start('alice', 'p2', { ...input, liveEdits: false })).liveEdits,
     false,
   )
   assert.equal(
-    manager.start('alice', 'p3', { ...input, mode: 'search' }).liveEdits,
+    (await manager.start('alice', 'p3', { ...input, mode: 'search' })).liveEdits,
     false,
   )
   for (const liveEdits of [null, 1, 'true'])
-    assert.throws(() => manager.start('alice', 'p4', { ...input, liveEdits }), {
+    await assert.rejects(() => manager.start('alice', 'p4', { ...input, liveEdits }), {
       status: 400,
     })
   await manager.shutdown()
@@ -359,28 +359,28 @@ test('starting a new run waits for the cancelled run to finish live writes and a
   assert.equal(stopped, false)
   assert.equal(saved, 'old')
   const input = { mode: 'prove', prompt: 'Continue the proof.' }
-  assert.throws(() => manager.start('alice', 'p', input), { status: 409 })
+  await assert.rejects(() => manager.start('alice', 'p', input), { status: 409 })
   assert.equal(
     events.list('alice', 'p').length,
     1,
     'Rejected start must not create a queued job',
   )
-  assert.equal(manager.start('alice', 'other', input).projectId, 'other')
+  assert.equal((await manager.start('alice', 'other', input)).projectId, 'other')
   release.resolve()
   await Promise.all([pending, stop])
   assert.equal(saved, 'new')
   assert.equal(stopped, true)
-  assert.throws(() => manager.start('alice', 'p', input), { status: 409 })
+  await assert.rejects(() => manager.start('alice', 'p', input), { status: 409 })
   // The execution finally block removes the active entry after all teardown.
   manager.active.delete(job.id)
-  assert.equal(manager.start('alice', 'p', input).status, 'queued')
+  assert.equal((await manager.start('alice', 'p', input)).status, 'queued')
   await manager.shutdown()
 })
 
 test('starting a run is rejected after manager shutdown begins', async (t) => {
   const { manager, events } = await fixture(t)
   await manager.shutdown()
-  assert.throws(
+  await assert.rejects(
     () =>
       manager.start('alice', 'p', {
         mode: 'prove',

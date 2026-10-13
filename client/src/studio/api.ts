@@ -1,3 +1,6 @@
+import type { ProofTarget } from './proofTarget'
+export type RunProofTarget = Omit<ProofTarget, 'source'> & { source?: string }
+
 export interface Preset {
   id: string
   name: string
@@ -97,6 +100,7 @@ export interface Run {
   createdAt?: string
   chatId?: string | null
   files?: string[]
+  proofTarget?: RunProofTarget
   followups?: RunFollowup[]
   changeCount?: number
   liveChangeCount?: number
@@ -135,6 +139,7 @@ export interface RunFollowup {
   messageOffset: number
   error?: string
   files?: string[]
+  proofTarget?: RunProofTarget
 }
 
 export class ApiError extends Error {
@@ -146,15 +151,34 @@ export class ApiError extends Error {
   }
 }
 
+export const SESSION_EXPIRED_EVENT = 'leanflow:session-expired'
+export const SESSION_RESTORED_EVENT = 'leanflow:session-restored'
+let sessionRevision = 0
+
+// A late response from the expired session must not reopen recovery after login.
+export function markSessionRestored() {
+  sessionRevision += 1
+  if (typeof window !== 'undefined')
+    window.dispatchEvent(new Event(SESSION_RESTORED_EVENT))
+}
+
 export async function api<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
+  const requestSessionRevision = sessionRevision
   const response = await fetch(path, {
     credentials: 'same-origin',
     ...options,
     headers: { 'Content-Type': 'application/json', ...options.headers },
   })
+  if (
+    response.status === 401 &&
+    path.split('?')[0] !== '/api/login' &&
+    requestSessionRevision === sessionRevision &&
+    typeof window !== 'undefined'
+  )
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
   const text = await response.text()
   let data: unknown
   try {

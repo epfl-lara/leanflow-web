@@ -4,6 +4,16 @@ LeanFlow Web is developed by [EPFL LARA](https://lara.epfl.ch/) and derived from
 
 Paths under `.runtime/` and review directories identify private retained evidence and are not included in the public repository. The corresponding `scripts/check-*.mjs` commands are available for reproduction with the documented prerequisites. No live project data, logs, credentials, or machine configuration are published here.
 
+## Proof focus and usability follow-up
+
+The current update passed **220 automated tests**, TypeScript, and a production build. Lint completed with warnings and no errors. Three read-only Claude Code reviews used the configured Opus model and medium effort; the implementation team independently reproduced and tested the actionable findings.
+
+The browser and language-server suites passed 56 checks across `check-proof-focus-ui.mjs`, `check-proof-chat-ui.mjs`, `check-chat-recovery-ui.mjs`, `check-auth-recovery-ui.mjs`, `check-chat-compact-ui.mjs`, `check-chat-ui.mjs`, and `check-streaming-ui.mjs`. They cover declaration selection with real Lean document symbols, line selection without an outline, target persistence and removal, stale-target rejection, clean focused updates, recovery without losing drafts, closed-stream reconnection, stable scrolling, and controls reachable on small screens. HTTP/browser fixtures do not contact a provider or mutate existing projects. The outline script additionally starts an isolated Lean 4.26.0 language server.
+
+`scripts/check-proof-target-agent.mjs` separately completed one real Lemex run using DeepSeek V4.1 Flash at `low` effort in an isolated project. Its native turn received the exact selected theorem and line snapshot. Lemex repaired that theorem while the neighboring theorem and surrounding text remained byte-for-byte unchanged. Independent compilation and kernel replay passed with no warnings or axioms. The run had no application time cap. Measured usage was 61,408 total tokens, including 58,432 cached input tokens; evidence is retained privately in `.runtime/proof-target-agent-1791904254762/result.json`. This script incurs provider usage.
+
+The HTTPS proxy unit was tested with a disposable certificate, private config/state permissions, a non-root process, only the port-binding capability, and pinned-image enforcement. Actual public certificate issuance was blocked by incoming connection timeouts on both challenge ports; external hosting is not claimed as deployed. Existing local access remains available.
+
 ## Current chat and project update
 
 The updated release uses the same native Lemex commit with LeanProbe added in worker image `sha256:a8d04190643136cc6b48f6944b21fa9ef14932749d8b18f02f5081a35d68dad2`. The historical release evidence below remains provenance for earlier checks; the following artifacts cover the newer implementation.

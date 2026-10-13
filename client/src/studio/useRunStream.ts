@@ -7,9 +7,10 @@ export function useRunStream(
   id: string | null,
   callbacks: {
     onRun: (run: Run) => void
-    onFilesUpdated: (paths: string[]) => Promise<void>
+    onFilesUpdated: (paths: string[], runId: string) => Promise<void>
     onTerminal: () => void
     onError: (error: unknown) => void
+    onRecovered: () => void
   },
 ) {
   const callbacksRef = useRef(callbacks)
@@ -30,6 +31,18 @@ export function useRunStream(
       timer: ReturnType<typeof setTimeout> | undefined
     let pending: RunEvent[] = [],
       revision: string | undefined
+    let filesPending = false,
+      snapshotRequest = 0
+    const updateFiles = async (paths: string[]) => {
+      try {
+        // The caller tracks file failures together with its project refreshes,
+        // which can outlive this stream when a terminal snapshot arrives.
+        await callbacksRef.current.onFilesUpdated(paths, runId)
+        return true
+      } catch {
+        return false
+      }
+    }
     const publish = (value: Run) => {
       if (
         current &&
@@ -40,14 +53,22 @@ export function useRunStream(
       current = mergeRunSnapshot(current, value)
       callbacksRef.current.onRun(current)
       const nextRevision = `${current.liveRevision || 0}:${!!current.liveUndone}`
-      if (current.liveEdits && revision !== nextRevision) {
-        revision = nextRevision
-        if (current.liveRevision)
-          void callbacksRef.current
-            .onFilesUpdated(
-              (current.liveChanges || []).map((change) => change.path),
-            )
-            .catch(callbacksRef.current.onError)
+      if (
+        current.liveEdits &&
+        current.liveRevision &&
+        revision !== nextRevision &&
+        !filesPending
+      ) {
+        filesPending = true
+        void updateFiles(
+          (current.liveChanges || []).map((change) => change.path),
+        )
+          .then((success) => {
+            if (success) revision = nextRevision
+          })
+          .finally(() => {
+            filesPending = false
+          })
       }
       if (!runIsActive(current)) {
         stream?.close()
@@ -58,11 +79,25 @@ export function useRunStream(
       }
     }
     const refresh = async () => {
+      if (cancelled) return
+      const request = ++snapshotRequest
       try {
         const value = await api<Run>(`/api/runs/${encodeURIComponent(runId)}`)
-        if (!cancelled) publish(value)
+        if (!cancelled) {
+          if (request === snapshotRequest) callbacksRef.current.onRecovered()
+          publish(value)
+          if (
+            current &&
+            runIsActive(current) &&
+            (!stream || stream.readyState === EventSource.CLOSED)
+          ) {
+            stream?.close()
+            connect()
+          }
+        }
       } catch (error) {
-        if (!cancelled) callbacksRef.current.onError(error)
+        if (!cancelled && request === snapshotRequest)
+          callbacksRef.current.onError(error)
       }
     }
     const flush = () => {
@@ -82,47 +117,40 @@ export function useRunStream(
         if (event.type === 'files-updated' && Array.isArray(event.data?.paths))
           for (const path of event.data.paths)
             if (typeof path === 'string') paths.add(path)
-      if (paths.size)
-        void callbacksRef.current
-          .onFilesUpdated([...paths])
-          .catch(callbacksRef.current.onError)
+      if (paths.size) void updateFiles([...paths])
       if (batch.some((event) => event.type === 'status')) void refresh()
     }
-    void api<Run>(`/api/runs/${encodeURIComponent(runId)}`)
-      .then((value) => {
+    const connect = () => {
+      if (!current || !Number.isSafeInteger(current.eventCursor)) return
+      stream = new EventSource(
+        `/api/runs/${encodeURIComponent(runId)}/events?after=${current.eventCursor}`,
+      )
+      stream.addEventListener('open', () => {
+        if (!cancelled) setConnection('Live')
+      })
+      stream.addEventListener('message', (raw) => {
         if (cancelled) return
-        publish(value)
-        if (!current || !runIsActive(current)) return
-        poll = setInterval(() => void refresh(), 4000)
-        if (!Number.isSafeInteger(current.eventCursor)) return
-        stream = new EventSource(
-          `/api/runs/${encodeURIComponent(runId)}/events?after=${current.eventCursor}`,
-        )
-        stream.addEventListener('open', () => {
-          if (!cancelled) setConnection('Live')
-        })
-        stream.addEventListener('message', (raw) => {
-          if (cancelled) return
-          try {
-            const event = JSON.parse((raw as MessageEvent).data) as RunEvent
-            if (!event || typeof event.type !== 'string') return
-            pending.push(event)
-            if (['status', 'followup', 'progress'].includes(event.type)) flush()
-            else timer ||= setTimeout(flush, 250)
-          } catch {
-            void refresh()
-          }
-        })
-        stream.addEventListener('error', () => {
-          if (!cancelled) {
-            setConnection('Reconnecting…')
-            void refresh()
-          }
-        })
+        try {
+          const event = JSON.parse((raw as MessageEvent).data) as RunEvent
+          if (!event || typeof event.type !== 'string') return
+          pending.push(event)
+          if (['status', 'followup', 'progress'].includes(event.type)) flush()
+          else timer ||= setTimeout(flush, 250)
+        } catch {
+          void refresh()
+        }
       })
-      .catch((error) => {
-        if (!cancelled) callbacksRef.current.onError(error)
+      stream.addEventListener('error', () => {
+        if (!cancelled) {
+          setConnection('Reconnecting…')
+          void refresh()
+        }
       })
+    }
+    // Begin retrying before the first fetch: an initial network failure must not
+    // leave the active run permanently disconnected.
+    poll = setInterval(() => void refresh(), 4000)
+    void refresh()
     return () => {
       cancelled = true
       stream?.close()

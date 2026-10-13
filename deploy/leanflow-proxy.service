@@ -1,0 +1,36 @@
+[Unit]
+Description=LeanFlow Web HTTPS proxy
+After=network-online.target lemex-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Set CADDY_IMAGE=caddy@sha256:<verified digest> in this private file.
+EnvironmentFile=%h/.config/leanflow-web/proxy/proxy.env
+ExecStartPre=/bin/sh -ec 'printf "%%s\\n" "$${CADDY_IMAGE}" | grep -Eq "^caddy@sha256:[0-9a-f]{64}$"'
+ExecStartPre=/usr/bin/docker image inspect --format={{.Id}} ${CADDY_IMAGE}
+ExecStartPre=/usr/bin/test -f %h/.config/leanflow-web/proxy/Caddyfile
+ExecStartPre=/usr/bin/install -d -m 0700 %h/.config/leanflow-web/proxy/certs %h/.local/share/leanflow-web/proxy/data %h/.local/share/leanflow-web/proxy/config
+# Host networking lets Caddy reach the application's loopback listener.
+# The proxy receives only its own config, certificates and persistent state.
+# Run as the owning user so mode-0700 state and mode-0600 config stay private.
+# The official binary's file capability grants only NET_BIND_SERVICE; setting
+# no-new-privileges would block it and prevent this non-root process binding 443.
+ExecStart=/usr/bin/docker run --rm --pull=never --name leanflow-web-proxy \
+    --user %U:%G \
+    --network host --read-only --cap-drop ALL --cap-add NET_BIND_SERVICE \
+    --pids-limit 128 --memory 256m --cpus 1 \
+    --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+    --mount type=bind,src=%h/.config/leanflow-web/proxy/Caddyfile,dst=/etc/caddy/Caddyfile,readonly \
+    --mount type=bind,src=%h/.config/leanflow-web/proxy/certs,dst=/certs,readonly \
+    --mount type=bind,src=%h/.local/share/leanflow-web/proxy/data,dst=/data \
+    --mount type=bind,src=%h/.local/share/leanflow-web/proxy/config,dst=/config \
+    ${CADDY_IMAGE} caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+ExecStop=/usr/bin/docker stop --time 15 leanflow-web-proxy
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=default.target

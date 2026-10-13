@@ -409,10 +409,10 @@ test('agent runs have no overall deadline by default but accept explicit finite 
     30,
     '1800',
   ].entries()) {
-    const job = manager.start('alice', `p${index}`, {
+    const job = (await manager.start('alice', `p${index}`, {
       ...input,
       maxSeconds: value,
-    })
+    }))
     assert.equal(job.maxSeconds, index < 4 ? null : Number(value))
   }
   for (const value of [
@@ -429,7 +429,7 @@ test('agent runs have no overall deadline by default but accept explicit finite 
     30.5,
     Infinity,
   ])
-    assert.throws(
+    await assert.rejects(
       () => manager.start('alice', 'invalid', { ...input, maxSeconds: value }),
       { status: 400 },
     )

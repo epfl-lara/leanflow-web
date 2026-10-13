@@ -1,3 +1,11 @@
+.chat-workbench {
+  /* Small windows and on-screen keyboards must not strand Send below a clip. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.chat-workbench .assistant-output {
+  min-height: min(160px, 25dvh);
+}
 .chat-workbench > .chat-picker {
   padding: 12px 12px 8px;
   align-items: center;
@@ -275,6 +283,63 @@
 .chat-workbench .composer-context {
   font-size: 11px;
   margin-bottom: 7px;
+}
+.composer-proof-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.proof-target-link,
+.message-proof-target {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  padding: 0;
+  min-width: 0;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.proof-target-link {
+  flex: 1;
+}
+.proof-target-link > span {
+  min-width: 0;
+}
+.proof-target-link strong,
+.proof-target-link small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.proof-target-link strong {
+  color: var(--text);
+  font-size: 12px;
+}
+.proof-target-link small,
+.message-proof-target {
+  font-size: 11px;
+}
+.message-proof-target {
+  margin-top: 7px;
+  max-width: 100%;
+}
+.message-proof-target span {
+  overflow-wrap: anywhere;
+}
+.proof-target-link:disabled,
+.message-proof-target:disabled {
+  opacity: 1;
+  cursor: default;
 }
 .chat-workbench .assistant-composer textarea {
   min-height: 76px;

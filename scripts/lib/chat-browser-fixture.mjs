@@ -24,6 +24,7 @@ export function runMetadata(run) {
     'chatId',
     'file',
     'files',
+    'proofTarget',
     'mode',
     'model',
     'effort',
@@ -41,6 +42,10 @@ export function runMetadata(run) {
   const value = Object.fromEntries(
     keys.filter((key) => run[key] !== undefined).map((key) => [key, run[key]]),
   )
+  if (value.proofTarget) {
+    const { source: _source, ...location } = value.proofTarget
+    value.proofTarget = location
+  }
   value.changeCount = run.changes?.length || 0
   value.liveChangeCount = run.liveChanges?.length || 0
   value.reasoningChars = run.reasoning?.length || 0
@@ -74,6 +79,7 @@ export async function chatBrowserFixture({
   files,
   chats,
   runs,
+  documentSymbols = [],
 }) {
   const state = {
     session,
@@ -81,10 +87,12 @@ export async function chatBrowserFixture({
     files,
     chats,
     runs,
+    documentSymbols,
     onMessage: null,
     onStop: null,
     onUndo: null,
     onCreateRun: null,
+    onCreateChat: null,
   }
   const report = {
     requests: [],
@@ -114,6 +122,14 @@ export async function chatBrowserFixture({
           return [...sources].some((source) =>
             source.url.includes(`/api/runs/${runId}/events`),
           )
+        },
+        disconnect(runId) {
+          for (const source of [...sources]) {
+            if (source.url.includes(`/api/runs/${runId}/events`)) {
+              source.close()
+              source.dispatchEvent(new Event('error'))
+            }
+          }
         },
         emit(runId, value) {
           for (const source of sources)
@@ -227,6 +243,7 @@ export async function chatBrowserFixture({
           updatedAt: '2026-10-13T13:00:00Z',
         }
         state.chats.unshift(chat)
+        if (state.onCreateChat) return state.onCreateChat({ chat, respond })
         return respond(chat, 201)
       }
       const chat = state.chats.find(
@@ -261,6 +278,8 @@ export async function chatBrowserFixture({
       if (message.method === '$/lean/rpc/connect')
         result = { sessionId: 'fixture-session' }
       if (/plainGoal/.test(message.method || '')) result = { goals: [] }
+      if (message.method === 'textDocument/documentSymbol')
+        result = state.documentSymbols
       if (message.method === '$/lean/rpc/call') {
         if (message.params?.method === 'Lean.Widget.getInteractiveGoals')
           result = { goals: [] }

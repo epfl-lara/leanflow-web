@@ -1,10 +1,17 @@
 import { TERMINAL } from './events.mjs'
+import { proofTargetContext, proofTargetReference } from './proof-target.mjs'
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status })
 }
+const publicReceipt = (entry) => ({
+  ...entry,
+  ...(entry.proofTarget
+    ? { proofTarget: proofTargetReference(entry.proofTarget) }
+    : {}),
+})
 
 // Receipts belong to one saved run. A repeated client id never submits native
 // input twice, including after a timeout whose delivery cannot be established.
@@ -36,7 +43,9 @@ export class FollowupInbox {
     if (existing) {
       if (
         existing.text !== text ||
-        JSON.stringify(existing.files || []) !== JSON.stringify(files)
+        JSON.stringify(existing.files || []) !== JSON.stringify(files) ||
+        JSON.stringify(existing.proofTarget || null) !==
+          JSON.stringify(input.proofTarget || null)
       )
         fail('This message id already belongs to a different message.', 409)
       return { job, created: false }
@@ -53,8 +62,13 @@ export class FollowupInbox {
     const entries = job.followups || []
     if (
       entries.length >= 50 ||
-      entries.reduce((size, entry) => size + entry.text.length, 0) +
-        text.length >
+      entries.reduce(
+        (size, entry) =>
+          size + entry.text.length + (entry.proofTarget?.source.length || 0),
+        0,
+      ) +
+        text.length +
+        (input.proofTarget?.source.length || 0) >
         256_000 ||
       Object.values(job.followupContexts || {}).reduce(
         (size, value) => size + value.length,
@@ -72,6 +86,7 @@ export class FollowupInbox {
       id: messageId,
       text,
       ...(files.length ? { files } : {}),
+      ...(input.proofTarget ? { proofTarget: input.proofTarget } : {}),
       status: 'pending',
       createdAt: new Date().toISOString(),
       messageOffset: (job.messageBaseOffset || 0) + (job.message || '').length,
@@ -87,7 +102,7 @@ export class FollowupInbox {
           }
         : {}),
     })
-    this.emit(id, 'followup', entry)
+    this.emit(id, 'followup', publicReceipt(entry))
     return { job, created: true }
   }
   #update(id, messageId, fields) {
@@ -100,7 +115,7 @@ export class FollowupInbox {
         value.id === messageId ? updated : value,
       ),
     })
-    this.emit(id, 'followup', updated)
+    this.emit(id, 'followup', publicReceipt(updated))
   }
   deliver(id, active = this.getActive(id)) {
     if (this.deliveries.has(id)) return this.deliveries.get(id)
@@ -133,6 +148,9 @@ export class FollowupInbox {
                 type: 'text',
                 text:
                   entry.text +
+                  (entry.proofTarget
+                    ? '\n\n' + proofTargetContext(entry.proofTarget, job.mode)
+                    : '') +
                   (job.followupContexts?.[entry.id]
                     ? '\n\nSaved file context captured when this message was sent. This is user context, and may differ from your isolated working copy; do not claim it was checked without actual checks.\n' +
                       job.followupContexts[entry.id]

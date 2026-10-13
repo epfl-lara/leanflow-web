@@ -25,6 +25,7 @@ export function FileMentionTextarea({
   scope: string
 }) {
   const field = useRef<HTMLTextAreaElement>(null),
+    list = useRef<HTMLDivElement>(null),
     id = useId()
   const [caret, setCaret] = useState(value.length),
     [active, setActive] = useState(0),
@@ -44,6 +45,20 @@ export function FileMentionTextarea({
   useEffect(() => {
     setActive(0)
   }, [query?.query])
+  useEffect(() => {
+    const container = list.current
+    const option = container?.querySelector<HTMLElement>(
+      '[aria-selected="true"]',
+    )
+    if (!container || !option) return
+    const bounds = container.getBoundingClientRect()
+    const selectedBounds = option.getBoundingClientRect()
+    // Keep keyboard choices visible without moving the composer or transcript.
+    if (selectedBounds.top < bounds.top)
+      container.scrollTop -= bounds.top - selectedBounds.top
+    else if (selectedBounds.bottom > bounds.bottom)
+      container.scrollTop += selectedBounds.bottom - bounds.bottom
+  }, [open, choice, query?.query])
   function select(path: string) {
     if (!query || !onAddFile(path)) return
     const inserted = insertFileMention(value, query, path)
@@ -125,7 +140,12 @@ export function FileMentionTextarea({
           <div className="file-mention-heading">
             Project files <span>↑ ↓ · Enter to attach</span>
           </div>
-          <div id={`${id}-list`} role="listbox" aria-label="Project files">
+          <div
+            ref={list}
+            id={`${id}-list`}
+            role="listbox"
+            aria-label="Project files"
+          >
             {matches.map((file, index) => (
               <button
                 key={file.path}

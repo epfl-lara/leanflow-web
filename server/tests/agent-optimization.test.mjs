@@ -41,8 +41,8 @@ test('Optimize validates a selected proof and rejects an invalid baseline before
     optimizationMeasure: async (...args) => { measurements.push(args); return baseline },
     config: { provider: { LEMEX_API_KEY: 'fake' }, defaultModel: 'model', models: [{ id: 'model' }], redact: String },
   })
-  for (const files of [[], ['Notes.md'], ['.lake/packages/mathlib/Mathlib.lean'], ['Nested/lakefile.lean']]) assert.throws(() => manager.start('alice', 'p', { mode: 'optimize', prompt: 'Reduce proof cost.', files }), { status: 400 })
-  const job = manager.start('alice', 'p', { mode: 'optimize', prompt: 'Reduce proof cost.', files: ['Main.lean'], liveEdits: false })
+  for (const files of [[], ['Notes.md'], ['.lake/packages/mathlib/Mathlib.lean'], ['Nested/lakefile.lean']]) await assert.rejects(() => manager.start('alice', 'p', { mode: 'optimize', prompt: 'Reduce proof cost.', files }), { status: 400 })
+  const job = (await manager.start('alice', 'p', { mode: 'optimize', prompt: 'Reduce proof cost.', files: ['Main.lean'], liveEdits: false }))
   await new Promise(resolve => events.on(job.id, event => { if (event.type === 'status' && event.data.status === 'failed') resolve() }))
   await manager.shutdown()
   assert.equal(measurements.length, 1)
@@ -113,7 +113,7 @@ test('optimization measures a protected baseline and only measures the clean can
     config: { provider: { LEMEX_API_KEY: 'fake' }, defaultModel: 'model', models: [{ id: 'model' }], redact: String },
   })
   t.after(async () => { await manager.shutdown(); events.close(); await fs.rm(root, { recursive: true, force: true }) })
-  const job = manager.start('alice', 'p', { mode: 'optimize', prompt: 'Reduce this proof cost.', files: ['Main.lean'], liveEdits: false })
+  const job = (await manager.start('alice', 'p', { mode: 'optimize', prompt: 'Reduce this proof cost.', files: ['Main.lean'], liveEdits: false }))
   await new Promise(resolve => events.on(job.id, event => { if (event.type === 'status' && ['completed', 'failed'].includes(event.data.status)) resolve() }))
   await manager.shutdown()
   const result = events.get(job.id)

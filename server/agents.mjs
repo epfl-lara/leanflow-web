@@ -12,6 +12,11 @@ import {
 } from './agent-context.mjs'
 import { validateWorkspaceFilePath } from './workspaces.mjs'
 import {
+  normalizeProofTarget,
+  validateProofTarget,
+  assertProofTargetCurrent,
+} from './proof-target.mjs'
+import {
   optimizationPaths,
   optimizationReductions,
   optimizationBaselineContext,
@@ -64,6 +69,7 @@ export class AgentManager {
     config,
     settings,
     chats,
+    assertCanStart = () => {},
     optimizationMeasure = async (...args) =>
       (await import('./optimization.mjs')).measureOptimization(...args),
     maxConcurrent = 2,
@@ -75,6 +81,7 @@ export class AgentManager {
       config,
       settings,
       chats,
+      assertCanStart,
       optimizationMeasure,
       maxConcurrent,
     })
@@ -91,7 +98,7 @@ export class AgentManager {
     })
     this.followups.recover()
   }
-  start(owner, projectId, input) {
+  async start(owner, projectId, input) {
     if (this.stopping)
       throw Object.assign(
         new Error(
@@ -130,9 +137,11 @@ export class AgentManager {
       throw Object.assign(new Error('Invalid selected file.'), { status: 400 })
     if (input.file) validateWorkspaceFilePath(input.file)
     const files = selectedContextFiles(input, validateWorkspaceFilePath)
+    const requestedTarget = normalizeProofTarget(input.proofTarget)
     if (
       input.mode === 'optimize' &&
-      !optimizationPaths({ file: input.file, files }).length
+      !optimizationPaths({ file: requestedTarget?.path || input.file, files })
+        .length
     )
       throw Object.assign(
         new Error('Select a local Lean proof file to optimize.'),
@@ -184,6 +193,22 @@ export class AgentManager {
         ),
         { status: 400 },
       )
+    const proofTarget = await validateProofTarget(requestedTarget, (file) =>
+      this.workspaces.readFile(projectId, owner, file),
+    )
+    // Validation reads are asynchronous. Recheck shutdown and project ownership
+    // before the synchronous capacity check/create section below.
+    if (this.stopping)
+      throw Object.assign(
+        new Error('The server is shutting down. Try again after it restarts.'),
+        { status: 503 },
+      )
+    if (this.workspaces.get(projectId, owner).status !== 'ready')
+      throw Object.assign(
+        new Error('Prepare this project before asking Lemex to work on it.'),
+        { status: 409 },
+      )
+    this.assertCanStart(owner, projectId)
     if (this.queue.length >= 12)
       throw Object.assign(
         new Error('The assistant queue is full. Try again shortly.'),
@@ -230,7 +255,9 @@ export class AgentManager {
       projectId,
       mode: ['repair', 'prove'].includes(input.mode) ? 'proofs' : input.mode,
       prompt: input.prompt.trim(),
+      ...(proofTarget ? { proofTarget } : {}),
       file:
+        proofTarget?.path ||
         input.file ||
         files.find(
           (file) => file.endsWith('.lean') && !file.startsWith('.lake/'),
@@ -287,7 +314,8 @@ export class AgentManager {
       { files: input?.files },
       validateWorkspaceFilePath,
     )
-    const submission = { ...input, files }
+    const requestedTarget = normalizeProofTarget(input?.proofTarget)
+    const submission = { ...input, files, proofTarget: requestedTarget }
     const messageId =
       typeof input?.id === 'string' ? input.id.toLowerCase() : null
     const existing = job.followups?.some((entry) => entry.id === messageId)
@@ -309,6 +337,47 @@ export class AgentManager {
         hash: source.hash,
         content: this.config.redact(source.content),
       })
+    }
+    try {
+      submission.proofTarget = await validateProofTarget(
+        requestedTarget,
+        (file) => this.workspaces.readFile(job.projectId, owner, file),
+      )
+      // In review-first runs, saved editor content and the working candidate
+      // can differ. Never direct a live turn at a different proof in its copy.
+      const current = this.events.get(id, owner)
+      if (current.followups?.some((entry) => entry.id === messageId))
+        return this.followups.queue(owner, id, submission).job
+      if (submission.proofTarget && current.snapshot) {
+        const mismatch =
+          'The selected proof differs from Lemex’s working copy. Wait for live edits to appear, or stop and start a new task with the selected proof.'
+        let captured
+        try {
+          captured = await this.workspaces.readSnapshotFile(
+            current.snapshot,
+            submission.proofTarget.path,
+          )
+        } catch (error) {
+          if ([400, 403, 404, 409].includes(error.status))
+            throw Object.assign(new Error(mismatch), { status: 409 })
+          throw error
+        }
+        assertProofTargetCurrent(
+          submission.proofTarget,
+          captured.content,
+          mismatch,
+        )
+      }
+    } catch (error) {
+      // Another identical HTTP request can have been accepted while these
+      // reads yielded. Return that durable receipt, never resubmit it.
+      if (
+        this.events
+          .get(id, owner)
+          .followups?.some((entry) => entry.id === messageId)
+      )
+        return this.followups.queue(owner, id, submission).job
+      throw error
     }
     const queued = this.followups.queue(
       owner,
@@ -396,6 +465,23 @@ export class AgentManager {
         snapshot,
         sourceRevision: snapshot.sourceRevision,
       })
+      // A focused run may have waited in the queue while the editor changed.
+      // Check the actual captured copy before any agent or Lean tool starts.
+      if (job.proofTarget) {
+        const mismatch =
+          'The selected proof changed before Lemex started. Select the current proof and send the task again.'
+        try {
+          const captured = await this.workspaces.readSnapshotFile(
+            snapshot,
+            job.proofTarget.path,
+          )
+          assertProofTargetCurrent(job.proofTarget, captured.content, mismatch)
+        } catch (error) {
+          if ([400, 403, 404, 409].includes(error.status))
+            throw Object.assign(new Error(mismatch), { status: 409 })
+          throw error
+        }
+      }
       if (active.controller.signal.aborted) return
       if (job.mode === 'optimize') {
         this.#progress(
@@ -605,7 +691,11 @@ export class AgentManager {
           )
       })
       await rpc.call('initialize', {
-        clientInfo: { name: 'lemex_web', title: 'LeanFlow Web', version: '0.1.0' },
+        clientInfo: {
+          name: 'lemex_web',
+          title: 'LeanFlow Web',
+          version: '0.1.0',
+        },
       })
       rpc.notify('initialized')
       const project = this.workspaces.get(job.projectId, job.owner)

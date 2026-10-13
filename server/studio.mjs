@@ -19,6 +19,7 @@ import { LspFrames, frame, validateClientUris } from './rpc.mjs'
 import { acquireServerLease } from './lease.mjs'
 import { repairProjectSetup } from './setup-repair.mjs'
 import { GitPublisher } from './git-publish.mjs'
+import { proofTargetReference } from './proof-target.mjs'
 
 const projectDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -63,6 +64,7 @@ const runMetadata = (job) => {
       .filter((key) => job[key] !== undefined)
       .map((key) => [key, job[key]]),
   )
+  if (job.proofTarget) result.proofTarget = proofTargetReference(job.proofTarget)
   if (Array.isArray(job.liveChanges))
     result.liveChanges = job.liveChanges.map((change) => ({
       path: change.path,
@@ -75,7 +77,10 @@ const chatTranscript = (job, eventCursor) => ({
   message: job.message || '',
   messageBaseOffset: job.messageBaseOffset || 0,
   messageTruncated: !!job.messageTruncated,
-  followups: job.followups || [],
+  followups: (job.followups || []).map((entry) => ({
+    ...entry,
+    ...(entry.proofTarget ? { proofTarget: proofTargetReference(entry.proofTarget) } : {}),
+  })),
   changeCount: job.changes?.length || 0,
   liveChangeCount: job.liveChanges?.length || 0,
   reasoningChars: job.reasoning?.length || 0,
@@ -136,6 +141,7 @@ export async function createStudio({
     config,
     settings,
     chats,
+    assertCanStart: (owner, projectId) => requireNoGit(projectId, owner),
   })
   const jobs = new JobManager({ runtime, workspaces, events })
   const app = express(),
@@ -201,7 +207,11 @@ export async function createStudio({
     if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store')
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
       if (!sameOrigin(req, origin))
-        return res.status(403).json({ error: 'Request origin is not allowed.' })
+        return res.status(403).json({
+          error: origin
+            ? 'This address is not enabled for sign-in or changes. Open the configured workspace address.'
+            : 'This address is not enabled for sign-in or changes. Ask the server administrator to configure the public HTTPS address (STUDIO_ORIGIN).',
+        })
       if (!req.is('application/json'))
         return res.status(415).json({ error: 'Send this request as JSON.' })
     }
@@ -224,6 +234,15 @@ export async function createStudio({
       req.body?.token,
       req.socket.remoteAddress || 'unknown',
     )
+    // Recovery preserves unsaved buffers belonging to the current account.
+    // Check the authenticated identity before replacing the browser cookie.
+    if (
+      req.body?.expectedUserId !== undefined &&
+      req.body.expectedUserId !== user.id
+    )
+      return res.status(409).json({
+        error: 'This token belongs to a different account. Use the access token for the workspace you have open.',
+      })
     res.setHeader(
       'Set-Cookie',
       auth.cookie(user, !!origin?.startsWith('https:')),
@@ -577,7 +596,7 @@ export async function createStudio({
   app.post('/api/chats/:id/title', async (req, res) =>
     res.json(await chats.suggestTitle(req.params.id, req.user.id)),
   )
-  app.post('/api/chats/:id/runs', (req, res) => {
+  app.post('/api/chats/:id/runs', async (req, res) => {
     const chat = chats.get(req.params.id, req.user.id)
     requireNoGit(chat.projectId, req.user.id)
     if (
@@ -589,7 +608,7 @@ export async function createStudio({
       throw Object.assign(new Error('Choose the same chat as this request.'), {
         status: 400,
       })
-    const job = agents.start(req.user.id, chat.projectId, {
+    const job = await agents.start(req.user.id, chat.projectId, {
       ...req.body,
       chatId: chat.id,
     })
@@ -598,9 +617,9 @@ export async function createStudio({
   app.post('/api/chats/:id/trash', (req, res) =>
     res.json(chats.trash(req.user.id, req.params.id)),
   )
-  app.post('/api/projects/:id/runs', (req, res) => {
+  app.post('/api/projects/:id/runs', async (req, res) => {
     requireNoGit(req.params.id, req.user.id)
-    const job = agents.start(req.user.id, req.params.id, req.body)
+    const job = await agents.start(req.user.id, req.params.id, req.body)
     res.status(202).json(publicJob(events.snapshot(job.id, req.user.id)))
   })
   app.get('/api/projects/:id/runs', (req, res) => {
@@ -839,7 +858,7 @@ if (
     host = process.env.HOST || '127.0.0.1'
   studio.server.listen(port, host, () =>
     console.log(
-      `LeanFlow Web: http://${host}:${port}\nDeveloped by EPFL LARA · https://lara.epfl.ch/\nAccess token file: ${path.join(process.env.STUDIO_DATA_DIR || path.join(projectDir, '.data'), 'auth/owner.token')}\nLemex revision: ${studio.config.lemex.revision || 'unknown'}`,
+      `LeanFlow Web: ${process.env.STUDIO_ORIGIN || `http://${host}:${port}`}\nBackend: http://${host}:${port}\nPublic origin: ${process.env.STUDIO_ORIGIN || 'not configured (set STUDIO_ORIGIN for HTTPS hosting)'}\nDeveloped by EPFL LARA · https://lara.epfl.ch/\nAccess token file: ${path.join(process.env.STUDIO_DATA_DIR || path.join(projectDir, '.data'), 'auth/owner.token')}\nLemex revision: ${studio.config.lemex.revision || 'unknown'}`,
     ),
   )
   studio.server.on('error', (error) => {

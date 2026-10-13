@@ -27,7 +27,7 @@ node --env-file=.env server/studio.mjs
 
 `npm start`, `npm run dev`, and `scripts/run-studio.sh` use the process environment; they do not load `.env` themselves. The systemd example instead reads `.data/server.env` explicitly. Never commit either file. Node's `--env-file` option uses existing exported environment values in preference to values in the file.
 
-The web server binds to `127.0.0.1:8090` by default. It creates `.data/auth/owner.token` on first startup. Read that file locally and paste its token into the sign-in screen. Keep tokens private; the server stores SHA256 hashes in `users.json`, and sessions use an HTTP-only cookie.
+The web server binds to `127.0.0.1:8090` by default. It creates `.data/auth/owner.token` on first startup. Read that file locally and paste its token into the sign-in screen. Keep tokens private; the server stores SHA256 hashes in `users.json`, and sessions use an HTTP-only cookie. If your session expires while working, sign in again with the same account's token in the recovery dialog. Unsaved editor text and chat drafts stay open; retry the interrupted action after signing in.
 
 Access it from another computer through SSH:
 
@@ -64,7 +64,7 @@ The token convention mirrors the [pinned Arena tokenizer](https://github.com/del
 
 ## Chats, selected files, and run controls
 
-Use **New chat** to start an empty conversation or the chat selector to reopen an existing project chat. Chats are owned by the signed-in account and scoped to their project. Earlier user/assistant text from the selected chat is carried into a fresh native Lemex run as bounded conversation context: at most 12 earlier runs and 60,000 characters, with per-entry limits. It is not imported as privileged instructions, proof evidence, or native home state. Current saved files are authoritative, and each run must check them again. Personal Lemex sessions and unrelated chats are not loaded.
+Use **New chat** to start a draft or the chat selector to reopen an existing project chat. A new conversation enters the chat list when you send its first message. Chats are owned by the signed-in account and scoped to their project. Earlier user/assistant text from the selected chat is carried into a fresh native Lemex run as bounded conversation context: at most 12 earlier runs and 60,000 characters, with per-entry limits. It is not imported as privileged instructions, proof evidence, or native home state. Current saved files are authoritative, and each run must check them again. Personal Lemex sessions and unrelated chats are not loaded.
 
 New chats receive a short DeepSeek title in the background after their first message. The initial prompt supplies a fallback if naming is unavailable. Use the **Rename chat** pencil beside the selector to enter your own name, or choose **Suggest with DeepSeek**, edit its suggestion, and **Save**. Naming keeps the same conversation, context, and draft, including during an active proof run. A manual name always takes precedence over a pending automatic title. Existing conversations are not renamed automatically.
 
@@ -74,11 +74,15 @@ An empty chat offers two compact suggestions for the selected task. For example,
 
 Type **@** in the composer to find a project file, or use **Select files** to attach up to 12 exact saved paths. Arrow keys, Enter, and Escape control the mention picker. Read-only library sources can provide context; they remain read-only. The active editor file is also supplied to the run. Starting a run saves the current dirty buffer before capturing its source snapshot. Only one assistant run can be active in a project.
 
+To work on one proof, choose a declaration from the editor's **Outline**, click inside a declaration, or select lines. **Ask Lemex** attaches that proof to the current chat; **Optimize** also selects optimization mode. Review the visible name and file/line range, then send your message. You can remove the target or click its label to return to the source. Targets stay with their own chat drafts and are recorded beside sent messages. The outline comes from Lean's language server; line selection also works when the outline is unavailable. Library sources remain read-only.
+
+Proof targets capture complete selected lines from the editor. Starting a new task saves the current buffer first. A focused update during a running task requires a clean editor and matching saved and agent sources; stop the task first if you want it to start from your unsaved edits. If the selected lines have changed, the server asks you to select the proof again and keeps your draft. Queued runs check the captured project once more before launching Lemex. Focus tells the assistant which statement to work on while keeping surrounding project context available; ordinary project isolation and independent proof verification still apply.
+
 Runs have no application time cap in the interface. **Options → Reasoning effort** offers only levels supported by the selected Lemex model. **Send update** queues additional instructions into the current native turn, with explicit pending/accepted/failed receipts. Accepted means the native runtime accepted the update for its next decision, not that the model has already read it. **Stop** remains visible and displays **Stopping…** until the worker and pending live edits are finished. Then Send can continue the same chat. Legacy API clients may explicitly request a finite cap; the browser always sends `maxSeconds=null`.
 
 The **Reasoning traces** setting controls capture for new runs. The interface renders reasoning text or summaries actually emitted by the selected model/runtime, inline with the corresponding conversation turn, with expand/collapse controls. Usage shows readable token categories; Raw data retains the original runtime record. A model may expose neither; the application does not generate missing traces. Assistant Markdown is rendered without raw HTML, and image references are links rather than automatic external image loads.
 
-While Lemex works, scroll up to read without incoming output moving your view. **Jump to latest** resumes following the output. Reasoning and activity start collapsed and keep your open/closed choice through updates. Streaming text uses a lightweight plain-text display; completed messages render Markdown. **Stop** stays above the conversation. You can navigate files, switch chats, and draft the next message during a run; submitting another task in the same project waits for the current one to stop.
+While Lemex works, scroll up to read without incoming output moving your view. **Jump to latest** resumes following the output; sending a message also returns to the latest output in that chat. Reasoning and activity start collapsed and keep your open/closed choice through updates. Streaming text uses a lightweight plain-text display; completed messages render Markdown. **Stop** stays above the conversation. You can navigate files, switch chats, and draft the next message during a run; submitting another task in the same project waits for the current one to stop.
 
 Task options collapse when opening a run to leave more space for messages. Open **Options** to change the model, reasoning effort, or live-edit preference for the next submission. Options are collapsed by default, including in empty chats. Typed drafts, task type, and selected files are retained separately for each signed-in account, project, and chat.
 
@@ -235,7 +239,56 @@ systemctl --user enable --now lemex-web.service
 
 Use `systemctl --user status lemex-web.service` and `journalctl --user -u lemex-web.service` for status and logs. A host administrator can enable user lingering if the service should survive logout. Service logs may contain deployment paths or project details; keep them private. The service/unit filenames retain `lemex-web` to match the repository and existing installations; the displayed product name is LeanFlow Web.
 
-For a public hostname, use an HTTPS reverse proxy. `deploy/Caddyfile.example` forwards to the loopback server. Set `STUDIO_ORIGIN=https://your-hostname` so WebSocket and request origin checks match the external address. Keep token-based account authentication enabled. Service installation and reverse-proxy changes are explicit deployment steps.
+### Access beyond localhost
+
+Use an HTTPS reverse proxy and keep the application on `127.0.0.1:8090`. Trusted collaborators still sign in with their own access tokens; exposing the sign-in page does not grant access to projects. Decide whether the address should be reachable only through your institution's network/VPN or from the Internet, and configure the corresponding network access with the host/network administrator.
+
+`deploy/leanflow-proxy.service` runs the official Caddy image through the existing Docker Engine as your user, so private config and certificate state remain readable by their owner. Its only host mounts are a dedicated Caddyfile, optional TLS certificates, and private proxy state. It uses a read-only filesystem, drops capabilities except `NET_BIND_SERVICE`, and has no Docker socket, project, account-token, or provider-credential mounts. The official binary's file capability allows this non-root process to bind ports 80/443; `no-new-privileges` would prevent that capability from taking effect. Host networking lets the proxy reach the loopback backend. Caddy's administration API is disabled; configuration changes require restarting the proxy. That reconnects browser streams without stopping backend proof jobs.
+
+Prepare the proxy without starting it:
+
+```bash
+install -d -m 700 ~/.config/leanflow-web/proxy \
+  ~/.config/leanflow-web/proxy/certs \
+  ~/.local/share/leanflow-web/proxy/data \
+  ~/.local/share/leanflow-web/proxy/config
+cp deploy/Caddyfile.example ~/.config/leanflow-web/proxy/Caddyfile
+chmod 600 ~/.config/leanflow-web/proxy/Caddyfile
+
+# Review the selected official release, then pin its immutable digest locally.
+docker pull caddy:2
+CADDY_IMAGE="$(docker image inspect --format '{{index .RepoDigests 0}}' caddy:2)"
+printf 'CADDY_IMAGE=%s\n' "$CADDY_IMAGE" > ~/.config/leanflow-web/proxy/proxy.env
+chmod 600 ~/.config/leanflow-web/proxy/proxy.env
+cp deploy/leanflow-proxy.service ~/.config/systemd/user/
+```
+
+The service requires `CADDY_IMAGE=caddy@sha256:<digest>` and a locally present image, so restarts cannot silently pick up a changed tag. Repeat the pull/review/pin process deliberately for updates. Keep the proxy's state directories private and persistent: `/data` holds certificate private keys and renewal state. Do not commit them or include them in shared logs.
+
+Replace `lean.example.org` in your private Caddyfile with the chosen hostname. Its DNS must point at the server. For automatic public certificate issuance, the ACME authority must be able to reach the challenge ports (normally TCP 80 and 443); a working DNS record alone does not establish reachability. For an EPFL/VPN deployment with an institution-issued certificate, put its full chain and private key in the private `certs` directory and enable the example `tls` line. Arrange renewal with the certificate issuer. DNS-based ACME validation is another option when challenge ports cannot be public, but requires DNS control and an appropriately configured Caddy DNS module. See [Caddy's HTTPS requirements](https://caddyserver.com/docs/automatic-https).
+
+Validate the edited configuration without starting a listener or contacting a certificate authority:
+
+```bash
+docker run --rm --pull=never --network none --read-only --cap-drop ALL \
+  --user "$(id -u):$(id -g)" --cap-add NET_BIND_SERVICE \
+  --tmpfs "/data:rw,nosuid,size=16m,uid=$(id -u),gid=$(id -g),mode=0700" \
+  --tmpfs "/config:rw,nosuid,size=16m,uid=$(id -u),gid=$(id -g),mode=0700" \
+  --mount "type=bind,src=$HOME/.config/leanflow-web/proxy/Caddyfile,dst=/etc/caddy/Caddyfile,readonly" \
+  --mount "type=bind,src=$HOME/.config/leanflow-web/proxy/certs,dst=/certs,readonly" \
+  "$CADDY_IMAGE" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+systemd-analyze --user verify deploy/leanflow-proxy.service
+```
+
+Set `STUDIO_ORIGIN=https://your-hostname` in the application's private `.data/server.env`, including the port if HTTPS uses a nonstandard port. It must match the browser origin exactly; this enables Secure cookies and correct request/WebSocket origin checks. Only that configured browser origin is accepted for writes, so an old HTTP/SSH-tunnel page will no longer be the entry point. Wait until active proof runs and project setup have finished before restarting the backend to apply the setting. Once network access, certificates, and origin configuration are ready:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart lemex-web.service
+systemctl --user enable --now leanflow-proxy.service
+```
+
+Check `systemctl --user status leanflow-proxy.service` and its private journal, then verify HTTPS, sign-in, live chat updates, and editor diagnostics from a separate computer on the intended network. Caddy handles WebSocket upgrades and flushes server-sent events immediately; the supplied configuration sets no stream deadline. See [Caddy's streaming behavior](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#streaming). A successful local check or installed unit does not prove public reachability. To remove external access, stop the proxy with `systemctl --user disable --now leanflow-proxy.service`; this leaves the backend and proof jobs running. Restoring the original HTTP entry point also requires removing `STUDIO_ORIGIN` and restarting the backend during an idle window.
 
 Back up `.data/auth`, `.data/provider.json`, workspace metadata, source projects, and saved jobs. Dependency caches and native runtime assets can be reproduced from the pinned manifests, but they must remain present during a live run. Stop jobs or capture a consistent snapshot before moving data. Preserve restrictive permissions for backups containing provider credentials or login tokens.
 

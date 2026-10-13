@@ -7,6 +7,7 @@ import {
   type Run,
   type Session,
   type FileEntry,
+  type RunProofTarget,
 } from './api'
 import { Icon } from './Icons'
 import { Dialog } from './Dialog'
@@ -22,6 +23,7 @@ import { useRunStream } from './useRunStream'
 import { chatDraftKey, useChatDraft, type DraftSubmission } from './chatDrafts'
 import { chatModes } from './chatModes'
 import { runStatusLabel } from './chatTimeline'
+import type { ProofFocusRequest } from './proofTarget'
 import './chat-workbench.css'
 
 const chronological = (values: Run[]) =>
@@ -50,6 +52,9 @@ export function AssistantPanel({
   onFilesUpdated,
   dirty,
   readOnly,
+  focusRequest,
+  onOpenTarget,
+  onFocusHandled,
 }: {
   projectId: string
   file?: string
@@ -63,6 +68,9 @@ export function AssistantPanel({
   onFilesUpdated: (paths: string[]) => Promise<void>
   dirty: boolean
   readOnly?: boolean
+  focusRequest?: ProofFocusRequest | null
+  onOpenTarget?: (target: RunProofTarget) => void
+  onFocusHandled?: (id: number) => void
 }) {
   const [chats, setChats] = useState<ChatChoice[]>([]),
     [chatId, setChatId] = useState<string | null>(null)
@@ -77,6 +85,12 @@ export function AssistantPanel({
     [liveEdits, setLiveEdits] = useState(true)
   const [errors, setErrors] = useState<Record<string, string>>({}),
     [streamError, setStreamError] = useState('')
+  const [backgroundErrors, setBackgroundErrors] = useState<
+    Record<string, string>
+  >({})
+  const backgroundRequests = useRef(new Map<string, number>())
+  const backgroundErrorsRef = useRef(backgroundErrors)
+  backgroundErrorsRef.current = backgroundErrors
   const [dialogId, setDialogId] = useState<string | null>(null),
     [actionError, setActionError] = useState('')
   const [applying, setApplying] = useState(false),
@@ -95,6 +109,7 @@ export function AssistantPanel({
   const draft = useChatDraft(session.user.id, projectId, chatId)
   const draftRef = useRef(draft),
     receipts = useRef(new Map<string, DraftSubmission>())
+  const handledFocus = useRef<number | null>(null)
   draftRef.current = draft
   const liveSeen = useRef(new Map<string, string>()),
     livePending = useRef(new Set<string>())
@@ -104,7 +119,8 @@ export function AssistantPanel({
   filesUpdatedRef.current = onFilesUpdated
   const mode = draft.value.mode,
     prompt = draft.value.text,
-    contextFiles = draft.value.files
+    contextFiles = draft.value.files,
+    proofTarget = draft.value.proofTarget
   const currentMode = chatModes.find((item) => item.id === mode)!
   const chatSelectionKey = `lemex-chat:${session.user.id}:${projectId}`
   const preferenceKey = `lemex-chat-options:${session.user.id}:${projectId}`
@@ -128,18 +144,64 @@ export function AssistantPanel({
     ? efforts[model]
     : ''
   const target =
-    !readOnly && file?.endsWith('.lean')
+    proofTarget?.path ||
+    (!readOnly && file?.endsWith('.lean')
       ? file
       : contextFiles.find(
           (path) =>
             path.endsWith('.lean') &&
             !path.startsWith('.lake/') &&
             !files.find((item) => item.path === path)?.readOnly,
-        )
+        ))
+  useEffect(() => {
+    if (
+      !focusRequest ||
+      focusRequest.projectId !== projectId ||
+      handledFocus.current === focusRequest.id
+    )
+      return
+    handledFocus.current = focusRequest.id
+    draftRef.current.focusTarget(focusRequest.target, focusRequest.mode)
+    document.getElementById('assistant-prompt')?.focus()
+    onFocusHandled?.(focusRequest.id)
+  }, [focusRequest, projectId, onFocusHandled])
   const dialogRun = [...runs, ...projectRuns].find(
     (item) => item.id === dialogId,
   )
-  const error = errors[draft.key] || streamError
+  const error =
+    errors[draft.key] ||
+    streamError ||
+    Object.entries(backgroundErrors).find(
+      ([source, message]) =>
+        message &&
+        (!source.startsWith('history:') || source === `history:${chatId}`),
+    )?.[1]
+  const backgroundError = useCallback((source: string, error?: unknown) => {
+    if (!mounted.current) return
+    const message = error === undefined ? '' : errorText(error)
+    setBackgroundErrors((previous) =>
+      previous[source] === message
+        ? previous
+        : { ...previous, [source]: message },
+    )
+  }, [])
+  const recoverBackground = useCallback(
+    async <T,>(source: string, request: () => Promise<T>) => {
+      const revision = (backgroundRequests.current.get(source) || 0) + 1
+      backgroundRequests.current.set(source, revision)
+      try {
+        const value = await request()
+        if (backgroundRequests.current.get(source) === revision)
+          backgroundError(source)
+        return value
+      } catch (error) {
+        if (backgroundRequests.current.get(source) === revision)
+          backgroundError(source, error)
+        throw error
+      }
+    },
+    [backgroundError],
+  )
   const reconcileFollowups = useCallback((value: Run) => {
     for (const receipt of value.followups || []) {
       const submission = receipts.current.get(receipt.id)
@@ -171,18 +233,18 @@ export function AssistantPanel({
   )
   const loadChats = useCallback(async () => {
     const revision = chatNamesRevision.current
-    const values = await api<ChatChoice[]>(
-      `/api/projects/${encodeURIComponent(projectId)}/chats`,
+    const values = await recoverBackground('chats', () =>
+      api<ChatChoice[]>(`/api/projects/${encodeURIComponent(projectId)}/chats`),
     )
     if (mounted.current && revision === chatNamesRevision.current)
       setChats(values)
     return values
-  }, [projectId])
+  }, [projectId, recoverBackground])
   const loadHistory = useCallback(
     async (id: string | null) => {
       if (!id) return [] as Run[]
-      const history = await api<{ runs: Run[] }>(
-        `/api/chats/${encodeURIComponent(id)}`,
+      const history = await recoverBackground(`history:${id}`, () =>
+        api<{ runs: Run[] }>(`/api/chats/${encodeURIComponent(id)}`),
       )
       if (mounted.current) history.runs.forEach(reconcileFollowups)
       if (mounted.current && chatRef.current === id)
@@ -204,11 +266,13 @@ export function AssistantPanel({
         )
       return history.runs
     },
-    [reconcileFollowups],
+    [reconcileFollowups, recoverBackground],
   )
   const loadProject = useCallback(async () => {
-    const values = await api<Run[]>(
-      `/api/projects/${encodeURIComponent(projectId)}/runs?summary=1`,
+    const values = await recoverBackground('project', () =>
+      api<Run[]>(
+        `/api/projects/${encodeURIComponent(projectId)}/runs?summary=1`,
+      ),
     )
     if (!mounted.current) return values
     const firstLoad = !projectLoaded.current
@@ -222,26 +286,28 @@ export function AssistantPanel({
       if (
         !metadata.liveEdits ||
         !metadata.liveRevision ||
-        liveSeen.current.get(metadata.id) === revision ||
+        (liveSeen.current.get(metadata.id) === revision &&
+          !backgroundErrorsRef.current[`files:${metadata.id}`]) ||
         livePending.current.has(metadata.id)
       )
         continue
       livePending.current.add(metadata.id)
-      void api<Run>(`/api/runs/${encodeURIComponent(metadata.id)}`)
-        .then(async (value) => {
-          if (!mounted.current) return
-          updateRun(value)
-          await filesUpdatedRef.current(
-            (value.liveChanges || []).map((change) => change.path),
-          )
-          liveSeen.current.set(
-            value.id,
-            `${value.liveRevision || 0}:${!!value.liveUndone}`,
-          )
-        })
-        .catch((error) => {
-          if (mounted.current) setStreamError(errorText(error))
-        })
+      void recoverBackground(`files:${metadata.id}`, () =>
+        api<Run>(`/api/runs/${encodeURIComponent(metadata.id)}`).then(
+          async (value) => {
+            if (!mounted.current) return
+            updateRun(value)
+            await filesUpdatedRef.current(
+              (value.liveChanges || []).map((change) => change.path),
+            )
+            liveSeen.current.set(
+              value.id,
+              `${value.liveRevision || 0}:${!!value.liveUndone}`,
+            )
+          },
+        ),
+      )
+        .catch(() => undefined)
         .finally(() => livePending.current.delete(metadata.id))
     }
     setProjectRuns((previous) =>
@@ -264,7 +330,7 @@ export function AssistantPanel({
       ),
     )
     return values
-  }, [projectId, updateRun])
+  }, [projectId, updateRun, recoverBackground])
   const openChat = useCallback(
     async (id: string | null) => {
       const request = ++navigation.current
@@ -276,15 +342,14 @@ export function AssistantPanel({
       setChatBusy(true)
       try {
         if (id) localStorage.setItem(chatSelectionKey, id)
-        else localStorage.removeItem(chatSelectionKey)
+        else localStorage.setItem(chatSelectionKey, 'new')
       } catch {
         /* Chat selection remains available when browser storage is unavailable. */
       }
       try {
         await loadHistory(id)
-      } catch (error) {
-        if (mounted.current && navigation.current === request)
-          setStreamError(errorText(error))
+      } catch {
+        // loadHistory owns its recoverable, chat-specific error.
       } finally {
         if (mounted.current && navigation.current === request)
           setChatBusy(false)
@@ -293,53 +358,68 @@ export function AssistantPanel({
     [loadHistory, chatSelectionKey],
   )
   const addChat = (created: ChatChoice) => {
+    ++chatNamesRevision.current
     if (mounted.current)
       setChats((previous) => [
         created,
         ...previous.filter((item) => item.id !== created.id),
       ])
   }
-  async function newChat() {
-    const request = navigation.current
-    setChatBusy(true)
-    setStreamError('')
-    try {
-      const created = await post<ChatChoice>(
-        `/api/projects/${encodeURIComponent(projectId)}/chats`,
-      )
-      addChat(created)
-      if (mounted.current && navigation.current === request)
-        await openChat(created.id)
-    } catch (error) {
-      if (mounted.current && navigation.current === request) {
-        setStreamError(errorText(error))
-        setChatBusy(false)
+  function newChat() {
+    // Keep one unsent draft; create the persisted chat only on its first send.
+    if (chatRef.current === null) {
+      // Repeated clicks during the first send do not abandon its pending chat.
+      // Otherwise this is an explicit choice that supersedes startup recovery.
+      if (!busy) ++navigation.current
+      try {
+        localStorage.setItem(chatSelectionKey, 'new')
+      } catch {
+        /* The in-memory selection still works without browser storage. */
       }
-    }
+    } else void openChat(null)
+    document.getElementById('assistant-prompt')?.focus()
   }
   useEffect(() => {
     mounted.current = true
     let cancelled = false
-    void Promise.all([loadChats(), loadProject()])
-      .then(([values]) => {
-        if (cancelled) return
+    let retry: ReturnType<typeof setTimeout> | undefined
+    const request = navigation.current
+    const initialDraft = draftRef.current.capture()
+    const restoreSelection = async () => {
+      try {
+        const values = await loadChats()
+        if (cancelled || navigation.current !== request) return
+        // Typing into the visible new draft while chats reconnect is already a
+        // choice. Do not replace that draft with a previously saved selection.
+        if (draftRef.current.value.revision !== initialDraft.revision) {
+          await openChat(null)
+          return
+        }
         let saved: string | null = null
         try {
           saved = localStorage.getItem(chatSelectionKey)
         } catch {
           /* Use the newest chat when selection storage is unavailable. */
         }
-        return openChat(
-          values.some((item) => item.id === saved)
-            ? saved
-            : values[0]?.id || null,
+        await openChat(
+          saved === 'new'
+            ? null
+            : values.some((item) => item.id === saved)
+              ? saved
+              : values[0]?.id || null,
         )
-      })
-      .catch((error) => {
-        if (!cancelled) setStreamError(errorText(error))
-      })
+      } catch {
+        if (!cancelled && navigation.current === request)
+          retry = setTimeout(() => void restoreSelection(), 4000)
+      }
+    }
+    // Project activity and chat selection recover independently. A failed
+    // activity request must not prevent restoring the selected conversation.
+    void loadProject().catch(() => undefined)
+    void restoreSelection()
     return () => {
       cancelled = true
+      clearTimeout(retry)
       mounted.current = false
       ++navigation.current
     }
@@ -381,21 +461,23 @@ export function AssistantPanel({
           const selected = chatRef.current
           if (
             selected &&
-            values.some(
-              (value) =>
-                value.chatId === selected &&
-                (!runsRef.current.some((run) => run.id === value.id) ||
-                  (value.eventCursor || 0) >
-                    (runsRef.current.find((run) => run.id === value.id)
-                      ?.eventCursor || 0) ||
-                  value.status !==
-                    runsRef.current.find((run) => run.id === value.id)?.status),
-            )
+            (backgroundErrorsRef.current[`history:${selected}`] ||
+              values.some(
+                (value) =>
+                  value.chatId === selected &&
+                  (!runsRef.current.some((run) => run.id === value.id) ||
+                    (value.eventCursor || 0) >
+                      (runsRef.current.find((run) => run.id === value.id)
+                        ?.eventCursor || 0) ||
+                    value.status !==
+                      runsRef.current.find((run) => run.id === value.id)
+                        ?.status),
+              ))
           )
             return loadHistory(selected)
         })
-        .catch((error) => setStreamError(errorText(error)))
-      void loadChats().catch((error) => setStreamError(errorText(error)))
+        .catch(() => undefined)
+      void loadChats().catch(() => undefined)
     }
     const timer = setInterval(refresh, 4000)
     document.addEventListener('visibilitychange', refresh)
@@ -406,7 +488,7 @@ export function AssistantPanel({
           if (selected && !values.some((item) => item.id === selected))
             void openChat(values[0]?.id || null)
         })
-        .catch((error) => setStreamError(errorText(error)))
+        .catch(() => undefined)
     }
     window.addEventListener('lemex-chats-changed', chatsChanged)
     return () => {
@@ -422,19 +504,22 @@ export function AssistantPanel({
   }, [statusRun?.id])
   const connection = useRunStream(activeRun?.id || null, {
     onRun: updateRun,
-    onFilesUpdated,
+    onFilesUpdated: (paths, runId) =>
+      recoverBackground(`files:${runId}`, () => onFilesUpdated(paths)),
     onTerminal: () => {
-      void loadProject()
-      void loadHistory(chatRef.current)
-      void loadChats()
+      void loadProject().catch(() => undefined)
+      void loadHistory(chatRef.current).catch(() => undefined)
+      void loadChats().catch(() => undefined)
     },
-    onError: (error) => {
-      if (mounted.current) setStreamError(errorText(error))
-    },
+    onError: (error) => backgroundError('stream:snapshot', error),
+    onRecovered: () => backgroundError('stream:snapshot'),
   })
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!prompt.trim() || busy || (hasActive && !acceptingUpdate)) return
+    // Sending is an explicit choice of this visible conversation. Startup
+    // restoration must not redirect it while its first chat is being created.
+    ++navigation.current
     const captured = draft.capture(),
       selected = chatRef.current,
       request = navigation.current
@@ -445,14 +530,21 @@ export function AssistantPanel({
       file: mode === 'search' ? file : target,
       mode,
       files: [...captured.files],
+      ...(captured.proofTarget ? { proofTarget: captured.proofTarget } : {}),
     }
     const steering = acceptingUpdate ? activeRun : null
     setBusy(true)
     setErrors((previous) => ({ ...previous, [captured.key]: '' }))
     setStreamError('')
     let submission = captured
+    let visibleRequest = request
+    let destination = selected
     try {
       if (steering) {
+        if (captured.proofTarget && dirty)
+          throw new Error(
+            'Stop the run or discard your unsaved edits before sending a focused update.',
+          )
         const clientId =
           [...receipts.current.entries()].find(
             ([, value]) =>
@@ -463,7 +555,14 @@ export function AssistantPanel({
         receipts.current.set(clientId, captured)
         const value = await post<Run>(
           `/api/runs/${encodeURIComponent(steering.id)}/messages`,
-          { id: clientId, text: captured.text.trim(), files: captured.files },
+          {
+            id: clientId,
+            text: captured.text.trim(),
+            files: captured.files,
+            ...(captured.proofTarget
+              ? { proofTarget: captured.proofTarget }
+              : {}),
+          },
         )
         updateRun(value)
         const receipt = value.followups?.find((item) => item.id === clientId)
@@ -475,7 +574,6 @@ export function AssistantPanel({
         draft.clearSubmitted(submission, true)
       } else {
         await beforeRun()
-        let destination = selected
         if (!destination) {
           const created = await post<ChatChoice>(
             `/api/projects/${encodeURIComponent(projectId)}/chats`,
@@ -490,7 +588,9 @@ export function AssistantPanel({
             const newKey = chatDraftKey(session.user.id, projectId, destination)
             draft.move(captured.key, newKey)
             submission = { ...captured, key: newKey }
-            await openChat(destination)
+            const opening = openChat(destination)
+            visibleRequest = navigation.current
+            await opening
           }
         }
         const created = await post<Run>(
@@ -501,6 +601,12 @@ export function AssistantPanel({
         draft.clearSubmitted(submission)
         if (mounted.current) void loadChats().catch(() => undefined)
       }
+      if (
+        mounted.current &&
+        navigation.current === visibleRequest &&
+        chatRef.current === destination
+      )
+        conversationScroll.jumpToLatest()
     } catch (error) {
       if (mounted.current)
         setErrors((previous) => ({
@@ -729,6 +835,7 @@ export function AssistantPanel({
                 onInspect={inspect}
                 canUndo={!dirty && !hasActive && !undoingId}
                 undoing={undoingId === item.id}
+                onOpenTarget={onOpenTarget}
               />
             ))}
             {!runs.length && !chatBusy && (
@@ -773,6 +880,37 @@ export function AssistantPanel({
         )}
       </div>
       <form className="assistant-composer" onSubmit={submit}>
+        {proofTarget && (
+          <div className="composer-proof-target" aria-label="Focused proof">
+            <button
+              type="button"
+              className="proof-target-link"
+              onClick={() => onOpenTarget?.(proofTarget)}
+              disabled={!onOpenTarget}
+              title={`Open ${proofTarget.path}:${proofTarget.startLine}`}
+            >
+              <Icon name="file" size={13} />
+              <span>
+                <strong>{proofTarget.name || 'Selected proof'}</strong>
+                <small>
+                  {proofTarget.path}:{proofTarget.startLine}
+                  {proofTarget.endLine !== proofTarget.startLine
+                    ? `–${proofTarget.endLine}`
+                    : ''}
+                </small>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={draft.clearTarget}
+              aria-label="Clear proof target"
+              title="Clear proof target"
+            >
+              <Icon name="close" size={14} />
+            </button>
+          </div>
+        )}
         <div className="composer-context">
           <Icon name="file" size={13} />
           <span title={mode === 'search' ? file : target}>

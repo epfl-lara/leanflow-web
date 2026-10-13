@@ -150,14 +150,14 @@ test('agent chat selection is scoped to owner and project before a run is create
     files: ['Proofs/A.lean', 'Proofs/B.lean'],
     liveEdits: false,
   }
-  assert.throws(() => manager.start('bob', 'p', input), { status: 404 })
-  assert.throws(() => manager.start('alice', 'other', input), { status: 404 })
+  await assert.rejects(() => manager.start('bob', 'p', input), { status: 404 })
+  await assert.rejects(() => manager.start('alice', 'other', input), { status: 404 })
   for (const chatId of ['', 0, false, {}])
-    assert.throws(() => manager.start('alice', 'p', { ...input, chatId }), {
+    await assert.rejects(() => manager.start('alice', 'p', { ...input, chatId }), {
       status: 400,
     })
   assert.deepEqual(events.list('alice', 'p'), [])
-  const job = manager.start('alice', 'p', input)
+  const job = (await manager.start('alice', 'p', input))
   assert.equal(job.chatId, 'chat')
   assert.equal(job.file, 'Proofs/A.lean')
   assert.deepEqual(job.files, input.files)
@@ -208,11 +208,11 @@ test('selected file access fails before a native worker can read a missing or fo
       redact: String,
     },
   })
-  const job = manager.start('alice', 'p', {
+  const job = (await manager.start('alice', 'p', {
     mode: 'prove',
     prompt: 'Prove these.',
     files: ['Main.lean', 'Missing.lean'],
-  })
+  }))
   await new Promise((resolve) =>
     events.on(job.id, (event) => {
       if (event.type === 'status' && event.data.status === 'failed') resolve()
@@ -252,7 +252,7 @@ test('a chat append failure never launches an orphaned run', async (t) => {
       redact: String,
     },
   })
-  assert.throws(
+  await assert.rejects(
     () =>
       manager.start('alice', 'p', {
         mode: 'prove',
@@ -394,12 +394,12 @@ test('real chat history reaches a fresh native RPC thread as current user contex
     events.close()
     await fs.rm(root, { recursive: true, force: true })
   })
-  const job = manager.start('alice', 'p', {
+  const job = (await manager.start('alice', 'p', {
     chatId: chat.id,
     mode: 'search',
     prompt: 'Which lemma did we discuss?',
     files: ['Main.lean', 'Notes.md'],
-  })
+  }))
   await new Promise((resolve) =>
     events.on(job.id, (event) => {
       if (
@@ -545,10 +545,10 @@ test('failed and interrupted native turns never verify an unchanged baseline or 
         events.close()
         await fs.rm(root, { recursive: true, force: true })
       })
-      const job = manager.start('alice', 'p', {
+      const job = (await manager.start('alice', 'p', {
         mode: 'search',
         prompt: 'Search without modifying sources.',
-      })
+      }))
       await new Promise((resolve) =>
         events.on(job.id, (event) => {
           if (event.type === 'status' && event.data.status === 'failed')

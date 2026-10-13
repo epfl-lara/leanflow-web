@@ -273,7 +273,10 @@ try {
     'active chat stream',
   )
   for (const name of ['Proofs', 'Formalize', 'Optimize', 'Search'])
-    await visible(page.getByRole('button', { name, exact: true }), name)
+    await visible(
+      page.locator('.mode-tabs').getByRole('button', { name, exact: true }),
+      name,
+    )
   assert.equal(
     await page
       .getByRole('button', { name: /Repair a proof|Find a proof/ })

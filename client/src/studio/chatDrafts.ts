@@ -1,18 +1,55 @@
 import { useRef, useState } from 'react'
 import type { ChatMode } from './chatModes'
+import type { ProofTarget } from './proofTarget'
 
 export interface ChatDraft {
   text: string
   files: string[]
   revision: number
   mode: ChatMode
+  proofTarget?: ProofTarget
 }
 export interface DraftSubmission {
   key: string
   revision: number
   text: string
   files: string[]
+  proofTarget?: ProofTarget
 }
+
+export const proofFocusPrompts = {
+  proofs: 'Complete or repair this proof while preserving its statement.',
+  optimize: 'Optimize this proof while preserving its statement.',
+}
+
+export function focusDraft(
+  current: ChatDraft,
+  proofTarget: ProofTarget,
+  mode?: ChatMode,
+): ChatDraft {
+  const nextMode = mode || current.mode
+  return {
+    ...current,
+    proofTarget: { ...proofTarget },
+    mode: nextMode,
+    text:
+      !current.text.trim() ||
+      Object.values(proofFocusPrompts).includes(current.text)
+        ? proofFocusPrompts[nextMode === 'optimize' ? 'optimize' : 'proofs']
+        : current.text,
+    revision: current.revision + 1,
+  }
+}
+
+const sameTarget = (a?: ProofTarget, b?: ProofTarget) =>
+  a === b ||
+  (!!a &&
+    !!b &&
+    a.path === b.path &&
+    a.startLine === b.startLine &&
+    a.endLine === b.endLine &&
+    a.name === b.name &&
+    a.source === b.source)
 
 const sameFiles = (a: string[], b: string[]) =>
   a.length === b.length && a.every((path, index) => path === b[index])
@@ -25,13 +62,15 @@ export function clearDraftSubmission(
   if (
     current.revision !== submission.revision ||
     current.text !== submission.text ||
-    !sameFiles(current.files, submission.files)
+    !sameFiles(current.files, submission.files) ||
+    !sameTarget(current.proofTarget, submission.proofTarget)
   )
     return null
   return {
     ...current,
     text: '',
     files: clearFiles ? [] : current.files,
+    ...(current.proofTarget ? { proofTarget: undefined } : {}),
     revision: current.revision + 1,
   }
 }
@@ -43,13 +82,17 @@ export function restoreDraftSubmission(
   if (
     current.revision !== submission.revision + 1 ||
     current.text !== '' ||
-    current.files.length !== 0
+    current.files.length !== 0 ||
+    !!current.proofTarget
   )
     return null
   return {
     ...current,
     text: submission.text,
     files: [...submission.files],
+    ...(submission.proofTarget
+      ? { proofTarget: { ...submission.proofTarget } }
+      : {}),
     revision: current.revision + 1,
   }
 }
@@ -76,6 +119,26 @@ export function readChatDraft(key: string): ChatDraft {
         mode: ['proofs', 'formalize', 'optimize', 'search'].includes(value.mode)
           ? value.mode
           : 'proofs',
+        ...(value.proofTarget &&
+        typeof value.proofTarget.path === 'string' &&
+        typeof value.proofTarget.source === 'string' &&
+        value.proofTarget.source.length <= 64_000 &&
+        Number.isSafeInteger(value.proofTarget.startLine) &&
+        value.proofTarget.startLine > 0 &&
+        Number.isSafeInteger(value.proofTarget.endLine) &&
+        value.proofTarget.endLine >= value.proofTarget.startLine
+          ? {
+              proofTarget: {
+                path: value.proofTarget.path,
+                startLine: value.proofTarget.startLine,
+                endLine: value.proofTarget.endLine,
+                source: value.proofTarget.source,
+                ...(typeof value.proofTarget.name === 'string'
+                  ? { name: value.proofTarget.name }
+                  : {}),
+              },
+            }
+          : {}),
       }
   } catch {
     /* Unavailable storage or an older invalid draft must not block chat. */
@@ -114,10 +177,21 @@ export function useChatDraft(
       write(key, { ...get(key), files, revision: get(key).revision + 1 }),
     setMode: (mode: ChatMode) =>
       write(key, { ...get(key), mode, revision: get(key).revision + 1 }),
+    clearTarget: () =>
+      write(key, {
+        ...get(key),
+        proofTarget: undefined,
+        revision: get(key).revision + 1,
+      }),
+    focusTarget: (proofTarget: ProofTarget, mode?: ChatMode) =>
+      write(key, focusDraft(get(key), proofTarget, mode)),
     capture: (): DraftSubmission => ({
       key,
       ...get(key),
       files: [...get(key).files],
+      ...(get(key).proofTarget
+        ? { proofTarget: { ...get(key).proofTarget! } }
+        : {}),
     }),
     clearSubmitted: (submission: DraftSubmission, clearFiles = false) => {
       const current = get(submission.key)
@@ -126,7 +200,8 @@ export function useChatDraft(
         stored.revision > submission.revision ||
         (stored.revision === submission.revision &&
           (stored.text !== submission.text ||
-            !sameFiles(stored.files, submission.files)))
+            !sameFiles(stored.files, submission.files) ||
+            !sameTarget(stored.proofTarget, submission.proofTarget)))
       )
         return
       const cleared = clearDraftSubmission(current, submission, clearFiles)
@@ -138,7 +213,9 @@ export function useChatDraft(
       if (stored.revision > submission.revision + 1) return
       if (
         stored.revision === submission.revision + 1 &&
-        (stored.text !== '' || stored.files.length !== 0)
+        (stored.text !== '' ||
+          stored.files.length !== 0 ||
+          !!stored.proofTarget)
       )
         return
       const restored = restoreDraftSubmission(current, submission)
