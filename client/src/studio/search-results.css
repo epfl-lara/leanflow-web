@@ -1,0 +1,94 @@
+.search-panel .search-result {
+  min-width: 0;
+  padding: 14px;
+}
+
+.search-result-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.search-panel .search-result-heading strong {
+  font-size: 13px;
+  line-height: 1.55;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.search-kind {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.search-signature,
+.search-documentation {
+  margin-top: 12px;
+}
+
+.search-result-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.search-panel .search-result .search-type {
+  max-width: 100%;
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}
+
+.search-type code {
+  font: inherit;
+  color: inherit;
+}
+
+.search-type-unavailable {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.search-documentation p {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.search-module {
+  margin: 12px 0 0;
+}
+
+.search-module code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.search-panel .search-result a {
+  font-size: 11px;
+}

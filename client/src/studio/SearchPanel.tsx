@@ -1,33 +1,86 @@
-import { useState, type FormEvent } from 'react'
-import { errorText, post, pretty } from './api'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { api, errorText } from './api'
 import { Icon } from './Icons'
+import './search-results.css'
 
 interface SearchResponse {
   results?: unknown
   error?: string
   [key: string]: unknown
 }
+function resultText(...values: unknown[]) {
+  return values.find((value) => typeof value === 'string' && value.trim()) as
+    | string
+    | undefined
+}
+
+function sourceUrl(value: unknown) {
+  if (typeof value !== 'string') return null
+  try {
+    const url = new URL(value)
+    return ['https:', 'http:'].includes(url.protocol) &&
+      !url.username &&
+      !url.password
+      ? url.href
+      : null
+  } catch {
+    return null
+  }
+}
+
 function Result({ value }: { value: unknown }) {
-  if (typeof value === 'string')
-    return <pre className="search-output">{value}</pre>
-  if (!value || typeof value !== 'object')
-    return <pre className="search-output">{pretty(value)}</pre>
-  const item = value as Record<string, unknown>
-  const name = item.name || item.declaration || item.title || item.fullName
-  const description =
-    item.type || item.signature || item.description || item.docstring
-  const documentation = item.doc || item.docstring || item.documentation
-  const module = item.module || item.source_file
-  const rawUrl = item.url || item.link
-  const url =
-    typeof rawUrl === 'string' && /^https?:\/\//.test(rawUrl) ? rawUrl : null
+  const item =
+    value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  const name = resultText(
+    item.name,
+    item.declaration,
+    item.title,
+    item.fullName,
+  )
+  const type = resultText(item.type)
+  const signature = type || resultText(item.signature, item.statement)
+  const kind = resultText(item.kind)
+  const documentation = resultText(
+    item.doc,
+    item.docstring,
+    item.documentation,
+    item.description,
+    typeof value === 'string' ? value : undefined,
+  )
+  const module = resultText(item.module, item.source_file)
+  const url = sourceUrl(item.url || item.link)
   return (
     <article className="search-result">
-      {!!name && <strong>{String(name)}</strong>}
-      {!!description && <pre>{pretty(description)}</pre>}
-      {!!documentation && <p className="field-help">{pretty(documentation)}</p>}
-      {!!module && <p className="field-help">{String(module)}</p>}
-      {!name && !description && <pre>{pretty(item)}</pre>}
+      <header className="search-result-heading">
+        <strong>{name || 'Declaration'}</strong>
+        {kind && <span className="search-kind">{kind}</span>}
+      </header>
+      <div className="search-signature">
+        <span className="search-result-label">
+          {type || !signature ? 'Type' : 'Signature'}
+        </span>
+        {signature ? (
+          <pre className="search-type">
+            <code>{signature}</code>
+          </pre>
+        ) : (
+          <p className="search-type-unavailable">
+            Type unavailable from this search service.
+          </p>
+        )}
+      </div>
+      {documentation && (
+        <div className="search-documentation">
+          <span className="search-result-label">Documentation</span>
+          <p>{documentation}</p>
+        </div>
+      )}
+      {module && (
+        <p className="search-module">
+          <span className="search-result-label">Module</span>
+          <code>{module}</code>
+        </p>
+      )}
       {url && (
         <a href={url} target="_blank" rel="noopener noreferrer">
           Open source <Icon name="external" size={13} />
@@ -38,28 +91,54 @@ function Result({ value }: { value: unknown }) {
 }
 
 export function SearchPanel({ projectId }: { projectId?: string }) {
-  const [backend, setBackend] = useState<'loogle' | 'leanexplore'>('leanexplore')
+  const [backend, setBackend] = useState<'loogle' | 'leanexplore'>(
+    'leanexplore',
+  )
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [response, setResponse] = useState<SearchResponse | null>(null)
+  const [pendingQuery, setPendingQuery] = useState('')
+  const generation = useRef(0)
+  const controller = useRef<AbortController | null>(null)
+
+  // A hosted index response belongs to the engine and project that requested it.
+  useEffect(() => {
+    generation.current += 1
+    controller.current?.abort()
+    setResponse(null)
+    setError('')
+    setBusy(false)
+    return () => {
+      generation.current += 1
+      controller.current?.abort()
+    }
+  }, [backend, projectId])
+
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (!query.trim()) return
+    const request = ++generation.current
+    controller.current?.abort()
+    const currentController = new AbortController()
+    controller.current = currentController
     setBusy(true)
+    setPendingQuery(query.trim())
     setError('')
     setResponse(null)
     try {
-      const result = await post<SearchResponse>('/api/search', {
-        query,
-        backend,
-        projectId,
+      const result = await api<SearchResponse>('/api/search', {
+        method: 'POST',
+        body: JSON.stringify({ query: query.trim(), backend, projectId }),
+        signal: currentController.signal,
       })
+      if (request !== generation.current) return
       if (result.error) setError(result.error)
       else setResponse(result)
     } catch (error) {
-      setError(errorText(error))
+      if (request === generation.current) setError(errorText(error))
     } finally {
-      setBusy(false)
+      if (request === generation.current) setBusy(false)
     }
   }
   const results = response?.results
@@ -104,13 +183,18 @@ export function SearchPanel({ projectId }: { projectId?: string }) {
           onChange={(event) => setQuery(event.target.value)}
           required
         />
-        <button className="button primary" disabled={busy || !query.trim()}>
-          {busy ? (
+        <button
+          className="button primary"
+          disabled={!query.trim() || (busy && query.trim() === pendingQuery)}
+        >
+          {busy && query.trim() === pendingQuery ? (
             <span className="spinner" />
           ) : (
             <Icon name="search" size={16} />
           )}
-          {busy ? 'Searching…' : 'Search declarations'}
+          {busy && query.trim() === pendingQuery
+            ? 'Searching…'
+            : 'Search declarations'}
         </button>
       </form>
       {error && (
