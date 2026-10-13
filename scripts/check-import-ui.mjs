@@ -248,6 +248,142 @@ try {
   report.checks.push(
     'Mathlib and Physlib can be combined with the actual selected toolchain displayed',
   )
+
+  // Keep fixture detail responses available while presenting an empty sidebar.
+  await f.page.route('**/api/projects', async (route) => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: [] })
+    return route.fallback()
+  })
+  const welcome = async () => {
+    await f.page.reload()
+    await f.page
+      .getByRole('heading', { name: 'Start with your project.', exact: true })
+      .waitFor()
+  }
+  const dialog = () => f.page.getByRole('dialog')
+  const checkedLibraries = () =>
+    dialog()
+      .locator('input[name="libraries"]:checked')
+      .evaluateAll((inputs) => inputs.map((input) => input.value))
+  for (const template of f.state.session.templates) {
+    await welcome()
+    const card = f.page.getByRole('button', {
+      name: `Create a ${template.name} project`,
+      exact: true,
+    })
+    if (template.id === 'lean' || template.id === 'mathlib') {
+      await card.focus()
+      await f.page.keyboard.press(template.id === 'lean' ? 'Enter' : 'Space')
+    } else {
+      await card.click()
+    }
+    await dialog().waitFor()
+    assert.equal(
+      await dialog()
+        .getByRole('button', { name: 'New project', exact: true })
+        .getAttribute('aria-pressed'),
+      'true',
+    )
+    assert.deepEqual(await checkedLibraries(), [template.id])
+    if (template.id === 'lean')
+      assert.equal(
+        await dialog().getByLabel('Lean version', { exact: true }).inputValue(),
+        template.toolchain.replace('leanprover/lean4:', ''),
+      )
+    if (template.id === 'mathlib')
+      await f.page.screenshot({
+        path: path.join(reportDir, 'welcome-mathlib.png'),
+        fullPage: true,
+      })
+    const requestCount = requests.length
+    await dialog()
+      .getByRole('button', { name: 'Create project', exact: true })
+      .click()
+    await dialog().waitFor({ state: 'hidden' })
+    assert.equal(requests.length, requestCount + 1)
+    assert.deepEqual(
+      requests.at(-1).libraries,
+      template.id === 'lean' ? [] : [template.id],
+    )
+    assert.equal(
+      requests.at(-1).toolchain,
+      template.id === 'lean' ? template.toolchain : undefined,
+    )
+    assert.equal(requests.at(-1).repository, undefined)
+  }
+  report.checks.push(
+    'Every welcome card opens New project with only its preset selected and submits that choice; Lean basics keeps its pinned version; Enter and Space activate cards',
+  )
+
+  await welcome()
+  await f.page
+    .getByRole('button', { name: 'Create a CSLib project', exact: true })
+    .click()
+  await dialog().getByRole('button', { name: 'Cancel', exact: true }).click()
+  await f.page
+    .getByRole('button', { name: 'Create a Physlib project', exact: true })
+    .click()
+  assert.deepEqual(await checkedLibraries(), ['physlib'])
+  await f.page.keyboard.press('Escape')
+  await open()
+  assert.equal(
+    await dialog()
+      .getByRole('button', { name: 'Repository', exact: true })
+      .getAttribute('aria-pressed'),
+    'true',
+  )
+  await dialog()
+    .getByRole('button', { name: 'New project', exact: true })
+    .click()
+  assert.deepEqual(await checkedLibraries(), ['mathlib'])
+  await dialog().getByRole('button', { name: 'Cancel', exact: true }).click()
+  report.checks.push(
+    'Closing and reopening cards resets the preset; the general import/create button retains the Repository tab and default Mathlib selection',
+  )
+
+  await f.page.setViewportSize({ width: 390, height: 844 })
+  await welcome()
+  await f.page
+    .getByRole('button', { name: 'Create a Mathlib project', exact: true })
+    .click()
+  assert.deepEqual(await checkedLibraries(), ['mathlib'])
+  await dialog().getByRole('button', { name: 'Cancel', exact: true }).click()
+  report.checks.push('Welcome cards remain usable on a narrow mobile viewport')
+
+  f.state.session.templates = f.state.session.templates.map((template) => ({
+    ...template,
+    ready: template.id !== 'physlib',
+  }))
+  await welcome()
+  await f.page
+    .getByRole('button', { name: 'Create a Physlib project', exact: true })
+    .click()
+  assert.deepEqual(await checkedLibraries(), ['physlib'])
+  assert.equal(
+    await dialog()
+      .getByRole('button', { name: 'Create project', exact: true })
+      .isDisabled(),
+    true,
+  )
+  await dialog()
+    .getByText(/A selected library is not installed/)
+    .waitFor()
+  await dialog()
+    .getByRole('checkbox', { name: /^Physlib/ })
+    .uncheck()
+  await dialog()
+    .getByRole('checkbox', { name: /^Mathlib/ })
+    .check()
+  assert.deepEqual(await checkedLibraries(), ['mathlib'])
+  assert.equal(
+    await dialog()
+      .getByRole('button', { name: 'Create project', exact: true })
+      .isEnabled(),
+    true,
+  )
+  report.checks.push(
+    'An unavailable card preserves its selection, explains why creation is disabled, and lets the user choose an installed library',
+  )
   f.assertClean()
   report.passed = true
 } catch (error) {

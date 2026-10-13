@@ -851,11 +851,17 @@ textarea {
   gap: 12px;
   margin-top: 48px;
 }
-.welcome-presets > div {
+.welcome-presets > button {
   border: 1px solid var(--border);
   padding: 16px 13px;
   border-radius: 9px;
   background: var(--canvas);
+  color: var(--text);
+  text-align: left;
+}
+.welcome-presets > button:hover {
+  border-color: var(--accent);
+  background: var(--surface-hover);
 }
 .welcome-presets svg {
   color: var(--accent);
@@ -866,7 +872,8 @@ textarea {
   font-size: 12px;
   font-weight: 600;
 }
-.welcome-presets p {
+.welcome-preset-description {
+  display: block;
   font-size: 11px;
   line-height: 1.7;
   color: var(--muted);
@@ -1932,7 +1939,7 @@ textarea {
     grid-template-columns: 1fr;
     margin-top: 28px;
   }
-  .welcome-presets > div {
+  .welcome-presets > button {
     display: grid;
     grid-template-columns: 20px 1fr;
     gap: 4px 10px;
@@ -1942,7 +1949,7 @@ textarea {
     margin: 0;
     grid-row: span 2;
   }
-  .welcome-presets p {
+  .welcome-preset-description {
     margin: 0;
   }
   .branch-label {

@@ -6,24 +6,34 @@ import { errorText, post, type Preset, type Project } from './api'
 
 export function ProjectModal({
   templates,
+  initialPreset,
   onClose,
   onCreated,
 }: {
   templates: Preset[]
+  initialPreset?: string
   onClose: () => void
   onCreated: (project: Project) => void
 }) {
-  const [kind, setKind] = useState<'create' | 'import' | 'upload'>('import')
+  const [kind, setKind] = useState<'create' | 'import' | 'upload'>(
+    initialPreset ? 'create' : 'import',
+  )
   const [name, setName] = useState('')
   const [repository, setRepository] = useState('')
   const [revision, setRevision] = useState('')
   const [subdirectory, setSubdirectory] = useState('')
   const [autoRepair, setAutoRepair] = useState(true)
   const [files, setFiles] = useState<UploadFile[]>([])
-  const [libraries, setLibraries] = useState<string[]>(
-    templates.some((template) => template.id === 'mathlib' && template.ready)
-      ? ['mathlib']
-      : [],
+  const [libraries, setLibraries] = useState<string[]>(() =>
+    initialPreset
+      ? initialPreset === 'lean'
+        ? []
+        : [initialPreset]
+      : templates.some(
+            (template) => template.id === 'mathlib' && template.ready,
+          )
+        ? ['mathlib']
+        : [],
   )
   const preset = libraries.includes('cslib')
     ? 'cslib'
@@ -40,6 +50,9 @@ export function ProjectModal({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const selected = templates.find((template) => template.id === preset)
+  const unavailableLibrary = libraries.some(
+    (id) => !templates.some((template) => template.id === id && template.ready),
+  )
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -184,7 +197,9 @@ export function ProjectModal({
                     }
                     disabled={
                       busy ||
-                      (template.id !== 'lean' && !template.ready) ||
+                      (template.id !== 'lean' &&
+                        !template.ready &&
+                        !libraries.includes(template.id)) ||
                       (template.id === 'cslib' &&
                         libraries.includes('physlib')) ||
                       (template.id === 'physlib' && libraries.includes('cslib'))
@@ -211,6 +226,12 @@ export function ProjectModal({
             {templates.length === 0 && (
               <p className="error-message">
                 No presets are available. Import an existing repository instead.
+              </p>
+            )}
+            {unavailableLibrary && (
+              <p className="error-message" aria-live="polite">
+                A selected library is not installed on this server. Choose an
+                available library or import an existing repository.
               </p>
             )}
             {selected && (
@@ -347,7 +368,7 @@ export function ProjectModal({
                 ? !repository.trim()
                 : kind === 'upload'
                   ? !files.length
-                  : !templates.length)
+                  : !templates.length || unavailableLibrary)
             }
           >
             {busy ? (

@@ -239,7 +239,9 @@ export function Studio() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [agentPendingFile, setAgentPendingFile] = useState<string | null>(null)
-  const [projectModal, setProjectModal] = useState(false)
+  const [projectModal, setProjectModal] = useState<{ preset?: string } | null>(
+    null,
+  )
   const [uploadModal, setUploadModal] = useState(false)
   const [stoppingSetup, setStoppingSetup] = useState(false)
   const [setupDetails, setSetupDetails] = useState(false)
@@ -1166,7 +1168,7 @@ export function Studio() {
             </details>
             <button
               className="icon-button sidebar-projects-create"
-              onClick={() => setProjectModal(true)}
+              onClick={() => setProjectModal({})}
               title="Import or create project"
               aria-label="Import or create project"
             >
@@ -1174,7 +1176,7 @@ export function Studio() {
             </button>
             <button
               className="import-button"
-              onClick={() => setProjectModal(true)}
+              onClick={() => setProjectModal({})}
             >
               <Icon name="plus" size={16} />
               Import or create project
@@ -1420,18 +1422,25 @@ export function Studio() {
             </p>
             <button
               className="button primary"
-              onClick={() => setProjectModal(true)}
+              onClick={() => setProjectModal({})}
             >
               <Icon name="plus" size={17} />
               Import or create project
             </button>
             <div className="welcome-presets">
               {session.templates.map((preset) => (
-                <div key={preset.id}>
+                <button
+                  key={preset.id}
+                  type="button"
+                  aria-label={`Create a ${preset.name} project`}
+                  onClick={() => setProjectModal({ preset: preset.id })}
+                >
                   <Icon name="folder" size={18} />
                   <strong>{preset.name}</strong>
-                  <p>{preset.description}</p>
-                </div>
+                  <span className="welcome-preset-description">
+                    {preset.description}
+                  </span>
+                </button>
               ))}
             </div>
           </div>
@@ -1859,9 +1868,10 @@ export function Studio() {
       {projectModal && (
         <ProjectModal
           templates={session.templates}
-          onClose={() => setProjectModal(false)}
+          initialPreset={projectModal.preset}
+          onClose={() => setProjectModal(null)}
           onCreated={(created) => {
-            setProjectModal(false)
+            setProjectModal(null)
             setProjects((previous) => [
               created,
               ...previous.filter((item) => item.id !== created.id),
