@@ -38,7 +38,7 @@ function Result({ value }: { value: unknown }) {
 }
 
 export function SearchPanel({ projectId }: { projectId?: string }) {
-  const [backend, setBackend] = useState<'loogle' | 'leanexplore'>('loogle')
+  const [backend, setBackend] = useState<'loogle' | 'leanexplore'>('leanexplore')
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -71,8 +71,8 @@ export function SearchPanel({ projectId }: { projectId?: string }) {
       <div className="panel-intro">
         <h2>Find a declaration</h2>
         <p>
-          Search by a type pattern with Loogle, or describe what you need with
-          LeanExplore.
+          Describe what you need with LeanExplore, or search by a type pattern
+          with Loogle.
         </p>
       </div>
       <form onSubmit={submit} className="search-form">
@@ -84,8 +84,8 @@ export function SearchPanel({ projectId }: { projectId?: string }) {
           value={backend}
           onChange={(event) => setBackend(event.target.value as typeof backend)}
         >
-          <option value="loogle">Loogle · type patterns</option>
           <option value="leanexplore">LeanExplore · semantic search</option>
+          <option value="loogle">Loogle · type patterns</option>
         </select>
         <label className="field-label" htmlFor="declaration-query">
           {backend === 'loogle'
