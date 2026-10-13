@@ -192,6 +192,9 @@ export class JobManager {
           const options = {
             network: 'none',
             timeoutMs: 600_000,
+            ...(project.repairedConfiguration
+              ? { readOnlyWorkspace: true, writeLakeCache: true }
+              : {}),
             onOutput: (text) =>
               this.events.append(job.id, 'log', text, 'activity'),
           }

@@ -21,7 +21,9 @@ export function ProjectModal({
   const [autoRepair, setAutoRepair] = useState(true)
   const [files, setFiles] = useState<UploadFile[]>([])
   const [libraries, setLibraries] = useState<string[]>(
-    templates.some((template) => template.id === 'mathlib') ? ['mathlib'] : [],
+    templates.some((template) => template.id === 'mathlib' && template.ready)
+      ? ['mathlib']
+      : [],
   )
   const preset = libraries.includes('cslib')
     ? 'cslib'
@@ -59,7 +61,9 @@ export function ProjectModal({
       const project = await post<Project>('/api/projects', {
         name: name.trim() || undefined,
         autoRepair,
-        ...(subdirectory.trim() ? { subdirectory: subdirectory.trim() } : {}),
+        ...(kind !== 'create' && subdirectory.trim()
+          ? { subdirectory: subdirectory.trim() }
+          : {}),
         ...(kind === 'import'
           ? {
               repository: repository.trim(),
@@ -147,10 +151,14 @@ export function ProjectModal({
           />
         ) : (
           <>
-            <label className="field-label" htmlFor="library-preset">
-              Libraries
-            </label>
-            <div className="preset-list" id="library-preset">
+            <p className="field-label" id="library-preset-label">
+              Libraries <span>select one or more</span>
+            </p>
+            <div
+              className="preset-list"
+              role="group"
+              aria-labelledby="library-preset-label"
+            >
               {templates.map((template) => (
                 <label
                   key={template.id}
@@ -176,6 +184,7 @@ export function ProjectModal({
                     }
                     disabled={
                       busy ||
+                      (template.id !== 'lean' && !template.ready) ||
                       (template.id === 'cslib' &&
                         libraries.includes('physlib')) ||
                       (template.id === 'physlib' && libraries.includes('cslib'))
@@ -193,6 +202,9 @@ export function ProjectModal({
                   {template.ready && (
                     <span className="tag success">Prepared</span>
                   )}
+                  {!template.ready && template.id !== 'lean' && (
+                    <span className="tag">Not installed</span>
+                  )}
                 </label>
               ))}
             </div>
@@ -202,12 +214,22 @@ export function ProjectModal({
               </p>
             )}
             {selected && (
-              <p className="field-help">
-                Select more than one library. CSLib and Physlib each supply
-                their compatible Mathlib revision. Their prepared releases use
-                different Lean versions, so CSLib and Physlib cannot currently
-                be combined.
-              </p>
+              <>
+                {libraries.length > 0 && (
+                  <p className="field-help" role="status">
+                    Uses Lean{' '}
+                    {selected.toolchain?.replace('leanprover/lean4:', '')}
+                    {preset === 'cslib' || preset === 'physlib'
+                      ? ` with ${preset === 'cslib' ? 'CSLib' : 'Physlib'}’s compatible Mathlib revision.`
+                      : ' with Mathlib.'}
+                  </p>
+                )}
+                <p className="field-help">
+                  Combine Mathlib with CSLib or Physlib. CSLib and Physlib
+                  currently require different Lean versions and cannot be
+                  selected together.
+                </p>
+              </>
             )}
             {preset === 'lean' && (
               <>

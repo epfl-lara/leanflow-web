@@ -47,6 +47,21 @@ export interface Project {
   }
 }
 
+export interface GitInfo {
+  repository: boolean
+  branch?: string | null
+  revision?: string | null
+  head?: string | null
+  remoteUrl?: string | null
+  changes?: { status: string; path: string; from?: string }[]
+  diff?: string
+  commits?: { sha: string; message: string }[]
+  mutationBlocked?: boolean
+  blockedReason?: string
+  reviewToken?: string
+  author?: { name: string; email: string }
+}
+
 export interface FileEntry {
   path: string
   size?: number

@@ -259,6 +259,45 @@ test('ambiguous uploaded projects require a directory and never trigger speculat
   assert.equal(repairs, 0)
 })
 
+test('setup repair copies source without original Git metadata or nested gitdir files', async (t) => {
+  let checked = false
+  const f = await fixture(t, {
+    broken: true,
+    cloneFiles: [
+      ...sources.map((file) =>
+        file.path === 'lakefile.toml' ? { ...file, content: 'broken' } : file,
+      ),
+      {
+        path: '.git/config',
+        content: '[credential]\nhelper = private-helper\n',
+      },
+      { path: 'Nested/.git', content: 'gitdir: /private/other-checkout\n' },
+      { path: 'Nested/Proof.lean', content: 'example : True := by trivial\n' },
+    ],
+    setupRepair: async ({ root }) => {
+      for (const filename of ['.git', 'Nested/.git'])
+        await assert.rejects(fs.lstat(path.join(root, filename)), {
+          code: 'ENOENT',
+        })
+      assert.equal(
+        await fs.readFile(path.join(root, 'Nested/Proof.lean'), 'utf8'),
+        'example : True := by trivial\n',
+      )
+      checked = true
+      await fs.writeFile(path.join(root, 'lakefile.toml'), 'name = "fixed"\n')
+    },
+  })
+  const project = await f.create({
+    repository: 'https://github.com/fixture/setup.git',
+  })
+  assert.equal(project.status, 'ready', project.error)
+  assert(checked)
+  assert.match(
+    await fs.readFile(path.join(project.root, '.git/config'), 'utf8'),
+    /private-helper/,
+  )
+})
+
 test('automatic setup repair is announced, retains original configuration and rechecks the environment once', async (t) => {
   let repairs = 0
   const f = await fixture(t, {

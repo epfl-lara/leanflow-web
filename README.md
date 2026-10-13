@@ -6,7 +6,7 @@ The server uses the latest verified native Lemex revision, `2f0e12c10d0baf7404a8
 
 Features:
 
-- Persistent projects, GitHub repository or subfolder links, local file/folder uploads, file creation/editing, branches, and explicit commits. Failed import setup can trigger an announced, isolated Lemex repair followed by environment checks.
+- Persistent projects, GitHub repository or subfolder links, local file/folder uploads, file creation/editing, branches, reviewed commits, and explicit pushes using a one-use repository token. Failed import setup can trigger an announced, isolated Lemex repair followed by environment checks.
 - Monaco editor, Lean infoview, live diagnostics, checks of the selected file, resizable panels, and readable light/dark goals.
 - Prebuilt Mathlib, CSLib, and Physlib environments with compatible pinned dependencies. Select Mathlib together with CSLib or Physlib; incompatible prepared versions are explained. Lean basics can use another exact Lean release; imported repositories use their own toolchain.
 - Four assistant sections: **Proofs** (repair/find), **Formalize**, **Optimize**, and **Search**, with model selection, progress streaming, cancellation, and saved runs.
@@ -62,7 +62,7 @@ node scripts/check-optimization.mjs
 
 `node scripts/check-application.mjs` makes a real provider request, repairs a broken proof in a new test project, verifies and applies the result, and checks it again. `node scripts/check-browser.mjs` checks live diagnostics and the desktop/mobile interface in a separate project. `node scripts/check-optimization.mjs` uses compiler-only fixtures with no model or worker network to check measurements in the installed Lean and Mathlib presets. See [verification evidence](doc/Verification.md) for completed checks, the measured token/heartbeat tradeoff, and Claude Code reviews.
 
-Read [deployment and configuration](doc/LemexWeb.md) for account management, systemd, HTTPS, native-runtime updates, dependency caches, and backups. Private-repository authentication, Git push, shared-project ACLs, and real-time coediting are future extensions; current imports use public HTTPS repositories.
+Read [deployment and configuration](doc/LemexWeb.md) for account management, systemd, HTTPS, native-runtime updates, dependency caches, and backups. Private-repository imports, shared-project ACLs, and real-time coediting are future extensions; current imports use public HTTPS repositories. Publishing accepts an HTTPS repository destination and a token entered for that push.
 
 Hosted LeanExplore is configured, but its upstream service currently returns HTTP 403 to requests from larapc2. Loogle and the local Lean tools work; search failures are surfaced in the interface.
 

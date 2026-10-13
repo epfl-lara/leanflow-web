@@ -192,6 +192,8 @@ try {
     'Folder upload strips enclosing folder, excludes private/cache files, and respects repair opt-out',
   )
   await open()
+  await f.page.locator('.import-options > summary').click()
+  await f.page.getByLabel('Lean project subdirectory').fill('old/import/path')
   await f.page.getByRole('button', { name: 'New project', exact: true }).click()
   assert.equal(
     await f.page.getByRole('checkbox', { name: /^Mathlib/ }).isChecked(),
@@ -217,8 +219,34 @@ try {
     requests.find((input) => input.libraries?.includes('cslib')).libraries,
     ['mathlib', 'cslib'],
   )
+  assert.equal(
+    requests.find((input) => input.libraries?.includes('cslib')).subdirectory,
+    undefined,
+  )
   report.checks.push(
-    'Mathlib and CSLib can be selected together while incompatible Physlib pins are explained and disabled',
+    'Mathlib and CSLib can be selected together, incompatible Physlib pins are explained, and switching from import drops the old subdirectory',
+  )
+  await open()
+  await f.page.getByRole('button', { name: 'New project', exact: true }).click()
+  await f.page.getByRole('checkbox', { name: /^Physlib/ }).check()
+  assert.equal(
+    await f.page.getByRole('checkbox', { name: /^CSLib/ }).isDisabled(),
+    true,
+  )
+  await f.page.getByText(/with Physlib’s compatible Mathlib revision/).waitFor()
+  await f.page
+    .getByRole('button', { name: 'Create project', exact: true })
+    .click()
+  await until(
+    async () => requests.some((input) => input.libraries?.includes('physlib')),
+    'Mathlib and Physlib creation',
+  )
+  assert.deepEqual(
+    requests.find((input) => input.libraries?.includes('physlib')).libraries,
+    ['mathlib', 'physlib'],
+  )
+  report.checks.push(
+    'Mathlib and Physlib can be combined with the actual selected toolchain displayed',
   )
   f.assertClean()
   report.passed = true

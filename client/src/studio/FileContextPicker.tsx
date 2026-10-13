@@ -163,6 +163,7 @@ export function FileContextPicker({
       >
         <summary
           aria-label="Select files"
+          title="Select project files, or type @ in your message"
           aria-controls={`${id}-panel`}
           aria-disabled={disabled}
           tabIndex={disabled ? -1 : 0}

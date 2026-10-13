@@ -13,6 +13,7 @@ import {
   post,
   pretty,
   type FileEntry,
+  type GitInfo,
   type OpenFile,
   type Project,
   type Session,
@@ -26,6 +27,7 @@ import { UploadModal } from './UploadFiles'
 import { SearchPanel } from './SearchPanel'
 import { SettingsModal } from './SettingsModal'
 import { FileBrowser } from './FileBrowser'
+import { GitModal } from './GitModal'
 import { ResizeHandle } from './ResizeHandle'
 import {
   DEFAULT_LAYOUT,
@@ -54,14 +56,6 @@ interface DeleteTarget {
   kind: 'project' | 'file' | 'folder' | 'chat'
 }
 
-interface GitInfo {
-  branch?: string
-  head?: string
-  status?: unknown
-  changes?: unknown[]
-  repository?: boolean
-  [key: string]: unknown
-}
 interface Job {
   id: string
   status: string
@@ -223,10 +217,7 @@ export function Studio() {
   const [trashItems, setTrashItems] = useState<TrashItem[]>([])
   const [trashError, setTrashError] = useState('')
   const [restoring, setRestoring] = useState<string | null>(null)
-  const [gitAction, setGitAction] = useState<'branch' | 'commit' | null>(null)
-  const [gitInput, setGitInput] = useState('')
-  const [gitError, setGitError] = useState('')
-  const [gitBusy, setGitBusy] = useState(false)
+  const [gitOpen, setGitOpen] = useState(false)
   const [newFileModal, setNewFileModal] = useState(false)
   const [newFileName, setNewFileName] = useState('')
   const [newFileError, setNewFileError] = useState('')
@@ -372,6 +363,12 @@ export function Studio() {
       if (projectIdRef.current === id) setGit(null)
     }
   }, [])
+  const acceptGit = useCallback(
+    (value: GitInfo) => {
+      if (projectIdRef.current === projectId) setGit(value)
+    },
+    [projectId],
+  )
 
   const openFile = useCallback(
     async (id: string, path: string, line?: number, column?: number) => {
@@ -416,6 +413,7 @@ export function Studio() {
     setFiles([])
     setFile(null)
     setGit(null)
+    setGitOpen(false)
     setJob(null)
     setFileFilter('')
     setLeanState('')
@@ -723,32 +721,6 @@ export function Studio() {
       )
     } catch (error) {
       setError(errorText(error))
-    }
-  }
-
-  async function performGitAction(event: FormEvent) {
-    event.preventDefault()
-    if (!projectId || !gitAction || !gitInput.trim()) return
-    setGitBusy(true)
-    setGitError('')
-    try {
-      await saveCompletely()
-      const value = await post<GitInfo>(
-        `/api/projects/${encodeURIComponent(projectId)}/git`,
-        {
-          action: gitAction,
-          ...(gitAction === 'branch'
-            ? { name: gitInput.trim() }
-            : { message: gitInput.trim() }),
-        },
-      )
-      setGit(value)
-      setNotice(gitAction === 'branch' ? 'Branch created' : 'Changes committed')
-      setGitAction(null)
-    } catch (error) {
-      setGitError(errorText(error))
-    } finally {
-      setGitBusy(false)
     }
   }
 
@@ -1100,7 +1072,9 @@ export function Studio() {
           <div className="git-sidebar">
             <div className="git-sidebar-caption">
               <Icon name="git" size={14} />
-              <span title={git.branch}>{git.branch || 'Detached HEAD'}</span>
+              <span title={git.branch || undefined}>
+                {git.branch || 'Detached HEAD'}
+              </span>
               <button
                 className="icon-button"
                 aria-label="Refresh Git status"
@@ -1110,43 +1084,14 @@ export function Studio() {
                 <Icon name="refresh" size={13} />
               </button>
             </div>
-            <details>
-              <summary>
-                Working tree · {git.changes?.length ?? ''} changes
-              </summary>
-              <pre>
-                {git.changes
-                  ? git.changes.length
-                    ? git.changes
-                        .map((change) => {
-                          const c = change as { status: string; path: string }
-                          return `${c.status} ${c.path}`
-                        })
-                        .join('\n')
-                    : 'Working tree is clean.'
-                  : pretty(git.status || 'Working tree is clean.')}
-              </pre>
-            </details>
-            <div className="git-sidebar-actions">
-              <button
-                onClick={() => {
-                  setGitAction('branch')
-                  setGitInput('')
-                  setGitError('')
-                }}
-              >
-                Create branch
-              </button>
-              <button
-                onClick={() => {
-                  setGitAction('commit')
-                  setGitInput('')
-                  setGitError('')
-                }}
-              >
-                Commit…
-              </button>
-            </div>
+            <button
+              className="button secondary small git-source-entry"
+              onClick={() => setGitOpen(true)}
+            >
+              <Icon name="git" size={14} />
+              Source control
+              <span>{git.changes?.length || 0}</span>
+            </button>
           </div>
         )}
         <div className="sidebar-footer">
@@ -1812,68 +1757,21 @@ export function Studio() {
           onSaved={() => setNotice('Assistant settings saved')}
         />
       )}
-      {gitAction && (
-        <Dialog
-          title={
-            gitAction === 'branch'
-              ? 'Create a branch'
-              : 'Commit saved text changes'
+      {gitOpen && project && (
+        <GitModal
+          key={project.id}
+          project={project}
+          initialInfo={git}
+          dirty={dirty}
+          localBlockedReason={
+            job && !terminalJob(job)
+              ? 'Finish or stop the active Lean check before changing source control.'
+              : undefined
           }
-          subtitle={
-            gitAction === 'branch'
-              ? 'Create and switch to a new branch in this project.'
-              : 'Saves the editor and commits eligible project text changes. Binary files and private files are excluded.'
-          }
-          onClose={() => setGitAction(null)}
-          busy={gitBusy}
-        >
-          <form onSubmit={performGitAction}>
-            <label className="field-label" htmlFor="git-action-input">
-              {gitAction === 'branch' ? 'Branch name' : 'Commit message'}
-            </label>
-            <input
-              id="git-action-input"
-              autoFocus
-              value={gitInput}
-              onChange={(event) => setGitInput(event.target.value)}
-              placeholder={
-                gitAction === 'branch'
-                  ? 'proof/my-theorem'
-                  : 'Complete the theorem proof'
-              }
-              disabled={gitBusy}
-              required
-            />
-            {gitError && (
-              <p className="error-message" role="alert">
-                {gitError}
-              </p>
-            )}
-            <footer className="dialog-actions">
-              <button
-                type="button"
-                className="button secondary"
-                onClick={() => setGitAction(null)}
-                disabled={gitBusy}
-              >
-                Cancel
-              </button>
-              <button
-                className="button primary"
-                disabled={gitBusy || !gitInput.trim()}
-              >
-                {gitBusy ? (
-                  <span className="spinner" />
-                ) : (
-                  <Icon name="git" size={15} />
-                )}
-                {gitAction === 'branch'
-                  ? 'Create branch'
-                  : 'Commit text changes'}
-              </button>
-            </footer>
-          </form>
-        </Dialog>
+          onSave={saveCompletely}
+          onUpdated={acceptGit}
+          onClose={() => setGitOpen(false)}
+        />
       )}
       {pendingAction && (
         <Dialog

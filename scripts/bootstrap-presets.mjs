@@ -39,7 +39,10 @@ for (const preset of presets) {
     let lakefile = 'name = "ProofWorkspace"\nversion = "0.1.0"\ndefaultTargets = ["Main"]\n\n[[lean_lib]]\nname = "Main"\n'
     if (preset.repository) lakefile += `\n[[require]]\nname = ${JSON.stringify(preset.package)}\ngit = ${JSON.stringify(preset.repository)}\nrev = ${JSON.stringify(preset.revision)}\n`
     await fs.writeFile(path.join(root, 'lakefile.toml'), lakefile)
-    await fs.writeFile(path.join(root, 'Main.lean'), `import ${preset.import}\n\n/-- Start a proof here, or select code and ask Lemex for help. -/\ntheorem addition_commutes (a b : Nat) : a + b = b + a := by\n  exact Nat.add_comm a b\n`)
+    // Verify the actual combined imports offered by the project picker, including
+    // Mathlib's aggregate module for the CSLib/Physlib dependency graphs.
+    const imports = ['cslib', 'physlib'].includes(preset.id) ? ['Mathlib', preset.import] : [preset.import]
+    await fs.writeFile(path.join(root, 'Main.lean'), `${imports.map(name => `import ${name}`).join('\n')}\n\n/-- Start a proof here, or select code and ask Lemex for help. -/\ntheorem addition_commutes (a b : Nat) : a + b = b + a := by\n  exact Nat.add_comm a b\n`)
     if (preset.repository) {
       await execute(root, ['lake', 'update'])
       await execute(root, ['lake', 'exe', 'cache', 'get'], 'bridge', true)

@@ -17,6 +17,7 @@ import { searchDeclarations } from './search.mjs'
 import { LspFrames, frame, validateClientUris } from './rpc.mjs'
 import { acquireServerLease } from './lease.mjs'
 import { repairProjectSetup } from './setup-repair.mjs'
+import { GitPublisher } from './git-publish.mjs'
 
 const projectDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -136,7 +137,26 @@ export async function createStudio({
     languageServers = new Map(),
     socketProjects = new Map()
   const origin = process.env.STUDIO_ORIGIN
-  const requireNoRun = (projectId, owner) => {
+  let publisher
+  const requireNoGit = (projectId, owner, { includeArchived = false } = {}) => {
+    if (includeArchived) {
+      if (
+        !workspaces.db
+          .prepare('SELECT 1 FROM projects WHERE id=? AND owner=?')
+          .get(projectId, owner)
+      )
+        throw Object.assign(new Error('Project not found.'), { status: 404 })
+    } else workspaces.get(projectId, owner)
+    if (publisher?.busy.has(projectId))
+      throw Object.assign(
+        new Error(
+          'Wait for the current Git operation before starting other project work.',
+        ),
+        { status: 409 },
+      )
+  }
+  const requireNoRun = (projectId, owner, { ignoreGit = false } = {}) => {
+    if (!ignoreGit) requireNoGit(projectId, owner)
     if (
       events.db
         .prepare(
@@ -152,6 +172,7 @@ export async function createStudio({
       )
   }
   const requireNoActiveWork = (projectId, owner) => {
+    requireNoGit(projectId, owner, { includeArchived: true })
     const active = events.db
       .prepare(
         "SELECT 1 FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.status') IN ('queued','running','stopping','verifying') LIMIT 1",
@@ -346,130 +367,184 @@ export async function createStudio({
       await workspaces.restore(req.params.id, req.user.id, { assertIdle }),
     )
   })
+  publisher = await new GitPublisher({
+    dataDir,
+    runtime,
+    workspaces,
+    assertIdle: (id, owner) => requireNoRun(id, owner, { ignoreGit: true }),
+    redact: config.redact,
+  }).init()
+  const gitInfo = async (id, user) => ({
+    ...(await publisher.metadata(user.id, id)),
+    author: { name: user.name, email: `${user.id}@lemex-web.local` },
+  })
   app.get('/api/projects/:id/git', async (req, res) =>
-    res.json(await workspaces.gitStatus(req.params.id, req.user.id)),
+    res.json(await gitInfo(req.params.id, req.user)),
   )
   app.post('/api/projects/:id/git', async (req, res) => {
-    const project = workspaces.get(req.params.id, req.user.id)
-    if (project.status !== 'ready')
-      throw Object.assign(new Error('Project is not ready.'), { status: 409 })
-    requireNoRun(project.id, req.user.id)
-    const { action, name, message } = req.body
-    const options = { network: 'none', timeoutMs: 60_000 }
-    const gitRoot = workspaces.repositoryRoot(project)
-    const command = async (args) => {
-      const result = await runtime.run(
-        gitRoot,
-        [
-          'git',
-          '-c',
-          'core.hooksPath=/dev/null',
-          '-c',
-          'credential.helper=',
-          ...args,
-        ],
-        options,
+    const { action, name, message, authorName, authorEmail, reviewToken } =
+      req.body
+    if (action === 'preview-push')
+      return res.json(
+        await publisher.preview(req.user.id, req.params.id, req.body),
       )
-      if (result.code !== 0)
-        throw new Error(
-          result.stderr || result.stdout || 'Git operation failed.',
+    if (action === 'push')
+      return res.json(
+        await publisher.push(req.user.id, req.params.id, req.body),
+      )
+    await publisher.withProject(req.user.id, req.params.id, async (project) => {
+      const options = { network: 'none', timeoutMs: 60_000 }
+      const gitRoot = workspaces.repositoryRoot(project)
+      const command = async (args) => {
+        const result = await runtime.run(
+          gitRoot,
+          [
+            'git',
+            '-c',
+            'core.hooksPath=/dev/null',
+            '-c',
+            'credential.helper=',
+            ...args,
+          ],
+          options,
         )
-      return result
-    }
-    if (action === 'branch') {
-      if (
-        typeof name !== 'string' ||
-        !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,120}$/.test(name) ||
-        name.includes('..') ||
-        name.endsWith('.lock')
-      )
-        throw Object.assign(new Error('Enter a valid branch name.'), {
-          status: 400,
-        })
-      await command(['switch', '-c', name])
-    } else if (action === 'commit') {
-      if (
-        typeof message !== 'string' ||
-        !message.trim() ||
-        message.length > 2000
-      )
-        throw Object.assign(new Error('Enter a commit message.'), {
-          status: 400,
-        })
-      const listed = await command([
-        'ls-files',
-        '-z',
-        '--cached',
-        '--others',
-        '--exclude-standard',
-      ])
-      const files = []
-      const prefix = project.subdirectory ? project.subdirectory + '/' : ''
-      for (const filename of listed.stdout.split('\0').filter(Boolean)) {
-        if (prefix && !filename.startsWith(prefix)) continue
-        const relative = filename.slice(prefix.length)
-        if (relative.startsWith('.lake/')) continue
-        try {
-          await workspaces.gitFilePath(project.id, req.user.id, relative)
-          files.push(filename)
-        } catch (error) {
-          if (error.status === 404) files.push(filename)
-        }
+        if (result.code !== 0)
+          throw new Error(
+            result.stderr || result.stdout || 'Git operation failed.',
+          )
+        return result
       }
-      if (!files.length)
-        throw Object.assign(
-          new Error('There are no project files to commit.'),
-          { status: 409 },
+      if (action === 'branch') {
+        if (
+          typeof name !== 'string' ||
+          !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,120}$/.test(name) ||
+          name.includes('..') ||
+          name.endsWith('.lock')
         )
-      const withPaths = (args) =>
-        new Promise((resolve, reject) => {
-          const child = runtime.spawn(
-            gitRoot,
-            [
-              'git',
-              '--literal-pathspecs',
-              '-c',
-              'core.hooksPath=/dev/null',
-              ...args,
-              '--pathspec-from-file=-',
-              '--pathspec-file-nul',
-            ],
-            options,
-          )
-          let output = ''
-          child.stdout.on('data', () => {})
-          child.stderr.on('data', (data) => {
-            output += data.toString()
+          throw Object.assign(new Error('Enter a valid branch name.'), {
+            status: 400,
           })
-          child.on('error', reject)
-          child.stdin.on('error', reject)
-          child.on('close', (code) =>
-            code === 0
-              ? resolve()
-              : reject(new Error(output || 'Git operation failed.')),
+        await command(['switch', '-c', name])
+      } else if (action === 'commit') {
+        if (
+          typeof message !== 'string' ||
+          !message.trim() ||
+          message.length > 2000
+        )
+          throw Object.assign(new Error('Enter a commit message.'), {
+            status: 400,
+          })
+        const listed = await command([
+          'ls-files',
+          '-z',
+          '--cached',
+          '--others',
+          '--exclude-standard',
+        ])
+        const files = []
+        const prefix = project.subdirectory ? project.subdirectory + '/' : ''
+        for (const filename of listed.stdout.split('\0').filter(Boolean)) {
+          if (prefix && !filename.startsWith(prefix)) continue
+          const relative = filename.slice(prefix.length)
+          if (relative.startsWith('.lake/')) continue
+          try {
+            await workspaces.gitFilePath(project.id, req.user.id, relative)
+            files.push(filename)
+          } catch (error) {
+            if (error.status === 404) files.push(filename)
+          }
+        }
+        if (!files.length)
+          throw Object.assign(
+            new Error('There are no project files to commit.'),
+            { status: 409 },
           )
-          child.stdin.end(files.map((filename) => filename + '\0').join(''))
+        if (reviewToken !== undefined) {
+          if (
+            typeof reviewToken !== 'string' ||
+            !/^[a-f0-9]{64}$/.test(reviewToken) ||
+            (await publisher.metadata(req.user.id, project.id)).reviewToken !==
+              reviewToken
+          )
+            throw Object.assign(
+              new Error(
+                'Project files or Git history changed after this review. Refresh and review the current changes before committing.',
+              ),
+              { status: 409 },
+            )
+        }
+        if (
+          authorName !== undefined &&
+          (typeof authorName !== 'string' ||
+            !authorName.trim() ||
+            authorName.length > 200 ||
+            /[<>\x00-\x1f]/.test(authorName))
+        )
+          throw Object.assign(new Error('Enter a valid commit author name.'), {
+            status: 400,
+          })
+        if (
+          authorEmail !== undefined &&
+          (typeof authorEmail !== 'string' ||
+            authorEmail.length > 254 ||
+            !/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9][A-Za-z0-9.-]*$/.test(
+              authorEmail,
+            ))
+        )
+          throw Object.assign(new Error('Enter a valid commit author email.'), {
+            status: 400,
+          })
+        const withPaths = (args) =>
+          new Promise((resolve, reject) => {
+            const child = runtime.spawn(
+              gitRoot,
+              [
+                'git',
+                '--literal-pathspecs',
+                '-c',
+                'core.hooksPath=/dev/null',
+                ...args,
+                '--pathspec-from-file=-',
+                '--pathspec-file-nul',
+              ],
+              options,
+            )
+            let output = ''
+            child.stdout.on('data', () => {})
+            child.stderr.on('data', (data) => {
+              output += data.toString()
+            })
+            child.on('error', reject)
+            child.stdin.on('error', reject)
+            child.on('close', (code) =>
+              code === 0
+                ? resolve()
+                : reject(new Error(output || 'Git operation failed.')),
+            )
+            child.stdin.end(files.map((filename) => filename + '\0').join(''))
+          })
+        await withPaths(['add', '-A'])
+        // A checkout may already have staged sibling or private files. Commit only
+        // the admitted project paths, leaving unrelated staged work untouched.
+        await withPaths([
+          '-c',
+          `user.name=${authorName?.trim() || req.user.name}`,
+          '-c',
+          `user.email=${authorEmail || `${req.user.id}@lemex-web.local`}`,
+          'commit',
+          '--only',
+          '-m',
+          message.trim(),
+        ])
+      } else
+        throw Object.assign(new Error('Choose branch or commit.'), {
+          status: 400,
         })
-      await withPaths(['add', '-A'])
-      // A checkout may already have staged sibling or private files. Commit only
-      // the admitted project paths, leaving unrelated staged work untouched.
-      await withPaths([
-        '-c',
-        `user.name=${req.user.name}`,
-        '-c',
-        `user.email=${req.user.id}@lemex-web.local`,
-        'commit',
-        '--only',
-        '-m',
-        message.trim(),
-      ])
-    } else
-      throw Object.assign(new Error('Choose branch or commit.'), {
-        status: 400,
-      })
-    res.json(await workspaces.gitStatus(project.id, req.user.id))
+    })
+    res.json(await gitInfo(req.params.id, req.user))
   })
   app.post('/api/projects/:id/check', (req, res) => {
+    requireNoGit(req.params.id, req.user.id)
     const job = jobs.check(req.user.id, req.params.id, req.body.path)
     res.status(202).json(publicJob(events.snapshot(job.id, req.user.id)))
   })
@@ -494,6 +569,7 @@ export async function createStudio({
   )
   app.post('/api/chats/:id/runs', (req, res) => {
     const chat = chats.get(req.params.id, req.user.id)
+    requireNoGit(chat.projectId, req.user.id)
     if (
       !req.body ||
       typeof req.body !== 'object' ||
@@ -513,6 +589,7 @@ export async function createStudio({
     res.json(chats.trash(req.user.id, req.params.id)),
   )
   app.post('/api/projects/:id/runs', (req, res) => {
+    requireNoGit(req.params.id, req.user.id)
     const job = agents.start(req.user.id, req.params.id, req.body)
     res.status(202).json(publicJob(events.snapshot(job.id, req.user.id)))
   })
@@ -623,6 +700,9 @@ export async function createStudio({
     try {
       child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
         network: 'none',
+        ...(project.repairedConfiguration
+          ? { readOnlyWorkspace: true, writeLakeCache: true }
+          : {}),
       })
       const frames = new LspFrames((message) => {
         const method = pending.get(message.id)
@@ -724,6 +804,7 @@ export async function createStudio({
     chats,
     config,
     settings,
+    publisher,
     close,
   }
 }

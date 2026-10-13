@@ -96,6 +96,27 @@ test('saves new files and rejects stale concurrent saves', async t => {
   assert.equal(writes.filter(write => write.status === 'rejected' && write.reason.status === 409).length, 1);
 });
 
+test('proof snapshots omit repository history, hooks and nested gitdir files while retaining the source revision', async t => {
+  const runtime = fakeRuntime();
+  const run = runtime.run.bind(runtime);
+  runtime.run = (root, args, options) => args[0] === 'git' && args.includes('rev-parse')
+    ? Promise.resolve({ code: 0, stdout: 'a'.repeat(40), stderr: '' })
+    : run(root, args, options);
+  const { store, project } = await fixture(t, runtime);
+  await fs.mkdir(path.join(project.root, '.git/hooks'), { recursive: true });
+  await fs.writeFile(path.join(project.root, '.git/hooks/pre-commit'), '#!/bin/sh\necho private-hook\n');
+  await fs.writeFile(path.join(project.root, '.git/config'), '[credential]\nhelper = private-helper\n');
+  await fs.mkdir(path.join(project.root, 'Nested'));
+  await fs.writeFile(path.join(project.root, 'Nested/.git'), 'gitdir: /private/other-checkout\n');
+  await fs.writeFile(path.join(project.root, 'Nested/Proof.lean'), 'example : True := by trivial\n');
+  const snapshot = await store.snapshot(project.id, 'alice', 'no-git-metadata');
+  assert.equal(snapshot.sourceRevision, 'a'.repeat(40));
+  for (const filename of ['.git', 'Nested/.git']) await assert.rejects(fs.lstat(path.join(snapshot.root, filename)), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(path.join(snapshot.root, 'Nested/Proof.lean'), 'utf8'), 'example : True := by trivial\n');
+  assert.equal(await fs.readFile(path.join(snapshot.root, '.gitignore'), 'utf8'), '.lake/\n');
+  assert.match(await fs.readFile(path.join(project.root, '.git/config'), 'utf8'), /private-helper/);
+});
+
 test('snapshot keeps a protected baseline and apply checks every base before any write', async t => {
   const { store, project } = await fixture(t);
   await store.writeFile(project.id, 'alice', 'Second.lean', 'second original\n', null);
@@ -146,10 +167,12 @@ test('independent verification copies saved sources and trusted artifacts into a
   await fs.writeFile(path.join(project.root, '.git', 'config'), 'trusted original git config');
   const original = await store.readFile(project.id, 'alice', 'Main.lean');
   const snapshot = await store.snapshot(project.id, 'alice', 'untrusted-run');
+  await assert.rejects(fs.stat(path.join(snapshot.root, '.git')), { code: 'ENOENT' });
   const proposed = 'example : True := by trivial\n';
   await fs.writeFile(path.join(snapshot.root, 'Main.lean'), proposed);
   await fs.writeFile(path.join(snapshot.root, '.lake', 'build', 'trusted.olean'), 'poisoned artifact');
   await fs.writeFile(path.join(snapshot.root, '.lake', 'build', 'evil.olean'), 'new poisoned artifact');
+  await fs.mkdir(path.join(snapshot.root, '.git'));
   await fs.writeFile(path.join(snapshot.root, '.git', 'config'), 'poisoned git config');
   await fs.mkdir(path.join(snapshot.root, '.lemex'), { recursive: true });
   await fs.writeFile(path.join(snapshot.root, '.lemex', 'config.toml'), 'poisoned agent config');
@@ -159,7 +182,7 @@ test('independent verification copies saved sources and trusted artifacts into a
   assert.notEqual(verification.root, project.root);
   assert.equal(await fs.readFile(path.join(verification.root, 'Main.lean'), 'utf8'), proposed);
   assert.equal(await fs.readFile(path.join(verification.root, '.lake', 'build', 'trusted.olean'), 'utf8'), 'trusted original artifact');
-  assert.equal(await fs.readFile(path.join(verification.root, '.git', 'config'), 'utf8'), 'trusted original git config');
+  await assert.rejects(fs.stat(path.join(verification.root, '.git')), { code: 'ENOENT' });
   await assert.rejects(fs.stat(path.join(verification.root, '.lake', 'build', 'evil.olean')), { code: 'ENOENT' });
   await assert.rejects(fs.stat(path.join(verification.root, '.lemex')), { code: 'ENOENT' });
   assert.equal((await store.readFile(project.id, 'alice', 'Main.lean')).hash, original.hash);

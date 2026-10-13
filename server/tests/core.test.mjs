@@ -681,7 +681,13 @@ test('Check validates the selected Lean file even if it is outside default Lake 
       },
     },
     workspaces: {
-      get: (id, owner) => ({ id, owner, root: '/project', status: 'ready' }),
+      get: (id, owner) => ({
+        id,
+        owner,
+        root: '/project',
+        status: 'ready',
+        repairedConfiguration: true,
+      }),
       readFile: async (id, owner, file) => {
         reads.push({ id, owner, file })
         return { content: '' }
@@ -702,6 +708,11 @@ test('Check validates the selected Lean file even if it is outside default Lake 
     ],
   )
   assert.ok(calls.every((call) => call.options.network === 'none'))
+  assert.ok(
+    calls.every(
+      (call) => call.options.readOnlyWorkspace && call.options.writeLakeCache,
+    ),
+  )
 })
 
 test('settings remain private per user, persist, and validate tool choices and instruction size', async (t) => {
@@ -976,6 +987,31 @@ test('WebSocket authentication, origin, and project ownership fail before any Le
     404,
   )
   assert.equal(runtime.spawned.length, 0)
+})
+
+test('repaired project LSP preserves source isolation and permits only Lake cache writes', async (t) => {
+  const { url, token, project, runtime, workspaces } = await fixture(t)
+  const saved = workspaces.get(project.id, 'owner')
+  saved.repairedConfiguration = true
+  workspaces.db
+    .prepare('UPDATE projects SET data=? WHERE id=?')
+    .run(JSON.stringify(saved), project.id)
+  const ws = new WebSocket(
+    url.replace('http:', 'ws:') + '/websocket/' + project.id,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  )
+  t.after(() => ws.terminate())
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve)
+    ws.once('error', reject)
+  })
+  const child = runtime.spawned[0]
+  assert.deepEqual(child.args, ['lake', 'serve', '--'])
+  assert.equal(child.options.network, 'none')
+  assert.equal(child.options.readOnlyWorkspace, true)
+  assert.equal(child.options.writeLakeCache, true)
 })
 
 test('authorized WebSocket relays Lean frames and closes on forbidden client file URIs', async (t) => {

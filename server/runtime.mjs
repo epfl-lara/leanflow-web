@@ -415,6 +415,7 @@ export class Runtime {
     }
     dockerArgs.push(this.imageId || this.image, ...args)
     const child = spawnChild(this.docker, dockerArgs, { stdio: ['pipe', 'pipe', 'pipe'], detached: true, env: childEnv })
+    child.workerHome = home
     child.containerName = name
     this.children.add(child)
     let timer
@@ -450,6 +451,7 @@ export class Runtime {
 
   run(root, args, options = {}) {
     this.#assertReady()
+    if (options.input !== undefined && typeof options.input !== 'string' && !Buffer.isBuffer(options.input)) return Promise.reject(new Error('Worker stdin input must be text or bytes'))
     if (options.signal?.aborted) return Promise.reject(options.signal.reason || new Error('Worker job was cancelled'))
     if (this.children.size < this.maxConcurrent) return this.#run(root, args, options)
     if (this.queue.length >= this.maxQueue) return Promise.reject(Object.assign(new Error('Workspace job queue is full'), { status: 503 }))
@@ -468,7 +470,7 @@ export class Runtime {
   #run(root, args, options) {
     return new Promise((resolve, reject) => {
       let child
-      try { child = this.spawn(root, args, options) } catch (error) { reject(error); return }
+      try { child = this.spawn(root, args, options); options.onSpawn?.(child) } catch (error) { child?.kill(); reject(error); return }
       let stdout = '', stderr = '', truncated = false
       const maxBytes = options.maxOutputBytes || 16 * 1024 * 1024
       const append = (current, chunk) => {
@@ -479,6 +481,8 @@ export class Runtime {
       child.stderr.on('data', chunk => { stderr = append(stderr, chunk) })
       child.once('error', reject)
       child.once('close', (code, signal) => resolve({ code: code ?? (child.timedOut ? 124 : 130), stdout, stderr, signal, timedOut: Boolean(child.timedOut), cancelled: Boolean(child.cancelled), truncated }))
+      child.stdin.on('error', error => { if (error.code !== 'EPIPE') reject(error) })
+      child.stdin.end(options.input)
     })
   }
 

@@ -157,7 +157,7 @@ async function copyWorkspace(source, target, { omitDependencies = false } = {}) 
       const anchor = `/proc/self/fd/${directory.fd}`;
       for (const entry of await fs.readdir(anchor, { withFileTypes: true })) {
         const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-        if (entry.name === 'node_modules' || entry.name === '.ready.json' || (entry.name !== '.git' && isSecret(entry.name)) || (omitDependencies && relative === '.lake/packages')) continue;
+        if (entry.name === 'node_modules' || entry.name === '.ready.json' || isSecret(entry.name) || (omitDependencies && relative === '.lake/packages')) continue;
         const original = path.join(from, entry.name);
         const anchored = path.join(anchor, entry.name);
         const destination = path.join(to, entry.name);
@@ -840,7 +840,7 @@ export class WorkspaceStore {
     const project = this.get(id, owner);
     this.#ready(project);
     if (!(await exists(path.join(this.repositoryRoot(project), '.git')))) return { repository: false, branch: null, revision: null, changes: [], diff: '' };
-    const status = await this.#command(project, [...GIT_ARGS, 'status', '--porcelain=v1', '--branch', '-z'], 30000);
+    const status = await this.#command(project, [...GIT_ARGS, 'status', '--porcelain=v1', '--branch', '--untracked-files=all', '-z'], 30000);
     const records = status.stdout.split('\0').filter(Boolean);
     const branchLine = records[0]?.startsWith('## ') ? records.shift().slice(3).split('...')[0] : null;
     const branch = branchLine?.replace(/^(?:No commits yet on |Initial commit on )/, '') || null;
