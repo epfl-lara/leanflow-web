@@ -33,3 +33,48 @@ export function projectLibraries(input, definitions) {
     ),
   }
 }
+
+/** Check supported library imports separately from unfinished user proofs. */
+export function projectEnvironmentImports(project, manifest) {
+  const names = new Set(
+    Array.isArray(manifest?.packages)
+      ? manifest.packages.map((pkg) => pkg?.name)
+      : [],
+  )
+  if (manifest?.name) names.add(manifest.name)
+  if (!project.repository && !project.uploaded) {
+    for (const library of project.libraries || [project.preset])
+      names.add(library)
+  }
+  const imports = ['Lean']
+  if (
+    names.has('mathlib') ||
+    names.has('cslib') ||
+    names.has('physlib') ||
+    names.has('Physlib')
+  )
+    imports.push('Mathlib')
+  if (names.has('cslib')) imports.push('Cslib')
+  if (names.has('physlib') || names.has('Physlib')) imports.push('Physlib')
+  return imports
+}
+
+export function environmentSmokeProof(imports) {
+  return (
+    imports.map((name) => `import ${name}`).join('\n') +
+    '\nexample (n : Nat) : n + 0 = n := by simp\n'
+  )
+}
+
+export function dependencyBuildTargets(manifest) {
+  if (!Array.isArray(manifest?.packages)) return []
+  return manifest.packages
+    .filter(
+      (pkg) =>
+        pkg?.type === 'git' &&
+        pkg.name !== 'mathlib' &&
+        pkg.inherited !== true &&
+        /^[A-Za-z][A-Za-z0-9_-]*$/.test(pkg.name),
+    )
+    .map((pkg) => pkg.name)
+}

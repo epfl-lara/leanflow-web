@@ -527,3 +527,184 @@ test('repaired Lake configuration that changes proof sources during evaluation i
     'broken',
   )
 })
+
+test('Mathlib setup must pass an import proof, requests Lemex repair on failure, and retests without changing unfinished proofs', async (t) => {
+  let repairs = 0
+  const f = await fixture(t, {
+    setupRepair: async ({ root, error }) => {
+      repairs++
+      assert.match(error, /environment is not ready/)
+      await fs.writeFile(path.join(root, 'lakefile.toml'), 'name = "fixed"\n')
+    },
+  })
+  const run = f.runtime.run
+  const smoke = []
+  f.runtime.run = async (root, args, options) => {
+    const result = await run(root, args, options)
+    if (args.at(-1) !== '--stdin') return result
+    smoke.push({ root, options })
+    assert.match(options.input, /import Mathlib/)
+    assert.equal(options.readOnlyWorkspace, true)
+    assert.equal(options.writeLakeCache, true)
+    const fixed = (
+      await fs.readFile(path.join(root, 'lakefile.toml'), 'utf8')
+    ).includes('fixed')
+    return fixed
+      ? result
+      : { code: 1, stderr: 'Compiled Mathlib artifact missing', stdout: '' }
+  }
+  const manifest = JSON.stringify({
+    packages: [
+      {
+        name: 'mathlib',
+        type: 'git',
+        url: 'https://github.com/leanprover-community/mathlib4',
+        rev: 'a'.repeat(40),
+      },
+    ],
+  })
+  const proof = 'import Mathlib\nexample : True := by\n'
+  const project = await f.create({
+    files: [
+      ...sources.filter((file) => file.path !== 'Main.lean'),
+      { path: 'Main.lean', content: proof },
+      { path: 'lake-manifest.json', content: manifest },
+    ],
+  })
+  assert.equal(project.status, 'ready', project.error)
+  assert.equal(repairs, 1)
+  assert.equal(project.setupRepair.status, 'completed')
+  assert.equal(smoke.length, 3)
+  assert.equal(smoke.at(-1).root, project.root)
+  assert.equal(
+    (await f.store.readFile(project.id, 'alice', 'Main.lean')).content,
+    proof,
+  )
+  assert.equal(
+    await fs.readFile(path.join(project.root, 'lake-manifest.json'), 'utf8'),
+    manifest,
+  )
+  assert(
+    f.calls.filter((call) => call.args.join(' ') === 'lake exe cache get')
+      .length >= 2,
+  )
+})
+
+test('failed environment pretests stay unavailable after one repair attempt, even if Lemex reports success without edits', async (t) => {
+  let repairs = 0
+  const f = await fixture(t, {
+    setupRepair: async () => {
+      repairs++
+    },
+  })
+  const run = f.runtime.run
+  f.runtime.run = async (root, args, options) => {
+    const result = await run(root, args, options)
+    return args.at(-1) === '--stdin' && !root.includes('/setup-repairs/')
+      ? { code: 1, stdout: '', stderr: 'Fixture environment still unavailable' }
+      : result
+  }
+  const project = await f.create({ files: sources })
+  assert.equal(project.status, 'error')
+  assert.equal(repairs, 1)
+  assert.match(project.error, /environment is not ready/)
+  assert.equal(project.setupRepair.status, 'failed')
+  assert.equal(
+    f.store.events(project.id, 'alice').some((event) => event.type === 'ready'),
+    false,
+  )
+})
+
+test('a prepared preset environment failure also requests repair and checks the final environment', async (t) => {
+  let repairs = 0
+  const f = await fixture(t, {
+    setupRepair: async ({ root }) => {
+      repairs++
+      await fs.writeFile(path.join(root, 'lakefile.toml'), 'name = "fixed"\n')
+    },
+  })
+  const run = f.runtime.run
+  f.runtime.run = async (root, args, options) => {
+    const result = await run(root, args, options)
+    if (args.at(-1) !== '--stdin') return result
+    return (
+      await fs.readFile(path.join(root, 'lakefile.toml'), 'utf8')
+    ).includes('fixed')
+      ? result
+      : { code: 1, stdout: '', stderr: 'Fixture preset environment failed' }
+  }
+  const project = await f.create({ preset: 'lean' })
+  assert.equal(project.status, 'ready', project.error)
+  assert.equal(repairs, 1)
+})
+
+test('setup repair cannot switch an existing valid Lean pin or resolved dependency revision', async (t) => {
+  for (const changed of ['lean', 'mathlib']) {
+    const manifest = JSON.stringify({
+      packages: [
+        {
+          name: 'mathlib',
+          type: 'git',
+          url: 'https://github.com/leanprover-community/mathlib4',
+          rev: 'a'.repeat(40),
+        },
+      ],
+    })
+    const f = await fixture(t, {
+      broken: true,
+      setupRepair: async ({ root }) => {
+        await fs.writeFile(path.join(root, 'lakefile.toml'), 'name = "fixed"\n')
+        if (changed === 'lean')
+          await fs.writeFile(
+            path.join(root, 'lean-toolchain'),
+            'leanprover/lean4:v4.35.0\n',
+          )
+        else
+          await fs.writeFile(
+            path.join(root, 'lake-manifest.json'),
+            manifest.replace('a'.repeat(40), 'b'.repeat(40)),
+          )
+      },
+    })
+    const project = await f.create({
+      files: [
+        ...sources.map((file) =>
+          file.path === 'lakefile.toml' ? { ...file, content: 'broken' } : file,
+        ),
+        { path: 'lake-manifest.json', content: manifest },
+      ],
+    })
+    assert.equal(project.status, 'error')
+    assert.match(project.error, /changed.*pinned/)
+    assert.equal(
+      await fs.readFile(path.join(project.root, 'lean-toolchain'), 'utf8'),
+      toolchain + '\n',
+    )
+    assert.equal(
+      await fs.readFile(path.join(project.root, 'lake-manifest.json'), 'utf8'),
+      manifest,
+    )
+  }
+})
+
+test('unsupported chosen Lean releases are reported without asking Lemex to substitute a version', async (t) => {
+  let repairs = 0
+  const f = await fixture(t, {
+    setupRepair: async () => {
+      repairs++
+    },
+  })
+  const chosen = 'leanprover/lean4:nightly-2026-10-13\n'
+  const project = await f.create({
+    files: sources.map((file) =>
+      file.path === 'lean-toolchain' ? { ...file, content: chosen } : file,
+    ),
+  })
+  assert.equal(project.status, 'error')
+  assert.match(project.error, /Nightly toolchains are not supported/)
+  assert.equal(repairs, 0)
+  assert.equal(
+    await fs.readFile(path.join(project.root, 'lean-toolchain'), 'utf8'),
+    chosen,
+  )
+})

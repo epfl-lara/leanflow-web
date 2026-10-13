@@ -81,6 +81,36 @@ systemctl --user enable --now leanflow-proxy.service
 
 Open the HTTPS address from another computer and check sign-in, editor diagnostics, and live chat. The configured origin becomes the write/sign-in address; the old HTTP tunnel is no longer accepted. Tokens are still required. Check proxy failures with `journalctl --user -u leanflow-proxy.service`.
 
+## Share imported dependencies
+
+Imported and uploaded projects with Mathlib can share dependencies with other
+projects in the same account. The cache matches the pinned Lean release, every
+Git dependency revision, the worker image, and Lake build settings. TOML project
+names and root target names can differ. Executable `lakefile.lean` configurations
+must match exactly.
+
+Setup runs `lake exe cache get` in a separate workspace and checks `import Mathlib`
+with dependencies mounted read-only before making an entry available. Projects
+and assistant runs mount the shared packages and downloaded artifacts read-only.
+Proof sources, project builds, and new cache artifacts stay private.
+
+Local dependencies, custom package directories, and configurations that need
+other project files keep their private setup path. Failed shared preparation also
+falls back to private setup. Changing dependency configuration requires preparing
+the project again; existing assistant snapshots retain their original cache.
+
+Every project also passes a separate Lean proof check before it becomes ready.
+The check imports its supported libraries without compiling unfinished user proofs.
+With automatic repair enabled (the default), an environment failure asks Lemex to
+repair an isolated copy, then tests the original project again. Repair preserves
+valid Lean and dependency pins and proof sources. A failed recheck leaves the
+project unavailable with an error instead of marking it ready.
+
+This applies when preparing projects after starting the updated server. Existing
+projects and running workers are not migrated or deleted. Restart only when active
+proof runs and setup have finished. Cache entries are retained; do not delete them
+while projects or snapshots reference them.
+
 ## Keep data and credentials private
 
 Back up your data directory (`.data` by default) while the server is stopped or from a consistent snapshot. It contains project sources, account tokens, saved provider settings, and chats. Dependency caches take several gigabytes; keep them while projects or runs use them.
