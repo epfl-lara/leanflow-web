@@ -1,3 +1,72 @@
+.workspace-search {
+  position: relative;
+  flex: 0 0 100%;
+  min-width: 0;
+}
+
+.workspace-search-form {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.workspace-search-form:focus-within {
+  border-color: var(--accent);
+}
+
+.workspace-search-form input,
+.workspace-search-form select {
+  border: 0;
+  background: transparent;
+  font-size: 12px;
+  padding: 8px 10px;
+}
+
+.workspace-search-form input {
+  flex: 1;
+  width: 0;
+}
+
+.workspace-search-form select {
+  width: auto;
+  max-width: 120px;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+}
+
+.workspace-search-submit {
+  flex-shrink: 0;
+  margin: 0 4px;
+  color: var(--accent);
+}
+
+.workspace-search .search-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: min(65dvh, 640px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+}
+
+.search-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.search-panel-header .panel-intro p {
+  margin-bottom: 0;
+}
+
 .search-panel .search-result {
   min-width: 0;
   padding: 14px;

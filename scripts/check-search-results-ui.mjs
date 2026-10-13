@@ -19,10 +19,9 @@ const fixture = await chatBrowserFixture({
   session: {
     user: { id: 'fixture-owner', name: 'Fixture owner' },
     templates: [],
-    models: [{ id: 'fixture-model', name: 'Fixture model' }],
-    defaultModel: 'fixture-model',
-    runtime: { ready: true },
-    lemex: { available: true },
+    models: [],
+    runtime: { ready: false },
+    lemex: { available: false },
   },
   projects: [
     { id: projectId, name: 'Search fixture', status: 'ready' },
@@ -134,6 +133,9 @@ await page.route('**/api/search', async (route) => {
       contentType: 'application/json',
       body: JSON.stringify(value),
     })
+  if (body.query === 'unavailable-service')
+    return respond({ error: 'LeanExplore is unavailable. Try Loogle.' }, 502)
+  if (body.query === 'no-matches') return respond({ results: [] })
   if (body.query.startsWith('slow-')) {
     return new Promise((resolve) => {
       pending.set(body.query, async (value, status = 200) => {
@@ -156,7 +158,7 @@ const card = (name) =>
     .filter({ has: page.getByText(name, { exact: true }) })
 async function submit(text) {
   await query.fill(text)
-  await search.click()
+  await query.press('Enter')
 }
 async function checkTypes(theme) {
   await page.evaluate((value) => {
@@ -306,11 +308,66 @@ async function checkTypes(theme) {
 }
 try {
   await fixture.ready()
-  await page.getByRole('tab', { name: 'Search', exact: true }).click()
+  assert.equal(
+    await page.getByRole('tab', { name: 'Assistant', exact: true }).count(),
+    0,
+  )
+  assert.equal(
+    await page.getByRole('tab', { name: 'Search', exact: true }).count(),
+    0,
+  )
+  assert.equal(
+    await page
+      .getByRole('button', { name: 'Ask & Search', exact: true })
+      .isVisible(),
+    true,
+  )
+  await page.getByRole('button', { name: 'Close tools panel' }).click()
+  assert.equal(
+    await page.locator('.workbench-header').getByRole('search').count(),
+    1,
+  )
+  assert.equal(await query.isVisible(), true)
+  assert.equal(await query.isEnabled(), true)
+  assert.equal(await query.getAttribute('type'), 'search')
+  assert.equal(await page.locator('.search-panel').count(), 0)
   assert.equal(await engine.inputValue(), 'leanexplore')
   await submit('monotone')
   await checkTypes('dark')
   await checkTypes('light')
+  report.checks.push(
+    'Top-level search submits directly with Enter while Lemex is closed, unavailable and has no models; Assistant/Search tabs are gone and Ask & Search remains',
+  )
+
+  const callsBeforeClose = report.requests.filter(
+    (request) => request.endpoint === '/api/search',
+  ).length
+  await page.getByRole('button', { name: 'Close search results' }).click()
+  assert.equal(await query.inputValue(), 'monotone')
+  assert.equal(await search.getAttribute('aria-expanded'), 'false')
+  assert.equal(
+    await query.evaluate((element) => element === document.activeElement),
+    true,
+  )
+  await query.press('Tab')
+  await query.focus()
+  assert.equal(await card('Monotone.map_le').count(), 1)
+  await page.getByRole('button', { name: 'Close search results' }).focus()
+  await page.keyboard.press('Escape')
+  assert.equal(await page.locator('.search-panel').count(), 0)
+  assert.equal(await query.inputValue(), 'monotone')
+  await query.press('Tab')
+  await query.focus()
+  assert.equal(await card('Monotone.map_le').count(), 1)
+  assert.equal(
+    report.requests.filter((request) => request.endpoint === '/api/search')
+      .length,
+    callsBeforeClose,
+  )
+  report.checks.push(
+    'Closing or pressing Escape preserves query/results and returns focus; refocusing restores results without another request',
+  )
+
   await engine.selectOption('loogle')
   assert.equal(await page.locator('.search-result').count(), 0)
   assert.equal(await query.getAttribute('placeholder'), 'List.map, (_ → _)')
@@ -402,6 +459,77 @@ try {
   )
   report.checks.push(
     'Project switch discards old results/errors and uses current workspace',
+  )
+
+  await submit('no-matches')
+  await page
+    .getByText('No declarations matched. Try a broader query.')
+    .waitFor()
+  await submit('unavailable-service')
+  await page.locator('.search-panel').getByRole('alert').waitFor()
+  assert.match(
+    await page.locator('.search-panel').getByRole('alert').innerText(),
+    /Try Loogle/,
+  )
+  await engine.selectOption('loogle')
+  await submit('Nat.add_comm')
+  await card('Nat.add_comm').waitFor()
+  report.checks.push(
+    'Empty results and actionable service errors remain usable; the other search engine works without an LLM',
+  )
+
+  for (const width of [1600, 1100, 900, 720, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 })
+    const header = await page.locator('.workbench-header').boundingBox()
+    const form = await page.getByRole('search').boundingBox()
+    const field = await query.boundingBox()
+    const results = await page.locator('.search-panel').boundingBox()
+    assert(
+      form.width >= header.width - 40,
+      JSON.stringify({ width, header, form }),
+    )
+    assert(field.width >= 120, JSON.stringify({ width, field }))
+    assert(
+      form.x >= 0 && form.x + form.width <= width,
+      JSON.stringify({ width, form }),
+    )
+    assert(
+      results.x >= 0 && results.x + results.width <= width,
+      JSON.stringify({ width, results }),
+    )
+    assert(
+      results.y + results.height <= 900,
+      JSON.stringify({ width, results }),
+    )
+    if (width === 390)
+      await page.screenshot({ path: path.join(output, 'search-mobile.png') })
+  }
+  report.checks.push(
+    'Wide search box and scrollable results stay inside the viewport at desktop, tablet and phone sizes',
+  )
+
+  fixture.state.projects = []
+  await page.reload()
+  await page.locator('.welcome-state').waitFor()
+  await submit('without-project')
+  await card('Monotone.map_le').waitFor()
+  const withoutProject = report.requests
+    .filter((request) => request.endpoint === '/api/search')
+    .at(-1)
+  assert.equal(withoutProject.body.projectId, undefined)
+  assert.equal(
+    await page.getByRole('button', { name: 'Open locally' }).count(),
+    0,
+  )
+  assert.equal(
+    report.requests.filter(
+      (request) =>
+        request.method === 'POST' && /\/runs(?:\/|$)/.test(request.endpoint),
+    ).length,
+    0,
+  )
+  report.checks.push(
+    'Search also works before opening a project and never starts a provider run',
   )
   fixture.assertClean()
   report.ok = true

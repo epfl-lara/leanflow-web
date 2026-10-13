@@ -18,12 +18,12 @@ Use **Upload** or drag files/folders into the upload area. **Upload** in the Fil
 
 Targets belong to their chat. **Ask Lemex** uses the current proof or selection; **Optimize** also selects optimization mode. Save changed lines before sending a focused update during a run.
 
-| Task          | Use it for                                               |
-| ------------- | -------------------------------------------------------- |
-| **Proofs**    | Complete or repair a proof while keeping its statement.  |
-| **Formalize** | Turn mathematical prose into Lean statements and proofs. |
-| **Optimize**  | Shorten a valid proof or reduce its elaboration work.    |
-| **Search**    | Find declarations or ask for explanations.               |
+| Task             | Use it for                                               |
+| ---------------- | -------------------------------------------------------- |
+| **Proofs**       | Complete or repair a proof while keeping its statement.  |
+| **Formalize**    | Turn mathematical prose into Lean statements and proofs. |
+| **Optimize**     | Shorten a valid proof or reduce its elaboration work.    |
+| **Ask & Search** | Find declarations or ask Lemex for explanations.         |
 
 Compare optimization's token and heartbeat measurements: a shorter proof can take more elaboration work. Repair invalid proofs first.
 
@@ -49,7 +49,9 @@ After stopping, **Undo agent edits** restores changes without overwriting confli
 
 ## Search and publish
 
-**Search** defaults to LeanExplore, with Loogle also available. Results show a **Type** or **Signature** and available documentation/source links. Check results against your project's versions.
+Type into the wide search box at the top of the workspace and press **Enter**. Choose **LeanExplore** for a description or **Loogle** for a type pattern. General search works without an LLM connection and without opening Lemex. For explanations and assisted searches, open Lemex and choose **Ask & Search**.
+
+Results show a **Type** or **Signature** and available documentation/source links. Check results against your project's versions. Press **Escape** or close the results panel to dismiss it; focus the search box to reopen your results.
 
 Choose **Open locally** to view a module from the project's pinned Lean installation or installed library packages. The viewer is read only and leaves your editor's unsaved changes intact. It selects the declaration when its signature matches the local file; otherwise it shows the module without guessing a line from another version. **Open source** opens the search index's version on the web.
 

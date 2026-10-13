@@ -261,7 +261,6 @@ export function Studio() {
   const [librarySource, setLibrarySource] = useState<SourceRequest | null>(null)
   const [fileFilter, setFileFilter] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [toolTab, setToolTab] = useState<'assistant' | 'search'>('assistant')
   const [toolsOpen, setToolsOpen] = useState(() => window.innerWidth > 1000)
   const [showInfoview, setShowInfoview] = useState(true)
   const [leanState, setLeanState] = useState('')
@@ -1311,6 +1310,10 @@ export function Studio() {
               <Icon name="settings" size={17} />
             </button>
           </div>
+          <SearchPanel
+            projectId={project?.status === 'ready' ? project.id : undefined}
+            onOpenSource={setLibrarySource}
+          />
         </header>
         {project?.status === 'ready' &&
           project.setupRepair?.status === 'completed' && (
@@ -1559,7 +1562,6 @@ export function Studio() {
                   target,
                   mode,
                 })
-                setToolTab('assistant')
                 setToolsOpen(true)
                 setSidebarOpen(false)
               }}
@@ -1627,7 +1629,7 @@ export function Studio() {
       </main>
       <aside
         className={`tools-panel ${toolsOpen ? '' : 'closed'}`}
-        aria-label="Assistant and search"
+        aria-label="Lemex assistant"
       >
         {!mobileLayout && toolsOpen && (
           <ResizeHandle
@@ -1643,31 +1645,9 @@ export function Studio() {
           />
         )}
         <header className="tools-header">
-          <div
-            className="tools-tabs"
-            role="tablist"
-            aria-label="Workspace tools"
-          >
-            <button
-              id="assistant-tab"
-              role="tab"
-              aria-selected={toolTab === 'assistant'}
-              className={toolTab === 'assistant' ? 'selected' : ''}
-              onClick={() => setToolTab('assistant')}
-            >
-              <Icon name="bot" size={16} />
-              Assistant
-            </button>
-            <button
-              id="search-tab"
-              role="tab"
-              aria-selected={toolTab === 'search'}
-              className={toolTab === 'search' ? 'selected' : ''}
-              onClick={() => setToolTab('search')}
-            >
-              <Icon name="search" size={15} />
-              Search
-            </button>
+          <div id="lemex-panel-title" className="tools-title">
+            <Icon name="bot" size={16} />
+            Lemex
           </div>
           <button
             className="icon-button"
@@ -1678,18 +1658,8 @@ export function Studio() {
             <Icon name="close" size={16} />
           </button>
         </header>
-        <div
-          className="tools-content"
-          role="tabpanel"
-          aria-labelledby={
-            toolTab === 'assistant' ? 'assistant-tab' : 'search-tab'
-          }
-        >
-          <div
-            className={
-              toolTab === 'assistant' ? 'tool-view' : 'tool-view hidden'
-            }
-          >
+        <div className="tools-content" aria-labelledby="lemex-panel-title">
+          <div className="tool-view">
             {project?.status === 'ready' ? (
               <AssistantPanel
                 key={project.id}
@@ -1754,14 +1724,6 @@ export function Studio() {
                 </p>
               </div>
             )}
-          </div>
-          <div
-            className={toolTab === 'search' ? 'tool-view' : 'tool-view hidden'}
-          >
-            <SearchPanel
-              projectId={project?.status === 'ready' ? project.id : undefined}
-              onOpenSource={setLibrarySource}
-            />
           </div>
         </div>
         <footer className="tools-footer" title={session.lemex?.revision}>

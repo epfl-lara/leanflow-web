@@ -28,6 +28,7 @@
   --danger-soft: #fff1f2;
   --shadow: 0 16px 70px #17223c26;
   --mono: 'JuliaMono', 'SFMono-Regular', Consolas, monospace;
+  --workbench-header-height: 96px;
   color-scheme: light;
 }
 :root[data-theme='dark'] {
@@ -572,12 +573,14 @@ textarea {
 }
 .workbench-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  align-content: space-between;
   justify-content: space-between;
   gap: 10px;
   border-bottom: 1px solid var(--border);
-  height: 57px;
-  padding: 12px 18px;
+  height: var(--workbench-header-height);
+  padding: 10px 18px;
   flex-shrink: 0;
 }
 .workspace-title {
@@ -585,6 +588,7 @@ textarea {
   align-items: center;
   gap: 9px;
   min-width: 0;
+  flex: 1;
   font-size: 13px;
 }
 .workspace-title > svg {
@@ -926,35 +930,13 @@ textarea {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.tools-tabs {
-  display: flex;
-  height: 100%;
-  gap: 8px;
-}
-.tools-tabs button {
-  border: 0;
-  position: relative;
+.tools-title {
   display: flex;
   align-items: center;
   gap: 7px;
   font-size: 12px;
   font-weight: 550;
-  background: transparent;
-  color: var(--muted);
-  padding: 5px 6px;
-}
-.tools-tabs button.selected {
   color: var(--accent);
-}
-.tools-tabs button.selected:after {
-  position: absolute;
-  content: '';
-  height: 2px;
-  bottom: -9px;
-  left: 5px;
-  right: 5px;
-  background: var(--accent);
-  border-radius: 2px;
 }
 .tools-content {
   flex: 1;
@@ -1467,8 +1449,7 @@ textarea {
 }
 .search-panel {
   overflow: auto;
-  flex: 1;
-  padding: 22px 16px;
+  padding: 16px;
 }
 .panel-intro h2 {
   font-size: 17px;
@@ -1479,18 +1460,6 @@ textarea {
   font-size: 12px;
   line-height: 1.8;
   color: var(--muted);
-}
-.search-form .field-label {
-  font-size: 11px;
-}
-.search-form select,
-.search-form textarea {
-  font-size: 12px;
-}
-.search-form .button {
-  width: 100%;
-  margin-top: 10px;
-  font-size: 12px;
 }
 .search-results {
   margin-top: 20px;
@@ -1989,7 +1958,7 @@ textarea {
   }
   .tools-panel {
     position: fixed;
-    top: 57px;
+    top: var(--workbench-header-height);
     right: 0;
     bottom: 0;
     width: 360px;
@@ -1998,9 +1967,6 @@ textarea {
   }
   .tools-header {
     height: 48px;
-  }
-  .tools-tabs button.selected:after {
-    bottom: -9px;
   }
   .workbench-header {
     padding: 10px 12px;
