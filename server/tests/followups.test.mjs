@@ -317,28 +317,28 @@ test('catalog reasoning efforts come only from native metadata and explicit unsu
     },
   })
   assert.equal(
-    manager.start('alice', 'one', { mode: 'repair', prompt: 'Fix it.' }).mode,
+    (await manager.start('alice', 'one', { mode: 'repair', prompt: 'Fix it.' })).mode,
     'proofs',
   )
   assert.equal(events.list('alice', 'one')[0].effort, 'medium')
   assert.equal(
-    manager.start('alice', 'two', {
+    (await manager.start('alice', 'two', {
       mode: 'proofs',
       prompt: 'Prove it.',
       effort: 'low',
-    }).effort,
+    })).effort,
     'low',
   )
   assert.equal(
-    manager.start('alice', 'three', {
+    (await manager.start('alice', 'three', {
       mode: 'prove',
       prompt: 'Prove it.',
       model: 'plain',
-    }).effort,
+    })).effort,
     null,
   )
   for (const effort of ['high', 'unlisted', 1, false])
-    assert.throws(
+    await assert.rejects(
       () =>
         manager.start('alice', 'bad', {
           mode: 'proofs',

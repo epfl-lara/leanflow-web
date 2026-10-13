@@ -49,7 +49,12 @@ function load(name) {
 
 const { mergeRunSnapshot, appendRunEvents } = load('./runStream.ts')
 const { runChangeCount, runStatusLabel } = load('./chatTimeline.ts')
-const { clearDraftSubmission, restoreDraftSubmission } = load('./chatDrafts.ts')
+const {
+  clearDraftSubmission,
+  restoreDraftSubmission,
+  focusDraft,
+  proofFocusPrompts,
+} = load('./chatDrafts.ts')
 const { OutputText } = load('./AssistantText.tsx')
 const run = (fields = {}) => ({ id: 'run-1', status: 'completed', ...fields })
 const draft = {
@@ -179,6 +184,67 @@ test('new typing, files, or revision prevent delayed receipts from changing a dr
       submission,
     ),
     null,
+  )
+})
+
+test('proof targets are consumed and restored with their exact draft revision', () => {
+  const proofTarget = {
+    path: 'Main.lean',
+    startLine: 3,
+    endLine: 4,
+    name: 'useful',
+    source: 'theorem useful : True := by\n  trivial',
+  }
+  const focused = { ...draft, proofTarget }
+  const sent = { ...submission, proofTarget }
+  const cleared = clearDraftSubmission(focused, sent, true)
+  assert.equal(cleared.proofTarget, undefined)
+  assert.deepEqual(
+    restoreDraftSubmission(cleared, sent).proofTarget,
+    proofTarget,
+  )
+  assert.equal(
+    clearDraftSubmission(
+      { ...focused, proofTarget: { ...proofTarget, source: 'edited source' } },
+      sent,
+      true,
+    ),
+    null,
+  )
+  assert.equal(
+    restoreDraftSubmission(
+      { ...cleared, proofTarget: { ...proofTarget, name: 'other' } },
+      sent,
+    ),
+    null,
+  )
+})
+
+test('changing proof focus mode updates only generated prompts and preserves custom requests', () => {
+  const target = {
+    path: 'Main.lean',
+    startLine: 1,
+    endLine: 2,
+    source: 'example : True := by\n  trivial',
+  }
+  const fresh = focusDraft({ ...draft, text: '' }, target, 'proofs')
+  assert.equal(fresh.text, proofFocusPrompts.proofs)
+  assert.equal(
+    focusDraft(fresh, target, 'optimize').text,
+    proofFocusPrompts.optimize,
+  )
+  assert.equal(
+    focusDraft(
+      { ...fresh, text: 'Please use my specific lemma.' },
+      target,
+      'optimize',
+    ).text,
+    'Please use my specific lemma.',
+  )
+  assert.equal(
+    focusDraft({ ...fresh, text: proofFocusPrompts.optimize }, target, 'proofs')
+      .text,
+    proofFocusPrompts.proofs,
   )
 })
 

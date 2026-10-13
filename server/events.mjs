@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
+import { proofTargetReference } from './proof-target.mjs'
 
 export const TERMINAL = new Set([
   'completed',
@@ -98,13 +99,22 @@ export class EventStore extends EventEmitter {
       .join(',')
     return this.db
       .prepare(
-        `SELECT id,${columns},json_extract(payload,'$.progress') AS progress,COALESCE((SELECT MAX(seq) FROM events WHERE events.job=jobs.id),0) AS eventCursor FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.kind')=? ORDER BY rowid DESC LIMIT 100`,
+        `SELECT id,${columns},json_extract(payload,'$.progress') AS progress,
+          CASE WHEN json_type(payload,'$.proofTarget')='object' THEN json_object(
+            'path',json_extract(payload,'$.proofTarget.path'),
+            'startLine',json_extract(payload,'$.proofTarget.startLine'),
+            'endLine',json_extract(payload,'$.proofTarget.endLine'),
+            'name',json_extract(payload,'$.proofTarget.name')) END AS proofTarget,
+          COALESCE((SELECT MAX(seq) FROM events WHERE events.job=jobs.id),0) AS eventCursor FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.kind')=? ORDER BY rowid DESC LIMIT 100`,
       )
       .all(owner, projectId, kind)
       .map((row) => ({
         ...row,
         eventCursor: Number(row.eventCursor),
         progress: row.progress ? JSON.parse(row.progress) : null,
+        proofTarget: row.proofTarget
+          ? proofTargetReference(JSON.parse(row.proofTarget))
+          : undefined,
         liveEdits: row.liveEdits === null ? undefined : !!row.liveEdits,
         liveUndone: row.liveUndone === null ? undefined : !!row.liveUndone,
       }))

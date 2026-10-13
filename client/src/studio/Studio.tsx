@@ -10,8 +10,11 @@ import {
   api,
   ApiError,
   errorText,
+  markSessionRestored,
   post,
   pretty,
+  SESSION_EXPIRED_EVENT,
+  SESSION_RESTORED_EVENT,
   type FileEntry,
   type GitInfo,
   type OpenFile,
@@ -29,6 +32,8 @@ import { SettingsModal } from './SettingsModal'
 import { FileBrowser } from './FileBrowser'
 import { GitModal } from './GitModal'
 import { ResizeHandle } from './ResizeHandle'
+import { SessionRecovery } from './SessionRecovery'
+import type { ProofFocusRequest, ProofTarget } from './proofTarget'
 import {
   DEFAULT_LAYOUT,
   clamp,
@@ -98,7 +103,9 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
     setError('')
     try {
       await post('/api/login', { token: token.trim() })
-      onSession(await api<Session>('/api/session'))
+      const session = await api<Session>('/api/session')
+      markSessionRestored()
+      onSession(session)
     } catch (error) {
       setError(errorText(error))
       setBusy(false)
@@ -203,6 +210,12 @@ export function Studio() {
   const [projectId, setProjectId] = useState<string | null>(null)
   const [files, setFiles] = useState<FileEntry[]>([])
   const [file, setFile] = useState<OpenFile | null>(null)
+  const [proofFocus, setProofFocus] = useState<ProofFocusRequest | null>(null)
+  const [revealProof, setRevealProof] = useState<{
+    id: number
+    target: Pick<ProofTarget, 'path' | 'startLine' | 'endLine' | 'name'>
+  } | null>(null)
+  const proofRequestId = useRef(0)
   const [git, setGit] = useState<GitInfo | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -293,6 +306,22 @@ export function Studio() {
   useEffect(() => {
     void loadSession()
   }, [loadSession])
+  useEffect(() => {
+    const expired = () => setAuthRequired(true)
+    const restored = () => {
+      setAuthRequired(false)
+      setError('')
+      setDeleteError('')
+      setTrashError('')
+      setNewFileError('')
+    }
+    window.addEventListener(SESSION_EXPIRED_EVENT, expired)
+    window.addEventListener(SESSION_RESTORED_EVENT, restored)
+    return () => {
+      window.removeEventListener(SESSION_EXPIRED_EVENT, expired)
+      window.removeEventListener(SESSION_RESTORED_EVENT, restored)
+    }
+  }, [])
   useEffect(() => {
     document.documentElement.dataset.theme = theme
     localStorage.setItem('lemex-theme', theme)
@@ -415,6 +444,8 @@ export function Studio() {
   useEffect(() => {
     setFiles([])
     setFile(null)
+    setProofFocus(null)
+    setRevealProof(null)
     setGit(null)
     setGitOpen(false)
     setJob(null)
@@ -1421,6 +1452,17 @@ export function Studio() {
               showInfoview={showInfoview}
               goalsSize={goalsSize}
               onGoalsSizeChange={setGoalsSize}
+              revealTarget={revealProof || undefined}
+              onFocusProof={(target, mode) => {
+                setProofFocus({
+                  id: ++proofRequestId.current,
+                  projectId: project.id,
+                  target,
+                  mode,
+                })
+                setToolTab('assistant')
+                setToolsOpen(true)
+              }}
               onState={setLeanState}
               onChange={(path, content) =>
                 setFile((current) =>
@@ -1553,6 +1595,28 @@ export function Studio() {
                 projectId={project.id}
                 file={file?.path}
                 files={files}
+                focusRequest={proofFocus || undefined}
+                onFocusHandled={(id) =>
+                  setProofFocus((current) =>
+                    current?.id === id ? null : current,
+                  )
+                }
+                onOpenTarget={(target) => {
+                  if (fileRef.current?.path === target.path) {
+                    setRevealProof({ id: ++proofRequestId.current, target })
+                  } else {
+                    navigate(async () => {
+                      await openFile(
+                        project.id,
+                        target.path,
+                        target.startLine,
+                        1,
+                      )
+                      if (projectIdRef.current === project.id)
+                        setRevealProof({ id: ++proofRequestId.current, target })
+                    })
+                  }
+                }}
                 onDeleteChat={(chat) =>
                   requestDelete({
                     projectId: project.id,
@@ -1869,6 +1933,7 @@ export function Studio() {
           </form>
         </Dialog>
       )}
+      {authRequired && <SessionRecovery user={session.user} />}
     </div>
   )
 }

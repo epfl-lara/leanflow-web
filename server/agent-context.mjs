@@ -1,3 +1,5 @@
+import { proofTargetContext, proofTargetReference } from './proof-target.mjs'
+
 const MAX_HISTORY = 60_000
 
 // Chat history is server-owned conversation text, never native HOME state or
@@ -21,6 +23,9 @@ export function agentConversationContext(job, runs = []) {
       assistant:
         typeof run.message === 'string' ? run.message.slice(-16_000) : '',
       status: run.status,
+      ...(run.proofTarget
+        ? { proofTarget: proofTargetReference(run.proofTarget) }
+        : {}),
       verificationAtThatTime:
         run.verification?.complete === true
           ? 'passed'
@@ -40,6 +45,9 @@ export function agentConversationContext(job, runs = []) {
         id: followup.id,
         user: text,
         ...(followup.files?.length ? { files: followup.files } : {}),
+        ...(followup.proofTarget
+          ? { proofTarget: proofTargetReference(followup.proofTarget) }
+          : {}),
       })
       guidanceSize += text.length
     }
@@ -62,6 +70,8 @@ export function agentConversationContext(job, runs = []) {
       'Selected saved project files (relative paths; read their current workspace contents):\n' +
         JSON.stringify(job.files),
     )
+  if (job.proofTarget)
+    sections.push(proofTargetContext(job.proofTarget, job.mode))
   sections.push('Current task:\n' + job.prompt)
   return sections.join('\n\n')
 }

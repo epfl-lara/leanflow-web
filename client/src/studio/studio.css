@@ -2671,3 +2671,12 @@ body.panel-resizing iframe {
 .optimization-summary p {
   line-height: 1.6;
 }
+
+.session-recovery {
+  max-width: 460px;
+}
+.session-recovery > p {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0 0 20px;
+}

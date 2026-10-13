@@ -690,11 +690,11 @@ test('HTTP project creation and uploads accept source bodies over 3 MiB while re
 test('HTTP followups capture current saved attachments privately, remain idempotent, and fail pending receipts on Stop', async (t) => {
   const f = await httpFixture(t),
     chat = f.chats.create('owner', f.project.id)
-  const job = f.agents.start('owner', f.project.id, {
+  const job = (await f.agents.start('owner', f.project.id, {
     mode: 'proofs',
     prompt: 'Repair Main.',
     chatId: chat.id,
-  })
+  }))
   const input = {
     id: '00112233-4455-4677-8899-aabbccddeeff',
     text: 'Use this saved file.',
@@ -1079,4 +1079,39 @@ test('suggestion HTTP endpoint is owned, read-only, usable during a run, and nev
   assert.equal(rename.status, 200)
   assert.equal(f.events.get(run.id).status, 'queued')
   assert.equal(f.chats.history(chat.id, 'owner').runs[0].id, run.id)
+})
+
+test('HTTP focused runs and updates reject stale selections and return compact proof references in history', async t => {
+  const f = await httpFixture(t)
+  const chat = f.chats.create('owner', f.project.id)
+  const source = 'theorem focused : True := by\n  trivial'
+  await f.workspaces.writeFile(f.project.id, 'owner', 'Main.lean', '-- preamble\n' + source + '\n')
+  const proofTarget = { path: 'Main.lean', startLine: 2, endLine: 3, name: 'focused', source }
+  const input = { mode: 'proofs', prompt: 'Complete the selected proof.', proofTarget }
+  const endpoint = `/api/chats/${chat.id}/runs`
+  const stale = await f.request(endpoint, { method: 'POST', body: { ...input, proofTarget: { ...proofTarget, source: 'old version' } } })
+  assert.equal(stale.status, 409)
+  assert.match((await stale.json()).error, /selected proof changed/i)
+  assert.equal(f.events.list('owner', f.project.id).length, 0)
+  const started = await f.request(endpoint, { method: 'POST', body: input })
+  assert.equal(started.status, 202)
+  const job = await started.json()
+  assert.deepEqual(job.proofTarget, proofTarget)
+  const update = { id: '6fac9dbe-771c-4fe6-908a-aac383ae6626', text: 'Optimize only this statement.', proofTarget }
+  const sent = await f.request(`/api/runs/${job.id}/messages`, { method: 'POST', body: update })
+  assert.equal(sent.status, 200)
+  assert.deepEqual((await sent.json()).followups[0].proofTarget, proofTarget)
+  const reference = { path: proofTarget.path, startLine: 2, endLine: 3, name: 'focused' }
+  const history = (await (await f.request(`/api/chats/${chat.id}`)).json()).runs[0]
+  assert.deepEqual(history.proofTarget, reference)
+  assert.deepEqual(history.followups[0].proofTarget, reference)
+  for (const suffix of ['', '?summary=1']) {
+    const summary = (await (await f.request(`/api/projects/${f.project.id}/runs${suffix}`)).json())[0]
+    assert.deepEqual(summary.proofTarget, reference)
+    assert(!JSON.stringify(summary).includes(source))
+  }
+  await f.request(`/api/runs/${job.id}/stop`, { method: 'POST', body: {} })
+  const direct = await f.request(`/api/projects/${f.project.id}/runs`, { method: 'POST', body: input })
+  assert.equal(direct.status, 202)
+  assert.deepEqual((await direct.json()).proofTarget, proofTarget)
 })

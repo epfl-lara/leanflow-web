@@ -230,14 +230,10 @@ export function ChatPicker({
             if (event.target.value) onSelect(event.target.value)
           }}
           disabled={disabled || loading || chats.length === 0}
-          title={selected?.title || 'Choose a chat'}
+          title={selected?.title || 'New chat'}
         >
           <option value="" disabled>
-            {loading
-              ? 'Loading chats…'
-              : chats.length
-                ? 'Choose a chat'
-                : 'No chats yet'}
+            {loading ? 'Loading chats…' : 'New chat'}
           </option>
           {chats.map((chat) => {
             const updated = updatedLabel(chat.updatedAt)

@@ -1,5 +1,6 @@
 import { LeanMonaco, LeanMonacoEditor } from 'lean4monaco'
 import { FileUri } from 'lean4monaco/dist/vscode-lean4/vscode-lean4/src/utils/exturi'
+import { CancellationTokenSource } from 'monaco-editor'
 import {
   useEffect,
   useLayoutEffect,
@@ -11,6 +12,14 @@ import type { OpenFile } from './api'
 import { connectInfoviewTheme } from './infoviewTheme'
 import { ResizeHandle } from './ResizeHandle'
 import { DEFAULT_LAYOUT, useMediaQuery } from './layout'
+import type { ChatMode } from './chatModes'
+import { ProofOutline } from './ProofOutline'
+import {
+  proofDeclarations,
+  proofTargetForSelection,
+  type ProofDeclaration,
+  type ProofTarget,
+} from './proofTarget'
 
 class BrowserLeanMonaco extends LeanMonaco {
   protected override getExtensionManifest() {
@@ -42,6 +51,7 @@ interface Runtime {
   subscription?: { dispose(): void }
   restoreOpenEditor?: () => void
   connectionSubscriptions?: { dispose(): void }[]
+  outlineCleanup?: () => void
 }
 interface ConnectionClient {
   isRunning(): boolean
@@ -60,6 +70,8 @@ export function LeanWorkspace({
   onOpenFile,
   goalsSize,
   onGoalsSizeChange,
+  onFocusProof,
+  revealTarget,
 }: {
   projectId: string
   file: OpenFile | null
@@ -70,6 +82,11 @@ export function LeanWorkspace({
   onOpenFile: (path: string, line?: number, column?: number) => void
   goalsSize: number
   onGoalsSizeChange: (value: number) => void
+  onFocusProof?: (target: ProofTarget, mode?: ChatMode) => void
+  revealTarget?: {
+    id: number
+    target: Pick<ProofTarget, 'path' | 'startLine' | 'endLine' | 'name'>
+  } | null
 }) {
   const workspaceEl = useRef<HTMLDivElement>(null)
   const editorEl = useRef<HTMLDivElement>(null)
@@ -86,6 +103,17 @@ export function LeanWorkspace({
   const onStateRef = useRef(onState)
   const onOpenFileRef = useRef(onOpenFile)
   const themeRef = useRef(theme)
+  const onFocusProofRef = useRef(onFocusProof)
+  const declarationsRef = useRef<ProofDeclaration[]>([])
+  const [declarations, setDeclarations] = useState<ProofDeclaration[]>([])
+  const [outlineStatus, setOutlineStatus] = useState<
+    'loading' | 'ready' | 'unavailable'
+  >('loading')
+  const [focus, setFocus] = useState<{
+    target: ProofTarget | null
+    error?: string
+  }>({ target: null })
+  const revealed = useRef<number | null>(null)
   const [failure, setFailure] = useState('')
   const [loading, setLoading] = useState(true)
   const stacked = useMediaQuery('(max-width: 1250px)')
@@ -94,6 +122,7 @@ export function LeanWorkspace({
   onStateRef.current = onState
   onOpenFileRef.current = onOpenFile
   themeRef.current = theme
+  onFocusProofRef.current = onFocusProof
 
   useEffect(() => {
     if (!infoEl.current) return
@@ -192,6 +221,7 @@ export function LeanWorkspace({
       cancelled = true
       void serialize(async () => {
         own?.subscription?.dispose()
+        own?.outlineCleanup?.()
         own?.connectionSubscriptions?.forEach((subscription) =>
           subscription.dispose(),
         )
@@ -211,12 +241,18 @@ export function LeanWorkspace({
     let cancelled = false
     let ownEditor: LeanMonacoEditor | null = null
     setLoading(true)
+    declarationsRef.current = []
+    setDeclarations([])
+    setFocus({ target: null })
+    setOutlineStatus('loading')
     const snapshot = fileRef.current
     void serialize(async () => {
       if (cancelled) return
       const active = runtime.current
       if (!active || active.lean.disposed) return
       active.subscription?.dispose()
+      active.outlineCleanup?.()
+      active.outlineCleanup = undefined
       active.restoreOpenEditor?.()
       active.restoreOpenEditor = undefined
       active.editor?.dispose()
@@ -299,6 +335,104 @@ export function LeanWorkspace({
           }
           onChangeRef.current(snapshot.path, content)
         })
+        let outlineDisposed = false
+        let timer: ReturnType<typeof setTimeout> | undefined
+        let request: CancellationTokenSource | undefined
+        const model = editor.getModel()!
+        const updateFocus = () => {
+          if (outlineDisposed || model.isDisposed()) return
+          setFocus(
+            proofTargetForSelection(
+              snapshot.path,
+              model.getValue(),
+              editor.getSelection(),
+              declarationsRef.current,
+            ),
+          )
+        }
+        const loadOutline = async (retries = 0) => {
+          if (outlineDisposed || model.isDisposed()) return
+          const client = active.lean.clientProvider
+            ?.getClients()
+            .find((item) => item.isRunning())
+          if (!client) {
+            if (retries < 30)
+              timer = setTimeout(() => void loadOutline(retries + 1), 500)
+            else {
+              setOutlineStatus('unavailable')
+              timer = setTimeout(() => void loadOutline(retries + 1), 5000)
+            }
+            return
+          }
+          setOutlineStatus('loading')
+          const version = model.getVersionId()
+          const cancellation = new CancellationTokenSource()
+          request?.cancel()
+          request?.dispose()
+          request = cancellation
+          try {
+            const symbols: unknown = await client.sendRequest(
+              'textDocument/documentSymbol',
+              { textDocument: { uri } },
+              cancellation.token,
+            )
+            if (
+              outlineDisposed ||
+              cancellation.token.isCancellationRequested ||
+              model.isDisposed() ||
+              model.getVersionId() !== version
+            )
+              return
+            const next = proofDeclarations(symbols, uri, model.getLineCount())
+            declarationsRef.current = next
+            setDeclarations(next)
+            setOutlineStatus('ready')
+            updateFocus()
+          } catch {
+            if (
+              !outlineDisposed &&
+              !cancellation.token.isCancellationRequested &&
+              !model.isDisposed() &&
+              model.getVersionId() === version
+            )
+              setOutlineStatus('unavailable')
+          }
+        }
+        const scheduleOutline = () => {
+          clearTimeout(timer)
+          request?.cancel()
+          // Never attach a proof using ranges from an older buffer version.
+          declarationsRef.current = []
+          setDeclarations([])
+          setOutlineStatus('loading')
+          updateFocus()
+          timer = setTimeout(() => void loadOutline(), 500)
+        }
+        const selectionSubscription =
+          editor.onDidChangeCursorSelection(updateFocus)
+        const contentSubscription = model.onDidChangeContent(scheduleOutline)
+        const clients = active.lean.clientProvider?.getClients() || []
+        const restartSubscriptions = clients.map((client) =>
+          client.restarted(scheduleOutline),
+        )
+        const clientAddedSubscription = active.lean.clientProvider?.clientAdded(
+          (client: ConnectionClient) => {
+            restartSubscriptions.push(client.restarted(scheduleOutline))
+            scheduleOutline()
+          },
+        )
+        active.outlineCleanup = () => {
+          outlineDisposed = true
+          clearTimeout(timer)
+          request?.cancel()
+          request?.dispose()
+          selectionSubscription.dispose()
+          contentSubscription.dispose()
+          clientAddedSubscription?.dispose()
+          restartSubscriptions.forEach((item) => item.dispose())
+        }
+        updateFocus()
+        void loadOutline()
         setLoading(false)
       } catch (error) {
         if (!cancelled) {
@@ -316,6 +450,8 @@ export function LeanWorkspace({
       void serialize(() => {
         if (runtime.current?.editor === ownEditor) {
           runtime.current.subscription?.dispose()
+          runtime.current.outlineCleanup?.()
+          runtime.current.outlineCleanup = undefined
           runtime.current.restoreOpenEditor?.()
           runtime.current.restoreOpenEditor = undefined
           runtime.current.subscription = undefined
@@ -416,13 +552,93 @@ export function LeanWorkspace({
     ).catch(() => undefined)
   }, [theme])
 
+  useEffect(() => {
+    if (
+      !revealTarget ||
+      loading ||
+      revealed.current === revealTarget.id ||
+      file?.path !== revealTarget.target.path
+    )
+      return
+    const editor = runtime.current?.editor?.editor
+    const model = editor?.getModel()
+    if (!editor || !model || model.uri.path !== `/workspace/${file?.path}`)
+      return
+    const start = Math.min(
+      model.getLineCount(),
+      Math.max(1, revealTarget.target.startLine),
+    )
+    const end = Math.min(
+      model.getLineCount(),
+      Math.max(start, revealTarget.target.endLine),
+    )
+    const range = {
+      startLineNumber: start,
+      startColumn: 1,
+      endLineNumber: end,
+      endColumn: model.getLineMaxColumn(end),
+    }
+    editor.setSelection(range)
+    editor.revealRangeInCenter(range)
+    editor.focus()
+    revealed.current = revealTarget.id
+  }, [revealTarget, loading, file?.path, file?.generation])
+
+  function selectDeclaration(declaration: ProofDeclaration) {
+    const editor = runtime.current?.editor?.editor
+    if (!editor) return
+    const range = {
+      startLineNumber: declaration.startLine,
+      startColumn: declaration.startColumn,
+      endLineNumber: declaration.endLine,
+      endColumn: declaration.endColumn,
+    }
+    editor.setSelection(range)
+    editor.revealRangeInCenter(range)
+    editor.focus()
+  }
+
+  function focusProof(mode: ChatMode) {
+    const editor = runtime.current?.editor?.editor
+    const current = fileRef.current
+    if (
+      !editor ||
+      !current ||
+      current.readOnly ||
+      !current.path.endsWith('.lean')
+    )
+      return
+    if (editor.getModel()?.uri.path !== `/workspace/${current.path}`) return
+    // Capture the current editor buffer, including unsaved edits, at click time.
+    const latest = proofTargetForSelection(
+      current.path,
+      editor.getValue(),
+      editor.getSelection(),
+      declarationsRef.current,
+    )
+    setFocus(latest)
+    if (latest.target) onFocusProofRef.current?.(latest.target, mode)
+  }
+
   return (
     <div
       ref={workspaceEl}
       className={`lean-workspace ${showInfoview ? '' : 'info-hidden'}`}
       style={{ '--goals-size': `${goalsSize}%` } as CSSProperties}
     >
-      <div className="source-pane">
+      <div className="source-pane proof-source-pane">
+        {file && onFocusProof && (
+          <ProofOutline
+            declarations={declarations}
+            status={outlineStatus}
+            target={focus.target}
+            error={focus.error}
+            disabled={loading || !!failure}
+            readOnly={!!file.readOnly || !file.path.endsWith('.lean')}
+            onSelect={selectDeclaration}
+            onFocus={focusProof}
+          />
+        )}
         <div
           ref={editorEl}
           className="monaco-host"

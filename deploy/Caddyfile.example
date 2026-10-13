@@ -1,9 +1,20 @@
-# Replace this hostname; keep the application bound to loopback.
+# No unauthenticated administration endpoint on a shared host.
+{
+	admin off
+}
+
+# Replace this hostname; keep the application bound to 127.0.0.1:8090.
+# Set the application's STUDIO_ORIGIN to this exact HTTPS origin.
 lean.example.org {
-    reverse_proxy 127.0.0.1:8090
-    header {
-        Strict-Transport-Security "max-age=31536000"
-        X-Content-Type-Options "nosniff"
-        Referrer-Policy "same-origin"
-    }
+	# For an existing institution-issued certificate, uncomment:
+	# tls /certs/fullchain.pem /certs/privkey.pem
+
+	# WebSocket upgrades and immediate SSE flushing are handled by Caddy.
+	# Do not impose a stream timeout on long-running assistant sessions.
+	reverse_proxy 127.0.0.1:8090
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+	}
 }

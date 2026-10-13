@@ -145,7 +145,7 @@ try {
   const chat = studio.chats.create('owner', project.id, {
     title: 'Native steering smoke',
   })
-  first = studio.agents.start('owner', project.id, {
+  first = await studio.agents.start('owner', project.id, {
     mode: 'proofs',
     prompt:
       'This is a small steering smoke test. First run `sleep 20` as a shell command, before editing files or checking proofs, to give the user a chance to send guidance. Then repair Main.lean. Keep the theorem statement and imports. Do not ask a question.',
@@ -211,7 +211,7 @@ try {
       broken,
       saved.hash,
     )
-  second = studio.agents.start('owner', project.id, {
+  second = await studio.agents.start('owner', project.id, {
     mode: 'proofs',
     prompt:
       'Continue this chat and repair the proof in Main.lean now. Call the enabled lean_probe MCP lean_check_target tool on the addition_commutes declaration with replacement `by exact Nat.add_comm a b` before editing; inspect success=true and ok=true. Then save that repair in Main.lean and check it. Keep the exact theorem statement and imports. Do not run sleep. Finish with one short sentence.',

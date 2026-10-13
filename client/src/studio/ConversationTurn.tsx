@@ -1,5 +1,5 @@
 import { memo, useState } from 'react'
-import { runIsActive, type Run } from './api'
+import { runIsActive, type Run, type RunProofTarget } from './api'
 import { Icon } from './Icons'
 import { OutputText } from './AssistantText'
 import { Verification } from './RunReview'
@@ -13,6 +13,31 @@ import { modeName } from './chatModes'
 import { ReasoningTrace } from './ReasoningTrace'
 import { UsageSummary } from './UsageSummary'
 
+function TargetLabel({
+  target,
+  onOpen,
+}: {
+  target: RunProofTarget
+  onOpen?: (target: RunProofTarget) => void
+}) {
+  return (
+    <button
+      type="button"
+      className="message-proof-target"
+      onClick={() => onOpen?.(target)}
+      disabled={!onOpen}
+      title={`Open ${target.path}:${target.startLine}`}
+    >
+      <Icon name="file" size={12} />
+      <span>
+        {target.name ? `${target.name} · ` : ''}
+        {target.path}:{target.startLine}
+        {target.endLine !== target.startLine ? `–${target.endLine}` : ''}
+      </span>
+    </button>
+  )
+}
+
 export const ConversationTurn = memo(function ConversationTurn({
   run,
   onReview,
@@ -20,6 +45,7 @@ export const ConversationTurn = memo(function ConversationTurn({
   onInspect,
   canUndo,
   undoing,
+  onOpenTarget,
 }: {
   run: Run
   onReview: (id: string) => void
@@ -27,6 +53,7 @@ export const ConversationTurn = memo(function ConversationTurn({
   onInspect: (id: string) => Promise<void>
   canUndo: boolean
   undoing: boolean
+  onOpenTarget?: (target: RunProofTarget) => void
 }) {
   const active = runIsActive(run)
   const status = runStatusLabel(run)
@@ -42,6 +69,9 @@ export const ConversationTurn = memo(function ConversationTurn({
         <div className="user-message">
           <span className="message-label">You</span>
           <p>{run.prompt}</p>
+          {run.proofTarget && (
+            <TargetLabel target={run.proofTarget} onOpen={onOpenTarget} />
+          )}
         </div>
       )}
       {run.messageTruncated && (
@@ -69,6 +99,12 @@ export const ConversationTurn = memo(function ConversationTurn({
           >
             <span className="message-label">You · update</span>
             <p>{segment.followup.text}</p>
+            {segment.followup.proofTarget && (
+              <TargetLabel
+                target={segment.followup.proofTarget}
+                onOpen={onOpenTarget}
+              />
+            )}
             <span
               className={`followup-receipt ${segment.followup.status}`}
               data-followup-status={segment.followup.status}

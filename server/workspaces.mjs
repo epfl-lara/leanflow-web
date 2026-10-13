@@ -943,6 +943,11 @@ export class WorkspaceStore {
     return changes;
   }
 
+  async readSnapshotFile(snapshot, filename) {
+    const { manifest } = await this.#manifest(snapshot);
+    return textFile(await guarded(manifest.root, filename, { write: true }));
+  }
+
   #checkLinks(manifest, entries, message) {
     const expected = new Map((manifest.links || []).map(link => [link.path, link.target]));
     const current = entries.filter(entry => entry.link !== undefined);
