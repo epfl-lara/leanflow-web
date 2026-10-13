@@ -86,7 +86,10 @@ async function fixture(t, command = async () => null) {
     })
     const override = await command(stage, args, options, runtime)
     if (override) return override
-    if (args.join(' ') === 'lake env lean --version') {
+    if (
+      args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
+      'lake env lean --version'
+    ) {
       const packages = path.join(stage, '.lake/packages/mathlib')
       await fs.mkdir(path.join(packages, '.lake/build/lib/lean'), {
         recursive: true,
@@ -96,7 +99,10 @@ async function fixture(t, command = async () => null) {
         'UPSTREAM FIXTURE SOURCE',
       )
     }
-    if (args.join(' ') === 'lake exe cache get') {
+    if (
+      args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
+      'lake exe cache get'
+    ) {
       await fs.writeFile(
         path.join(
           stage,
@@ -249,7 +255,11 @@ test('imports and snapshots reuse compiled readonly dependencies without copying
   const shared = await runtime.prepareSharedDependencies(root, request())
   assert(shared)
   assert.equal(
-    calls.filter((call) => call.args.join(' ') === 'lake exe cache get').length,
+    calls.filter(
+      (call) =>
+        call.args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
+        'lake exe cache get',
+    ).length,
     1,
   )
   assert.equal(
@@ -327,7 +337,10 @@ test('a cancelled cache waiter cannot cancel another import or publish an incomp
   const { runtime, root, dataDir, calls } = await fixture(
     t,
     async (_stage, args) => {
-      if (args.join(' ') === 'lake exe cache get') {
+      if (
+        args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
+        'lake exe cache get'
+      ) {
         started()
         await waiting
       }
@@ -349,7 +362,11 @@ test('a cancelled cache waiter cannot cancel another import or publish an incomp
   resume()
   assert(await second)
   assert.equal(
-    calls.filter((call) => call.args.join(' ') === 'lake exe cache get').length,
+    calls.filter(
+      (call) =>
+        call.args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
+        'lake exe cache get',
+    ).length,
     1,
   )
 })
@@ -358,7 +375,8 @@ test('download failures and missing compiled Mathlib never publish entries and c
   for (const failing of ['lake exe cache get', 'lake env lean --stdin']) {
     let fail = true
     const { runtime, root, dataDir } = await fixture(t, async (_stage, args) =>
-      args.join(' ') === failing && fail
+      args.filter((arg) => arg !== '--keep-toolchain').join(' ') === failing &&
+      fail
         ? { code: 1, stdout: '', stderr: 'fixture failure' }
         : null,
     )
@@ -446,8 +464,11 @@ test('uploaded projects share dependencies before builds, preserve unfinished pr
         runtime.dependencyRoot(root),
         /\/shared-dependencies\/[a-f0-9]{64}$/,
       )
-      assert.notEqual(args.join(' '), 'lake exe cache get')
-      if (args[1] === 'build') {
+      assert.notEqual(
+        args.filter((arg) => arg !== '--keep-toolchain').join(' '),
+        'lake exe cache get',
+      )
+      if (args.includes('build')) {
         await fs.mkdir(path.join(root, '.lake/build'), { recursive: true })
         await fs.writeFile(path.join(root, '.lake/build/Private.olean'), root)
         return { code: 1, stdout: '', stderr: 'Unfinished user proof' }
@@ -517,12 +538,19 @@ test('uploaded projects share dependencies before builds, preserve unfinished pr
     runtime.dependencyRoot(second.root),
   )
   assert.equal(
-    calls.filter((call) => call.args.join(' ') === 'lake exe cache get').length,
+    calls.filter(
+      (call) =>
+        call.args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
+        'lake exe cache get',
+    ).length,
     1,
   )
   assert.equal(
-    projectCommands.filter((call) => call.args.join(' ') === 'lake build')
-      .length,
+    projectCommands.filter(
+      (call) =>
+        call.args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
+        'lake build',
+    ).length,
     2,
   )
   const snapshot = await store.snapshot(first.id, 'alice', 'shared-candidate')
@@ -536,7 +564,10 @@ test('uploaded projects share dependencies before builds, preserve unfinished pr
 test('a malicious dependency ancestor link cannot expose or freeze another project', async (t) => {
   let replaced = false
   const { runtime, root, dataDir } = await fixture(t, async (stage, args) => {
-    if (args.join(' ') === 'lake exe cache get') {
+    if (
+      args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
+      'lake exe cache get'
+    ) {
       await fs.rm(path.join(stage, '.lake'), { recursive: true })
       await fs.symlink(
         path.join(dataDir, 'private-lake'),
@@ -602,7 +633,11 @@ test('simultaneous builders in separate runtimes publish one complete entry with
     release = resolve
   })
   const { runtime, root, dataDir } = await fixture(t, async (_stage, args) => {
-    if (args.join(' ') !== 'lake exe cache get') return null
+    if (
+      args.filter((arg) => arg !== '--keep-toolchain').join(' ') !==
+      'lake exe cache get'
+    )
+      return null
     if (++reached === 2) release()
     await waiting
   })
@@ -630,4 +665,16 @@ test('simultaneous builders in separate runtimes publish one complete entry with
     await fs.readdir(path.join(dataDir, 'runtime/shared-dependency-stages')),
     [],
   )
+})
+
+test('cleanup failure after atomic publication does not discard a verified shared cache', async (t) => {
+  const { runtime, root } = await fixture(t)
+  runtime.releaseTemporaryWorkspace = async () => {
+    throw new Error('Fixture cleanup deferred')
+  }
+  const first = await runtime.prepareSharedDependencies(root, request())
+  const second = await runtime.prepareSharedDependencies(root, request())
+  assert.equal(first.root, second.root)
+  assert.equal(second.reused, true)
+  assert((await fs.stat(path.join(first.root, '.ready.json'))).isFile())
 })

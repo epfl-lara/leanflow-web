@@ -69,7 +69,7 @@ class FakeRuntime {
   async prepareToolchain() {}
   async run(root, args, options = {}) {
     this.calls.push({ root, args, options })
-    if (args[0] === 'lake' && args[1] === 'update') {
+    if (args[0] === 'lake' && args.includes('update')) {
       await fs.mkdir(path.join(root, '.lake'), { recursive: true })
       await fs.writeFile(
         path.join(root, 'lake-manifest.json'),
@@ -514,7 +514,7 @@ test('candidate verification resolves the trusted environment before build and a
         calls.push({ root, args, options })
         if (args[1] === 'env')
           return { code: 0, stdout: JSON.stringify(auditEnv), stderr: '' }
-        return args[1] === 'build'
+        return args.includes('build')
           ? { code: 0, stdout: '', stderr: '' }
           : {
               code: 0,
@@ -561,7 +561,7 @@ test('candidate verification fails closed when the independent audit process fai
     async run(_root, args) {
       if (args[1] === 'env')
         return { code: 0, stdout: JSON.stringify(auditEnv), stderr: '' }
-      return args[1] === 'build'
+      return args.includes('build')
         ? { code: 0, stdout: '', stderr: '' }
         : {
             code: 1,
@@ -1044,4 +1044,144 @@ test('authorized WebSocket relays Lean frames and closes on forbidden client fil
   )
   assert.equal(await closed, 1008)
   assert.equal(child.requests.length, 0)
+})
+
+test('configuration saves close only that project editor and expose setup retry before new runs', async (t) => {
+  const { url, token, project, runtime, workspaces, request } = await fixture(t)
+  const ws = new WebSocket(
+    url.replace('http:', 'ws:') + '/websocket/' + project.id,
+    { headers: { Authorization: `Bearer ${token}` } },
+  )
+  t.after(() => ws.terminate())
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve)
+    ws.once('error', reject)
+  })
+  const closed = new Promise((resolve) => ws.once('close', resolve))
+  const workerClosed = new Promise((resolve) =>
+    runtime.spawned[0].once('close', resolve),
+  )
+  const original = await workspaces.readFile(
+    project.id,
+    'owner',
+    'lakefile.toml',
+  )
+  const response = await request(
+    `/api/projects/${project.id}/file?path=lakefile.toml`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content: original.content + '\n# Updated configuration\n',
+        expectedHash: original.hash,
+      }),
+    },
+  )
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).requiresPreparation, true)
+  assert.equal(await closed, 1012)
+  assert.equal(workspaces.get(project.id, 'owner').status, 'error')
+  await assert.rejects(
+    workspaces.snapshot(project.id, 'owner', 'stale-config'),
+    { status: 409 },
+  )
+  await workerClosed
+  assert(runtime.spawned[0].killed)
+  const retry = await request(`/api/projects/${project.id}/prepare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  assert.equal(retry.status, 200)
+  await workspaces.jobs.get(project.id)
+  assert.equal(workspaces.get(project.id, 'owner').status, 'ready')
+})
+
+test('a server without a provider does not install automatic setup repair', async (t) => {
+  const dataDir = await temp(t),
+    runtime = new FakeRuntime()
+  const studio = await createStudio({
+    dataDir,
+    runtime,
+    config: {
+      provider: {},
+      defaultModel: 'test',
+      models: [],
+      lemex: {},
+      redact: String,
+    },
+    titleGenerator: async () => null,
+  })
+  t.after(() => studio.close())
+  assert.equal(studio.workspaces.setupRepair, undefined)
+})
+
+test('startup migrates existing aliased project directories and retains missing projects as errors', async (t) => {
+  const base = await temp(t),
+    real = path.join(base, 'data'),
+    alias = path.join(base, 'alias')
+  await fs.mkdir(real)
+  await fs.symlink(real, alias)
+  const first = await createStudio({
+    dataDir: real,
+    runtime: new FakeRuntime(),
+    config: {
+      provider: {},
+      models: [],
+      defaultModel: 'fixture',
+      lemex: {},
+      redact: String,
+    },
+    titleGenerator: async () => null,
+  })
+  const projects = []
+  for (let i = 0; i < 4; i++) {
+    const project = await first.workspaces.create('owner', { preset: 'lean' })
+    await first.workspaces.jobs.get(project.id)
+    const stored = first.workspaces.get(project.id, 'owner')
+    stored.root = path.join(alias, 'projects', project.id)
+    if (i >= 2) {
+      stored.repository = 'https://github.com/fixture/project.git'
+      stored.subdirectory = 'lean'
+      stored.status = 'error'
+      stored.imported = false
+      if (i === 3) {
+        await fs.mkdir(path.join(project.root, 'lean'))
+        stored.root = path.join(stored.root, 'lean')
+      }
+    }
+    first.workspaces.db
+      .prepare('UPDATE projects SET data=? WHERE id=?')
+      .run(JSON.stringify(stored), project.id)
+    projects.push(project)
+  }
+  await fs.rm(projects[1].root, { recursive: true })
+  await first.close()
+  const restarted = await createStudio({
+    dataDir: alias,
+    runtime: new FakeRuntime(),
+    config: {
+      provider: {},
+      models: [],
+      defaultModel: 'fixture',
+      lemex: {},
+      redact: String,
+    },
+    titleGenerator: async () => null,
+  })
+  t.after(() => restarted.close())
+  const ready = restarted.workspaces.get(projects[0].id, 'owner')
+  assert.equal(ready.root, path.join(real, 'projects', projects[0].id))
+  assert.equal(ready.status, 'ready')
+  const missing = restarted.workspaces.get(projects[1].id, 'owner')
+  assert.equal(missing.status, 'error')
+  assert.match(missing.error, /directory is missing/)
+  assert.equal(
+    restarted.workspaces.get(projects[2].id, 'owner').root,
+    path.join(real, 'projects', projects[2].id),
+  )
+  assert.equal(
+    restarted.workspaces.get(projects[3].id, 'owner').root,
+    path.join(real, 'projects', projects[3].id, 'lean'),
+  )
 })

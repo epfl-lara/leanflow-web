@@ -1,3 +1,6 @@
+import * as fs from 'node:fs/promises'
+import path from 'node:path'
+
 export const DEFAULT_MODEL = 'deepseek-ai/DeepSeek-V4.1-Flash'
 
 // RCP serves these models through vLLM. A generic low/medium/high catalog
@@ -47,4 +50,13 @@ export function rcpModelCatalog(catalog) {
       }
     }),
   }
+}
+
+export async function writeModelCatalog(home, catalog) {
+  if (catalog)
+    await fs.writeFile(
+      path.join(home, '.lemex/models.json'),
+      JSON.stringify(catalog),
+      { mode: 0o600 },
+    )
 }

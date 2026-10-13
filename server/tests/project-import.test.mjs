@@ -339,8 +339,8 @@ test('automatic setup repair is announced, retains original configuration and re
       call.args[0] === 'lake' &&
       call.options.readOnlyWorkspace,
   )
-  assert(checks.some((call) => call.args[1] === 'env'))
-  assert(checks.some((call) => call.args[1] === 'build'))
+  assert(checks.some((call) => call.args.includes('env')))
+  assert(checks.some((call) => call.args.includes('build')))
   assert(checks.every((call) => call.options.writeLakeCache))
 })
 
@@ -585,8 +585,11 @@ test('Mathlib setup must pass an import proof, requests Lemex repair on failure,
     manifest,
   )
   assert(
-    f.calls.filter((call) => call.args.join(' ') === 'lake exe cache get')
-      .length >= 2,
+    f.calls.filter(
+      (call) =>
+        call.args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
+        'lake exe cache get',
+    ).length >= 2,
   )
 })
 

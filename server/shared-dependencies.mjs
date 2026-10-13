@@ -1,3 +1,9 @@
+import { removeDisposableTree } from './temporary-workspaces.mjs'
+import {
+  runPinnedLake,
+  dependencyCacheCommands,
+  runDependencyCache,
+} from './pinned-lake.mjs'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -179,9 +185,24 @@ export async function sharedDependencySpec({
     a.name.localeCompare(b.name),
   )
   const key = digest(
-    canonical({ schema: 1, owner, toolchain, image, environment, settings }),
+    canonical({
+      schema: settings.lean || settings.enableArtifactCache === true ? 2 : 1,
+      owner,
+      toolchain,
+      image,
+      environment,
+      settings,
+    }),
   )
-  return { key, manifest, configuration }
+  return {
+    key,
+    manifest,
+    configuration,
+    toolchain,
+    buildMathlib: Boolean(
+      settings.lean || settings.enableArtifactCache === true,
+    ),
+  }
 }
 
 async function inspectPackages(
@@ -222,28 +243,6 @@ async function inspectPackages(
     } else throw new Error('Shared dependencies must not contain special files')
   }
   if (freeze) await fsp.chmod(directory, 0o500)
-}
-
-// Failed stages are private and never selected by dependency mounts. Removal
-// restores permissions only on this builder's disposable tree.
-async function removeStage(directory) {
-  const unfreeze = async (current) => {
-    const stat = await fsp.lstat(current)
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return
-    await fsp.chmod(current, 0o700)
-    for (const entry of await fsp.readdir(current, { withFileTypes: true }))
-      if (entry.isDirectory()) await unfreeze(path.join(current, entry.name))
-  }
-  await unfreeze(directory)
-  await fsp.rm(directory, { recursive: true, force: true })
-}
-
-async function discardStage(directory) {
-  try {
-    await removeStage(directory)
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error
-  }
 }
 
 export class SharedDependencyCache {
@@ -323,7 +322,7 @@ export class SharedDependencyCache {
     )
     const home = path.join(this.runtime.runtimeDir, 'homes', digest(stage))
     const run = async (args, options = {}) => {
-      const result = await this.runtime.run(stage, args, {
+      const result = await runPinnedLake(this.runtime, stage, args, {
         network: 'none',
         timeoutMs: 1800000,
         onOutput,
@@ -337,6 +336,7 @@ export class SharedDependencyCache {
       return result
     }
     try {
+      await this.runtime.claimTemporaryWorkspace?.(stage)
       for (const [name, content] of Object.entries(spec.configuration))
         await fsp.writeFile(path.join(stage, name), content, {
           mode: 0o600,
@@ -344,7 +344,21 @@ export class SharedDependencyCache {
         })
       const original = configurationDigest(spec.configuration)
       await run(['lake', 'env', 'lean', '--version'], { network: 'bridge' })
-      await run(['lake', 'exe', 'cache', 'get'], { network: 'bridge' })
+      for (const command of dependencyCacheCommands(spec.manifest, {
+        dependencyOnly: true,
+        toolchain: spec.toolchain,
+      }))
+        await runDependencyCache(this.runtime, stage, command, {
+          network: 'bridge',
+          timeoutMs: 5400000,
+          onOutput,
+          cleanHome: true,
+        })
+      if (spec.buildMathlib)
+        await run(['lake', 'build', 'mathlib'], {
+          network: 'bridge',
+          timeoutMs: 5400000,
+        })
       for (const target of dependencyBuildTargets(spec.manifest))
         await run(['lake', 'build', target], { network: 'bridge' })
       if (configurationDigest(readDependencyConfiguration(stage)) !== original)
@@ -384,7 +398,7 @@ export class SharedDependencyCache {
         readOnlyWorkspace: true,
         writeLakeCache: true,
         input: environmentSmokeProof(
-          projectEnvironmentImports({}, spec.manifest),
+          projectEnvironmentImports({}, { ...spec.manifest, name: '' }),
         ),
       })
       if (configurationDigest(readDependencyConfiguration(stage)) !== original)
@@ -421,8 +435,16 @@ export class SharedDependencyCache {
     } finally {
       if (fs.existsSync(stage))
         await this.runtime.clearInheritedDependencies(stage)
-      await discardStage(stage)
-      await discardStage(home)
+      try {
+        if (this.runtime.releaseTemporaryWorkspace)
+          await this.runtime.releaseTemporaryWorkspace(stage)
+        else {
+          await removeDisposableTree(stage)
+          await removeDisposableTree(home)
+        }
+      } catch (error) {
+        console.warn('Deferred dependency stage cleanup:', error.message)
+      }
     }
   }
 }

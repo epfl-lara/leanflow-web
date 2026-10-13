@@ -1,3 +1,4 @@
+import { writeModelCatalog } from './model-catalog.mjs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { AgentRpc } from './rpc.mjs'
@@ -19,7 +20,14 @@ export async function repairProjectSetup({
       'Automatic setup repair needs the server Lemex provider key. The uploaded files are retained.',
     )
   signal?.throwIfAborted()
+  const model = config.models?.find((model) => model.id === config.defaultModel)
+  const effort = model?.defaultReasoningEffort
+  if (effort && !model.reasoningEfforts?.some((level) => level.id === effort))
+    throw new Error(
+      'The configured setup model has an unsupported reasoning effort.',
+    )
   const home = await runtime.home(root)
+  await writeModelCatalog(home, config.modelCatalog)
   await fs.writeFile(
     path.join(home, '.lemex/config.toml'),
     [
@@ -34,7 +42,7 @@ export async function repairProjectSetup({
     ].join('\n') + '\n',
     { mode: 0o600 },
   )
-  const child = runtime.spawn(
+  const child = await runtime.spawnWhenAvailable(
     root,
     ['lemex', 'app-server', '--stdio', '--strict-config'],
     { env: config.provider, network: 'bridge', signal },
@@ -111,6 +119,7 @@ export async function repairProjectSetup({
     signal?.throwIfAborted()
     await rpc.call('turn/start', {
       threadId: thread.id,
+      ...(effort ? { effort } : {}),
       input: [
         {
           type: 'text',

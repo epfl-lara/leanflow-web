@@ -23,6 +23,7 @@ import {
 } from './api'
 import { AssistantPanel } from './AssistantPanel'
 import { Dialog } from './Dialog'
+import { ProjectSetupDetails } from './ProjectSetupDetails'
 import { Icon } from './Icons'
 import { LeanWorkspace } from './LeanWorkspace'
 import { ProofOutline } from './ProofOutline'
@@ -289,6 +290,10 @@ export function Studio() {
   filesRef.current = files
   projectIdRef.current = projectId
   const project = projects.find((item) => item.id === projectId)
+  const workspaceEditable =
+    project?.status === 'ready' ||
+    (project?.status === 'error' && project.needsPreparation === true)
+  const loadedProjectId = useRef<string | null>(null)
   const currentEditorProof =
     editorProof?.path === file?.path ? editorProof : null
   const sidebarMaximum = Math.min(
@@ -474,22 +479,25 @@ export function Studio() {
   )
 
   useEffect(() => {
-    setFiles([])
-    setFile(null)
-    setLibrarySource(null)
-    setProofFocus(null)
-    setEditorProof(null)
-    setFocusEditorRequest(null)
-    setRevealProof(null)
-    setGit(null)
-    setGitOpen(false)
-    setJob(null)
-    setFileFilter('')
-    setLeanState('')
-    ++openRequest.current
+    if (loadedProjectId.current !== projectId) {
+      loadedProjectId.current = projectId
+      setFiles([])
+      setFile(null)
+      setLibrarySource(null)
+      setProofFocus(null)
+      setEditorProof(null)
+      setFocusEditorRequest(null)
+      setRevealProof(null)
+      setGit(null)
+      setGitOpen(false)
+      setJob(null)
+      setFileFilter('')
+      setLeanState('')
+      ++openRequest.current
+    }
     if (!projectId) return
     localStorage.setItem('lemex-project', projectId)
-    if (project?.status !== 'ready') return
+    if (!workspaceEditable) return
     let cancelled = false
     void loadFiles(projectId)
       .then((value) => {
@@ -500,16 +508,24 @@ export function Studio() {
           value.find((item) => item.path === 'Main.lean') ||
           value.find((item) => item.path.endsWith('.lean')) ||
           value[0]
-        if (first) void openFile(projectId, first.path)
+        if (first && (project?.status === 'ready' || !fileRef.current))
+          void openFile(projectId, fileRef.current?.path || first.path)
       })
       .catch((error) => {
         if (!cancelled) setError(errorText(error))
       })
-    void loadGit(projectId)
+    if (project?.status === 'ready') void loadGit(projectId)
     return () => {
       cancelled = true
     }
-  }, [projectId, project?.status, loadFiles, loadGit, openFile])
+  }, [
+    projectId,
+    project?.status,
+    workspaceEditable,
+    loadFiles,
+    loadGit,
+    openFile,
+  ])
 
   const saveFile = useCallback(async () => {
     if (savePromise.current) return savePromise.current
@@ -525,7 +541,11 @@ export function Studio() {
     const task = (async () => {
       setSaving(true)
       try {
-        const value = await api<{ content: string; hash: string }>(
+        const value = await api<{
+          content: string
+          hash: string
+          requiresPreparation: boolean
+        }>(
           `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(snapshot.path)}`,
           {
             method: 'PUT',
@@ -546,7 +566,8 @@ export function Studio() {
               : current,
           )
         setNotice('File saved')
-        void loadGit(id)
+        if (value.requiresPreparation) await loadProjects()
+        else void loadGit(id)
       } finally {
         setSaving(false)
         savePromise.current = null
@@ -554,7 +575,7 @@ export function Studio() {
     })()
     savePromise.current = task
     return task
-  }, [loadGit])
+  }, [loadGit, loadProjects])
 
   const saveCompletely = useCallback(async () => {
     // Saving is optimistic: preserve edits made during the request and save them
@@ -699,6 +720,9 @@ export function Studio() {
 
   async function refreshAfterApply() {
     if (!projectId) return
+    const updated = await loadProjects()
+    if (updated.find((item) => item.id === projectId)?.status !== 'ready')
+      return
     await loadFiles(projectId)
     if (fileRef.current) await openFile(projectId, fileRef.current.path)
     await loadGit(projectId)
@@ -716,15 +740,18 @@ export function Studio() {
     setNewFileError('')
     try {
       await saveCompletely()
-      await api(
+      const saved = await api<{ requiresPreparation: boolean }>(
         `/api/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}`,
         {
           method: 'PUT',
           body: JSON.stringify({ content: '', expectedHash: null }),
         },
       )
-      await loadFiles(projectId)
-      await openFile(projectId, path)
+      if (saved.requiresPreparation) await loadProjects()
+      else {
+        await loadFiles(projectId)
+        await openFile(projectId, path)
+      }
       setNewFileModal(false)
       setNewFileName('')
     } catch (error) {
@@ -782,6 +809,7 @@ export function Studio() {
   async function retryPrepare() {
     if (!projectId) return
     try {
+      await saveCompletely()
       const value = await post<Project>(
         `/api/projects/${encodeURIComponent(projectId)}/prepare`,
       )
@@ -847,13 +875,19 @@ export function Studio() {
           ++openRequest.current
           setFile(null)
         }
-        const remaining = await loadFiles(target.projectId)
-        await loadGit(target.projectId)
-        if (removed) {
-          const next = remaining.find(
-            (item) => !item.readOnly && item.path.endsWith('.lean'),
-          )
-          if (next) await openFile(target.projectId, next.path)
+        const updated = await loadProjects()
+        if (
+          updated.find((item) => item.id === target.projectId)?.status ===
+          'ready'
+        ) {
+          const remaining = await loadFiles(target.projectId)
+          await loadGit(target.projectId)
+          if (removed) {
+            const next = remaining.find(
+              (item) => !item.readOnly && item.path.endsWith('.lean'),
+            )
+            if (next) await openFile(target.projectId, next.path)
+          }
         }
       }
       setNotice('Moved to Trash')
@@ -870,12 +904,16 @@ export function Studio() {
     setTrashError('')
     try {
       await post(`/api/trash/${encodeURIComponent(item.trashId)}/restore`)
-      await loadProjects()
+      const updated = await loadProjects()
       if (item.kind === 'chat')
         window.dispatchEvent(new Event('lemex-chats-changed'))
       else if (item.kind === 'project' && !projectIdRef.current)
         setProjectId(item.projectId)
-      else if (projectIdRef.current === item.projectId) {
+      else if (
+        projectIdRef.current === item.projectId &&
+        updated.find((project) => project.id === item.projectId)?.status ===
+          'ready'
+      ) {
         const restoredFiles = await loadFiles(item.projectId)
         await loadGit(item.projectId)
         if (!fileRef.current) {
@@ -989,7 +1027,7 @@ export function Studio() {
                       setNewFileError('')
                       setNewFileModal(true)
                     }}
-                    disabled={project?.status !== 'ready'}
+                    disabled={!workspaceEditable}
                     title="New file"
                     aria-label="New file"
                   >
@@ -1003,7 +1041,7 @@ export function Studio() {
                         setError(errorText(error)),
                       )
                     }
-                    disabled={project?.status !== 'ready'}
+                    disabled={!workspaceEditable}
                     title="Refresh files"
                     aria-label="Refresh files"
                   >
@@ -1028,7 +1066,7 @@ export function Studio() {
                 dirty={dirty}
                 disabled={opening || saving}
                 filter={fileFilter}
-                ready={project?.status === 'ready'}
+                ready={workspaceEditable}
                 onSelect={chooseFile}
                 onDelete={(path, kind) =>
                   projectId &&
@@ -1444,7 +1482,7 @@ export function Studio() {
               ))}
             </div>
           </div>
-        ) : project.status !== 'ready' ? (
+        ) : !workspaceEditable ? (
           <div className="preparation-state">
             {project.status === 'preparing' ? (
               <>
@@ -1486,33 +1524,29 @@ export function Studio() {
                 </button>
               </>
             )}
-            {project.setupRepair && (
-              <div className="setup-repair-notice" role="status">
-                <strong>
-                  {project.setupRepair.status === 'running'
-                    ? 'Lemex is repairing setup'
-                    : project.setupRepair.status === 'completed'
-                      ? 'Setup repaired by Lemex'
-                      : 'Lemex setup repair needs attention'}
-                </strong>
-                <p>{project.setupRepair.message}</p>
-                {!!project.setupRepair.changes?.length && (
-                  <p>Updated: {project.setupRepair.changes.join(', ')}</p>
-                )}
-              </div>
-            )}
-            {project.log && (
-              <details open={project.status === 'error'}>
-                <summary>Setup output</summary>
-                <pre className="setup-log">{project.log}</pre>
-              </details>
-            )}
-            {project.repository && (
-              <p className="field-help">{project.repository}</p>
-            )}
+            <ProjectSetupDetails project={project} />
           </div>
         ) : (
           <>
+            {project.needsPreparation && project.status === 'error' && (
+              <div className="workspace-alert" role="status">
+                <span>
+                  {project.error} You can edit the setup files or retry.
+                </span>
+                <button
+                  className="button small secondary"
+                  disabled={saving}
+                  onClick={retryPrepare}
+                >
+                  Retry setup
+                </button>
+              </div>
+            )}
+            {project.needsPreparation && (
+              <div className="setup-editor-details">
+                <ProjectSetupDetails project={project} />
+              </div>
+            )}
             <div className="file-toolbar">
               <div className="file-tab">
                 <Icon name="file" size={15} />
@@ -1538,6 +1572,7 @@ export function Studio() {
                   className="button small subtle lean-check-button"
                   onClick={check}
                   disabled={
+                    project.status !== 'ready' ||
                     !file?.path.endsWith('.lean') ||
                     saving ||
                     !!(job && !terminalJob(job))
@@ -1548,43 +1583,60 @@ export function Studio() {
                 </button>
               </div>
             </div>
-            <LeanWorkspace
-              key={project.id}
-              projectId={project.id}
-              file={file}
-              theme={theme}
-              showInfoview={showInfoview}
-              goalsSize={goalsSize}
-              onGoalsSizeChange={setGoalsSize}
-              revealTarget={revealProof || undefined}
-              onProofStateChange={setEditorProof}
-              focusEditorRequest={focusEditorRequest}
-              onFocusEditorHandled={(id) =>
-                setFocusEditorRequest((current) =>
-                  current?.id === id ? null : current,
-                )
-              }
-              onFocusProof={(target, mode) => {
-                setProofFocus({
-                  id: ++proofRequestId.current,
-                  projectId: project.id,
-                  target,
-                  mode,
-                })
-                setToolsOpen(true)
-                setSidebarOpen(false)
-              }}
-              onState={setLeanState}
-              onChange={(path, content) =>
-                setFile((current) =>
-                  current?.path === path ? { ...current, content } : current,
-                )
-              }
-              onOpenFile={(path, line, column) =>
-                navigate(() => openFile(project.id, path, line, column))
-              }
-              onOpenLibrary={setLibrarySource}
-            />
+            {project.status === 'ready' ? (
+              <LeanWorkspace
+                key={project.id}
+                projectId={project.id}
+                file={file}
+                theme={theme}
+                showInfoview={showInfoview}
+                goalsSize={goalsSize}
+                onGoalsSizeChange={setGoalsSize}
+                revealTarget={revealProof || undefined}
+                onProofStateChange={setEditorProof}
+                focusEditorRequest={focusEditorRequest}
+                onFocusEditorHandled={(id) =>
+                  setFocusEditorRequest((current) =>
+                    current?.id === id ? null : current,
+                  )
+                }
+                onFocusProof={(target, mode) => {
+                  setProofFocus({
+                    id: ++proofRequestId.current,
+                    projectId: project.id,
+                    target,
+                    mode,
+                  })
+                  setToolsOpen(true)
+                  setSidebarOpen(false)
+                }}
+                onState={setLeanState}
+                onChange={(path, content) =>
+                  setFile((current) =>
+                    current?.path === path ? { ...current, content } : current,
+                  )
+                }
+                onOpenFile={(path, line, column) =>
+                  navigate(() => openFile(project.id, path, line, column))
+                }
+                onOpenLibrary={setLibrarySource}
+              />
+            ) : (
+              <textarea
+                className="setup-file-editor"
+                aria-label="Project file content"
+                spellCheck={false}
+                readOnly={file?.readOnly || !file}
+                value={file?.content || ''}
+                onChange={(event) =>
+                  setFile((current) =>
+                    current
+                      ? { ...current, content: event.target.value }
+                      : current,
+                  )
+                }
+              />
+            )}
             {job && (
               <section className={`build-output ${jobOpen ? 'expanded' : ''}`}>
                 <button
@@ -1885,7 +1937,11 @@ export function Studio() {
           projectId={projectId}
           onClose={() => setUploadModal(false)}
           onUploaded={async () => {
-            await loadFiles(projectId)
+            const updated = await loadProjects()
+            if (
+              updated.find((item) => item.id === projectId)?.status === 'ready'
+            )
+              await loadFiles(projectId)
             setNotice('Local files uploaded')
           }}
         />

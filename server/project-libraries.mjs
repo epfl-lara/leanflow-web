@@ -42,7 +42,7 @@ export function projectEnvironmentImports(project, manifest) {
       : [],
   )
   if (manifest?.name) names.add(manifest.name)
-  if (!project.repository && !project.uploaded) {
+  if (!project.repository && !project.uploaded && !project.customEnvironment) {
     for (const library of project.libraries || [project.preset])
       names.add(library)
   }

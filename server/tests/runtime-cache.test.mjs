@@ -195,3 +195,73 @@ test('cache scan does not follow symlinks or inspect read-only dependency conten
   const result = await runtime.run(root, ['true'], cacheOptions)
   assert.equal(result.code, 0, result.stderr)
 })
+
+test('setup RPC workers wait for runtime capacity and queued cancellation never spawns a worker', async (t) => {
+  const { runtime, root } = await fixture(t)
+  runtime.maxConcurrent = 1
+  const occupied = runtime.spawn(root, ['true'], { cleanHome: true })
+  const next = runtime.spawnWhenAvailable(root, ['true'], { cleanHome: true })
+  assert.equal(runtime.queue.length, 1)
+  const controller = new AbortController()
+  const cancelled = runtime.spawnWhenAvailable(root, ['true'], {
+    cleanHome: true,
+    signal: controller.signal,
+  })
+  controller.abort(new Error('Cancelled queued RPC'))
+  await assert.rejects(cancelled, /Cancelled queued RPC/)
+  assert.equal(runtime.queue.length, 1)
+  occupied.stdin.end()
+  const child = await next
+  child.stdin.end()
+  await new Promise((resolve) => child.once('close', resolve))
+  assert.equal(runtime.queue.length, 0)
+  assert.equal(runtime.children.size, 0)
+})
+
+test('temporary repair cleanup removes its home and self binding but preserves a source referenced by another workspace', async (t) => {
+  const { runtime, dataDir } = await fixture(t)
+  const root = path.join(dataDir, 'setup-repairs', 'repair', 'workspace')
+  const target = path.join(dataDir, 'snapshot')
+  await fs.mkdir(path.join(root, '.lake/packages/mathlib'), { recursive: true })
+  await fs.mkdir(target)
+  await runtime.claimTemporaryWorkspace(root)
+  await runtime.inheritDependencies(root, root)
+  const home = await runtime.home(root)
+  await runtime.inheritDependencies(root, target)
+  await runtime.releaseTemporaryWorkspace(root)
+  assert((await fs.stat(root)).isDirectory())
+  assert((await fs.stat(home)).isDirectory())
+  await fs.rm(target, { recursive: true })
+  await runtime.releaseTemporaryWorkspace(root)
+  await assert.rejects(fs.stat(root), { code: 'ENOENT' })
+  await assert.rejects(fs.stat(home), { code: 'ENOENT' })
+  const registry = JSON.parse(
+    await fs.readFile(path.join(dataDir, 'runtime/dependencies.json'), 'utf8'),
+  )
+  assert.equal(registry[root], undefined)
+})
+
+test('detaching a changed preset environment preserves the dependency mounts of existing snapshots', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  const template = path.join(dataDir, 'template'),
+    snapshot = path.join(dataDir, 'snapshot')
+  await fs.mkdir(path.join(template, '.lake/packages/mathlib'), {
+    recursive: true,
+  })
+  await fs.mkdir(snapshot)
+  await runtime.inheritDependencies(template, root)
+  await runtime.inheritDependencies(root, snapshot)
+  assert.equal(runtime.dependencyRoot(root), template)
+  await runtime.clearInheritedDependencies(root, { force: true })
+  assert.equal(runtime.dependencyRoot(root), null)
+  assert.equal(runtime.dependencyRoot(snapshot), template)
+  const child = await runtime.run(snapshot, ['true'], { cleanHome: true })
+  assert.equal(child.code, 0)
+  assert(
+    mounts(JSON.parse(child.stdout)).some((mount) =>
+      mount.includes(
+        `src=${template}/.lake/packages,dst=/workspace/.lake/packages,readonly`,
+      ),
+    ),
+  )
+})

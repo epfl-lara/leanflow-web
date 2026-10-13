@@ -194,3 +194,66 @@ test('three assistant tasks execute concurrently while a fourth waits for capaci
     await manager.shutdown()
   }
 })
+
+test('setup repairs share assistant capacity and queue admission, and queued cancellation releases its slot', async (t) => {
+  const f = await fixture(t),
+    manager = f.studio.agents
+  manager.maxConcurrent = 1
+  let finish
+  const first = manager.runSetupRepair(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve
+      }),
+  )
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(manager.running, 1)
+  const controller = new AbortController()
+  const cancelled = manager.runSetupRepair(
+    () => assert.fail('Cancelled repair executed'),
+    { signal: controller.signal },
+  )
+  cancelled.catch(() => {})
+  const ordinary = await manager.start('owner', f.projects[0].id, {
+    mode: 'prove',
+    prompt: 'Complete the proof.',
+    model: 'test',
+  })
+  assert.equal(ordinary.status, 'queued')
+  await assert.rejects(
+    manager.runSetupRepair(() => {}),
+    { status: 429 },
+  )
+  controller.abort(new Error('Cancelled queued setup'))
+  await assert.rejects(cancelled, /Cancelled queued setup/)
+  assert.equal(manager.queue.length, 1)
+  await manager.stop('owner', ordinary.id)
+  finish()
+  await first
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(manager.running, 0)
+})
+
+test('shutdown cancels both queued and active setup repairs without provider calls', async (t) => {
+  const f = await fixture(t),
+    manager = f.studio.agents
+  manager.maxConcurrent = 1
+  const first = manager.runSetupRepair(
+    (signal) =>
+      new Promise((_resolve, reject) =>
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        }),
+      ),
+  )
+  first.catch(() => {})
+  await new Promise((resolve) => setImmediate(resolve))
+  const queued = manager.runSetupRepair(() =>
+    assert.fail('Queued setup executed during shutdown'),
+  )
+  queued.catch(() => {})
+  await manager.shutdown()
+  await assert.rejects(first, /shutting down/)
+  await assert.rejects(queued, /shutting down/)
+  assert.equal(manager.running, 0)
+})

@@ -34,6 +34,7 @@ export interface Project {
   id: string
   name: string
   status: 'preparing' | 'ready' | 'error'
+  needsPreparation?: boolean
   toolchain?: string
   preset?: string
   libraries?: string[]

@@ -1,3 +1,4 @@
+import { writeModelCatalog } from './model-catalog.mjs'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { AgentRpc } from './rpc.mjs'
@@ -391,6 +392,38 @@ export class AgentManager {
     if (queued.created) await this.followups.deliver(id)
     return this.events.get(id, owner)
   }
+  runSetupRepair(execute, { signal } = {}) {
+    if (this.stopping || signal?.aborted)
+      return Promise.reject(
+        signal?.reason || new Error('The server is shutting down.'),
+      )
+    if (this.queue.length >= this.maxQueue)
+      return Promise.reject(
+        Object.assign(
+          new Error(
+            'Agent queue is full. Retry setup when capacity is available.',
+          ),
+          { status: 429 },
+        ),
+      )
+    return new Promise((resolve, reject) => {
+      const controller = new AbortController()
+      const job = { execute, resolve, reject, controller, signal }
+      job.abort = () => {
+        controller.abort(signal?.reason || new Error('Setup repair stopped.'))
+        const index = this.queue.indexOf(job)
+        if (index >= 0) {
+          this.queue.splice(index, 1)
+          signal?.removeEventListener('abort', job.abort)
+          reject(controller.signal.reason)
+        }
+      }
+      signal?.addEventListener('abort', job.abort, { once: true })
+      this.queue.push(job)
+      queueMicrotask(() => this.#drain())
+    })
+  }
+
   #drain() {
     while (
       !this.stopping &&
@@ -398,9 +431,28 @@ export class AgentManager {
       this.queue.length
     ) {
       const id = this.queue.shift()
-      if (['cancelled', 'stopping'].includes(this.events.get(id).status))
+      if (
+        typeof id === 'string' &&
+        ['cancelled', 'stopping'].includes(this.events.get(id).status)
+      )
         continue
       this.running++
+      if (typeof id !== 'string') {
+        this.setupRepairs ||= new Set()
+        this.setupRepairs.add(id)
+        const task = Promise.resolve()
+          .then(() => id.execute(id.controller.signal))
+          .then(id.resolve, id.reject)
+          .finally(() => {
+            id.signal?.removeEventListener('abort', id.abort)
+            this.setupRepairs.delete(id)
+            this.running--
+            this.tasks.delete(task)
+            this.#drain()
+          })
+        this.tasks.add(task)
+        continue
+      }
       const task = this.#execute(id)
         .catch((error) => {
           if (!['cancelled', 'stopping'].includes(this.events.get(id).status)) {
@@ -575,12 +627,7 @@ export class AgentManager {
       await fs.writeFile(path.join(home, '.lemex/config.toml'), config, {
         mode: 0o600,
       })
-      if (this.config.modelCatalog)
-        await fs.writeFile(
-          path.join(home, '.lemex/models.json'),
-          JSON.stringify(this.config.modelCatalog),
-          { mode: 0o600 },
-        )
+      await writeModelCatalog(home, this.config.modelCatalog)
       if (active.controller.signal.aborted) return
       const child = this.runtime.spawn(
         snapshot.root,
@@ -1058,7 +1105,14 @@ export class AgentManager {
   async shutdown() {
     this.stopping = true
     const stops = []
-    for (const id of this.queue)
+    for (const repair of this.setupRepairs || [])
+      repair.controller.abort(new Error('The server is shutting down.'))
+    for (const id of this.queue) {
+      if (typeof id !== 'string') {
+        id.signal?.removeEventListener('abort', id.abort)
+        id.reject(new Error('The server is shutting down.'))
+        continue
+      }
       stops.push(
         this.stop(
           this.events.get(id).owner,
@@ -1066,6 +1120,7 @@ export class AgentManager {
           'The server is shutting down.',
         ),
       )
+    }
     this.queue.length = 0
     for (const [id] of this.active)
       stops.push(

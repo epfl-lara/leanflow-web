@@ -1,3 +1,4 @@
+import { removeDisposableTree } from './temporary-workspaces.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
@@ -17,7 +18,16 @@ import {
   environmentSmokeProof,
   dependencyBuildTargets,
 } from './project-libraries.mjs'
-import { configurationDigest } from './shared-dependencies.mjs'
+import {
+  runPinnedLake,
+  dependencyCacheCommands,
+  runDependencyCache,
+  setupInfrastructureFailure,
+} from './pinned-lake.mjs'
+import {
+  configurationDigest,
+  readDependencyConfiguration,
+} from './shared-dependencies.mjs'
 import {
   libraryModulePath,
   sourceSelection,
@@ -491,6 +501,13 @@ export class WorkspaceStore {
   }
 
   async init() {
+    const previousDataDir = this.dataDir
+    await fs.mkdir(this.dataDir, { recursive: true, mode: 0o700 })
+    this.dataDir = await fs.realpath(this.dataDir)
+    this.projectsDir = path.join(this.dataDir, 'projects')
+    this.snapshotsDir = path.join(this.dataDir, 'candidates')
+    this.historyDir = path.join(this.dataDir, 'history')
+    this.trashDir = path.join(this.dataDir, 'trash')
     await Promise.all(
       [this.projectsDir, this.snapshotsDir, this.historyDir, this.trashDir].map(
         (dir) => fs.mkdir(dir, { recursive: true, mode: 0o700 }),
@@ -510,6 +527,33 @@ export class WorkspaceStore {
         checkout,
         projectDirectory(project.subdirectory),
       )
+      const previousCheckout = path.join(
+        previousDataDir,
+        'projects',
+        project.id,
+      )
+      const previousSelected = path.join(
+        previousCheckout,
+        projectDirectory(project.subdirectory),
+      )
+      if (
+        previousDataDir !== this.dataDir &&
+        [previousCheckout, previousSelected].includes(project.root)
+      ) {
+        const migratedRoot =
+          project.root === previousCheckout ? checkout : selected
+        const root = await exists(project.root)
+        if (root && (await fs.realpath(project.root)) !== migratedRoot)
+          throw new Error('Invalid persisted workspace directory')
+        if (!root) {
+          project.status = 'error'
+          project.needsPreparation = false
+          project.error =
+            'The saved project directory is missing. Restore its files before retrying setup.'
+        }
+        project.root = migratedRoot
+        this.#save(project)
+      }
       if (project.root !== checkout && project.root !== selected)
         throw new Error('Invalid persisted workspace directory')
       if (project.status === 'preparing') {
@@ -521,7 +565,7 @@ export class WorkspaceStore {
             ...project.setupRepair,
             status: 'failed',
             message:
-              'Lemex setup repair was interrupted by a server restart. Its source copy and any original configuration backup were retained.',
+              'Lemex setup repair was interrupted by a server restart. Any saved configuration change records were retained; the disposable workspace will be cleaned up.',
           }
         this.#save(project)
         this.#event(project, 'interrupted', project.error)
@@ -814,6 +858,7 @@ export class WorkspaceStore {
         await fs.rename(anchored, path.join(container, 'content'))
         entry.state = 'trashed'
         this.#saveTrash(entry)
+        this.#invalidateConfiguration(project, filename)
         this.#event(
           project,
           'trashed',
@@ -959,6 +1004,7 @@ export class WorkspaceStore {
         entry.state = 'restored'
         entry.restoredAt = new Date().toISOString()
         this.#saveTrash(entry)
+        this.#invalidateConfiguration(project, entry.path)
         this.#event(
           project,
           'restored',
@@ -1117,16 +1163,30 @@ export class WorkspaceStore {
               (!project.imported &&
                 !project.uploaded &&
                 !error.setupEnvironment) ||
-              [403, 404, 409, 413].includes(error.status)
+              [403, 404, 409, 413, 429, 503].includes(error.status) ||
+              error.infrastructure
             )
               throw error
-            await this.#repairPreparation(project, error, controller.signal)
+            try {
+              await this.#repairPreparation(project, error, controller.signal)
+            } catch (repairError) {
+              throw new Error(
+                `${error.message}\nAutomatic setup repair also failed: ${repairError.message}`,
+                { cause: repairError },
+              )
+            }
             await this.#prepareProject(project)
           }
         }),
       )
-      .catch((error) => {
+      .catch(async (error) => {
         project.status = 'error'
+        project.needsPreparation = Boolean(
+          project.uploaded ||
+          project.imported ||
+          (!project.repository &&
+            (await exists(path.join(project.root, 'lean-toolchain')))),
+        )
         project.error = controller.signal.aborted
           ? 'Project setup stopped. You can retry when ready.'
           : error.message || 'Project preparation failed'
@@ -1146,22 +1206,28 @@ export class WorkspaceStore {
     this.jobs.set(project.id, job)
   }
 
-  async prepare(id, owner) {
-    const project = this.get(id, owner)
-    if (this.jobs.has(id)) return project
-    project.status = 'preparing'
-    delete project.error
-    delete project.log
-    if (project.setupRepair) {
-      project.setupRepairHistory = [
-        ...(project.setupRepairHistory || []),
-        project.setupRepair,
-      ]
-      delete project.setupRepair
-    }
-    this.#save(project)
-    this.#beginPrepare(project)
-    return clone(project)
+  async prepare(id, owner, { assertIdle = () => {} } = {}) {
+    this.get(id, owner)
+    return this.#locked(id, async () => {
+      const project = this.#owned(id, owner)
+      if (project.archivedAt) fail('Project not found', 404)
+      assertIdle()
+      if (this.jobs.has(id)) return project
+      project.status = 'preparing'
+      delete project.needsPreparation
+      delete project.error
+      delete project.log
+      if (project.setupRepair) {
+        project.setupRepairHistory = [
+          ...(project.setupRepairHistory || []),
+          project.setupRepair,
+        ]
+        delete project.setupRepair
+      }
+      this.#save(project)
+      this.#beginPrepare(project)
+      return clone(project)
+    })
   }
 
   async stopPreparation(id, owner) {
@@ -1234,6 +1300,27 @@ export class WorkspaceStore {
       'setup-repair',
       `${project.setupRepair.message}\nOriginal error: ${cause.message}\n`,
     )
+    await fs.mkdir(candidate, { mode: 0o700 })
+    try {
+      await this.runtime.claimTemporaryWorkspace?.(candidate)
+      await this.#repairCandidate(project, {
+        cause,
+        signal,
+        container,
+        candidate,
+      })
+    } finally {
+      try {
+        if (this.runtime.releaseTemporaryWorkspace)
+          await this.runtime.releaseTemporaryWorkspace(candidate)
+        else await removeDisposableTree(candidate)
+      } catch (error) {
+        console.warn('Deferred setup workspace cleanup:', error.message)
+      }
+    }
+  }
+
+  async #repairCandidate(project, { cause, signal, container, candidate }) {
     await copyWorkspace(project.root, candidate, { omitDependencies: true })
     const allowed = new Set([
       'lean-toolchain',
@@ -1301,7 +1388,7 @@ export class WorkspaceStore {
       commands.push(['lake', 'update'])
     commands.push(['lake', 'env', 'lean', '--version'])
     for (const args of commands) {
-      const checked = await this.runtime.run(candidate, args, {
+      const checked = await runPinnedLake(this.runtime, candidate, args, {
         signal,
         network: 'bridge',
         timeoutMs: 900000,
@@ -1336,27 +1423,19 @@ export class WorkspaceStore {
       /* Missing or invalid lockfiles can be repaired. */
     }
     this.#assertRepairDependencyPins(originalManifest, repairedManifest)
-    if (
-      projectEnvironmentImports(project, repairedManifest).includes('Mathlib')
-    ) {
-      const cache = await this.runtime.run(
-        candidate,
-        ['lake', 'exe', 'cache', 'get'],
-        {
-          signal,
-          network: 'bridge',
-          timeoutMs: 1800000,
-          onOutput: (message) => this.#event(project, 'setup-repair', message),
-        },
-      )
-      signal.throwIfAborted()
-      if (cache.code !== 0)
-        throw new Error(
-          `Repaired setup could not prepare compiled Mathlib: ${(cache.stderr || cache.stdout || '').slice(-2000)}`,
-        )
+    for (const command of dependencyCacheCommands(repairedManifest, {
+      toolchain: repairedToolchain,
+    })) {
+      await runDependencyCache(this.runtime, candidate, command, {
+        signal,
+        network: 'bridge',
+        timeoutMs: 5400000,
+        onOutput: (message) => this.#event(project, 'setup-repair', message),
+      })
     }
     for (const target of dependencyBuildTargets(repairedManifest)) {
-      const built = await this.runtime.run(
+      const built = await runPinnedLake(
+        this.runtime,
         candidate,
         ['lake', 'build', target],
         {
@@ -1481,8 +1560,15 @@ export class WorkspaceStore {
     )
   }
 
-  async #command(project, args, timeoutMs = 900000, network = 'none') {
-    const result = await this.runtime.run(
+  async #command(
+    project,
+    args,
+    timeoutMs = 900000,
+    network = 'none',
+    env = {},
+  ) {
+    const result = await runPinnedLake(
+      this.runtime,
       args[0] === 'git' ? this.repositoryRoot(project) : project.root,
       args,
       {
@@ -1496,6 +1582,7 @@ export class WorkspaceStore {
           GIT_TERMINAL_PROMPT: '0',
           GIT_CONFIG_NOSYSTEM: '1',
           GIT_LFS_SKIP_SMUDGE: '1',
+          ...env,
         },
         onOutput: (output) =>
           this.#event(
@@ -1508,8 +1595,11 @@ export class WorkspaceStore {
       },
     )
     if (result.code !== 0)
-      throw new Error(
-        `${args[0]} failed (exit ${result.code}): ${(result.stderr || result.stdout || '').slice(-2000)}`,
+      throw Object.assign(
+        new Error(
+          `${args[0]} failed (exit ${result.code}): ${(result.stderr || result.stdout || '').slice(-2000)}`,
+        ),
+        { infrastructure: setupInfrastructureFailure(result) },
       )
     return result
   }
@@ -1611,7 +1701,8 @@ export class WorkspaceStore {
       'output',
       `Checking that ${imports.join(', ')} are ready for proofs.\n`,
     )
-    const result = await this.runtime.run(
+    const result = await runPinnedLake(
+      this.runtime,
       project.root,
       ['lake', 'env', 'lean', '--stdin'],
       {
@@ -1635,15 +1726,31 @@ export class WorkspaceStore {
         new Error(
           `The project environment is not ready (${imports.join(', ')}). ${(result.stderr || result.stdout || 'The import check failed.').slice(-2000)}`,
         ),
-        { setupEnvironment: true },
+        {
+          setupEnvironment: true,
+          infrastructure: setupInfrastructureFailure(result),
+        },
       )
   }
 
   async #prepareProject(project) {
     this.preparationControllers.get(project.id)?.signal.throwIfAborted()
     this.#event(project, 'preparing', 'Preparing the project environment.\n')
-    if (project.repository || project.uploaded)
-      await this.runtime.clearInheritedDependencies?.(project.root)
+    if (project.customEnvironment && !project.repository && !project.uploaded) {
+      const template = await this.runtime.templateRoot(project.preset)
+      if (
+        template &&
+        configurationDigest(readDependencyConfiguration(template)) ===
+          configurationDigest(readDependencyConfiguration(project.root))
+      ) {
+        delete project.customEnvironment
+        await this.runtime.inheritDependencies?.(template, project.root)
+      }
+    }
+    if (project.repository || project.uploaded || project.customEnvironment)
+      await this.runtime.clearInheritedDependencies?.(project.root, {
+        force: project.customEnvironment === true,
+      })
     const checkout = this.repositoryRoot(project)
     const entries = await fs.readdir(checkout)
     if (project.repository && !project.imported && entries.length)
@@ -1800,6 +1907,7 @@ export class WorkspaceStore {
     const shared =
       project.repository ||
       project.uploaded ||
+      project.customEnvironment ||
       project.setupRepair?.status === 'running'
         ? await this.#sharedDependencies(project, signal)
         : null
@@ -1811,7 +1919,7 @@ export class WorkspaceStore {
       900000,
       'bridge',
     )
-    if (project.repository || project.uploaded) {
+    if (project.repository || project.uploaded || project.customEnvironment) {
       let manifest = null
       try {
         manifest = JSON.parse(
@@ -1825,16 +1933,16 @@ export class WorkspaceStore {
         )
           throw error
       }
-      if (
-        !shared &&
-        projectEnvironmentImports(project, manifest).includes('Mathlib')
-      )
-        await this.#command(
-          project,
-          ['lake', 'exe', 'cache', 'get'],
-          1800000,
-          'bridge',
-        )
+      for (const command of dependencyCacheCommands(manifest, {
+        toolchain: project.toolchain,
+      }))
+        if (!shared || command.args.includes(`--package=${manifest?.name}`))
+          await runDependencyCache(this.runtime, project.root, command, {
+            signal,
+            network: 'bridge',
+            timeoutMs: 5400000,
+            onOutput: (message) => this.#event(project, 'output', message),
+          })
       // Imported projects need their own compiled modules for cross-file imports.
       if (!shared)
         for (const target of dependencyBuildTargets(manifest))
@@ -1893,6 +2001,7 @@ export class WorkspaceStore {
     }
     signal?.throwIfAborted()
     project.status = 'ready'
+    delete project.needsPreparation
     if (project.setupRepair?.status === 'running')
       project.setupRepair = {
         ...project.setupRepair,
@@ -1904,8 +2013,15 @@ export class WorkspaceStore {
     this.#event(project, 'ready', 'Project ready.\n')
   }
 
-  #ready(project) {
-    if (project.status !== 'ready')
+  #ready(project, allowConfigurationChange = false) {
+    if (
+      project.status !== 'ready' &&
+      !(
+        allowConfigurationChange &&
+        project.status === 'error' &&
+        project.needsPreparation
+      )
+    )
       fail(
         project.status === 'error'
           ? project.error || 'Project needs preparation'
@@ -2079,9 +2195,30 @@ export class WorkspaceStore {
     }
   }
 
+  #invalidateConfiguration(project, filename, changed = true) {
+    if (
+      !changed ||
+      ![
+        'lean-toolchain',
+        'lakefile.lean',
+        'lakefile.toml',
+        'lake-manifest.json',
+      ].includes(filename)
+    )
+      return false
+    delete project.log
+    project.status = 'error'
+    project.needsPreparation = true
+    project.customEnvironment = true
+    project.error =
+      'Project configuration changed. Retry setup to prepare and test the updated environment.'
+    this.#save(project)
+    return true
+  }
+
   async writeFile(id, owner, filename, content, expectedHash) {
     const project = this.get(id, owner)
-    this.#ready(project)
+    this.#ready(project, true)
     if (
       typeof content !== 'string' ||
       Buffer.byteLength(content) > MAX_FILE ||
@@ -2089,6 +2226,11 @@ export class WorkspaceStore {
     )
       fail('File content must be UTF-8 text smaller than 2 MiB', 413)
     return this.#locked(id, async () => {
+      const project = this.#owned(id, owner)
+      if (project.archivedAt) fail('Project not found', 404)
+      this.#ready(project, true)
+      if (this.jobs.has(id))
+        fail('Wait for project preparation to finish before saving.', 409)
       const destination = await guarded(project.root, filename, { write: true })
       const before = await textFile(destination, true)
       if (expectedHash !== undefined && expectedHash !== (before?.hash ?? null))
@@ -2109,7 +2251,12 @@ export class WorkspaceStore {
         await parent.handle.close()
       }
       this.#event(project, 'saved', `Saved ${filename}.\n`)
-      return { content, hash: sha(content) }
+      const requiresPreparation = this.#invalidateConfiguration(
+        project,
+        filename,
+        before?.content !== content,
+      )
+      return { content, hash: sha(content), requiresPreparation }
     })
   }
 
@@ -2613,7 +2760,7 @@ export class WorkspaceStore {
     const initial = this.get(manifest.projectId, manifest.owner)
     return this.#locked(initial.id, async () => {
       const project = this.get(initial.id, initial.owner)
-      this.#ready(project)
+      this.#ready(project, true)
       const live = await this.#leanChanges(manifest, container, liveChanges)
       await this.#assertTouched(manifest, project, live)
       return this.#applyLocked(project, this.#liveTransition(live, []), 'undo')
@@ -2699,7 +2846,7 @@ export class WorkspaceStore {
 
   async #applyLocked(project, changes, reason = 'applied') {
     project = this.get(project.id, project.owner)
-    this.#ready(project)
+    this.#ready(project, reason === 'undo')
     const { id, owner } = project
     const seen = new Set()
     const prepared = []
@@ -2734,6 +2881,7 @@ export class WorkspaceStore {
         destination,
         existed: !!before,
         mode: before?.mode ?? 0o600,
+        before: before?.content ?? null,
       })
     }
     if (!prepared.length) return { applied: 0, files: [] }
@@ -2811,6 +2959,13 @@ export class WorkspaceStore {
       JSON.stringify({ appliedAt: new Date().toISOString() }),
       { mode: 0o600 },
     )
+    const requiresPreparation = prepared.some((change) =>
+      this.#invalidateConfiguration(
+        project,
+        change.path,
+        change.before !== change.after,
+      ),
+    )
     const action =
       reason === 'live'
         ? `Saved ${prepared.length} live assistant edits`
@@ -2824,6 +2979,7 @@ export class WorkspaceStore {
     )
     return {
       applied: prepared.length,
+      requiresPreparation,
       files: prepared.map((change) => ({
         path: change.path,
         hash: change.after === null ? null : sha(change.after),

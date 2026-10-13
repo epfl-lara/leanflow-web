@@ -113,7 +113,9 @@ export async function createStudio({
   capacity = loadCapacity(),
 } = {}) {
   dataDir = path.resolve(dataDir)
+  const workspaceDataDir = dataDir
   await fs.mkdir(dataDir, { recursive: true, mode: 0o700 })
+  dataDir = await fs.realpath(dataDir)
   const auth = new Auth(dataDir)
   await auth.init()
   const config = suppliedConfig || (await loadConfig(dataDir))
@@ -129,9 +131,8 @@ export async function createStudio({
     })
   await runtime.init()
   const workspaces = new WorkspaceStore({
-    dataDir,
+    dataDir: workspaceDataDir,
     runtime,
-    setupRepair: (args) => repairProjectSetup({ runtime, config, ...args }),
   })
   await workspaces.init()
   const events = new EventStore(dataDir),
@@ -154,12 +155,23 @@ export async function createStudio({
     maxConcurrent: capacity.agents,
     maxQueue: capacity.agentQueue,
   })
+  if (config.provider.LEMEX_API_KEY)
+    workspaces.setupRepair = (args) =>
+      agents.runSetupRepair(
+        (signal) => repairProjectSetup({ runtime, config, ...args, signal }),
+        { signal: args.signal },
+      )
   const jobs = new JobManager({ runtime, workspaces, events })
   const app = express(),
     server = http.createServer(app),
     sockets = new Set(),
     languageServers = new Map(),
     socketProjects = new Map()
+  const closeProjectEditors = (projectId) => {
+    for (const ws of sockets)
+      if (socketProjects.get(ws) === projectId)
+        ws.close(1012, 'Project configuration changed. Retry setup.')
+  }
   const origin = process.env.STUDIO_ORIGIN
   let publisher
   const requireNoGit = (projectId, owner, { includeArchived = false } = {}) => {
@@ -313,7 +325,11 @@ export async function createStudio({
   app.post('/api/projects/:id/prepare', async (req, res) => {
     requireNoRun(req.params.id, req.user.id)
     res.json(
-      publicProject(await workspaces.prepare(req.params.id, req.user.id)),
+      publicProject(
+        await workspaces.prepare(req.params.id, req.user.id, {
+          assertIdle: () => requireNoRun(req.params.id, req.user.id),
+        }),
+      ),
     )
   })
   app.post('/api/projects/:id/prepare/stop', async (req, res) =>
@@ -325,9 +341,13 @@ export async function createStudio({
   )
   app.post('/api/projects/:id/upload', async (req, res) => {
     requireNoActiveWork(req.params.id, req.user.id)
-    res.json(
-      await workspaces.upload(req.params.id, req.user.id, req.body.files),
+    const result = await workspaces.upload(
+      req.params.id,
+      req.user.id,
+      req.body.files,
     )
+    if (result.requiresPreparation) closeProjectEditors(req.params.id)
+    res.json(result)
   })
   app.get('/api/projects/:id/files', async (req, res) =>
     res.json(await workspaces.files(req.params.id, req.user.id)),
@@ -352,15 +372,15 @@ export async function createStudio({
       ].includes(req.query.path)
     )
       requireNoRun(req.params.id, req.user.id)
-    res.json(
-      await workspaces.writeFile(
-        req.params.id,
-        req.user.id,
-        req.query.path,
-        req.body.content,
-        req.body.expectedHash,
-      ),
+    const saved = await workspaces.writeFile(
+      req.params.id,
+      req.user.id,
+      req.query.path,
+      req.body.content,
+      req.body.expectedHash,
     )
+    if (saved.requiresPreparation) closeProjectEditors(req.params.id)
+    res.json(saved)
   })
   app.post('/api/projects/:id/trash', async (req, res) => {
     if (
@@ -388,6 +408,11 @@ export async function createStudio({
       for (const ws of sockets)
         if (socketProjects.get(ws) === receipt.projectId)
           ws.close(1001, 'Project archived.')
+    if (
+      receipt.kind !== 'project' &&
+      workspaces.get(receipt.projectId, req.user.id).needsPreparation
+    )
+      closeProjectEditors(receipt.projectId)
     res.json(receipt)
   })
   app.get('/api/trash', (req, res) =>
@@ -407,9 +432,12 @@ export async function createStudio({
     }
     const assertIdle = () => requireNoActiveWork(entry.projectId, req.user.id)
     assertIdle()
-    res.json(
-      await workspaces.restore(req.params.id, req.user.id, { assertIdle }),
-    )
+    const result = await workspaces.restore(req.params.id, req.user.id, {
+      assertIdle,
+    })
+    if (workspaces.get(entry.projectId, req.user.id).needsPreparation)
+      closeProjectEditors(entry.projectId)
+    res.json(result)
   })
   publisher = await new GitPublisher({
     dataDir,

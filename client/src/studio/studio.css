@@ -2712,3 +2712,26 @@ body.panel-resizing iframe {
   line-height: 1.6;
   margin: 0 0 20px;
 }
+
+.setup-file-editor {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg);
+  color: var(--text);
+  padding: 16px;
+  font-family: monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+.setup-editor-details {
+  padding: 0 12px;
+  max-height: 180px;
+  overflow: auto;
+  flex-shrink: 0;
+}

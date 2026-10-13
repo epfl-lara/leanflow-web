@@ -1,3 +1,7 @@
+import {
+  TemporaryWorkspaces,
+  removeDisposableTree,
+} from './temporary-workspaces.mjs'
 import { spawn as spawnChild } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -158,10 +162,29 @@ export class Runtime {
     this.queue = []
     this.ready = false
     this.error = null
+    this.temporaryWorkspaces = new TemporaryWorkspaces({
+      directory: path.join(this.runtimeDir, 'temporary-workspaces'),
+      allowedRoots: [
+        path.join(this.runtimeDir, 'shared-dependency-stages'),
+        path.join(this.dataDir, 'setup-repairs'),
+      ],
+      cleanup: (root) => this.#removeTemporaryWorkspace(root),
+    })
     this.stopping = false
   }
 
   async init() {
+    await fsp.mkdir(this.dataDir, { recursive: true, mode: 0o700 })
+    this.dataDir = await fsp.realpath(this.dataDir)
+    this.runtimeDir = path.join(this.dataDir, 'runtime')
+    this.temporaryWorkspaces.directory = path.join(
+      this.runtimeDir,
+      'temporary-workspaces',
+    )
+    this.temporaryWorkspaces.allowedRoots = [
+      path.join(this.runtimeDir, 'shared-dependency-stages'),
+      path.join(this.dataDir, 'setup-repairs'),
+    ]
     this.lemexCommit = null
     this.lemexNativeBuildCommit = null
     await fsp.mkdir(this.runtimeDir, { recursive: true, mode: 0o700 })
@@ -241,7 +264,65 @@ export class Runtime {
       /* First startup has no registry. */
     }
     this.#reloadDependencies()
+    if (this.ready) {
+      try {
+        const containers = await this.#host(['ps', '-q'])
+        if (containers.code === 0) {
+          const ids = containers.stdout.trim().split(/\s+/).filter(Boolean)
+          const inspected = ids.length
+            ? await this.#host([
+                'inspect',
+                '--format',
+                '{{json .Mounts}}',
+                ...ids,
+              ])
+            : { code: 0, stdout: '' }
+          if (inspected.code === 0) {
+            const mounts = inspected.stdout
+              .trim()
+              .split('\n')
+              .filter(Boolean)
+              .flatMap((line) => JSON.parse(line).map((mount) => mount.Source))
+            await this.temporaryWorkspaces.sweep(mounts)
+          }
+        }
+      } catch (error) {
+        console.warn('Deferred startup workspace cleanup:', error.message)
+      }
+    }
     return this.info()
+  }
+
+  async claimTemporaryWorkspace(root) {
+    await this.temporaryWorkspaces.claim(root)
+  }
+
+  async releaseTemporaryWorkspace(root) {
+    await this.temporaryWorkspaces.release(root)
+  }
+
+  async #removeTemporaryWorkspace(root) {
+    this.#reloadDependencies()
+    if (
+      [...this.dependencies].some(
+        ([target, source]) => target !== root && source === root,
+      )
+    )
+      return false
+    await this.#persistDependencies({ delete: [root] })
+    this.dependencies.delete(root)
+    await removeDisposableTree(root)
+    const digest = createHash('sha256').update(root).digest('hex')
+    await removeDisposableTree(path.join(this.runtimeDir, 'homes', digest))
+    await fsp.rm(
+      path.join(
+        this.runtimeDir,
+        'shared-dependency-bindings',
+        digest + '.json',
+      ),
+      { force: true },
+    )
+    return true
   }
 
   #reloadDependencies() {
@@ -341,11 +422,11 @@ export class Runtime {
     return source
   }
 
-  async clearInheritedDependencies(root) {
+  async clearInheritedDependencies(root, { force = false } = {}) {
     this.#reloadDependencies()
     const actual = this.#root(root)
     const source = this.dependencies.get(actual)
-    if (source !== actual && !this.#sharedSource(source)) return false
+    if (!force && source !== actual && !this.#sharedSource(source)) return false
     this.dependencies.delete(actual)
     await this.#persistDependencies({ delete: [actual] })
     return true
@@ -524,6 +605,10 @@ export class Runtime {
       ...preset,
       ready: Boolean(this.templateRoot(preset.id)),
     }))
+  }
+
+  presetDefinition(id) {
+    return presetDefinitions.find((preset) => preset.id === id)
   }
 
   templateRoot(id) {
@@ -878,7 +963,15 @@ export class Runtime {
     return child
   }
 
+  spawnWhenAvailable(root, args, options = {}) {
+    return this.#schedule(root, args, options, true)
+  }
+
   run(root, args, options = {}) {
+    return this.#schedule(root, args, options, false)
+  }
+
+  #schedule(root, args, options, spawnOnly) {
     this.#assertReady()
     if (
       options.input !== undefined &&
@@ -893,7 +986,9 @@ export class Runtime {
         options.signal.reason || new Error('Worker job was cancelled'),
       )
     if (this.children.size < this.maxConcurrent)
-      return this.#run(root, args, options)
+      return spawnOnly
+        ? Promise.resolve(this.spawn(root, args, options))
+        : this.#run(root, args, options)
     if (this.queue.length >= this.maxQueue)
       return Promise.reject(
         Object.assign(new Error('Workspace job queue is full'), {
@@ -901,7 +996,7 @@ export class Runtime {
         }),
       )
     return new Promise((resolve, reject) => {
-      const job = { root, args, options, resolve, reject }
+      const job = { root, args, options, resolve, reject, spawnOnly }
       const abort = () => {
         const index = this.queue.indexOf(job)
         if (index >= 0) {
@@ -976,7 +1071,14 @@ export class Runtime {
         )
         continue
       }
-      this.#run(job.root, job.args, job.options).then(job.resolve, job.reject)
+      if (job.spawnOnly) {
+        try {
+          job.resolve(this.spawn(job.root, job.args, job.options))
+        } catch (error) {
+          job.reject(error)
+        }
+      } else
+        this.#run(job.root, job.args, job.options).then(job.resolve, job.reject)
     }
   }
 
@@ -995,6 +1097,9 @@ export class Runtime {
     this.installing.set(toolchain, install)
     try {
       return await install
+    } catch (error) {
+      error.infrastructure = true
+      throw error
     } finally {
       this.installing.delete(toolchain)
     }
