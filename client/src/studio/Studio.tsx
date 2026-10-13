@@ -1529,7 +1529,9 @@ export function Studio() {
                   }
                 >
                   <Icon name="check" size={14} />
-                  {job && !terminalJob(job) ? 'Checking…' : 'Check Lean'}
+                  {job && !terminalJob(job)
+                    ? 'Checking…'
+                    : 'Check Entire Project'}
                 </button>
               </div>
             </div>
