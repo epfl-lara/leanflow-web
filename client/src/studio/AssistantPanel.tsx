@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import {
+  memo,
+  startTransition,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import {
   api,
@@ -17,6 +25,8 @@ import { Dialog } from './Dialog'
 import { ChatPicker, type ChatChoice } from './ChatPicker'
 import { FileContextPicker } from './FileContextPicker'
 import { OptimizationSummary } from './OptimizationSummary'
+import { appendRunEvents, mergeRunSnapshot } from './runStream'
+import { useConversationScroll } from './useConversationScroll'
 
 const markdownComponents: Components = {
   a: ({ node: _node, href, children, ...props }) => {
@@ -152,32 +162,20 @@ const modes: {
   },
 ]
 
-function normalizedEvents(run: Run): RunEvent[] {
-  return Array.isArray(run.events) ? run.events : []
-}
-
-function mergeRun(previous: Run | null, value: Run) {
-  if (!previous || previous.id !== value.id) return value
-  const events = new Map(
-    normalizedEvents(previous).map((event) => [event.seq, event]),
+const OutputText = memo(function OutputText({
+  text,
+  streaming = false,
+}: {
+  text: string
+  streaming?: boolean
+}) {
+  if (streaming) return <div className="streaming-text">{text}</div>
+  return (
+    <ReactMarkdown skipHtml components={markdownComponents}>
+      {text}
+    </ReactMarkdown>
   )
-  for (const event of normalizedEvents(value)) events.set(event.seq, event)
-  return {
-    ...value,
-    events: [...events.values()].sort((a, b) => a.seq - b.seq),
-  }
-}
-
-function eventText(event: RunEvent) {
-  const data = event.data
-  return typeof data === 'string'
-    ? data
-    : typeof data?.text === 'string'
-      ? data.text
-      : typeof data?.message === 'string'
-        ? data.message
-        : ''
-}
+})
 
 function Verification({ value }: { value: unknown }) {
   if (!value || typeof value !== 'object') return null
@@ -356,7 +354,10 @@ export function AssistantPanel({
   const [applying, setApplying] = useState(false)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
   const [discarding, setDiscarding] = useState(false)
-  const messagesEnd = useRef<HTMLDivElement>(null)
+  const [reasoningOpen, setReasoningOpen] = useState(false)
+  const [activityOpen, setActivityOpen] = useState(false)
+  const [optionsOpen, setOptionsOpen] = useState(true)
+  const conversationScroll = useConversationScroll(selectedId)
   const onFilesUpdatedRef = useRef(onFilesUpdated)
   onFilesUpdatedRef.current = onFilesUpdated
   const liveRevision = useRef<string | null>(null)
@@ -370,6 +371,11 @@ export function AssistantPanel({
   const hasActive = active || !!otherActive
   const currentSection = mode === 'repair' || mode === 'prove' ? 'proofs' : mode
   const currentMode = modes.find((item) => item.id === mode)!
+  useEffect(() => {
+    setReasoningOpen(false)
+    setActivityOpen(false)
+    setOptionsOpen(!selectedId)
+  }, [selectedId])
   useEffect(() => {
     if (readOnly) setMode('search')
   }, [readOnly])
@@ -526,13 +532,15 @@ export function AssistantPanel({
     let cancelled = false
     let stream: EventSource | undefined
     let poll: ReturnType<typeof setInterval> | undefined
+    let batchTimer: ReturnType<typeof setTimeout> | undefined
+    let pending: RunEvent[] = []
     const refresh = async () => {
       try {
         const value = await api<Run>(
           `/api/runs/${encodeURIComponent(selectedId)}`,
         )
         if (cancelled) return
-        setRun((previous) => mergeRun(previous, value))
+        setRun((previous) => mergeRunSnapshot(previous, value))
         const revision = `${value.id}:${value.liveRevision || 0}:${!!value.liveUndone}`
         if (value.liveEdits && revision !== liveRevision.current) {
           liveRevision.current = revision
@@ -551,15 +559,47 @@ export function AssistantPanel({
         if (!cancelled) setError(errorText(error))
       }
     }
+    const flush = () => {
+      clearTimeout(batchTimer)
+      batchTimer = undefined
+      if (cancelled || !pending.length) return
+      const batch = pending
+      pending = []
+      startTransition(() =>
+        setRun((previous) =>
+          previous?.id === selectedId
+            ? appendRunEvents(previous, batch)
+            : previous,
+        ),
+      )
+      const paths = new Set<string>()
+      for (const event of batch) {
+        if (event.type === 'files-updated' && Array.isArray(event.data?.paths))
+          for (const path of event.data.paths)
+            if (typeof path === 'string') paths.add(path)
+      }
+      if (paths.size)
+        void onFilesUpdatedRef
+          .current([...paths])
+          .catch((error) => setError(errorText(error)))
+      if (batch.some((event) => event.type === 'status')) void refresh()
+    }
     setError('')
+    setConnection('')
     setRun(null)
     void api<Run>(`/api/runs/${encodeURIComponent(selectedId)}`)
       .then((value) => {
         if (cancelled) return
         setRun(value)
         if (!runIsActive(value)) return
+        poll = setInterval(() => {
+          void refresh()
+        }, 4000)
+        // Older servers can still provide polled snapshots during deployment.
+        // Without a cursor, replay would duplicate the already captured text.
+        if (!Number.isSafeInteger(value.eventCursor)) return
         stream = new EventSource(
-          `/api/runs/${encodeURIComponent(selectedId)}/events`,
+          `/api/runs/${encodeURIComponent(selectedId)}/events?after=${value.eventCursor}`,
         )
         stream.addEventListener('open', () => {
           if (!cancelled) setConnection('Live')
@@ -569,36 +609,9 @@ export function AssistantPanel({
           try {
             const event = JSON.parse((raw as MessageEvent).data) as RunEvent
             if (!event || typeof event.type !== 'string') return
-            setRun((previous) => {
-              if (!previous || previous.id !== selectedId) return previous
-              const events = normalizedEvents(previous)
-              if (events.some((item) => item.seq === event.seq)) return previous
-              const next = {
-                ...previous,
-                events: [...events, event].sort((a, b) => a.seq - b.seq),
-              }
-              if (
-                event.type === 'status' &&
-                typeof event.data?.status === 'string'
-              )
-                next.status = event.data.status
-              if (event.type === 'verification') next.verification = event.data
-              if (
-                event.type === 'changes' &&
-                Array.isArray(event.data?.changes)
-              )
-                next.changes = event.data.changes as Change[]
-              if (event.type === 'usage') next.usage = event.data
-              return next
-            })
-            if (
-              event.type === 'files-updated' &&
-              Array.isArray(event.data?.paths)
-            )
-              void onFilesUpdatedRef
-                .current(event.data.paths as string[])
-                .catch((error) => setError(errorText(error)))
-            if (event.type === 'status') void refresh()
+            pending.push(event)
+            if (event.type === 'status') flush()
+            else batchTimer ||= setTimeout(flush, 250)
           } catch {
             void refresh()
           }
@@ -607,9 +620,6 @@ export function AssistantPanel({
           if (!cancelled) setConnection('Reconnecting…')
           void refresh()
         })
-        poll = setInterval(() => {
-          void refresh()
-        }, 4000)
       })
       .catch((error) => {
         if (!cancelled) setError(errorText(error))
@@ -618,38 +628,15 @@ export function AssistantPanel({
       cancelled = true
       stream?.close()
       if (poll) clearInterval(poll)
+      clearTimeout(batchTimer)
+      pending = []
     }
   }, [selectedId, loadRuns, loadChats])
 
-  const events = run ? normalizedEvents(run) : []
-  const text = events
-    .filter((event) => event.type === 'message')
-    .map(eventText)
-    .join('')
-  const reasoning =
-    events
-      .filter((event) => event.type === 'reasoning')
-      .map(eventText)
-      .join('') ||
-    run?.reasoning ||
-    ''
-  const reasoningSummary =
-    events
-      .filter((event) => event.type === 'reasoning-summary')
-      .map(eventText)
-      .join('') ||
-    run?.reasoningSummary ||
-    ''
-  const activities = events.filter((event) =>
-    ['activity', 'error'].includes(event.type),
-  )
-  useEffect(() => {
-    if (active)
-      messagesEnd.current?.scrollIntoView({
-        block: 'nearest',
-        behavior: 'smooth',
-      })
-  }, [text.length, reasoning.length, reasoningSummary.length, active])
+  const text = run?.message || ''
+  const reasoning = run?.reasoning || ''
+  const reasoningSummary = run?.reasoningSummary || ''
+  const activity = typeof run?.log === 'string' ? run.log : ''
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -697,7 +684,18 @@ export function AssistantPanel({
       const value = await post<Run>(
         `/api/runs/${encodeURIComponent(run.id)}/stop`,
       )
-      setRun(value)
+      setRun((previous) =>
+        previous?.id === value.id
+          ? mergeRunSnapshot(previous, value)
+          : previous,
+      )
+      // Stop waits for a pending live write, which can finish after the terminal
+      // status has closed our stream. Refresh those saved files one last time.
+      if (value.liveEdits)
+        await onFilesUpdatedRef.current(
+          (value.liveChanges || []).map((change) => change.path),
+        )
+      await loadRuns()
     } catch (error) {
       setError(errorText(error))
     }
@@ -720,7 +718,11 @@ export function AssistantPanel({
       const value = await post<Run>(
         `/api/runs/${encodeURIComponent(run.id)}/apply`,
       )
-      setRun(value)
+      setRun((previous) =>
+        previous?.id === value.id
+          ? mergeRunSnapshot(previous, value)
+          : previous,
+      )
       await onApplied()
       await loadRuns()
       // Keep the native modal active until the editor reload has finished, so
@@ -742,7 +744,11 @@ export function AssistantPanel({
       const value = await post<Run>(
         `/api/runs/${encodeURIComponent(run.id)}/undo`,
       )
-      setRun(value)
+      setRun((previous) =>
+        previous?.id === value.id
+          ? mergeRunSnapshot(previous, value)
+          : previous,
+      )
       await onFilesUpdatedRef.current(
         (value.liveChanges || []).map((change) => change.path),
       )
@@ -798,7 +804,7 @@ export function AssistantPanel({
               key={item.id}
               className={currentSection === item.id ? 'selected' : ''}
               aria-pressed={currentSection === item.id}
-              disabled={active || (readOnly && item.id !== 'search')}
+              disabled={readOnly && item.id !== 'search'}
               onClick={() =>
                 setMode(item.id === 'proofs' ? proofMode : (item.id as Mode))
               }
@@ -807,72 +813,84 @@ export function AssistantPanel({
             </button>
           ))}
         </div>
-        {currentSection === 'proofs' && (
-          <div className="proof-task-tabs" aria-label="Proof task">
-            {(['repair', 'prove'] as const).map((task) => (
-              <button
-                key={task}
-                className={mode === task ? 'selected' : ''}
-                aria-pressed={mode === task}
-                disabled={active || readOnly}
-                onClick={() => {
-                  setProofMode(task)
-                  setMode(task)
-                }}
-              >
-                {task === 'repair' ? 'Repair a proof' : 'Find a proof'}
-              </button>
-            ))}
-          </div>
-        )}
-        <p className="mode-hint">{currentMode.hint}</p>
-        <div className="assistant-options">
-          <label>
-            Model
-            <select
-              value={model}
-              onChange={(event) => setModel(event.target.value)}
-              disabled={active}
-            >
-              {session.models.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name || item.id}
-                </option>
+        <details
+          className="assistant-run-options"
+          open={optionsOpen}
+          onToggle={(event) => setOptionsOpen(event.currentTarget.open)}
+        >
+          <summary>
+            {hasActive ? 'Next task options' : 'Run options'}
+            <span>
+              {session.models.find((item) => item.id === model)?.name || model}
+            </span>
+          </summary>
+          {currentSection === 'proofs' && (
+            <div className="proof-task-tabs" aria-label="Proof task">
+              {(['repair', 'prove'] as const).map((task) => (
+                <button
+                  key={task}
+                  className={mode === task ? 'selected' : ''}
+                  aria-pressed={mode === task}
+                  disabled={readOnly}
+                  onClick={() => {
+                    setProofMode(task)
+                    setMode(task)
+                  }}
+                >
+                  {task === 'repair' ? 'Repair a proof' : 'Find a proof'}
+                </button>
               ))}
-            </select>
+            </div>
+          )}
+          <p className="mode-hint">{currentMode.hint}</p>
+          <div className="assistant-options">
+            <label>
+              Model
+              <select
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+                disabled={busy}
+              >
+                {session.models.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name || item.id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Time limit (optional)
+              <select
+                value={seconds}
+                onChange={(event) => setSeconds(event.target.value)}
+                disabled={busy}
+              >
+                <option value="unlimited">Until done</option>
+                <option value="120">2 minutes</option>
+                <option value="300">5 minutes</option>
+                <option value="900">15 minutes</option>
+                <option value="1800">30 minutes</option>
+              </select>
+            </label>
+          </div>
+          <label className="live-edit-choice">
+            <input
+              type="checkbox"
+              checked={liveEdits}
+              disabled={busy}
+              onChange={(event) => setLiveEdits(event.target.checked)}
+            />
+            <span>
+              <strong>Edit files live</strong>
+              <span>
+                {liveEdits
+                  ? 'Changes appear in your project as Lemex works.'
+                  : 'Keep edits separate until you review and apply them.'}
+              </span>
+            </span>
           </label>
-          <label>
-            Time limit (optional)
-            <select
-              value={seconds}
-              onChange={(event) => setSeconds(event.target.value)}
-              disabled={active}
-            >
-              <option value="unlimited">Until done</option>
-              <option value="120">2 minutes</option>
-              <option value="300">5 minutes</option>
-              <option value="900">15 minutes</option>
-              <option value="1800">30 minutes</option>
-            </select>
-          </label>
-        </div>
+        </details>
       </div>
-      <label className="live-edit-choice">
-        <input
-          type="checkbox"
-          checked={liveEdits}
-          disabled={active}
-          onChange={(event) => setLiveEdits(event.target.checked)}
-        />
-        <span>
-          <strong>Edit files live</strong>
-          <span>
-            {liveEdits
-              ? 'Changes appear in your project as Lemex works.'
-              : 'Keep edits separate until you review and apply them.'}
-          </span>
-        </span>
-      </label>
       {runs.length > 0 && (
         <div className="run-history">
           <Icon name="log" size={15} />
@@ -908,227 +926,266 @@ export function AssistantPanel({
           </button>
         </div>
       )}
-      <div
-        className="assistant-conversation"
-        aria-live="polite"
-        aria-atomic="false"
-      >
-        {run ? (
-          <>
-            <div className="run-status">
-              <span
-                className={`tag ${run.status === 'completed' || run.status === 'applied' ? 'success' : run.status === 'failed' ? 'danger' : ''}`}
-              >
-                {active && <span className="spinner" />}
-                {run.status}
-              </span>
-              {connection && <span className="field-help">{connection}</span>}
-              {active && (
-                <button
-                  className="button small secondary"
-                  onClick={stop}
-                  disabled={run.status === 'stopping'}
-                >
-                  <Icon name="stop" size={13} />
-                  Stop
-                </button>
-              )}
-            </div>
-            {runs
-              .filter(
-                (item) =>
-                  item.id !== run.id &&
-                  (item.createdAt || '') < (run.createdAt || ''),
-              )
-              .reverse()
-              .map((item) => (
-                <div className="chat-previous-turn" key={item.id}>
-                  <div className="user-message">
-                    <span className="message-label">You · {item.mode}</span>
-                    <p>{item.prompt}</p>
-                  </div>
-                  {item.message && (
-                    <div className="assistant-message">
-                      <span className="message-label">
-                        <Icon name="bot" size={14} />
-                        Lemex
-                      </span>
-                      <div className="markdown-body">
-                        <ReactMarkdown skipHtml components={markdownComponents}>
-                          {item.message}
-                        </ReactMarkdown>
+      {run && (
+        <div className="run-status" aria-live="polite">
+          <span
+            className={`tag ${run.status === 'completed' || run.status === 'applied' ? 'success' : run.status === 'failed' ? 'danger' : ''}`}
+          >
+            {active && <span className="spinner" />}
+            {run.status}
+          </span>
+          <span className="field-help">
+            {run.mode}
+            {connection ? ` · ${connection}` : ''}
+          </span>
+          {active && (
+            <button
+              className="button small secondary"
+              onClick={stop}
+              disabled={run.status === 'stopping'}
+            >
+              <Icon name="stop" size={13} />
+              Stop
+            </button>
+          )}
+        </div>
+      )}
+      <div className="assistant-output">
+        <div
+          className="assistant-conversation"
+          ref={conversationScroll.viewport}
+          role="region"
+          aria-label="Assistant conversation"
+          tabIndex={0}
+          onScroll={conversationScroll.onScroll}
+          onWheel={(event) => {
+            if (event.deltaY < 0) conversationScroll.pause()
+          }}
+          onPointerDown={conversationScroll.pause}
+          onKeyDown={(event) => {
+            if (
+              ['ArrowUp', 'PageUp', 'Home'].includes(event.key) ||
+              (event.key === ' ' && event.shiftKey)
+            )
+              conversationScroll.pause()
+          }}
+        >
+          <div ref={conversationScroll.content}>
+            {run ? (
+              <>
+                {runs
+                  .filter(
+                    (item) =>
+                      item.id !== run.id &&
+                      (item.createdAt || '') < (run.createdAt || ''),
+                  )
+                  .reverse()
+                  .map((item) => (
+                    <div className="chat-previous-turn" key={item.id}>
+                      <div className="user-message">
+                        <span className="message-label">You · {item.mode}</span>
+                        <p>{item.prompt}</p>
                       </div>
-                    </div>
-                  )}
-                  <button
-                    className="button small subtle"
-                    onClick={() => setSelectedId(item.id)}
-                  >
-                    Inspect this turn
-                  </button>
-                </div>
-              ))}
-            {run.prompt && (
-              <div className="user-message">
-                <span className="message-label">You · {run.mode}</span>
-                <p>{run.prompt}</p>
-              </div>
-            )}
-            {(reasoning || reasoningSummary) && (
-              <details className="reasoning-trace" open={active}>
-                <summary>
-                  <Icon name="bot" size={14} />
-                  Reasoning trace{active && <span className="spinner" />}
-                </summary>
-                <p className="field-help">Exposed by the selected model.</p>
-                {reasoningSummary && (
-                  <div className="markdown-body reasoning-summary">
-                    <ReactMarkdown skipHtml components={markdownComponents}>
-                      {reasoningSummary}
-                    </ReactMarkdown>
-                  </div>
-                )}
-                {reasoning && (
-                  <div className="markdown-body reasoning-content">
-                    <ReactMarkdown skipHtml components={markdownComponents}>
-                      {reasoning}
-                    </ReactMarkdown>
-                  </div>
-                )}
-              </details>
-            )}
-            {run.liveEdits && (
-              <div className="live-edit-status">
-                <strong>
-                  {run.liveUndone
-                    ? 'Live edits undone'
-                    : 'Editing project files live'}
-                </strong>
-                <p>
-                  {run.liveUndone
-                    ? 'The original saved files were restored.'
-                    : 'Edits are saved as the agent works. Lean verifies the final result; you can undo the run when it stops.'}
-                </p>
-                {run.liveEditConflict && (
-                  <p className="error-message">{run.liveEditConflict}</p>
-                )}
-                {!active && !run.liveUndone && !!run.liveChanges?.length && (
-                  <button
-                    className="button small secondary"
-                    disabled={undoing || dirty || hasActive}
-                    onClick={() => void undoLiveEdits()}
-                  >
-                    {undoing ? 'Undoing…' : 'Undo agent edits'}
-                  </button>
-                )}
-              </div>
-            )}
-            {(text || run.message) && (
-              <div className="assistant-message">
-                <span className="message-label">
-                  <Icon name="bot" size={14} />
-                  Lemex
-                </span>
-                <div className="message-body markdown-body">
-                  <ReactMarkdown skipHtml components={markdownComponents}>
-                    {text || run.message || ''}
-                  </ReactMarkdown>
-                </div>
-              </div>
-            )}
-            {activities.length > 0 && (
-              <details className="activity-log" open={active}>
-                <summary>
-                  {active ? 'Working' : 'Activity'} · {activities.length} events
-                </summary>
-                <div>
-                  {activities.map((event, index) => (
-                    <div
-                      key={`${event.seq}-${index}`}
-                      className={event.type === 'error' ? 'error-activity' : ''}
-                    >
-                      <span className="activity-bullet" />
-                      {eventText(event) || pretty(event.data)}
+                      {item.message && (
+                        <div className="assistant-message">
+                          <span className="message-label">
+                            <Icon name="bot" size={14} />
+                            Lemex
+                          </span>
+                          <div className="markdown-body">
+                            <OutputText text={item.message} />
+                          </div>
+                        </div>
+                      )}
+                      <button
+                        className="button small subtle"
+                        onClick={() => setSelectedId(item.id)}
+                      >
+                        Inspect this turn
+                      </button>
                     </div>
                   ))}
-                </div>
-              </details>
-            )}
-            {active && !text && !activities.length && (
-              <p className="working-message">
-                <span className="spinner" />
-                Lemex is preparing the project context…
-              </p>
-            )}
-            {run.error && (
-              <p className="error-message" role="alert">
-                {run.error}
-              </p>
-            )}
-            <Verification value={run.verification} />
-            <OptimizationSummary value={run.optimization} active={active} />
-            {!!run.changes?.length && (
-              <div className="candidate-card">
-                <strong>
-                  {run.changes.length} changed{' '}
-                  {run.changes.length === 1 ? 'file' : 'files'}
-                </strong>
-                <p>
-                  {run.liveEdits
-                    ? run.liveUndone
-                      ? 'These edits have been undone.'
-                      : 'Agent edits were saved live. You can inspect the diff.'
-                    : run.status === 'applied'
-                      ? 'These changes have been applied to the project.'
-                      : 'Review the candidate before applying it to your files.'}
-                </p>
-                <button
-                  className="button secondary"
-                  onClick={() => {
-                    setConfirmDiscard(false)
-                    setShowDiff(true)
-                  }}
-                >
-                  <Icon name="file" size={15} />
-                  {run.liveEdits ? 'View edits' : 'Review changes'}
-                </button>
+                {run.prompt && (
+                  <div className="user-message">
+                    <span className="message-label">You · {run.mode}</span>
+                    <p>{run.prompt}</p>
+                  </div>
+                )}
+                {(reasoning || reasoningSummary) && (
+                  <details
+                    className="reasoning-trace"
+                    open={reasoningOpen}
+                    onToggle={(event) =>
+                      setReasoningOpen(event.currentTarget.open)
+                    }
+                  >
+                    <summary>
+                      <Icon name="bot" size={14} />
+                      Reasoning trace{active && <span className="spinner" />}
+                    </summary>
+                    {reasoningOpen && (
+                      <>
+                        <p className="field-help">
+                          Exposed by the selected model.
+                        </p>
+                        {reasoningSummary && (
+                          <div className="markdown-body reasoning-summary">
+                            <OutputText
+                              text={reasoningSummary}
+                              streaming={active}
+                            />
+                          </div>
+                        )}
+                        {reasoning && (
+                          <div className="markdown-body reasoning-content">
+                            <OutputText text={reasoning} streaming={active} />
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </details>
+                )}
+                {run.liveEdits && (
+                  <div className="live-edit-status">
+                    <strong>
+                      {run.liveUndone
+                        ? 'Live edits undone'
+                        : 'Editing project files live'}
+                    </strong>
+                    <p>
+                      {run.liveUndone
+                        ? 'The original saved files were restored.'
+                        : 'Edits are saved as the agent works. Lean verifies the final result; you can undo the run when it stops.'}
+                    </p>
+                    {run.liveEditConflict && (
+                      <p className="error-message">{run.liveEditConflict}</p>
+                    )}
+                    {!active &&
+                      !run.liveUndone &&
+                      !!run.liveChanges?.length && (
+                        <button
+                          className="button small secondary"
+                          disabled={undoing || dirty || hasActive}
+                          onClick={() => void undoLiveEdits()}
+                        >
+                          {undoing ? 'Undoing…' : 'Undo agent edits'}
+                        </button>
+                      )}
+                  </div>
+                )}
+                {(text || run.message) && (
+                  <div className="assistant-message">
+                    <span className="message-label">
+                      <Icon name="bot" size={14} />
+                      Lemex
+                    </span>
+                    <div className="message-body markdown-body">
+                      <OutputText text={text} streaming={active} />
+                    </div>
+                  </div>
+                )}
+                {activity && (
+                  <details
+                    className="activity-log"
+                    open={activityOpen}
+                    onToggle={(event) =>
+                      setActivityOpen(event.currentTarget.open)
+                    }
+                  >
+                    <summary>
+                      Activity {active && <span className="spinner" />}
+                    </summary>
+                    {activityOpen && (
+                      <div className="activity-output">
+                        <pre>{activity}</pre>
+                      </div>
+                    )}
+                  </details>
+                )}
+                {active && !text && !activity && (
+                  <p className="working-message">
+                    <span className="spinner" />
+                    Lemex is preparing the project context…
+                  </p>
+                )}
+                {run.error && (
+                  <p className="error-message" role="alert">
+                    {run.error}
+                  </p>
+                )}
+                <Verification value={run.verification} />
+                <OptimizationSummary value={run.optimization} active={active} />
+                {!!run.changes?.length && (
+                  <div className="candidate-card">
+                    <strong>
+                      {run.changes.length} changed{' '}
+                      {run.changes.length === 1 ? 'file' : 'files'}
+                    </strong>
+                    <p>
+                      {run.liveEdits
+                        ? run.liveUndone
+                          ? 'These edits have been undone.'
+                          : 'Agent edits were saved live. You can inspect the diff.'
+                        : run.status === 'applied'
+                          ? 'These changes have been applied to the project.'
+                          : 'Review the candidate before applying it to your files.'}
+                    </p>
+                    <button
+                      className="button secondary"
+                      onClick={() => {
+                        setConfirmDiscard(false)
+                        setShowDiff(true)
+                      }}
+                    >
+                      <Icon name="file" size={15} />
+                      {run.liveEdits ? 'View edits' : 'Review changes'}
+                    </button>
+                  </div>
+                )}
+                {run.usage != null && (
+                  <details className="usage-details">
+                    <summary>Usage</summary>
+                    <pre>{pretty(run.usage)}</pre>
+                  </details>
+                )}
+              </>
+            ) : (
+              <div
+                className="assistant-starters"
+                role="group"
+                aria-label={`${currentMode.name} suggestions`}
+              >
+                {currentMode.suggestions.map((suggestion) => (
+                  <button
+                    key={suggestion.label}
+                    type="button"
+                    disabled={busy || chatBusy}
+                    onClick={() => {
+                      setPrompt(suggestion.prompt)
+                      document.getElementById('assistant-prompt')?.focus()
+                    }}
+                  >
+                    {suggestion.label}
+                  </button>
+                ))}
               </div>
             )}
-            {run.usage != null && (
-              <details className="usage-details">
-                <summary>Usage</summary>
-                <pre>{pretty(run.usage)}</pre>
-              </details>
-            )}
-            <div ref={messagesEnd} />
-          </>
-        ) : (
-          <div
-            className="assistant-starters"
-            role="group"
-            aria-label={`${currentMode.name} suggestions`}
-          >
-            {currentMode.suggestions.map((suggestion) => (
-              <button
-                key={suggestion.label}
-                type="button"
-                disabled={busy || chatBusy}
-                onClick={() => {
-                  setPrompt(suggestion.prompt)
-                  document.getElementById('assistant-prompt')?.focus()
-                }}
-              >
-                {suggestion.label}
-              </button>
-            ))}
           </div>
+        </div>
+        {run && !conversationScroll.following && (
+          <button
+            className="jump-to-latest button small secondary"
+            onClick={conversationScroll.jumpToLatest}
+          >
+            Jump to latest
+          </button>
         )}
       </div>
       <FileContextPicker
         files={files}
         selected={contextFiles}
         onChange={setContextFiles}
-        disabled={active || busy}
+        disabled={busy}
       />
       <form className="assistant-composer" onSubmit={submit}>
         <div className="composer-context">
@@ -1145,7 +1202,7 @@ export function AssistantPanel({
           rows={3}
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
-          disabled={active || busy}
+          disabled={busy}
           onKeyDown={(event) => {
             if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
               event.preventDefault()
@@ -1160,11 +1217,13 @@ export function AssistantPanel({
         )}
         <div className="composer-footer">
           <span>
-            {!file && mode !== 'search'
-              ? 'Open a Lean file to begin.'
-              : readOnly
-                ? 'Read-only library context'
-                : 'Ctrl / ⌘ + Enter to run'}
+            {hasActive
+              ? 'Draft your next message while Lemex works.'
+              : !file && mode !== 'search'
+                ? 'Open a Lean file to begin.'
+                : readOnly
+                  ? 'Read-only library context'
+                  : 'Ctrl / ⌘ + Enter to run'}
           </span>
           <button
             type="submit"

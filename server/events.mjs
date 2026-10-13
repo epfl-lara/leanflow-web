@@ -29,6 +29,13 @@ export class EventStore extends EventEmitter {
     if (owner !== undefined && job.owner !== owner) throw Object.assign(new Error('Job not found.'), { status: 404 })
     return job
   }
+  snapshot(id, owner) {
+    // Both reads are synchronous: no event producer can run between reading the
+    // accumulated fields and the replay cursor in this server process.
+    const job = this.get(id, owner)
+    const eventCursor = Number(this.db.prepare('SELECT COALESCE(MAX(seq),0) AS cursor FROM events WHERE job=?').get(id).cursor)
+    return { ...job, eventCursor }
+  }
   list(owner, projectId, kind = 'agent') {
     return this.db.prepare("SELECT payload FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.kind')=? ORDER BY rowid DESC LIMIT 100").all(owner, projectId, kind).map(row => JSON.parse(row.payload))
   }

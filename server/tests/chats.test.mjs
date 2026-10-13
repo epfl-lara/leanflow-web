@@ -164,6 +164,7 @@ test('chat HTTP APIs enforce scope, create turns with attachments, and redact pr
   const response = await f.request(`/api/chats/${chat.id}/runs`, { method: 'POST', body: input }); assert.equal(response.status, 202)
   const run = await response.json()
   assert.equal(run.chatId, chat.id); assert.equal(run.projectId, f.project.id); assert.deepEqual(run.files, ['Main.lean'])
+  assert.equal(run.eventCursor, 1)
   f.events.update(run.id, { status: 'completed', message: 'Saved result', snapshot: { root: '/private/snapshot' }, verificationRoot: '/private/verification' })
   const history = await (await f.request(`/api/chats/${chat.id}`)).json()
   assert.equal(history.chat.title, input.prompt); assert.equal(history.runs[0].message, 'Saved result')
@@ -172,6 +173,114 @@ test('chat HTTP APIs enforce scope, create turns with attachments, and redact pr
   const renamed = await f.request(`/api/chats/${chat.id}`, { method: 'PATCH', body: { title: 'Renamed session' } }); assert.equal((await renamed.json()).title, 'Renamed session')
   const other = await f.workspaces.create('owner', { preset: 'lean' }); await f.workspaces.jobs.get(other.id)
   assert.equal((await f.request(`/api/projects/${other.id}/runs`, { method: 'POST', body: { ...input, chatId: chat.id } })).status, 404)
+})
+
+test('run snapshots provide an owned cursor for gapless replay without repeating accumulated text', async t => {
+  const f = await httpFixture(t)
+  const job = f.events.create('owner', { kind: 'agent', projectId: f.project.id })
+  f.events.update(job.id, { status: 'running' })
+  f.events.append(job.id, 'message', 'Before snapshot.', 'message')
+  f.events.append(job.id, 'reasoning', 'Earlier reasoning.', 'reasoning')
+  const snapshot = await (await f.request(`/api/runs/${job.id}`)).json()
+  assert.equal(snapshot.message, 'Before snapshot.')
+  assert.equal(snapshot.reasoning, 'Earlier reasoning.')
+  assert.equal(snapshot.eventCursor, f.events.events(job.id).at(-1).seq)
+  assert.equal((await f.request(`/api/jobs/${job.id}`)).status, 200)
+  assert.equal((await f.request(`/api/runs/${job.id}`, { access: f.bobToken })).status, 404)
+  assert.throws(() => f.events.snapshot(job.id, 'bob'), { status: 404 })
+  f.events.append(job.id, 'message', ' After snapshot.', 'message')
+  f.events.update(job.id, { status: 'completed' })
+  const subsequent = f.events.events(job.id, snapshot.eventCursor)
+  const stream = await f.request(`/api/runs/${job.id}/events?after=${snapshot.eventCursor}`)
+  const reader = stream.body.getReader(), decoder = new TextDecoder()
+  let received = '', replayed = []
+  while (!replayed.some(event => event.seq === subsequent.at(-1).seq)) {
+    const chunk = await reader.read()
+    assert.equal(chunk.done, false)
+    received += decoder.decode(chunk.value)
+    replayed = received.split('\n\n').slice(0, -1).flatMap(frame => frame.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6))))
+  }
+  assert.deepEqual(replayed, subsequent)
+  assert(replayed.every(event => event.seq > snapshot.eventCursor))
+  const next = f.events.event(job.id, 'activity', { text: 'Future live event.' })
+  const live = decoder.decode((await reader.read()).value)
+  assert(live.includes(`id: ${next.seq}\n`))
+  await reader.cancel()
+  const latest = await (await f.request(`/api/runs/${job.id}`)).json()
+  assert.equal(latest.message, 'Before snapshot. After snapshot.')
+  assert.equal(latest.eventCursor, next.seq)
+})
+
+test('project run and check creation return initial snapshots with replay cursors', async t => {
+  const f = await httpFixture(t)
+  const response = await f.request(`/api/projects/${f.project.id}/runs`, { method: 'POST', body: { mode: 'repair', prompt: 'A queued task.' } })
+  assert.equal(response.status, 202)
+  const run = await response.json()
+  assert.equal(run.status, 'queued'); assert.equal(run.eventCursor, 1)
+  const stopped = await (await f.request(`/api/runs/${run.id}/stop`, { method: 'POST', body: {} })).json()
+  assert.equal(stopped.status, 'cancelled')
+  assert(stopped.eventCursor > run.eventCursor)
+  assert.equal(stopped.eventCursor, f.events.events(run.id).at(-1).seq)
+  const checkResponse = await f.request(`/api/projects/${f.project.id}/check`, { method: 'POST', body: { path: 'Main.lean' } })
+  assert.equal(checkResponse.status, 202)
+  const check = await checkResponse.json()
+  assert.equal(check.kind, 'check'); assert.equal(check.status, 'queued'); assert.equal(check.eventCursor, 1)
+})
+
+test('run mutation responses wait for actions and return a fresh owned snapshot and cursor', async t => {
+  const f = await httpFixture(t)
+  for (const action of ['stop', 'undo', 'apply']) {
+    const job = f.events.create('owner', { kind: 'agent', projectId: f.project.id, snapshot: { root: '/private' } })
+    f.agents[action] = async (owner, id) => {
+      f.events.get(id, owner)
+      await Promise.resolve()
+      const before = f.events.get(id, owner)
+      f.events.append(id, 'message', `${action} finished.`, 'message')
+      f.events.update(id, { status: action === 'stop' ? 'cancelled' : action === 'apply' ? 'applied' : 'completed', ...(action === 'undo' ? { liveUndone: true, liveRevision: 2 } : {}) })
+      return before // The HTTP response must read the final state after the action.
+    }
+    assert.equal((await f.request(`/api/runs/${job.id}/${action}`, { method: 'POST', body: {}, access: f.bobToken })).status, 404)
+    const response = await f.request(`/api/runs/${job.id}/${action}`, { method: 'POST', body: {} })
+    assert.equal(response.status, 200)
+    const result = await response.json()
+    assert.equal(result.message, `${action} finished.`)
+    assert.equal(result.eventCursor, f.events.events(job.id).at(-1).seq)
+    assert(result.eventCursor > 1)
+    assert.equal(result.status, action === 'stop' ? 'cancelled' : action === 'apply' ? 'applied' : 'completed')
+    if (action === 'undo') { assert.equal(result.liveUndone, true); assert.equal(result.liveRevision, 2) }
+    for (const field of ['owner', 'snapshot', 'verificationRoot']) assert.equal(field in result, false)
+  }
+})
+
+test('project polling omits transcripts and chat polling omits traces and diffs while single runs remain complete', async t => {
+  const f = await httpFixture(t), chat = f.chats.create('owner', f.project.id)
+  const job = f.events.create('owner', { kind: 'agent', projectId: f.project.id, chatId: chat.id, prompt: 'A saved request', files: ['Main.lean'], liveEdits: true })
+  const changes = [{ path: 'Main.lean', before: 'Original source', after: 'Updated source', beforeHash: 'original-hash' }]
+  f.events.update(job.id, {
+    status: 'completed', message: 'A saved answer', reasoning: 'r'.repeat(20_000), reasoningSummary: 'Summary', log: 'l'.repeat(20_000),
+    changes, liveChanges: changes, liveRevision: 3, snapshot: { root: '/private/source' }, verificationRoot: '/private/check', threadId: 'private-native-thread',
+    verification: { complete: true }, optimization: { baseline: { available: true } },
+  })
+  f.chats.appendRun(chat.id, 'owner', job)
+  const listed = (await (await f.request(`/api/projects/${f.project.id}/runs`)).json())[0]
+  const history = (await (await f.request(`/api/chats/${chat.id}`)).json()).runs[0]
+  for (const item of [listed, history]) {
+    assert.equal(item.id, job.id)
+    assert.equal(item.status, 'completed')
+    assert.equal(item.liveRevision, 3)
+    assert.deepEqual(item.files, ['Main.lean'])
+    assert.deepEqual(item.liveChanges, [{ path: 'Main.lean' }])
+    for (const field of ['owner', 'snapshot', 'verificationRoot', 'threadId', 'log', 'reasoning', 'reasoningSummary', 'changes', 'verification', 'optimization']) assert.equal(field in item, false, field)
+  }
+  assert.equal('prompt' in listed, false); assert.equal('message' in listed, false)
+  assert.equal(history.prompt, 'A saved request'); assert.equal(history.message, 'A saved answer')
+  const full = await (await f.request(`/api/runs/${job.id}`)).json()
+  assert.equal(full.reasoning.length, 20_000); assert.equal(full.log.length, 20_000)
+  assert.deepEqual(full.changes, changes); assert.deepEqual(full.liveChanges, changes)
+  assert(Number.isSafeInteger(full.eventCursor))
+  for (const field of ['owner', 'snapshot', 'verificationRoot']) assert.equal(field in full, false)
+  assert.equal(f.chats.history(chat.id, 'owner').runs[0].reasoning.length, 20_000)
+  assert.deepEqual(f.chats.history(chat.id, 'owner').runs[0].changes, changes)
 })
 
 test('HTTP Trash merges chat and file recovery receipts and retains conversations after restore', async t => {

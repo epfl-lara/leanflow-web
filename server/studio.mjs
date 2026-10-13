@@ -20,6 +20,13 @@ import { acquireServerLease } from './lease.mjs'
 const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const publicProject = project => { const { root: _root, ...rest } = project; return rest }
 const publicJob = job => { const { snapshot: _snapshot, verificationRoot: _verificationRoot, owner: _owner, ...rest } = job; return rest }
+const runMetadata = job => {
+  const fields = ['id', 'kind', 'projectId', 'chatId', 'file', 'files', 'mode', 'model', 'status', 'createdAt', 'updatedAt', 'maxSeconds', 'liveEdits', 'liveRevision', 'liveUndone']
+  const result = Object.fromEntries(fields.filter(key => job[key] !== undefined).map(key => [key, job[key]]))
+  if (Array.isArray(job.liveChanges)) result.liveChanges = job.liveChanges.map(change => ({ path: change.path }))
+  return result
+}
+const chatTranscript = job => ({ ...runMetadata(job), prompt: job.prompt || '', message: job.message || '', ...(job.error ? { error: job.error } : {}) })
 
 export async function createStudio({ dataDir = process.env.STUDIO_DATA_DIR || path.join(projectDir, '.data'), runtime: suppliedRuntime, config: suppliedConfig } = {}) {
   dataDir = path.resolve(dataDir)
@@ -140,30 +147,38 @@ export async function createStudio({ dataDir = process.env.STUDIO_DATA_DIR || pa
     } else throw Object.assign(new Error('Choose branch or commit.'), { status: 400 })
     res.json(await workspaces.gitStatus(project.id, req.user.id))
   })
-  app.post('/api/projects/:id/check', (req, res) => res.status(202).json(publicJob(jobs.check(req.user.id, req.params.id, req.body.path))))
-  app.get('/api/jobs/:id', (req, res) => res.json(publicJob(events.get(req.params.id, req.user.id))))
+  app.post('/api/projects/:id/check', (req, res) => {
+    const job = jobs.check(req.user.id, req.params.id, req.body.path)
+    res.status(202).json(publicJob(events.snapshot(job.id, req.user.id)))
+  })
+  app.get('/api/jobs/:id', (req, res) => res.json(publicJob(events.snapshot(req.params.id, req.user.id))))
   app.get('/api/projects/:id/chats', (req, res) => res.json(chats.list(req.user.id, req.params.id)))
   app.post('/api/projects/:id/chats', (req, res) => res.status(201).json(chats.create(req.user.id, req.params.id, req.body)))
   app.get('/api/chats/:id', (req, res) => {
     const { chat, runs } = chats.history(req.params.id, req.user.id)
-    res.json({ chat, runs: runs.map(publicJob) })
+    res.json({ chat, runs: runs.map(chatTranscript) })
   })
   app.patch('/api/chats/:id', (req, res) => res.json(chats.rename(req.params.id, req.user.id, req.body)))
   app.post('/api/chats/:id/runs', (req, res) => {
     const chat = chats.get(req.params.id, req.user.id)
     if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || (req.body.chatId !== undefined && req.body.chatId !== chat.id)) throw Object.assign(new Error('Choose the same chat as this request.'), { status: 400 })
-    res.status(202).json(publicJob(agents.start(req.user.id, chat.projectId, { ...req.body, chatId: chat.id })))
+    const job = agents.start(req.user.id, chat.projectId, { ...req.body, chatId: chat.id })
+    res.status(202).json(publicJob(events.snapshot(job.id, req.user.id)))
   })
   app.post('/api/chats/:id/trash', (req, res) => res.json(chats.trash(req.user.id, req.params.id)))
-  app.post('/api/projects/:id/runs', (req, res) => res.status(202).json(publicJob(agents.start(req.user.id, req.params.id, req.body))))
+  app.post('/api/projects/:id/runs', (req, res) => {
+    const job = agents.start(req.user.id, req.params.id, req.body)
+    res.status(202).json(publicJob(events.snapshot(job.id, req.user.id)))
+  })
   app.get('/api/projects/:id/runs', (req, res) => {
     workspaces.get(req.params.id, req.user.id)
-    res.json(events.list(req.user.id, req.params.id).map(publicJob))
+    res.json(events.list(req.user.id, req.params.id).map(runMetadata))
   })
-  app.get('/api/runs/:id', (req, res) => res.json(publicJob(events.get(req.params.id, req.user.id))))
-  app.post('/api/runs/:id/stop', async (req, res) => res.json(publicJob(await agents.stop(req.user.id, req.params.id))))
-  app.post('/api/runs/:id/undo', async (req, res) => res.json(publicJob(await agents.undo(req.user.id, req.params.id))))
-  app.post('/api/runs/:id/apply', async (req, res) => res.json(publicJob(await agents.apply(req.user.id, req.params.id))))
+  app.get('/api/runs/:id', (req, res) => res.json(publicJob(events.snapshot(req.params.id, req.user.id))))
+  for (const action of ['stop', 'undo', 'apply']) app.post(`/api/runs/:id/${action}`, async (req, res) => {
+    await agents[action](req.user.id, req.params.id)
+    res.json(publicJob(events.snapshot(req.params.id, req.user.id)))
+  })
   app.get('/api/runs/:id/events', (req, res) => {
     events.get(req.params.id, req.user.id)
     const after = Number(req.headers['last-event-id'] || req.query.after || 0)

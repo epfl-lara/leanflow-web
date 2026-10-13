@@ -1006,6 +1006,28 @@ textarea {
   background: var(--canvas);
   flex-shrink: 0;
 }
+.assistant-run-options {
+  margin-top: 8px;
+}
+.assistant-run-options > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 5px 0;
+}
+.assistant-run-options > summary > span {
+  float: right;
+  max-width: 55%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.assistant-run-options .live-edit-choice {
+  margin-top: 10px;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+}
 .mode-tabs {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -1065,11 +1087,32 @@ textarea {
   padding: 3px 0;
   color: var(--muted);
 }
+.assistant-output {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
 .assistant-conversation {
   flex: 1;
   overflow: auto;
   min-height: 0;
+  min-width: 0;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
   padding: 15px 15px 20px;
+}
+.jump-to-latest {
+  position: absolute;
+  bottom: 10px;
+  right: 12px;
+  z-index: 2;
+  box-shadow: 0 2px 8px #0003;
+}
+.streaming-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .assistant-starters {
   display: flex;
@@ -1095,7 +1138,9 @@ textarea {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 16px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 .run-status > .button {
   margin-left: auto;
@@ -1245,16 +1290,13 @@ textarea {
 }
 .activity-log > div {
   padding: 0 12px 9px;
-  max-height: 240px;
-  overflow: auto;
   line-height: 1.7;
 }
-.activity-log > div > div {
-  padding: 4px 0;
+.activity-output pre {
+  margin: 0;
+  font: inherit;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  display: flex;
-  gap: 7px;
 }
 .activity-bullet {
   display: inline-block;
@@ -2546,10 +2588,6 @@ body.panel-resizing iframe {
 .reasoning-trace .markdown-body {
   font-size: 12px;
   line-height: 1.7;
-}
-.reasoning-content {
-  max-height: 420px;
-  overflow: auto;
 }
 .live-edit-status {
   padding: 12px 13px;

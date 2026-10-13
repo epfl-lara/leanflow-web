@@ -63,6 +63,10 @@ The default **Until done** setting applies no application wall-clock cap. Choose
 
 The **Reasoning traces** setting controls capture for new runs. The interface renders reasoning text or summaries actually emitted by the selected model/runtime, separately from assistant messages and tool activity. A model may expose neither; the application does not generate missing traces. Assistant Markdown is rendered without raw HTML, and image references are links rather than automatic external image loads.
 
+While Lemex works, scroll up to read without incoming output moving your view. **Jump to latest** resumes following the output. Reasoning and activity start collapsed and keep your open/closed choice through updates. Streaming text uses a lightweight plain-text display; completed messages render Markdown. **Stop** stays above the conversation. You can navigate files, switch chats, and draft the next message during a run; submitting another task in the same project waits for the current one to stop.
+
+Task options collapse when opening a run to leave more space for messages. Open **Next task options** (or **Run options** when idle) to change the model, proof task, time limit, or live-edit preference for the next submission. Empty chats show these options expanded.
+
 ## Live saved edits, review, and Undo
 
 **Edit files live** is enabled by default for proof, formalization, and optimization tasks. Validated source-file updates from the isolated agent workspace are mirrored into the actual saved project as the agent works. A clean open editor updates its existing Monaco model so Lean sees the edits without restarting the language server. An unsaved editor buffer is preserved and receives a notice if the saved file changes underneath it. Live edits are intermediate work; the final result still needs independent Lean verification. **View edits** shows the diff and verification result.

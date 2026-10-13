@@ -68,6 +68,8 @@ export interface Run {
   message?: string
   reasoning?: string
   reasoningSummary?: string
+  log?: string
+  eventCursor?: number
   liveEdits?: boolean
   liveChanges?: Change[]
   liveRevision?: number
