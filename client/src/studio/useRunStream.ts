@@ -1,6 +1,7 @@
 import { startTransition, useEffect, useRef, useState } from 'react'
 import { api, runIsActive, type Run, type RunEvent } from './api'
 import { appendRunEvents, mergeRunSnapshot } from './runStream'
+import { hydrateReasoningHistory } from './reasoningHistory'
 
 /** Follow the active project run independently of which chat or turn is open. */
 export function useRunStream(
@@ -24,6 +25,7 @@ export function useRunStream(
     setConnection('')
     if (!followingId) return
     const runId = followingId
+    const historyController = new AbortController()
     let cancelled = false,
       current: Run | null = null,
       stream: EventSource | undefined
@@ -33,6 +35,9 @@ export function useRunStream(
       revision: string | undefined
     let filesPending = false,
       snapshotRequest = 0
+    let historyRequest: Promise<void> | undefined
+    let historyBase: Run | null = null
+    let historyEvents: RunEvent[] = []
     const updateFiles = async (paths: string[]) => {
       try {
         // The caller tracks file failures together with its project refreshes,
@@ -78,14 +83,50 @@ export function useRunStream(
         setFollowingId(null)
       }
     }
+    const recoverHistory = (snapshot: Run) => {
+      if (cancelled || snapshot.reasoningBlocks !== undefined || historyRequest)
+        return
+      historyEvents = []
+      historyRequest = hydrateReasoningHistory(
+        snapshot,
+        historyBase,
+        historyController.signal,
+      )
+        .then((value) => {
+          if (cancelled) return
+          historyBase = appendRunEvents(value, historyEvents)
+          if (
+            current &&
+            (historyBase.eventCursor || 0) >= (current.eventCursor || 0)
+          ) {
+            current = {
+              ...current,
+              reasoningBlocks: historyBase.reasoningBlocks,
+              reasoningHistoryCursor: historyBase.eventCursor,
+            }
+            callbacksRef.current.onRun(current)
+          }
+        })
+        .catch(() => {
+          // Optional history must not block status, file updates or cancellation.
+          // An explicitly opened trace reports its own actionable load error.
+        })
+        .finally(() => {
+          historyRequest = undefined
+          historyEvents = []
+        })
+    }
     const refresh = async () => {
       if (cancelled) return
       const request = ++snapshotRequest
       try {
-        const value = await api<Run>(`/api/runs/${encodeURIComponent(runId)}`)
+        const snapshot = await api<Run>(
+          `/api/runs/${encodeURIComponent(runId)}`,
+        )
         if (!cancelled) {
           if (request === snapshotRequest) callbacksRef.current.onRecovered()
-          publish(value)
+          publish(snapshot)
+          recoverHistory(snapshot)
           if (
             current &&
             runIsActive(current) &&
@@ -106,6 +147,7 @@ export function useRunStream(
       if (cancelled || !current || !pending.length) return
       const batch = pending
       pending = []
+      if (historyRequest) historyEvents.push(...batch)
       current = appendRunEvents(current, batch)
       const value = current
       // Wait for a full final snapshot before publishing a terminal status.
@@ -118,7 +160,10 @@ export function useRunStream(
           for (const path of event.data.paths)
             if (typeof path === 'string') paths.add(path)
       if (paths.size) void updateFiles([...paths])
-      if (batch.some((event) => event.type === 'status')) void refresh()
+      if (
+        batch.some((event) => ['status', 'files-updated'].includes(event.type))
+      )
+        void refresh()
     }
     const connect = () => {
       if (!current || !Number.isSafeInteger(current.eventCursor)) return
@@ -153,6 +198,7 @@ export function useRunStream(
     void refresh()
     return () => {
       cancelled = true
+      historyController.abort()
       stream?.close()
       if (poll) clearInterval(poll)
       clearTimeout(timer)

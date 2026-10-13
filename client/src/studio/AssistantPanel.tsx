@@ -19,11 +19,12 @@ import { ChatOptions } from './ChatOptions'
 import { ConversationTurn } from './ConversationTurn'
 import { ChangeDiff, Verification } from './RunReview'
 import { mergeRunSnapshot } from './runStream'
+import { hydrateReasoningHistory } from './reasoningHistory'
 import { useConversationScroll } from './useConversationScroll'
 import { useRunStream } from './useRunStream'
 import { chatDraftKey, useChatDraft, type DraftSubmission } from './chatDrafts'
 import { chatModes } from './chatModes'
-import { runStatusLabel } from './chatTimeline'
+import { runStatusLabel, liveEditStatus } from './chatTimeline'
 import type {
   EditorProofState,
   ProofEditorRequest,
@@ -676,6 +677,12 @@ export function AssistantPanel({
       const pending = inspections.current.get(id)
       if (pending) return pending
       const task = api<Run>(`/api/runs/${encodeURIComponent(id)}`)
+        .then((value) =>
+          hydrateReasoningHistory(
+            value,
+            runsRef.current.find((run) => run.id === id),
+          ),
+        )
         .then((value) => updateRun(value))
         .finally(() => inspections.current.delete(id))
       inspections.current.set(id, task)
@@ -804,8 +811,34 @@ export function AssistantPanel({
             </strong>
             <span className="chat-elapsed">{elapsed}</span>
           </div>
-          {statusRun.progress?.detail && !stopping && (
-            <p title={statusRun.progress.detail}>{statusRun.progress.detail}</p>
+          {statusRun.progress?.detail &&
+            !stopping &&
+            !['Working', 'Running command', 'Using tool'].includes(
+              statusRun.progress.label,
+            ) && (
+              <p title={statusRun.progress.detail}>
+                {statusRun.progress.detail}
+              </p>
+            )}
+          {!stopping && (liveEditStatus(statusRun) || connection) && (
+            <p className="chat-work-meta">
+              <span
+                className="chat-edit-status"
+                title={
+                  statusRun.liveEditConflict ||
+                  (statusRun.liveEdits
+                    ? 'Only changes written to project files appear in the editor. Scratch checks do not change those files. Final Lean verification runs at completion.'
+                    : liveEditStatus(statusRun))
+                }
+              >
+                {liveEditStatus(statusRun)}
+              </span>
+              {connection && (
+                <span className="chat-connection">
+                  {connection === 'Live' ? 'Connected' : connection}
+                </span>
+              )}
+            </p>
           )}
           {!activeHere && activeRun?.chatId && (
             <button
@@ -825,7 +858,6 @@ export function AssistantPanel({
             <Icon name="stop" size={13} />
             {stopping ? 'Stopping…' : 'Stop'}
           </button>
-          {connection && <span className="chat-connection">{connection}</span>}
         </div>
       )}
       <div className="assistant-output">
@@ -997,7 +1029,7 @@ export function AssistantPanel({
           <span>
             {hasActive
               ? acceptingUpdate
-                ? 'Updates reach Lemex at its next decision boundary.'
+                ? 'Your update will be picked up after the current step.'
                 : activeHere
                   ? 'Checking or stopping; your next draft is kept.'
                   : 'Open the active chat to send an update.'
@@ -1038,6 +1070,12 @@ export function AssistantPanel({
           busy={applying || discarding}
         >
           <div className="diff-review">
+            {dialogRun.liveEdits && runIsActive(dialogRun) && (
+              <p className="field-help">
+                These edits are saved in the project. Final Lean verification is
+                still pending.
+              </p>
+            )}
             <Verification value={dialogRun.verification} />
             {dialogRun.mode === 'formalize' && (
               <p className="review-note">
@@ -1083,7 +1121,10 @@ export function AssistantPanel({
                   )}
                 </div>
               )}
-            {dialogRun.changes?.map((change) => (
+            {(dialogRun.liveEdits
+              ? dialogRun.liveChanges
+              : dialogRun.changes
+            )?.map((change) => (
               <ChangeDiff key={change.path} change={change} />
             ))}
             {actionError && (

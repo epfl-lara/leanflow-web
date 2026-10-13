@@ -90,6 +90,38 @@ test('streams native reasoning parts and summaries without repeating completed i
   )
 })
 
+test('buffering preserves fast reasoning/reply alternation and still redacts split secrets', () => {
+  const { handler, chunks, text } = output({ secrets: ['provider-secret'] })
+  handler.handle('item/agentMessage/delta', {
+    itemId: 'm1',
+    delta: 'First reply.',
+  })
+  handler.handle('item/reasoning/textDelta', {
+    itemId: 'r1',
+    delta: 'Inspect provider-',
+  })
+  handler.handle('item/reasoning/textDelta', {
+    itemId: 'r1',
+    delta: 'secret safely.',
+  })
+  handler.handle('item/agentMessage/delta', {
+    itemId: 'm2',
+    delta: 'Second reply.',
+  })
+  handler.handle('item/reasoning/summaryTextDelta', {
+    itemId: 'r2',
+    delta: 'Checking the result.',
+  })
+  handler.flush()
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.type),
+    ['message', 'reasoning', 'message', 'reasoning-summary'],
+  )
+  assert.equal(text.reasoning, 'Inspect [redacted] safely.')
+  assert.equal(text.message, 'First reply.\n\nSecond reply.')
+  assert(!JSON.stringify(chunks).includes('provider-secret'))
+})
+
 test('captures plaintext completion fallback, ignores encrypted content, and leaves absent reasoning absent', () => {
   const { handler, text } = output()
   handler.handle('item/started', {
@@ -409,10 +441,10 @@ test('agent runs have no overall deadline by default but accept explicit finite 
     30,
     '1800',
   ].entries()) {
-    const job = (await manager.start('alice', `p${index}`, {
+    const job = await manager.start('alice', `p${index}`, {
       ...input,
       maxSeconds: value,
-    }))
+    })
     assert.equal(job.maxSeconds, index < 4 ? null : Number(value))
   }
   for (const value of [

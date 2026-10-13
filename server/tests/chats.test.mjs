@@ -454,6 +454,50 @@ test('run snapshots provide an owned cursor for gapless replay without repeating
   assert.equal(latest.eventCursor, next.seq)
 })
 
+test('HTTP history retains reasoning step positions without trace bodies, including older saved runs', async (t) => {
+  const f = await httpFixture(t),
+    chat = f.chats.create('owner', f.project.id)
+  const job = f.events.create('owner', {
+    kind: 'agent',
+    projectId: f.project.id,
+    chatId: chat.id,
+  })
+  f.chats.appendRun(chat.id, 'owner', job)
+  f.events.append(job.id, 'message', 'First reply. 🔎', 'message')
+  f.events.append(job.id, 'reasoning', 'Check the lemma.', 'reasoning')
+  f.events.append(job.id, 'reasoningSummary', 'Checking.', 'reasoning-summary')
+  f.events.append(job.id, 'message', 'Second reply.', 'message')
+  f.events.append(job.id, 'reasoning', 'Try induction.', 'reasoning')
+  f.events.update(job.id, { status: 'completed' })
+  const full = await (await f.request(`/api/runs/${job.id}`)).json()
+  assert.equal(full.reasoningBlocks.length, 2)
+  assert.equal(full.reasoningBlocks[0].messageOffset, 'First reply. 🔎'.length)
+  assert.equal(
+    full.reasoningBlocks[1].reasoningOffset,
+    'Check the lemma.'.length,
+  )
+  const history = (await (await f.request(`/api/chats/${chat.id}`)).json())
+    .runs[0]
+  assert.deepEqual(history.reasoningBlocks, full.reasoningBlocks)
+  assert.equal(history.reasoning, undefined)
+  assert.equal(history.reasoningSummary, undefined)
+  assert.equal(
+    (await f.request(`/api/chats/${chat.id}`, { access: f.bobToken })).status,
+    404,
+  )
+  // Simulate a record from the running server before timeline metadata existed.
+  f.events.db
+    .prepare(
+      "UPDATE jobs SET payload=json_remove(payload,'$.reasoningBlocks') WHERE id=?",
+    )
+    .run(job.id)
+  const reconstructed = await (await f.request(`/api/runs/${job.id}`)).json()
+  assert.deepEqual(reconstructed.reasoningBlocks, full.reasoningBlocks)
+  f.events.append(job.id, 'message', 'Final reply.', 'message')
+  const continued = await (await f.request(`/api/runs/${job.id}`)).json()
+  assert.deepEqual(continued.reasoningBlocks, full.reasoningBlocks)
+})
+
 test('project run and check creation return initial snapshots with replay cursors', async (t) => {
   const f = await httpFixture(t)
   const response = await f.request(`/api/projects/${f.project.id}/runs`, {
@@ -626,6 +670,46 @@ test('project polling omits transcripts and chat polling omits traces and diffs 
   assert.deepEqual(f.chats.history(chat.id, 'owner').runs[0].changes, changes)
 })
 
+test('user updates split saved and reconstructed reasoning even without a new reply', async (t) => {
+  const f = await httpFixture(t)
+  const job = f.events.create('owner', {
+    kind: 'agent',
+    projectId: f.project.id,
+  })
+  f.events.append(job.id, 'reasoning', 'Before update.', 'reasoning')
+  const entry = {
+    id: 'timeline-update',
+    text: 'Try induction.',
+    status: 'accepted',
+    createdAt: '2026-10-13T10:00:00Z',
+    messageOffset: 0,
+  }
+  f.events.update(job.id, { followups: [entry] })
+  f.events.event(job.id, 'followup', entry)
+  f.events.append(job.id, 'reasoning', 'After update.', 'reasoning')
+  f.events.event(job.id, 'followup', entry)
+  f.events.append(job.id, 'reasoning', ' Still after.', 'reasoning')
+  f.events.update(job.id, { status: 'completed' })
+  const full = f.events.snapshot(job.id, 'owner')
+  assert.deepEqual(
+    full.reasoningBlocks.map((block) => block.afterFollowups),
+    [0, 1],
+  )
+  assert.equal(
+    full.reasoningBlocks[1].reasoningLength,
+    'After update. Still after.'.length,
+  )
+  f.events.db
+    .prepare(
+      "UPDATE jobs SET payload=json_remove(payload,'$.reasoningBlocks') WHERE id=?",
+    )
+    .run(job.id)
+  assert.deepEqual(
+    f.events.snapshot(job.id, 'owner').reasoningBlocks,
+    full.reasoningBlocks,
+  )
+})
+
 test('HTTP project creation and uploads accept source bodies over 3 MiB while retaining source and ordinary API limits', async (t) => {
   const f = await httpFixture(t)
   const large = '--' + 'x'.repeat(1_700_000) + '\n'
@@ -690,11 +774,11 @@ test('HTTP project creation and uploads accept source bodies over 3 MiB while re
 test('HTTP followups capture current saved attachments privately, remain idempotent, and fail pending receipts on Stop', async (t) => {
   const f = await httpFixture(t),
     chat = f.chats.create('owner', f.project.id)
-  const job = (await f.agents.start('owner', f.project.id, {
+  const job = await f.agents.start('owner', f.project.id, {
     mode: 'proofs',
     prompt: 'Repair Main.',
     chatId: chat.id,
-  }))
+  })
   const input = {
     id: '00112233-4455-4677-8899-aabbccddeeff',
     text: 'Use this saved file.',
@@ -1081,15 +1165,33 @@ test('suggestion HTTP endpoint is owned, read-only, usable during a run, and nev
   assert.equal(f.chats.history(chat.id, 'owner').runs[0].id, run.id)
 })
 
-test('HTTP focused runs and updates reject stale selections and return compact proof references in history', async t => {
+test('HTTP focused runs and updates reject stale selections and return compact proof references in history', async (t) => {
   const f = await httpFixture(t)
   const chat = f.chats.create('owner', f.project.id)
   const source = 'theorem focused : True := by\n  trivial'
-  await f.workspaces.writeFile(f.project.id, 'owner', 'Main.lean', '-- preamble\n' + source + '\n')
-  const proofTarget = { path: 'Main.lean', startLine: 2, endLine: 3, name: 'focused', source }
-  const input = { mode: 'proofs', prompt: 'Complete the selected proof.', proofTarget }
+  await f.workspaces.writeFile(
+    f.project.id,
+    'owner',
+    'Main.lean',
+    '-- preamble\n' + source + '\n',
+  )
+  const proofTarget = {
+    path: 'Main.lean',
+    startLine: 2,
+    endLine: 3,
+    name: 'focused',
+    source,
+  }
+  const input = {
+    mode: 'proofs',
+    prompt: 'Complete the selected proof.',
+    proofTarget,
+  }
   const endpoint = `/api/chats/${chat.id}/runs`
-  const stale = await f.request(endpoint, { method: 'POST', body: { ...input, proofTarget: { ...proofTarget, source: 'old version' } } })
+  const stale = await f.request(endpoint, {
+    method: 'POST',
+    body: { ...input, proofTarget: { ...proofTarget, source: 'old version' } },
+  })
   assert.equal(stale.status, 409)
   assert.match((await stale.json()).error, /selected proof changed/i)
   assert.equal(f.events.list('owner', f.project.id).length, 0)
@@ -1097,21 +1199,41 @@ test('HTTP focused runs and updates reject stale selections and return compact p
   assert.equal(started.status, 202)
   const job = await started.json()
   assert.deepEqual(job.proofTarget, proofTarget)
-  const update = { id: '6fac9dbe-771c-4fe6-908a-aac383ae6626', text: 'Optimize only this statement.', proofTarget }
-  const sent = await f.request(`/api/runs/${job.id}/messages`, { method: 'POST', body: update })
+  const update = {
+    id: '6fac9dbe-771c-4fe6-908a-aac383ae6626',
+    text: 'Optimize only this statement.',
+    proofTarget,
+  }
+  const sent = await f.request(`/api/runs/${job.id}/messages`, {
+    method: 'POST',
+    body: update,
+  })
   assert.equal(sent.status, 200)
   assert.deepEqual((await sent.json()).followups[0].proofTarget, proofTarget)
-  const reference = { path: proofTarget.path, startLine: 2, endLine: 3, name: 'focused' }
-  const history = (await (await f.request(`/api/chats/${chat.id}`)).json()).runs[0]
+  const reference = {
+    path: proofTarget.path,
+    startLine: 2,
+    endLine: 3,
+    name: 'focused',
+  }
+  const history = (await (await f.request(`/api/chats/${chat.id}`)).json())
+    .runs[0]
   assert.deepEqual(history.proofTarget, reference)
   assert.deepEqual(history.followups[0].proofTarget, reference)
   for (const suffix of ['', '?summary=1']) {
-    const summary = (await (await f.request(`/api/projects/${f.project.id}/runs${suffix}`)).json())[0]
+    const summary = (
+      await (
+        await f.request(`/api/projects/${f.project.id}/runs${suffix}`)
+      ).json()
+    )[0]
     assert.deepEqual(summary.proofTarget, reference)
     assert(!JSON.stringify(summary).includes(source))
   }
   await f.request(`/api/runs/${job.id}/stop`, { method: 'POST', body: {} })
-  const direct = await f.request(`/api/projects/${f.project.id}/runs`, { method: 'POST', body: input })
+  const direct = await f.request(`/api/projects/${f.project.id}/runs`, {
+    method: 'POST',
+    body: input,
+  })
   assert.equal(direct.status, 202)
   assert.deepEqual((await direct.json()).proofTarget, proofTarget)
 })

@@ -3,6 +3,11 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { proofTargetReference } from './proof-target.mjs'
+import {
+  recordReasoningBlock,
+  retainedReasoningBlocks,
+  reasoningBlocksFromEvents,
+} from '../shared/reasoning-timeline.mjs'
 
 export const TERMINAL = new Set([
   'completed',
@@ -15,6 +20,7 @@ export const TERMINAL = new Set([
 export class EventStore extends EventEmitter {
   constructor(dataDir) {
     super()
+    this.reasoningCache = new Map()
     this.setMaxListeners(100)
     this.db = new DatabaseSync(path.join(dataDir, 'activity.sqlite'))
     this.db.exec(
@@ -61,7 +67,34 @@ export class EventStore extends EventEmitter {
     // accumulated fields and the replay cursor in this server process.
     const job = this.get(id, owner)
     const eventCursor = this.cursor(id)
-    return { ...job, eventCursor }
+    return { ...job, reasoningBlocks: this.reasoningBlocks(job), eventCursor }
+  }
+  reasoningBlocks(job) {
+    if (Array.isArray(job.reasoningBlocks)) return job.reasoningBlocks
+    if (!job.reasoning && !job.reasoningSummary) return []
+    const cursor = this.cursor(job.id)
+    const cached = this.reasoningCache.get(job.id)
+    if (cached?.cursor === cursor) return cached.blocks
+    const rows = this.db
+      .prepare(
+        "SELECT payload FROM events WHERE job=? AND json_extract(payload,'$.type') IN ('message','reasoning','reasoning-summary','followup') ORDER BY seq",
+      )
+      .iterate(job.id)
+    const blocks = retainedReasoningBlocks(
+      reasoningBlocksFromEvents(
+        (function* () {
+          for (const row of rows) yield JSON.parse(row.payload)
+        })(),
+      ),
+      {
+        reasoning: job.reasoningBaseOffset || 0,
+        reasoningSummary: job.reasoningSummaryBaseOffset || 0,
+      },
+    )
+    if (this.reasoningCache.size >= 128)
+      this.reasoningCache.delete(this.reasoningCache.keys().next().value)
+    this.reasoningCache.set(job.id, { cursor, blocks })
+    return blocks
   }
   cursor(id) {
     return Number(
@@ -158,10 +191,44 @@ export class EventStore extends EventEmitter {
       trimmed = Math.max(0, combined.length - 250_000)
     const baseOffset = (job[field + 'BaseOffset'] || 0) + trimmed
     const truncated = !!job[field + 'Truncated'] || trimmed > 0
+    const tracksOutput = ['message', 'reasoning', 'reasoningSummary'].includes(
+      field,
+    )
+    const blocks = tracksOutput
+      ? recordReasoningBlock(
+          this.reasoningBlocks(job),
+          field,
+          text.length,
+          {
+            message: (job.messageBaseOffset || 0) + (job.message?.length || 0),
+            followups: job.followups?.length || 0,
+            reasoning:
+              (job.reasoningBaseOffset || 0) + (job.reasoning?.length || 0),
+            reasoningSummary:
+              (job.reasoningSummaryBaseOffset || 0) +
+              (job.reasoningSummary?.length || 0),
+          },
+          `reasoning-${this.cursor(id) + 1}`,
+        )
+      : []
     this.update(id, {
       [field]: combined.slice(-250_000),
       [field + 'BaseOffset']: baseOffset,
       ...(truncated ? { [field + 'Truncated']: true } : {}),
+      ...(tracksOutput
+        ? {
+            reasoningBlocks: retainedReasoningBlocks(blocks, {
+              reasoning:
+                field === 'reasoning'
+                  ? baseOffset
+                  : job.reasoningBaseOffset || 0,
+              reasoningSummary:
+                field === 'reasoningSummary'
+                  ? baseOffset
+                  : job.reasoningSummaryBaseOffset || 0,
+            }),
+          }
+        : {}),
     })
     this.event(id, type, {
       text,

@@ -68,7 +68,7 @@ const conversation = page.getByRole('region', {
   exact: true,
 })
 const traceFor = (run) =>
-  page.locator(`[data-run-id="${run.id}"] .reasoning-trace`)
+  page.locator(`[data-run-id="${run.id}"] .reasoning-trace`).first()
 async function visibleToggle(trace) {
   const bounds = await conversation.boundingBox()
   const toggle = await trace.locator('summary').boundingBox()
@@ -130,9 +130,43 @@ async function exercise(run, label) {
       'reasoning',
       '\n\nSTREAMED_REASONING: the next step is ready.',
     )
+    const latest = page
+      .locator(`[data-run-id="${run.id}"] .reasoning-trace`)
+      .last()
     await until(
-      async () => (await trace.textContent()).includes('STREAMED_REASONING'),
-      'live reasoning update',
+      async () =>
+        (await page
+          .locator(
+            `[data-run-id="${run.id}"] [data-reasoning-id="${run.reasoningBlocks.at(-1).id}"]`,
+          )
+          .count()) === 1,
+      'later reasoning section',
+    )
+    await latest.locator('summary').click()
+    await until(
+      async () => (await latest.textContent()).includes('STREAMED_REASONING'),
+      'reasoning in its later section',
+    )
+    await latest
+      .getByRole('button', { name: 'Hide reasoning trace', exact: true })
+      .click()
+    await conversation.evaluate((element, id) => {
+      const trace = element.querySelector(
+        `[data-run-id="${id}"] .reasoning-trace`,
+      )
+      element.scrollTop +=
+        trace.getBoundingClientRect().top -
+        element.getBoundingClientRect().top +
+        1400
+    }, run.id)
+    assert(
+      !(await trace.textContent()).includes('STREAMED_REASONING'),
+      'Later reasoning must belong to its own section',
+    )
+    assert.notEqual(
+      await trace.getAttribute('open'),
+      null,
+      'Streaming must preserve the earlier section’s open state',
     )
   }
   const box = await visibleToggle(trace)

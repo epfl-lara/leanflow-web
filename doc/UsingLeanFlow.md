@@ -35,7 +35,11 @@ Type **@** or use **Select files** to attach files; the active editor file is in
 
 Use **Send update** for extra instructions or **Stop** to interrupt. Updates show whether they were accepted. Runs continue until finished or stopped; send another message afterward to continue.
 
-Scroll up freely; **Jump to latest** resumes following output. Expand reasoning and activity as needed. Files and chat drafts remain available during a run.
+Scroll up freely; **Jump to latest** resumes following output. Reasoning appears between replies in separate Show/Hide sections. Files and chat drafts remain available during a run.
+
+With live edits on, the work status shows whether any files have been updated. Scratch checks do not change your editor; changes appear when Lemex writes to a project file. Saved edits still need final Lean verification. In review-first mode, files update after you accept the candidate changes.
+
+Use **View edits** to inspect saved changes during a run. If **Final checks need attention** appears, select **Review checks** to see why the server did not verify the result.
 
 ## Review changes
 

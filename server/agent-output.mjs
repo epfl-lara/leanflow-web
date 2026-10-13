@@ -49,6 +49,7 @@ export function createAgentOutputHandler({
     ...knownSecrets.map((value) => value.length - 1),
   )
   let timer = null
+  let outputKind = null
   const channel = (field) => {
     if (!channels.has(field))
       channels.set(field, { pending: '', buffered: '', written: 0, part: null })
@@ -141,6 +142,15 @@ export function createAgentOutputHandler({
       text = text.slice(previous)
       if (!text) return
     }
+    const kind = field === 'message' ? 'message' : 'reasoning'
+    if (outputKind !== null && outputKind !== kind) {
+      // Keep buffered reasoning on its side of the next assistant reply.
+      for (const previous of channels.keys()) {
+        publish(previous, true)
+        drain(previous)
+      }
+    }
+    outputKind = kind
     if (output.part !== null && output.part !== key) output.pending += '\n\n'
     output.part = key
     output.pending += text

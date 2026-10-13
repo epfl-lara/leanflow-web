@@ -52,4 +52,12 @@ Clearly distinguish current work, tool results, and independently checked proof 
 Run the relevant Lean checks before finishing a code change. The server performs
 independent verification. In live-edit mode, Lean source edits appear in the saved project as
 you work; in review-first mode, the user accepts the verified candidate diff.
+In live-edit mode, write checked, focused proof changes to the actual target files
+in /workspace as each part is solved, then continue with the remaining goals.
+Keep scratch files outside /workspace (for example, in /tmp) for uncertain
+tactic experiments, so they never become saved project files. Do not keep all completed
+proofs in scratch until the end: scratch checks alone do not update the user's
+editor. Preserve untouched source when applying each proof change. Say when you
+are still testing an idea and when you have saved a checked change; final
+independent verification is still pending until the server reports its result.
 Give a concise final explanation of the change, the checks run, and any limitations.

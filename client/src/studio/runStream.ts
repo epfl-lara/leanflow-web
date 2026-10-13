@@ -1,4 +1,9 @@
 import { runIsActive, type Run, type RunEvent } from './api'
+import { runReasoningBlocks } from './chatTimeline'
+import {
+  recordReasoningBlock,
+  retainedReasoningBlocks,
+} from '../../../shared/reasoning-timeline.mjs'
 
 const OUTPUT_LIMIT = 250_000
 const cursor = (run: Run) => Number(run.eventCursor) || 0
@@ -45,8 +50,39 @@ export function appendRunEvents(previous: Run, events: RunEvent[]): Run {
       activity: 'log',
     }[event.type]
     if (field) {
+      const blocks = recordReasoningBlock(
+        runReasoningBlocks(next),
+        field,
+        text.length,
+        {
+          message: (next.messageBaseOffset || 0) + (next.message?.length || 0),
+          followups: next.followups?.length || 0,
+          reasoning:
+            (next.reasoningBaseOffset || 0) +
+            (next.reasoning?.length || next.reasoningChars || 0),
+          reasoningSummary:
+            (next.reasoningSummaryBaseOffset || 0) +
+            (next.reasoningSummary?.length || next.reasoningSummaryChars || 0),
+        },
+        `reasoning-${event.seq}`,
+      )
       const combined = String(next[field] || '') + text
       next[field] = combined.slice(-OUTPUT_LIMIT)
+      if (field === 'reasoning' || field === 'reasoningSummary') {
+        const baseField =
+          field === 'reasoning'
+            ? 'reasoningBaseOffset'
+            : 'reasoningSummaryBaseOffset'
+        next[baseField] =
+          Number.isSafeInteger(data.baseOffset) && Number(data.baseOffset) >= 0
+            ? Number(data.baseOffset)
+            : (next[baseField] || 0) +
+              Math.max(0, combined.length - OUTPUT_LIMIT)
+      }
+      next.reasoningBlocks = retainedReasoningBlocks(blocks, {
+        reasoning: next.reasoningBaseOffset || 0,
+        reasoningSummary: next.reasoningSummaryBaseOffset || 0,
+      })
       if (field === 'message') {
         next.messageBaseOffset =
           Number.isSafeInteger(data.baseOffset) && Number(data.baseOffset) >= 0

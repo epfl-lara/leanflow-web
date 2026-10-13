@@ -73,12 +73,13 @@ const runMetadata = (job) => {
     }))
   return result
 }
-const chatTranscript = (job, eventCursor) => ({
+const chatTranscript = (job, eventCursor, reasoningBlocks) => ({
   ...runMetadata(job),
   prompt: job.prompt || '',
   message: job.message || '',
   messageBaseOffset: job.messageBaseOffset || 0,
   messageTruncated: !!job.messageTruncated,
+  reasoningBlocks,
   followups: (job.followups || []).map((entry) => ({
     ...entry,
     ...(entry.proofTarget
@@ -599,7 +600,9 @@ export async function createStudio({
     const { chat, runs } = chats.history(req.params.id, req.user.id)
     res.json({
       chat,
-      runs: runs.map((job) => chatTranscript(job, events.cursor(job.id))),
+      runs: runs.map((job) =>
+        chatTranscript(job, events.cursor(job.id), events.reasoningBlocks(job)),
+      ),
     })
   })
   app.patch('/api/chats/:id', (req, res) =>

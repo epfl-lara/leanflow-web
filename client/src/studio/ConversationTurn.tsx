@@ -8,6 +8,7 @@ import {
   conversationSegments,
   runChangeCount,
   runStatusLabel,
+  finalVerificationIssue,
 } from './chatTimeline'
 import { modeName } from './chatModes'
 import { ReasoningTrace } from './ReasoningTrace'
@@ -60,9 +61,11 @@ export const ConversationTurn = memo(function ConversationTurn({
   const [expanded, setExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [detailsError, setDetailsError] = useState('')
-  const changeCount = runChangeCount(run)
+  const changeCount = runChangeCount(run, !!run.liveEdits)
   const liveCount = runChangeCount(run, true)
   const [activityOpen, setActivityOpen] = useState(false)
+  const segments = conversationSegments(run)
+  const verificationIssue = !active ? finalVerificationIssue(run) : ''
   return (
     <article className="conversation-turn" data-run-id={run.id}>
       {run.prompt && (
@@ -79,16 +82,26 @@ export const ConversationTurn = memo(function ConversationTurn({
           Earlier assistant output was trimmed; the latest response is shown.
         </p>
       )}
-      <ReasoningTrace run={run} onInspect={onInspect} />
-      {conversationSegments(run).map((segment) =>
-        segment.kind === 'assistant' ? (
+      {segments.map((segment) =>
+        segment.kind === 'reasoning' ? (
+          <ReasoningTrace
+            key={segment.key}
+            run={run}
+            onInspect={onInspect}
+            block={segment.block}
+            streaming={segment.active}
+          />
+        ) : segment.kind === 'assistant' ? (
           <div key={segment.key} className="assistant-message">
             <span className="message-label">
               <Icon name="bot" size={14} />
               Lemex
             </span>
             <div className="message-body markdown-body">
-              <OutputText text={segment.text} streaming={active} />
+              <OutputText
+                text={segment.text}
+                streaming={active && segment.key === segments.at(-1)?.key}
+              />
             </div>
           </div>
         ) : (
@@ -110,7 +123,7 @@ export const ConversationTurn = memo(function ConversationTurn({
               data-followup-status={segment.followup.status}
               title={
                 segment.followup.status === 'accepted'
-                  ? 'Accepted by Lemex for its next decision boundary.'
+                  ? 'Lemex will use this update on its next step.'
                   : undefined
               }
             >
@@ -133,6 +146,49 @@ export const ConversationTurn = memo(function ConversationTurn({
       )}
       {run.liveEditConflict && (
         <p className="error-message">{run.liveEditConflict}</p>
+      )}
+      {verificationIssue && (
+        <div className="turn-verification-issue" role="alert">
+          <strong>Final checks need attention</strong>
+          <p>{verificationIssue}</p>
+          <button
+            type="button"
+            className="turn-action"
+            onClick={() => setExpanded(true)}
+          >
+            Review checks
+          </button>
+        </div>
+      )}
+      {active &&
+        run.liveEdits &&
+        !run.liveRevision &&
+        !run.liveEditConflict && (
+          <p className="field-help">
+            No project files changed yet. Scratch checks do not update the
+            editor.
+          </p>
+        )}
+      {run.liveEdits && !run.liveUndone && liveCount > 0 && (
+        <div className="turn-saved-edits">
+          <span>Saved to project:</span>
+          {(run.liveChanges || []).map((change) => (
+            <button
+              key={change.path}
+              type="button"
+              className="turn-action"
+              disabled={!onOpenTarget}
+              onClick={() =>
+                onOpenTarget?.({ path: change.path, startLine: 1, endLine: 1 })
+              }
+            >
+              {change.path}
+            </button>
+          ))}
+          {active && (
+            <span className="turn-status">Final Lean check pending</span>
+          )}
+        </div>
       )}
       <div className="turn-footer">
         <span

@@ -36,6 +36,19 @@
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
+  appearance: none;
+  padding-inline-end: 36px;
+}
+.chat-picker-select {
+  position: relative;
+}
+.chat-picker-select > svg {
+  position: absolute;
+  top: 50%;
+  inset-inline-end: 12px;
+  transform: translateY(-50%) rotate(90deg);
+  pointer-events: none;
+  color: var(--muted);
 }
 .chat-control-button {
   display: inline-flex;

@@ -2,6 +2,10 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { chromium } from '@playwright/test'
+import {
+  reasoningBlocksFromEvents,
+  recordReasoningBlock,
+} from '../../shared/reasoning-timeline.mjs'
 
 export const sleep = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -67,6 +71,7 @@ export function runTranscript(run) {
     messageBaseOffset: run.messageBaseOffset || 0,
     messageTruncated: !!run.messageTruncated,
     followups: run.followups || [],
+    reasoningBlocks: run.reasoningBlocks || [],
     ...(run.error ? { error: run.error } : {}),
   }
 }
@@ -80,7 +85,21 @@ export async function chatBrowserFixture({
   chats,
   runs,
   documentSymbols = [],
+  legacyReasoning = false,
+  failReasoningHistory = false,
 }) {
+  for (const run of runs)
+    run.reasoningBlocks ??= reasoningBlocksFromEvents(
+      run.events || [
+        { seq: 0, type: 'reasoning', data: { text: run.reasoning || '' } },
+        {
+          seq: 1,
+          type: 'reasoning-summary',
+          data: { text: run.reasoningSummary || '' },
+        },
+        { seq: 2, type: 'message', data: { text: run.message || '' } },
+      ],
+    )
   const state = {
     session,
     projects,
@@ -107,7 +126,7 @@ export async function chatBrowserFixture({
     report.errors.push(error.stack || error.message),
   )
   await page.addInitScript(
-    ({ projectId, chatId }) => {
+    ({ projectId, chatId, failReasoningHistory }) => {
       if (!localStorage.getItem('lemex-project'))
         localStorage.setItem('lemex-project', projectId)
       if (!localStorage.getItem(`lemex-chat-${projectId}`))
@@ -151,6 +170,13 @@ export async function chatBrowserFixture({
           window.__chatFixture.urls.push(this.url)
           queueMicrotask(() => {
             if (this.readyState === 2) return
+            if (
+              failReasoningHistory &&
+              new URL(this.url, location.href).searchParams.get('after') === '0'
+            ) {
+              this.dispatchEvent(new Event('error'))
+              return
+            }
             this.readyState = 1
             this.dispatchEvent(new Event('open'))
           })
@@ -162,7 +188,7 @@ export async function chatBrowserFixture({
       }
       window.EventSource = MockEventSource
     },
-    { projectId: projects[0].id, chatId: chats[0].id },
+    { projectId: projects[0].id, chatId: chats[0].id, failReasoningHistory },
   )
   await page.route('**/api/**', async (route) => {
     const request = route.request(),
@@ -226,10 +252,23 @@ export async function chatBrowserFixture({
           chat,
           runs: state.runs
             .filter((run) => run.chatId === chat.id)
-            .map(runTranscript),
+            .map((run) => {
+              const transcript = runTranscript(run)
+              if (legacyReasoning) delete transcript.reasoningBlocks
+              return transcript
+            }),
         })
       const run = state.runs.find((run) => endpoint === `/api/runs/${run.id}`)
-      if (run) return respond(run)
+      if (run)
+        return respond(
+          legacyReasoning
+            ? Object.fromEntries(
+                Object.entries(run).filter(
+                  ([key]) => key !== 'reasoningBlocks',
+                ),
+              )
+            : run,
+        )
     }
     if (method === 'POST') {
       const project = state.projects.find(
@@ -302,6 +341,22 @@ export async function chatBrowserFixture({
       'reasoning-summary': 'reasoningSummary',
       activity: 'log',
     }[type]
+    if (field)
+      run.reasoningBlocks = recordReasoningBlock(
+        run.reasoningBlocks || [],
+        field,
+        data.text.length,
+        {
+          message: (run.messageBaseOffset || 0) + (run.message?.length || 0),
+          followups: run.followups?.length || 0,
+          reasoning:
+            (run.reasoningBaseOffset || 0) + (run.reasoning?.length || 0),
+          reasoningSummary:
+            (run.reasoningSummaryBaseOffset || 0) +
+            (run.reasoningSummary?.length || 0),
+        },
+        `reasoning-${event.seq}`,
+      )
     if (field)
       run[field] = (String(run[field] || '') + data.text).slice(-250000)
     if (type === 'status') run.status = data.status

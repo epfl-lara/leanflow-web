@@ -8,6 +8,10 @@ import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { chromium } from '@playwright/test'
 import { runMetadata, runTranscript } from './lib/chat-browser-fixture.mjs'
+import {
+  reasoningBlocksFromEvents,
+  recordReasoningBlock,
+} from '../shared/reasoning-timeline.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const base = process.env.STUDIO_TEST_URL || 'http://127.0.0.1:8090'
@@ -103,6 +107,7 @@ current.log = current.events
   .map((item) => item.data.text)
   .join('\n')
 current.eventCursor = sequence
+current.reasoningBlocks = reasoningBlocksFromEvents(current.events)
 delete current.events
 const runs = new Map([
   [earlierId, earlier],
@@ -322,6 +327,23 @@ async function burst(count = 5) {
       event('reasoning', `Further reasoning ${sequence}.\n\n`.repeat(25)),
       event('activity', `Later activity ${sequence}.`.repeat(40)),
     ]
+    for (const value of values) {
+      const field = { message: 'message', reasoning: 'reasoning' }[value.type]
+      if (field)
+        current.reasoningBlocks = recordReasoningBlock(
+          current.reasoningBlocks,
+          field,
+          value.data.text.length,
+          {
+            message:
+              current.message.length +
+              (field === 'reasoning' ? values[0].data.text.length : 0),
+            reasoning: current.reasoning.length,
+            reasoningSummary: current.reasoningSummary.length,
+          },
+          `reasoning-${value.seq}`,
+        )
+    }
     current.message += values[0].data.text
     current.reasoning += values[1].data.text
     current.log += '\n' + values[2].data.text
@@ -396,7 +418,7 @@ try {
 
   const activeTurn = page.locator(`[data-run-id="${activeId}"]`)
   await activeTurn.locator('.turn-details > summary').click()
-  const reasoning = activeTurn.locator('.reasoning-trace'),
+  const reasoning = activeTurn.locator('.reasoning-trace').first(),
     activity = activeTurn.locator('.activity-log')
   assert.equal(
     await reasoning.getAttribute('open'),

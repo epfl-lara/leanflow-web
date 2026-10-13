@@ -1,4 +1,6 @@
 import type { ProofTarget } from './proofTarget'
+import type { ReasoningBlock } from '../../../shared/reasoning-timeline.mjs'
+export type { ReasoningBlock } from '../../../shared/reasoning-timeline.mjs'
 export type RunProofTarget = Omit<ProofTarget, 'source'> & { source?: string }
 
 export interface Preset {
@@ -112,6 +114,10 @@ export interface Run {
   messageBaseOffset?: number
   messageTruncated?: boolean
   reasoning?: string
+  reasoningBlocks?: ReasoningBlock[]
+  reasoningHistoryCursor?: number
+  reasoningBaseOffset?: number
+  reasoningSummaryBaseOffset?: number
   reasoningTruncated?: boolean
   reasoningSummary?: string
   log?: string

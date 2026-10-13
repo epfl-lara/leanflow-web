@@ -32,6 +32,7 @@ function load(name) {
   const module = { exports: {} }
   modules.set(name, module.exports)
   const imports = (id) => {
+    if (id.endsWith('.mjs')) return require(id)
     if (id.startsWith('.')) {
       const suffix = id === './Icons' ? '.tsx' : '.ts'
       return load(`${id}${suffix}`)
@@ -48,7 +49,13 @@ function load(name) {
 }
 
 const { mergeRunSnapshot, appendRunEvents } = load('./runStream.ts')
-const { runChangeCount, runStatusLabel } = load('./chatTimeline.ts')
+const {
+  runChangeCount,
+  runStatusLabel,
+  conversationSegments,
+  liveEditStatus,
+  finalVerificationIssue,
+} = load('./chatTimeline.ts')
 const {
   clearDraftSubmission,
   restoreDraftSubmission,
@@ -56,6 +63,11 @@ const {
   proofFocusPrompts,
 } = load('./chatDrafts.ts')
 const { OutputText } = load('./AssistantText.tsx')
+const { hydrateReasoningHistory } = load('./reasoningHistory.ts')
+const {
+  retainedReasoningBlocks,
+  reasoningBlocksFromEvents,
+} = require('../../../shared/reasoning-timeline.mjs')
 const { UsageSummary } = load('./UsageSummary.tsx')
 
 test('usage shows current context first and keeps cumulative request totals collapsed', () => {
@@ -130,6 +142,346 @@ const draft = {
   mode: 'proofs',
 }
 const submission = { ...draft, key: 'chat-a' }
+
+test('final verification rejection is reported independently of saved files and model claims', () => {
+  const completed = run({
+    message: 'The proof was checked.',
+    liveEdits: true,
+    liveRevision: 1,
+    verification: {
+      complete: false,
+      compiled: false,
+      errors: ['Main.lean changes code outside existing theorem proof bodies.'],
+    },
+  })
+  assert.equal(runStatusLabel(completed), 'Finished · checks need attention')
+  assert.equal(
+    finalVerificationIssue(completed),
+    completed.verification.errors[0],
+  )
+  assert.equal(
+    finalVerificationIssue(run({ verification: { complete: true } })),
+    '',
+  )
+  assert.equal(
+    finalVerificationIssue(
+      run({ verification: { kind: 'search', complete: false } }),
+    ),
+    '',
+  )
+  assert.equal(finalVerificationIssue(run()), '')
+})
+
+test('live edit status distinguishes work without writes, saved edits, review mode, and paused mirroring', () => {
+  assert.equal(
+    liveEditStatus(run({ liveEdits: true, liveRevision: 0 })),
+    'Live edits on · No saved edits yet',
+  )
+  assert.equal(
+    liveEditStatus(
+      run({
+        liveEdits: true,
+        liveRevision: 2,
+        liveChanges: [{ path: 'Main.lean' }],
+      }),
+    ),
+    'Live edits on · 1 file updated',
+  )
+  assert.equal(
+    liveEditStatus(
+      run({
+        liveEdits: true,
+        liveRevision: 2,
+        liveChangeCount: 5,
+        liveChanges: [],
+      }),
+    ),
+    'Live edits on · No current file changes',
+  )
+  assert.equal(
+    liveEditStatus(run({ liveEdits: true, liveRevision: 2 })),
+    'Live edits on · Edits saved',
+  )
+  assert.equal(
+    liveEditStatus(run({ liveEdits: false })),
+    'Review first · Files update after you accept changes',
+  )
+  assert.equal(
+    liveEditStatus(run({ mode: 'search' })),
+    'Read-only · Files will not change',
+  )
+  assert.equal(
+    liveEditStatus(
+      run({ liveEdits: true, liveEditConflict: 'Saved file differs.' }),
+    ),
+    'Live edits paused · Saved files changed',
+  )
+})
+
+test('reasoning is interleaved between replies, coalesces deltas, and survives duplicate replay and snapshots', () => {
+  const initial = run({ status: 'running', eventCursor: 0 })
+  const events = [
+    { seq: 1, type: 'message', data: { text: 'First reply.' } },
+    { seq: 2, type: 'reasoning', data: { text: 'Check ' } },
+    { seq: 3, type: 'reasoning', data: { text: 'the lemma.' } },
+    { seq: 4, type: 'reasoning-summary', data: { text: 'Checking.' } },
+    { seq: 5, type: 'activity', data: { text: 'Tool activity.' } },
+    { seq: 6, type: 'message', data: { text: 'Second reply.' } },
+    { seq: 7, type: 'reasoning', data: { text: 'Try induction.' } },
+  ]
+  const current = appendRunEvents(initial, events)
+  const segments = conversationSegments(current)
+  assert.deepEqual(
+    segments.map((entry) => entry.kind),
+    ['assistant', 'reasoning', 'assistant', 'reasoning'],
+  )
+  assert.deepEqual(
+    segments
+      .filter((entry) => entry.kind === 'assistant')
+      .map((entry) => entry.text),
+    ['First reply.', 'Second reply.'],
+  )
+  const blocks = segments.filter((entry) => entry.kind === 'reasoning')
+  assert.equal(blocks[0].active, false)
+  assert.equal(blocks[1].active, true)
+  assert.equal(blocks[0].block.reasoningLength, 'Check the lemma.'.length)
+  assert.equal(blocks[0].block.summaryLength, 'Checking.'.length)
+  assert.equal(current.reasoning, 'Check the lemma.Try induction.')
+  assert.equal(initial.reasoning, undefined)
+  assert.equal(appendRunEvents(current, events), current)
+  const polled = mergeRunSnapshot(current, { ...current, status: 'completed' })
+  assert.deepEqual(
+    conversationSegments(polled).map((entry) => entry.key),
+    segments.map((entry) => entry.key),
+  )
+})
+
+test('trimmed message and reasoning tails keep absolute step and user-update positions', () => {
+  const original = run({ status: 'running', eventCursor: 0 })
+  const current = appendRunEvents(original, [
+    { seq: 1, type: 'message', data: { text: 'a'.repeat(250010) } },
+    { seq: 2, type: 'reasoning', data: { text: 'x'.repeat(250020) } },
+    {
+      seq: 3,
+      type: 'followup',
+      data: {
+        id: 'u',
+        text: 'Use induction.',
+        status: 'accepted',
+        createdAt: '2026-10-13T10:00:00Z',
+        messageOffset: 250010,
+      },
+    },
+    { seq: 4, type: 'message', data: { text: 'Final reply.' } },
+  ])
+  assert.equal(current.message.length, 250000)
+  assert.equal(current.reasoning.length, 250000)
+  assert.equal(current.reasoningBaseOffset, 20)
+  const segments = conversationSegments(current)
+  assert.deepEqual(
+    segments.map((entry) => entry.kind),
+    ['assistant', 'reasoning', 'followup', 'assistant'],
+  )
+  assert.equal(segments.at(-1).text, 'Final reply.')
+  assert.equal(segments[1].block.messageOffset, 250010)
+  assert.equal(segments[1].block.reasoningLength, 250020)
+})
+
+test('inline reply boundaries remove blank spacer lines without changing code indentation', () => {
+  const message = '\n\nFirst reply.\n\n\n\n    example : True := by trivial\n\n'
+  const position = message.indexOf('    example')
+  const blocks = [
+    {
+      id: 'r',
+      messageOffset: position,
+      reasoningOffset: 0,
+      reasoningLength: 1,
+      summaryOffset: 0,
+      summaryLength: 0,
+    },
+  ]
+  const parts = conversationSegments(
+    run({ message, reasoningBlocks: blocks }),
+  ).filter((part) => part.kind === 'assistant')
+  assert.deepEqual(
+    parts.map((part) => part.text),
+    ['First reply.', '    example : True := by trivial'],
+  )
+})
+
+test('reasoning before and after a user update stays on its own side even without a reply', () => {
+  const entry = {
+    id: 'update-1',
+    text: 'Try induction.',
+    status: 'pending',
+    createdAt: '2026-10-13T10:00:00Z',
+    messageOffset: 0,
+  }
+  const events = [
+    { seq: 1, type: 'reasoning', data: { text: 'Before update.' } },
+    { seq: 2, type: 'followup', data: entry },
+    { seq: 3, type: 'reasoning', data: { text: 'After update.' } },
+    { seq: 4, type: 'followup', data: { ...entry, status: 'accepted' } },
+    { seq: 5, type: 'reasoning', data: { text: ' Still after.' } },
+  ]
+  const current = appendRunEvents(
+    run({ status: 'running', eventCursor: 0 }),
+    events,
+  )
+  const parts = conversationSegments(current)
+  assert.deepEqual(
+    parts.map((part) => part.kind),
+    ['reasoning', 'followup', 'reasoning'],
+  )
+  assert.equal(parts[0].block.reasoningLength, 'Before update.'.length)
+  assert.equal(
+    parts[2].block.reasoningLength,
+    'After update. Still after.'.length,
+  )
+  assert.deepEqual(current.reasoningBlocks, reasoningBlocksFromEvents(events))
+})
+
+test('fully trimmed reasoning sections do not survive because of empty summary ranges', () => {
+  const first = {
+    id: 'old',
+    messageOffset: 0,
+    reasoningOffset: 0,
+    reasoningLength: 10,
+    summaryOffset: 100,
+    summaryLength: 0,
+  }
+  const second = {
+    ...first,
+    id: 'new',
+    reasoningOffset: 10,
+    reasoningLength: 20,
+  }
+  assert.deepEqual(
+    retainedReasoningBlocks([first, second], {
+      reasoning: 10,
+      reasoningSummary: 0,
+    }),
+    [second],
+  )
+})
+
+test('a server without timeline metadata retains its earlier reasoning while new steps arrive', () => {
+  const old = run({
+    status: 'running',
+    eventCursor: 3,
+    message: 'Earlier reply.',
+    reasoning: 'Earlier reasoning.',
+  })
+  const key = conversationSegments(old)[0].key
+  const current = appendRunEvents(old, [
+    { seq: 4, type: 'reasoning', data: { text: 'New step.' } },
+  ])
+  assert.deepEqual(
+    conversationSegments(current).map((entry) => entry.kind),
+    ['reasoning', 'assistant', 'reasoning'],
+  )
+  assert.equal(conversationSegments(current)[0].key, key)
+  assert.equal(
+    current.reasoningBlocks[1].reasoningOffset,
+    'Earlier reasoning.'.length,
+  )
+})
+
+test('older running servers recover positions through owned replay and only replay subsequent gaps', async (t) => {
+  const events = [
+    { seq: 1, type: 'message', data: { text: 'First.' } },
+    { seq: 2, type: 'reasoning', data: { text: 'Step one.' } },
+    { seq: 3, type: 'message', data: { text: 'Second.' } },
+    { seq: 4, type: 'reasoning', data: { text: 'Step two.' } },
+    { seq: 5, type: 'status', data: { status: 'running' } },
+  ]
+  const streams = [],
+    saved = globalThis.EventSource
+  t.after(() => {
+    globalThis.EventSource = saved
+  })
+  globalThis.EventSource = class extends EventTarget {
+    constructor(url) {
+      super()
+      this.url = url
+      streams.push(this)
+      queueMicrotask(() => {
+        for (const event of events)
+          this.dispatchEvent(
+            new MessageEvent('message', { data: JSON.stringify(event) }),
+          )
+      })
+    }
+    close() {
+      this.closed = true
+    }
+  }
+  const snapshot = run({
+    status: 'running',
+    eventCursor: 5,
+    message: 'First.Second.',
+    reasoning: 'Step one.Step two.',
+  })
+  const hydrated = await hydrateReasoningHistory(snapshot)
+  assert.equal(streams[0].url, '/api/runs/run-1/events?after=0')
+  assert.equal(streams[0].closed, true)
+  assert.deepEqual(
+    hydrated.reasoningBlocks.map((block) => block.messageOffset),
+    [6, 13],
+  )
+  assert.equal(hydrated.reasoningBlocks[0].id, 'reasoning-legacy')
+  assert.equal(hydrated.message, snapshot.message)
+  assert.equal(hydrated.reasoning, snapshot.reasoning)
+  events.push(
+    { seq: 6, type: 'message', data: { text: 'Third.' } },
+    { seq: 6, type: 'message', data: { text: 'Third.' } },
+    { seq: 7, type: 'reasoning', data: { text: 'Step three.' } },
+  )
+  const next = await hydrateReasoningHistory(
+    {
+      ...snapshot,
+      eventCursor: 7,
+      message: snapshot.message + 'Third.',
+      reasoning: snapshot.reasoning + 'Step three.',
+    },
+    hydrated,
+  )
+  assert.equal(streams[1].url, '/api/runs/run-1/events?after=5')
+  assert.deepEqual(
+    next.reasoningBlocks.map((block) => block.messageOffset),
+    [6, 13, 19],
+  )
+  assert.equal(next.reasoningBlocks[0].id, hydrated.reasoningBlocks[0].id)
+  assert.equal(await hydrateReasoningHistory(next), next)
+  assert.equal(streams.length, 2)
+})
+
+test('reasoning replay closes promptly on cancellation and reports connection failures', async (t) => {
+  const streams = [],
+    saved = globalThis.EventSource
+  t.after(() => {
+    globalThis.EventSource = saved
+  })
+  globalThis.EventSource = class extends EventTarget {
+    constructor() {
+      super()
+      streams.push(this)
+    }
+    close() {
+      this.closed = true
+    }
+  }
+  const snapshot = run({ eventCursor: 3, reasoning: 'Reasoning.' })
+  const controller = new AbortController()
+  const pending = hydrateReasoningHistory(snapshot, null, controller.signal)
+  controller.abort()
+  await assert.rejects(pending, /cancelled/)
+  assert.equal(streams[0].closed, true)
+  const failed = hydrateReasoningHistory(snapshot)
+  streams[1].dispatchEvent(new Event('error'))
+  await assert.rejects(failed, /Try opening the trace again/)
+  assert.equal(streams[1].closed, true)
+})
 
 test('compact history preserves full verification details and search kind', () => {
   const full = run({

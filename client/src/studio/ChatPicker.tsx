@@ -222,29 +222,32 @@ export function ChatPicker({
     <div className="chat-picker" aria-busy={loading}>
       <label className="chat-picker-field" htmlFor={id}>
         <span>Chat</span>
-        <select
-          id={id}
-          aria-label="Select chat"
-          value={selectedId || ''}
-          onChange={(event) => {
-            if (event.target.value) onSelect(event.target.value)
-          }}
-          disabled={disabled || loading || chats.length === 0}
-          title={selected?.title || 'New chat'}
-        >
-          <option value="" disabled>
-            {loading ? 'Loading chats…' : 'New chat'}
-          </option>
-          {chats.map((chat) => {
-            const updated = updatedLabel(chat.updatedAt)
-            return (
-              <option key={chat.id} value={chat.id}>
-                {chat.title.trim() || 'Untitled chat'}
-                {updated ? ` · ${updated}` : ''}
-              </option>
-            )
-          })}
-        </select>
+        <div className="chat-picker-select">
+          <select
+            id={id}
+            aria-label="Select chat"
+            value={selectedId || ''}
+            onChange={(event) => {
+              if (event.target.value) onSelect(event.target.value)
+            }}
+            disabled={disabled || loading || chats.length === 0}
+            title={selected?.title || 'New chat'}
+          >
+            <option value="" disabled>
+              {loading ? 'Loading chats…' : 'New chat'}
+            </option>
+            {chats.map((chat) => {
+              const updated = updatedLabel(chat.updatedAt)
+              return (
+                <option key={chat.id} value={chat.id}>
+                  {chat.title.trim() || 'Untitled chat'}
+                  {updated ? ` · ${updated}` : ''}
+                </option>
+              )
+            })}
+          </select>
+          <Icon name="chevron" size={14} />
+        </div>
       </label>
       {selected && (
         <button
