@@ -1520,7 +1520,7 @@ export function Studio() {
                   {saving ? 'Saving…' : 'Save'}
                 </button>
                 <button
-                  className="button small primary"
+                  className="button small subtle lean-check-button"
                   onClick={check}
                   disabled={
                     !file?.path.endsWith('.lean') ||

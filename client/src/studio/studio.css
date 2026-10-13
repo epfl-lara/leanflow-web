@@ -659,6 +659,12 @@ textarea {
   gap: 6px;
   flex-shrink: 0;
 }
+.file-actions .lean-check-button {
+  align-self: center;
+  gap: 5px;
+  padding: 5px 8px;
+  font-weight: 450;
+}
 .lean-workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(210px, 34%);
