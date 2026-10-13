@@ -1,0 +1,24 @@
+[Unit]
+Description=LeanFlow Web — developed by EPFL LARA
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Install as a user service: ~/.config/systemd/user/lemex-web.service.
+WorkingDirectory=%h/lemex-web
+Environment=HOST=127.0.0.1
+Environment=PORT=8090
+Environment=STUDIO_DATA_DIR=%h/lemex-web/.data
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/lemex-web/.data/server.env
+# Adjust Node to the host's supported Node 24+ installation.
+ExecStart=/usr/bin/env node %h/lemex-web/server/studio.mjs
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=default.target

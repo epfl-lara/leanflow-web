@@ -1,0 +1,328 @@
+.chat-controls-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.chat-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 7px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+.chat-picker-field {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.chat-picker-field select {
+  min-width: 0;
+  width: 100%;
+  height: 32px;
+  padding: 5px 8px;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.chat-control-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 32px;
+  padding: 6px 9px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.chat-control-button:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.chat-picker-delete {
+  width: 30px;
+  padding: 6px;
+  color: var(--muted);
+}
+.chat-picker-rename {
+  width: 30px;
+  padding: 6px;
+  color: var(--muted);
+}
+.chat-rename-form {
+  flex-basis: 100%;
+  min-width: 0;
+  padding: 9px 0 2px;
+  border-top: 1px solid var(--border);
+}
+.chat-rename-form > label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.chat-rename-field {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.chat-rename-field input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  height: 34px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.chat-rename-field input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.chat-rename-field input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+.chat-rename-suggest {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 3px 0;
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.chat-rename-suggest:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.chat-rename-notice,
+.chat-rename-error {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.chat-rename-notice {
+  color: var(--muted);
+}
+.chat-rename-error {
+  color: var(--danger);
+}
+.chat-picker-delete:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+.file-context-control {
+  min-width: 0;
+  margin: 8px 0;
+}
+.file-context-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 7px;
+}
+.file-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: min(190px, 100%);
+  padding: 4px 5px 4px 7px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 9px;
+}
+.file-context-chip > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.file-context-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-context-chip-library {
+  color: var(--muted);
+  font-size: 8px;
+  flex-shrink: 0;
+}
+.file-context-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.file-context-chip button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.file-context-picker > summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  padding: 5px 7px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+.file-context-picker > summary::-webkit-details-marker {
+  display: none;
+}
+.file-context-picker > summary:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.file-context-picker > summary[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+.file-context-picker > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.file-context-count {
+  color: var(--muted);
+  font-size: 9px;
+  margin-left: 3px;
+}
+.file-context-picker[open] > summary > svg:last-child {
+  transform: rotate(90deg);
+}
+.file-context-popover {
+  margin-top: 8px;
+  padding: 10px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow: 0 4px 18px #00000012;
+}
+.file-context-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 8px;
+}
+.file-context-filter > svg {
+  flex-shrink: 0;
+}
+.file-context-filter input {
+  min-width: 0;
+  width: 100%;
+  padding: 7px 0;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-size: 11px;
+}
+.file-context-help {
+  margin: 8px 1px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.file-context-results {
+  max-height: 240px;
+  overflow: auto;
+}
+.file-context-section {
+  margin: 8px 1px 5px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 550;
+}
+.file-context-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 6px;
+  margin: 1px 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.file-context-option:hover:not(.blocked) {
+  background: var(--surface-hover);
+}
+.file-context-option.selected {
+  background: var(--accent-soft);
+}
+.file-context-option.blocked {
+  cursor: default;
+  opacity: 0.55;
+}
+.file-context-option > input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+.file-context-option > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.file-context-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+}
+.file-context-path > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-context-directory {
+  color: var(--muted);
+  font-size: 9px;
+  margin-top: 3px;
+}
+.file-context-library {
+  flex-shrink: 0;
+  padding: 2px 4px;
+  color: var(--muted);
+  background: var(--surface);
+  border-radius: 4px;
+  font-size: 8px;
+}

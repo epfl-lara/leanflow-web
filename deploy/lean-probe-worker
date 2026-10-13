@@ -1,0 +1,63 @@
+#!/opt/lean-probe/bin/python
+"""Run the pinned LeanProbe package with private, stdio-safe worker REPLs."""
+import json
+import logging
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+def configure_worker():
+    import lean_interact
+    from filelock import FileLock
+
+    cache = Path.home() / ".cache" / "lean-probe"
+    cache.mkdir(parents=True, exist_ok=True)
+    # LeanInteract's default Rich handler writes to stdout, which is the MCP
+    # transport. Retain diagnostics while keeping JSON-RPC stdout clean.
+    logger = logging.getLogger("lean_interact")
+    logger.handlers = [logging.StreamHandler(sys.stderr)]
+    source_root = Path("/opt/lean-probe-repls")
+    pins = json.loads((source_root / "pins.json").read_text())
+    original = lean_interact.LeanREPLConfig
+
+    class WorkerREPLConfig(original):
+        def __init__(self, **kwargs):
+            kwargs.setdefault("cache_dir", cache / "downloads")
+            project = kwargs.get("project")
+            version = project.get_lean_version() if project else kwargs.get("lean_version")
+            version = (version or "").removeprefix("leanprover/lean4:")
+            if not kwargs.get("local_repl_path") and version in pins:
+                destination = cache / version
+                pin = pins[version]
+                with FileLock(str(destination) + ".lock", timeout=600):
+                    marker = destination / ".worker-repl-pin"
+                    if not marker.exists() or marker.read_text().strip() != pin["revision"]:
+                        if destination.exists():
+                            shutil.rmtree(destination)
+                        shutil.copytree(source_root / version, destination)
+                        (destination / "lean-toolchain").write_text("leanprover/lean4:" + version + "\n")
+                        marker.write_text(pin["revision"] + "\n")
+                    binary = destination / ".lake" / "build" / "bin" / "repl"
+                    if not binary.exists():
+                        subprocess.run(
+                            [str(kwargs.get("lake_path", "lake")), "build", "repl"],
+                            cwd=destination,
+                            check=True,
+                            stdout=sys.stderr,
+                            stderr=sys.stderr,
+                        )
+                kwargs.update(local_repl_path=destination, build_repl=False)
+            super().__init__(**kwargs)
+
+    lean_interact.LeanREPLConfig = WorkerREPLConfig
+
+
+if __name__ == "__main__":
+    if "mcp" in sys.argv[1:]:
+        os.environ.setdefault("LEAN_PROBE_AUTO_BUILD", "0")
+        configure_worker()
+    from lean_probe.cli import main
+    main()

@@ -1,0 +1,60 @@
+{
+  "name": "leanflow-web",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "type": "module",
+  "scripts": {
+    "start": "node server/studio.mjs",
+    "start:client": "npm --workspace @leanweb/client run dev",
+    "start:server": "node server/studio.mjs",
+    "build": "npm run build:client",
+    "build:client": "npm --workspace @leanweb/client run build",
+    "build:server": "node --check server/studio.mjs",
+    "build:projects": "node scripts/bootstrap-presets.mjs",
+    "production": "node server/studio.mjs",
+    "prod": "node server/studio.mjs",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "test": "node --test server/tests/*.test.mjs client/src/studio/*.test.mjs",
+    "dev": "concurrently -n server,client \"npm run dev:server\" \"npm run start:client\"",
+    "dev:server": "node --watch server/studio.mjs",
+    "check": "tsc --noEmit -p client/tsconfig.json",
+    "worker:build": "bash scripts/build-worker.sh",
+    "presets:install": "node scripts/bootstrap-presets.mjs",
+    "access": "node scripts/access.mjs"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.0",
+    "@types/node": "^26.0.1",
+    "@typescript-eslint/eslint-plugin": "^8.50.1",
+    "@typescript-eslint/parser": "^8.50.1",
+    "concurrently": "^9.2.1",
+    "cypress": "^15.7.0",
+    "cypress-iframe": "^1.0.1",
+    "cypress-real-events": "^1.15.0",
+    "globals": "^16.5.0",
+    "oxfmt": "^0.56.0",
+    "oxlint": "^1.71.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.50.1",
+    "wait-on": "^9.0.3"
+  },
+  "engines": {
+    "node": ">=24.x"
+  },
+  "allowScripts": {
+    "@swc/core@1.15.3": true,
+    "cypress@15.21.0": true,
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": true
+  }
+}

@@ -1,0 +1,14 @@
+name = "MathlibDemo"
+reservoir = false
+defaultTargets = ["MathlibDemo"]
+
+[leanOptions]
+pp.unicode.fun = true
+
+[[require]]
+scope = "leanprover-community"
+name = "mathlib"
+rev = "master"
+
+[[lean_lib]]
+name = "MathlibDemo"

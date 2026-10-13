@@ -1,0 +1,28 @@
+{
+  "name": "@leanweb/server",
+  "private": true,
+  "bin": {
+    "server": "studio.mjs"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch studio.mjs",
+    "prod": "node studio.mjs",
+    "build": "node --check studio.mjs",
+    "build:projects": "node ../scripts/bootstrap-presets.mjs"
+  },
+  "dependencies": {
+    "compression": "^1.8.2",
+    "cross-env": "^10.1.0",
+    "express": "^5.1.0",
+    "ip-anonymize": "^0.1.0",
+    "memfs": "^4.51.1",
+    "nocache": "^4.0.0",
+    "ws": "^8.18.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "nodemon": "^3.1.11"
+  }
+}

@@ -1,0 +1,64 @@
+.upload-dropzone {
+  padding: 24px 18px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--canvas);
+  text-align: center;
+}
+.upload-dropzone > strong {
+  font-size: 14px;
+}
+.upload-choices {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0;
+}
+.upload-dropzone p,
+.upload-preview p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.upload-preview {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.upload-preview ul {
+  padding-left: 20px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.import-options {
+  margin: 15px 0;
+}
+.import-options > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+.setup-repair-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.setup-repair-choice input {
+  flex-shrink: 0;
+  width: 14px;
+  margin-top: 4px;
+}
+.setup-repair-notice {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  max-width: 600px;
+  text-align: left;
+}

@@ -1,0 +1,9 @@
+# Replace this hostname; keep the application bound to loopback.
+lean.example.org {
+    reverse_proxy 127.0.0.1:8090
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "same-origin"
+    }
+}

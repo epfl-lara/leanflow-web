@@ -1,0 +1,11 @@
+**
+!.runtime/
+!.runtime/lemex/
+!.runtime/lemex/**
+!.runtime/lemex-next/
+!.runtime/lemex-next/**
+!deploy/
+!deploy/Dockerfile.worker
+!deploy/worker-entrypoint
+!deploy/lean-probe-worker
+!deploy/lean-probe-repl-pins.json
