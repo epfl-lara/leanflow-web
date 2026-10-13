@@ -11,9 +11,11 @@
 }
 .chat-picker {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 7px;
   min-width: 0;
+  flex-shrink: 0;
 }
 .chat-picker-field {
   display: flex;
@@ -59,6 +61,74 @@
   width: 30px;
   padding: 6px;
   color: var(--muted);
+}
+.chat-picker-rename {
+  width: 30px;
+  padding: 6px;
+  color: var(--muted);
+}
+.chat-rename-form {
+  flex-basis: 100%;
+  min-width: 0;
+  padding: 9px 0 2px;
+  border-top: 1px solid var(--border);
+}
+.chat-rename-form > label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.chat-rename-field {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.chat-rename-field input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  height: 34px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.chat-rename-field input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.chat-rename-field input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+.chat-rename-suggest {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 3px 0;
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.chat-rename-suggest:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.chat-rename-notice,
+.chat-rename-error {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.chat-rename-notice {
+  color: var(--muted);
+}
+.chat-rename-error {
+  color: var(--danger);
 }
 .chat-picker-delete:hover:not(:disabled) {
   color: var(--danger);

@@ -40,10 +40,14 @@ function promptTitle(prompt) {
 
 /** Chat metadata stores run references; EventStore retains the actual transcripts. */
 export class ChatStore {
-  constructor({ dataDir, workspaces, events }) {
+  constructor({ dataDir, workspaces, events, titleGenerator }) {
     if (!dataDir || !workspaces || !events)
       throw new Error('ChatStore requires dataDir, workspaces, and events')
-    Object.assign(this, { workspaces, events })
+    Object.assign(this, { workspaces, events, titleGenerator })
+    this.titleTasks = new Map()
+    this.titleQueue = []
+    this.titleActive = 0
+    this.closed = false
     this.db = new DatabaseSync(path.join(path.resolve(dataDir), 'chats.sqlite'))
     this.db.exec(
       'PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, owner TEXT NOT NULL, project TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS chats_project ON chats(owner,project); CREATE TABLE IF NOT EXISTS chat_runs (position INTEGER PRIMARY KEY AUTOINCREMENT, chat TEXT NOT NULL, run TEXT NOT NULL UNIQUE); CREATE INDEX IF NOT EXISTS chat_runs_chat ON chat_runs(chat,position);',
@@ -51,6 +55,18 @@ export class ChatStore {
   }
 
   init() {
+    // Interrupted naming requests retain their prompt-based title. Never issue
+    // model requests merely because the application restarted.
+    for (const row of this.db
+      .prepare(
+        "SELECT data FROM chats WHERE json_extract(data,'$.titleStatus')='pending'",
+      )
+      .all()) {
+      const chat = JSON.parse(row.data)
+      chat.titleStatus = 'unavailable'
+      delete chat.titleRequestId
+      this.#save(chat)
+    }
     // A one-time reference migration keeps earlier project tasks available in
     // the new chat picker without rewriting their transcripts or job records.
     if (!this.events.db) return this
@@ -143,6 +159,9 @@ export class ChatStore {
       id: chat.id,
       projectId: chat.projectId,
       title: chat.title,
+      titleSource:
+        chat.titleSource || (chat.explicitTitle ? 'manual' : 'prompt'),
+      titleStatus: chat.titleStatus || 'ready',
       createdAt: chat.createdAt,
       updatedAt:
         run?.updatedAt > chat.updatedAt ? run.updatedAt : chat.updatedAt,
@@ -193,9 +212,126 @@ export class ChatStore {
       fail('Choose a chat title')
     chat.title = title(input.title)
     chat.explicitTitle = true
+    chat.titleSource = 'manual'
+    chat.titleStatus = 'ready'
+    delete chat.titleRequestId
     chat.updatedAt = new Date().toISOString()
     this.#save(chat)
     return this.#public(chat)
+  }
+
+  suggestTitle(id, owner) {
+    this.#owned(id, owner)
+    if (this.closed || !this.titleGenerator?.available)
+      return Promise.reject(
+        Object.assign(
+          new Error(
+            'DeepSeek chat naming is unavailable. You can still enter a name manually.',
+          ),
+          { status: 503 },
+        ),
+      )
+    const { runs } = this.history(id, owner)
+    const selected = runs.length > 3 ? [runs[0], ...runs.slice(-2)] : runs
+    const messages = []
+    let remaining = 8000
+    for (const run of selected) {
+      for (const [role, value] of [
+        ['user', run.prompt],
+        ['assistant', run.message],
+      ]) {
+        if (typeof value !== 'string' || !value.trim() || remaining <= 0)
+          continue
+        const content = value.trim().slice(0, Math.min(2000, remaining))
+        messages.push({ role, content })
+        remaining -= content.length
+      }
+    }
+    if (!messages.length)
+      return Promise.reject(
+        Object.assign(
+          new Error('Send a message before asking DeepSeek to name this chat.'),
+          { status: 400 },
+        ),
+      )
+    const existing = this.titleTasks.get(id)
+    if (existing) return existing.promise
+    if (this.titleQueue.length >= 16)
+      return Promise.reject(
+        Object.assign(
+          new Error(
+            'Chat naming is busy. Try again shortly or enter a name manually.',
+          ),
+          { status: 503 },
+        ),
+      )
+    const controller = new AbortController()
+    const job = { id, owner, messages, controller }
+    job.promise = new Promise((resolve, reject) => {
+      job.resolve = resolve
+      job.reject = reject
+    })
+    this.titleTasks.set(id, job)
+    this.titleQueue.push(job)
+    this.#drainTitles()
+    return job.promise
+  }
+
+  #drainTitles() {
+    while (!this.closed && this.titleActive < 2 && this.titleQueue.length) {
+      const job = this.titleQueue.shift()
+      this.titleActive++
+      Promise.resolve()
+        .then(() => {
+          this.#owned(job.id, job.owner)
+          return this.titleGenerator.generate(job.messages, {
+            signal: job.controller.signal,
+          })
+        })
+        .then((result) => {
+          if (this.closed) throw new Error('Chat naming stopped.')
+          this.#owned(job.id, job.owner)
+          return { title: title(result.title), model: result.model }
+        })
+        .then(job.resolve, job.reject)
+        .finally(() => {
+          this.titleActive--
+          if (this.titleTasks.get(job.id) === job)
+            this.titleTasks.delete(job.id)
+          this.#drainTitles()
+        })
+    }
+  }
+
+  async #autoTitle(chat) {
+    try {
+      const result = await this.suggestTitle(chat.id, chat.owner)
+      if (this.closed) return
+      const current = this.#owned(chat.id, chat.owner)
+      // A manual rename, deletion, or newer request always wins this race.
+      if (
+        current.explicitTitle ||
+        current.titleRequestId !== chat.titleRequestId
+      )
+        return
+      current.title = result.title
+      current.titleSource = 'generated'
+      current.titleStatus = 'ready'
+      current.titleModel = result.model
+      delete current.titleRequestId
+      this.#save(current)
+    } catch {
+      if (this.closed) return
+      try {
+        const current = this.#owned(chat.id, chat.owner)
+        if (current.titleRequestId !== chat.titleRequestId) return
+        current.titleStatus = 'unavailable'
+        delete current.titleRequestId
+        this.#save(current)
+      } catch {
+        /* Deleted or archived chats need no naming update. */
+      }
+    }
   }
 
   appendRun(id, owner, suppliedRun) {
@@ -225,7 +361,16 @@ export class ChatStore {
         .prepare('SELECT COUNT(*) AS count FROM chat_runs WHERE chat=?')
         .get(id).count,
     )
+    const autoName =
+      count === 0 &&
+      !chat.explicitTitle &&
+      this.titleGenerator?.available &&
+      !this.closed
     if (count === 0 && !chat.explicitTitle) chat.title = promptTitle(run.prompt)
+    if (autoName) {
+      chat.titleStatus = 'pending'
+      chat.titleRequestId = randomUUID()
+    }
     chat.updatedAt = new Date().toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
@@ -238,6 +383,7 @@ export class ChatStore {
       this.db.exec('ROLLBACK')
       throw error
     }
+    if (autoName) void this.#autoTitle(chat)
     return this.#public(chat)
   }
 
@@ -310,6 +456,8 @@ export class ChatStore {
     this.#assertInactive(chat)
     chat.trashId = randomUUID()
     chat.archivedAt = new Date().toISOString()
+    if (chat.titleStatus === 'pending') chat.titleStatus = 'unavailable'
+    delete chat.titleRequestId
     chat.updatedAt = chat.archivedAt
     this.#save(chat)
     return this.#receipt(chat)
@@ -348,7 +496,19 @@ export class ChatStore {
     return { ...receipt, recoverable: false, restored: true }
   }
 
+  stopNaming() {
+    this.closed = true
+    for (const job of this.titleTasks.values()) job.controller.abort()
+    for (const job of this.titleQueue.splice(0)) {
+      this.titleTasks.delete(job.id)
+      job.reject(
+        Object.assign(new Error('Chat naming stopped.'), { status: 503 }),
+      )
+    }
+  }
+
   close() {
+    this.stopNaming()
     this.db.close()
   }
 }

@@ -13,6 +13,7 @@ import { EventStore, JobManager } from './events.mjs'
 import { AgentManager } from './agents.mjs'
 import { Settings } from './settings.mjs'
 import { ChatStore } from './chats.mjs'
+import { createChatTitleGenerator } from './chat-titles.mjs'
 import { searchDeclarations } from './search.mjs'
 import { LspFrames, frame, validateClientUris } from './rpc.mjs'
 import { acquireServerLease } from './lease.mjs'
@@ -98,6 +99,7 @@ export async function createStudio({
   dataDir = process.env.STUDIO_DATA_DIR || path.join(projectDir, '.data'),
   runtime: suppliedRuntime,
   config: suppliedConfig,
+  titleGenerator: suppliedTitleGenerator,
 } = {}) {
   dataDir = path.resolve(dataDir)
   await fs.mkdir(dataDir, { recursive: true, mode: 0o700 })
@@ -120,7 +122,12 @@ export async function createStudio({
   await workspaces.init()
   const events = new EventStore(dataDir),
     settings = new Settings(dataDir)
-  const chats = new ChatStore({ dataDir, workspaces, events })
+  const chats = new ChatStore({
+    dataDir,
+    workspaces,
+    events,
+    titleGenerator: suppliedTitleGenerator || createChatTitleGenerator(config),
+  })
   await chats.init()
   const agents = new AgentManager({
     runtime,
@@ -567,6 +574,9 @@ export async function createStudio({
   app.patch('/api/chats/:id', (req, res) =>
     res.json(chats.rename(req.params.id, req.user.id, req.body)),
   )
+  app.post('/api/chats/:id/title', async (req, res) =>
+    res.json(await chats.suggestTitle(req.params.id, req.user.id)),
+  )
   app.post('/api/chats/:id/runs', (req, res) => {
     const chat = chats.get(req.params.id, req.user.id)
     requireNoGit(chat.projectId, req.user.id)
@@ -775,6 +785,7 @@ export async function createStudio({
   const close = () => {
     if (closePromise) return closePromise
     closePromise = (async () => {
+      chats.stopNaming()
       const stopped = new Promise((resolve) => server.close(resolve))
       server.closeAllConnections()
       for (const ws of sockets) ws.terminate()

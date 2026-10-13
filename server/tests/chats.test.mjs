@@ -8,7 +8,7 @@ import { ChatStore } from '../chats.mjs'
 import { EventStore } from '../events.mjs'
 import { createStudio } from '../studio.mjs'
 
-async function fixture(t) {
+async function fixture(t, titleGenerator) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-chats-'))
   const projects = new Map([
     ['p', { id: 'p', name: 'Proofs', owner: 'alice' }],
@@ -24,7 +24,7 @@ async function fixture(t) {
     },
   }
   const events = new EventStore(dataDir)
-  let chats = new ChatStore({ dataDir, workspaces, events })
+  let chats = new ChatStore({ dataDir, workspaces, events, titleGenerator })
   chats.init()
   t.after(async () => {
     chats.close()
@@ -53,7 +53,7 @@ async function fixture(t) {
     run,
     restart() {
       chats.close()
-      chats = new ChatStore({ dataDir, workspaces, events })
+      chats = new ChatStore({ dataDir, workspaces, events, titleGenerator })
       chats.init()
       return chats
     },
@@ -245,7 +245,7 @@ test('recoverable chat deletion preserves history and protects active chats and 
   assert.deepEqual(f.chats.listTrash('alice'), [])
 })
 
-async function httpFixture(t) {
+async function httpFixture(t, titleGenerator) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-chat-http-'))
   const runtime = {
     async init() {},
@@ -279,7 +279,12 @@ async function httpFixture(t) {
     lemex: {},
     redact: String,
   }
-  const studio = await createStudio({ dataDir, runtime, config })
+  const studio = await createStudio({
+    dataDir,
+    runtime,
+    config,
+    titleGenerator,
+  })
   studio.agents.maxConcurrent = 0
   await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve))
   t.after(async () => {
@@ -835,4 +840,243 @@ test('HTTP Trash merges chat and file recovery receipts and retains conversation
     ),
     [fileReceipt.trashId],
   )
+})
+
+const titleTick = () => new Promise((resolve) => setImmediate(resolve))
+const titleGate = () => {
+  let resolve, reject
+  const promise = new Promise((yes, no) => {
+    resolve = yes
+    reject = no
+  })
+  return { promise, resolve, reject }
+}
+
+test('first message receives a background title once, with prompt fallback and unchanged chat history', async (t) => {
+  const gate = titleGate(),
+    calls = []
+  const f = await fixture(t, {
+    available: true,
+    generate: (messages) => {
+      calls.push(messages)
+      return gate.promise
+    },
+  })
+  const chat = f.chats.create('alice', 'p')
+  const run = f.run(chat, {
+    prompt:
+      'Please repair the proof of commutativity for natural number addition.',
+  })
+  assert.equal(
+    f.events.get(run.id).status,
+    'queued',
+    'Naming never runs or delays the proof agent',
+  )
+  assert.equal(f.chats.get(chat.id, 'alice').titleStatus, 'pending')
+  assert.match(f.chats.get(chat.id, 'alice').title, /^Please repair/)
+  await titleTick()
+  assert.deepEqual(calls, [[{ role: 'user', content: run.prompt }]])
+  gate.resolve({
+    title: 'Natural Addition Commutativity',
+    model: 'deepseek-fixture',
+  })
+  await titleTick()
+  assert.equal(
+    f.chats.get(chat.id, 'alice').title,
+    'Natural Addition Commutativity',
+  )
+  assert.equal(f.chats.get(chat.id, 'alice').titleSource, 'generated')
+  assert.equal(f.chats.get(chat.id, 'alice').titleStatus, 'ready')
+  f.run(chat, { prompt: 'Continue the same proof.' })
+  await titleTick()
+  assert.equal(calls.length, 1)
+  assert.equal(f.chats.history(chat.id, 'alice').runs[0].id, run.id)
+  f.restart()
+  assert.equal(
+    f.chats.get(chat.id, 'alice').title,
+    'Natural Addition Commutativity',
+  )
+  assert.equal(calls.length, 1)
+})
+
+test('manual titles win late automatic results and cancelled requests never rename restored chats', async (t) => {
+  const gates = []
+  const f = await fixture(t, {
+    available: true,
+    generate: () => {
+      const gate = titleGate()
+      gates.push(gate)
+      return gate.promise
+    },
+  })
+  const chat = f.chats.create('alice', 'p')
+  f.run(chat)
+  await titleTick()
+  f.chats.rename(chat.id, 'alice', { title: 'My precise name' })
+  gates[0].resolve({ title: 'Late automatic title', model: 'deepseek-fixture' })
+  await titleTick()
+  assert.equal(f.chats.get(chat.id, 'alice').title, 'My precise name')
+  assert.equal(f.chats.get(chat.id, 'alice').titleSource, 'manual')
+  const second = f.chats.create('alice', 'p'),
+    job = f.run(second)
+  await titleTick()
+  f.events.update(job.id, { status: 'completed' })
+  const receipt = f.chats.trash('alice', second.id)
+  f.chats.restore('alice', receipt.trashId)
+  gates[1].resolve({
+    title: 'Result from before deletion',
+    model: 'deepseek-fixture',
+  })
+  await titleTick()
+  assert.equal(f.chats.get(second.id, 'alice').title, 'First task')
+  const explicit = f.chats.create('alice', 'p', {
+    title: 'Named before first message',
+  })
+  f.run(explicit)
+  await titleTick()
+  assert.equal(
+    gates.length,
+    2,
+    'Explicit names never start automatic generation',
+  )
+})
+
+test('failed naming retains a usable title and never retries automatically on new messages or restart', async (t) => {
+  let calls = 0
+  const f = await fixture(t, {
+    available: true,
+    generate: async () => {
+      calls++
+      throw new Error('Provider unavailable')
+    },
+  })
+  const chat = f.chats.create('alice', 'p')
+  f.run(chat, { prompt: 'Optimize the induction proof' })
+  await titleTick()
+  assert.equal(
+    f.chats.get(chat.id, 'alice').title,
+    'Optimize the induction proof',
+  )
+  assert.equal(f.chats.get(chat.id, 'alice').titleStatus, 'unavailable')
+  f.run(chat)
+  f.restart()
+  await titleTick()
+  assert.equal(calls, 1)
+  f.chats.rename(chat.id, 'alice', { title: 'Manual fallback' })
+  assert.equal(f.chats.get(chat.id, 'alice').title, 'Manual fallback')
+})
+
+test('suggestions deduplicate and queue within limits, send bounded conversation text, and abort on shutdown', async (t) => {
+  const calls = [],
+    gates = []
+  const f = await fixture(t, {
+    available: true,
+    generate: (messages, { signal }) => {
+      const gate = titleGate()
+      gates.push(gate)
+      calls.push({ messages, signal })
+      signal.addEventListener(
+        'abort',
+        () => gate.reject(new Error('Stopped')),
+        { once: true },
+      )
+      return gate.promise
+    },
+  })
+  const chats = Array.from({ length: 3 }, () =>
+    f.chats.create('alice', 'p', { title: 'Explicit' }),
+  )
+  for (const chat of chats) {
+    const job = f.run(chat, {
+      prompt: 'p'.repeat(9000),
+      file: 'PrivateFile.lean',
+    })
+    f.events.update(job.id, {
+      status: 'completed',
+      message: 'm'.repeat(9000),
+      reasoning: 'PRIVATE_REASONING',
+      log: 'PRIVATE_LOG',
+    })
+  }
+  const requests = chats.map((chat) => f.chats.suggestTitle(chat.id, 'alice'))
+  assert.equal(f.chats.suggestTitle(chats[0].id, 'alice'), requests[0])
+  await titleTick()
+  assert.equal(calls.length, 2)
+  assert.equal(f.chats.titleQueue.length, 1)
+  assert(!JSON.stringify(calls[0].messages).includes('PRIVATE_'))
+  assert(!JSON.stringify(calls[0].messages).includes('PrivateFile'))
+  assert(calls[0].messages.every((message) => message.content.length <= 2000))
+  gates[0].resolve({ title: 'A suggested title', model: 'deepseek-fixture' })
+  assert.equal((await requests[0]).title, 'A suggested title')
+  await titleTick()
+  assert.equal(calls.length, 3)
+  assert.equal(
+    f.chats.get(chats[0].id, 'alice').title,
+    'Explicit',
+    'Suggestion requires an explicit save',
+  )
+  const aborted = Promise.allSettled(requests.slice(1))
+  f.chats.stopNaming()
+  assert((await aborted).every((result) => result.status === 'rejected'))
+  assert(calls.every((call) => call.signal.aborted || call === calls[0]))
+})
+
+test('suggestion HTTP endpoint is owned, read-only, usable during a run, and never accepts client-supplied context', async (t) => {
+  const calls = []
+  const f = await httpFixture(t, {
+    available: true,
+    generate: async (messages) => {
+      calls.push(messages)
+      return { title: 'Commutativity Proof', model: 'deepseek-fixture' }
+    },
+  })
+  const chat = f.chats.create('owner', f.project.id, {
+    title: 'Original title',
+  })
+  const endpoint = `/api/chats/${chat.id}/title`
+  assert.equal(
+    (await f.request(endpoint, { method: 'POST', body: {} })).status,
+    400,
+  )
+  const run = f.events.create('owner', {
+    kind: 'agent',
+    projectId: f.project.id,
+    chatId: chat.id,
+    prompt: 'Prove addition commutative',
+  })
+  f.chats.appendRun(chat.id, 'owner', run)
+  assert.equal(
+    (
+      await f.request(endpoint, {
+        method: 'POST',
+        body: {},
+        access: f.bobToken,
+      })
+    ).status,
+    404,
+  )
+  assert.equal(
+    (await f.request(endpoint, { method: 'POST', body: {}, access: null }))
+      .status,
+    401,
+  )
+  const response = await f.request(endpoint, {
+    method: 'POST',
+    body: { prompt: 'Injected unrelated context', model: 'expensive-override' },
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), {
+    title: 'Commutativity Proof',
+    model: 'deepseek-fixture',
+  })
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0], [{ role: 'user', content: run.prompt }])
+  assert.equal(f.chats.get(chat.id, 'owner').title, 'Original title')
+  const rename = await f.request(`/api/chats/${chat.id}`, {
+    method: 'PATCH',
+    body: { title: 'Chosen name during active run' },
+  })
+  assert.equal(rename.status, 200)
+  assert.equal(f.events.get(run.id).status, 'queued')
+  assert.equal(f.chats.history(chat.id, 'owner').runs[0].id, run.id)
 })

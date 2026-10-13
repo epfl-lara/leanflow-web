@@ -530,6 +530,19 @@ try {
       (await oldTurn.innerText()).includes('PRESERVED_VERIFICATION_ERROR'),
     'full verification diagnostics',
   )
+  // Native details toggles are queued. Opening a nested verification section
+  // can leave a legitimate lazy inspection pending after cached errors appear.
+  // Settle that inspection before changing the shared fixture; otherwise its
+  // full response can contain the marker intended for the later compact poll.
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  )
+  await oldTurn
+    .getByText('Loading details…', { exact: true })
+    .waitFor({ state: 'hidden' })
   earlier.verification.reason =
     'COMPACT_VERIFICATION_REFRESH: checked saved project'
   earlier.eventCursor += 10
@@ -549,6 +562,10 @@ try {
     readsBeforeCompact,
     'Verification preservation must not rely on refetching a full snapshot',
   )
+  report.compactVerificationReads = {
+    before: readsBeforeCompact,
+    after: oldRunReads(),
+  }
   await oldTurn.getByText('Warnings', { exact: true }).click()
   assert((await oldTurn.innerText()).includes('PRESERVED_VERIFICATION_WARNING'))
   await oldTurn.getByText('Axiom audit', { exact: true }).click()

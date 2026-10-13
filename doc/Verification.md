@@ -118,6 +118,14 @@ The import browser check now passes five flows, including Mathlib + CSLib, Mathl
 
 Claude Code reviewed the implementation using the configured Opus model at medium effort, with read-only tools and no permission denials. Its final source review found no remaining security blocker. The suspected shallow-bundle failure was explicitly uncertain and was resolved by the real depth-one integration check above. Review records are `.runtime/git-review-initial.json`, `git-review-publish.json`, `git-review-final.json`, and `git-review-summary.json`; test results remain the evidence for executed behavior.
 
+## Chat naming
+
+The naming update passes **197 automated tests**, TypeScript checks, lint with warnings, and the production build. New backend regressions cover automatic first-message titles, prompt fallback, manual-name precedence, deletion/restoration races, persistence, owner/project isolation, bounded/coalesced requests, and shutdown. Suggestions use conversation text only and require an explicit Save to replace an existing name.
+
+One real synthetic request to `deepseek-ai/DeepSeek-V4.1-Flash` at `low` effort returned “Finite sums of continuous functions in Lean” in 5.2 seconds. It used a text-only Responses request with no tools, `store:false`, and no user project content. Evidence: `.runtime/chat-naming/model-check.json`.
+
+`scripts/check-chat-naming-ui.mjs` passes seven browser scenario groups: manual naming and persistence during an active proof, cancel/validation, errors with draft retention, editable DeepSeek suggestions, late-response protection while typing or switching chats/projects, empty-chat naming, and laptop layout. A suggestion cannot steal focus from the proof composer. Evidence: `.runtime/chat-naming-ui/result.json` and screenshots. The existing chat regression test now waits for an in-flight lazy inspection before measuring requests caused by a subsequent metadata update; the earlier timing-sensitive failure is retained in `.runtime/chat-naming/chat-ui-first-result.json`.
+
 ## Current scope
 
 Imports support public HTTPS repositories. Source control supports explicit reviewed commits and pushes with a one-use repository token. Private repository import credentials, shared-project ACLs, real-time coediting, native thread resumption, and automatic history retention policies are future work. Chats keep bounded server-owned conversation context while each native run starts fresh. Review-first acceptance rejects changes to its saved baseline; live mirroring and Undo check agent-touched files and context without overwriting conflicting saved work. Conservative proof parsing and executable metaprogramming restrictions may require manual review for advanced Lean syntax; optimization metrics explicitly report unsupported syntax as unavailable.

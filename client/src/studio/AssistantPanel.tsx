@@ -87,6 +87,7 @@ export function AssistantPanel({
     [now, setNow] = useState(Date.now())
   const mounted = useRef(true),
     navigation = useRef(0),
+    chatNamesRevision = useRef(0),
     chatRef = useRef(chatId),
     runsRef = useRef(runs)
   chatRef.current = chatId
@@ -169,10 +170,12 @@ export function AssistantPanel({
     [reconcileFollowups],
   )
   const loadChats = useCallback(async () => {
+    const revision = chatNamesRevision.current
     const values = await api<ChatChoice[]>(
       `/api/projects/${encodeURIComponent(projectId)}/chats`,
     )
-    if (mounted.current) setChats(values)
+    if (mounted.current && revision === chatNamesRevision.current)
+      setChats(values)
     return values
   }, [projectId])
   const loadHistory = useCallback(
@@ -623,6 +626,15 @@ export function AssistantPanel({
         onSelect={(id) => void openChat(id)}
         onNew={() => void newChat()}
         onDelete={onDeleteChat}
+        onRenamed={(renamed) => {
+          if (!mounted.current) return
+          ++chatNamesRevision.current
+          setChats((previous) =>
+            previous.map((chat) =>
+              chat.id === renamed.id ? { ...chat, ...renamed } : chat,
+            ),
+          )
+        }}
         disabled={applying || discarding}
         deleteDisabled={activeHere}
         loading={chatBusy}
