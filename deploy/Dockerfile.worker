@@ -16,15 +16,29 @@ RUN python3 -m venv /opt/lean-lsp-mcp \
  && /opt/tools/bin/pip install --no-cache-dir 'uv==0.13.0' \
  && ln -s /opt/lean-lsp-mcp/bin/lean-lsp-mcp /opt/tools/bin/lean-lsp-mcp \
  && ln -s /opt/lean-explore/bin/lean-explore /opt/tools/bin/lean-explore
+# Pin LeanProbe independently of the Lemex/native bundle. Its MCP process uses
+# a private worker home for REPL caches and never installs into a user's home.
+ARG LEAN_PROBE_REVISION=646cb0ee3d428562b13740649aa7c1689ec0720a
+RUN python3 -m venv /opt/lean-probe \
+ && /opt/lean-probe/bin/pip install --no-cache-dir 'lean-interact==0.11.5' "lean-probe @ git+https://github.com/epfl-lara/LeanProbe.git@${LEAN_PROBE_REVISION}" \
+ && /opt/lean-probe/bin/python -c 'import lean_interact'
+# LeanInteract's published REPL releases currently stop before our newest
+# toolchains. Ship exact compatible upstream sources; compile per toolchain in
+# the private worker home on first use, with no network or project source writes.
+COPY deploy/lean-probe-repl-pins.json /opt/lean-probe-repls/pins.json
+RUN /opt/lean-probe/bin/python -c 'import json,pathlib,subprocess; root=pathlib.Path("/opt/lean-probe-repls"); pins=json.loads((root/"pins.json").read_text()); [(subprocess.run(["git","clone","--quiet","--no-checkout",pin["repository"],str(root/version)],check=True), subprocess.run(["git","-C",str(root/version),"checkout","--quiet",pin["revision"]],check=True)) for version,pin in pins.items()]'
+COPY deploy/lean-probe-worker /opt/tools/bin/lean-probe
 ARG LEMEX_RUNTIME_DIR=.runtime/lemex
 COPY ${LEMEX_RUNTIME_DIR} /opt/lemex
 COPY deploy/worker-entrypoint /usr/local/bin/worker-entrypoint
 ENV PATH=/opt/lemex/bin:/opt/lemex/codex-path:/opt/elan/bin:/opt/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV HOME=/home/worker LEMEX_HOME=/home/worker/.lemex ELAN_HOME=/home/worker/.elan
 RUN chmod 755 /usr/local/bin/worker-entrypoint \
+ && chmod 755 /opt/tools/bin/lean-probe \
  && /opt/lemex/bin/lemex --version \
  && /opt/elan/bin/elan --version \
  && /opt/tools/bin/lean-lsp-mcp --help \
- && /opt/tools/bin/lean-explore --help
+ && /opt/tools/bin/lean-explore --help \
+ && /opt/tools/bin/lean-probe --help
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/worker-entrypoint"]

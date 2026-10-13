@@ -16,6 +16,7 @@ export interface ChatPickerProps {
   onDelete?: (chat: { id: string; title: string }) => void
   disabled: boolean
   loading?: boolean
+  deleteDisabled?: boolean
 }
 
 function updatedLabel(value?: string) {
@@ -37,6 +38,7 @@ export function ChatPicker({
   onDelete,
   disabled,
   loading = false,
+  deleteDisabled = false,
 }: ChatPickerProps) {
   const id = useId()
   const selected = chats.find((chat) => chat.id === selectedId)
@@ -88,7 +90,7 @@ export function ChatPicker({
           title="Move selected chat to trash"
           aria-label={`Delete chat ${selected.title || 'Untitled chat'}`}
           onClick={() => onDelete({ id: selected.id, title: selected.title })}
-          disabled={disabled || loading}
+          disabled={disabled || loading || deleteDisabled}
         >
           <Icon name="trash" size={14} />
         </button>

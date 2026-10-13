@@ -712,7 +712,11 @@ test('settings remain private per user, persist, and validate tool choices and i
     tools: { lean: true, lean_explore: false, exa: false },
   }
   await settings.save('alice', alice)
-  assert.deepEqual(await new Settings(directory).get('alice'), { ...alice, showReasoning: true })
+  assert.deepEqual(await new Settings(directory).get('alice'), {
+    ...alice,
+    tools: { ...alice.tools, lean_probe: true },
+    showReasoning: true,
+  })
   assert.equal((await settings.get('bob')).extraInstructions, '')
   for (const input of [
     null,
@@ -723,7 +727,11 @@ test('settings remain private per user, persist, and validate tool choices and i
   ])
     await assert.rejects(settings.save('alice', input), { status: 400 })
   await assert.rejects(settings.get('../alice'))
-  assert.deepEqual(await settings.get('alice'), { ...alice, showReasoning: true })
+  assert.deepEqual(await settings.get('alice'), {
+    ...alice,
+    tools: { ...alice.tools, lean_probe: true },
+    showReasoning: true,
+  })
 })
 
 test('concurrent settings saves each complete and leave one valid persisted configuration', async (t) => {
@@ -754,8 +762,12 @@ test('concurrent settings saves each complete and leave one valid persisted conf
   const persisted = await settings.get('alice')
   assert.ok(
     choices.some(
-      (choice) => choice.extraInstructions === persisted.extraInstructions &&
-        Object.entries(choice.tools).every(([key, value]) => persisted.tools[key] === value) && persisted.showReasoning === true,
+      (choice) =>
+        choice.extraInstructions === persisted.extraInstructions &&
+        Object.entries(choice.tools).every(
+          ([key, value]) => persisted.tools[key] === value,
+        ) &&
+        persisted.showReasoning === true,
     ),
   )
 })
@@ -836,6 +848,116 @@ test('HTTP rejects wrong origins and protects projects, files, jobs, and event s
     ).status,
     409,
   )
+})
+
+test('active Lean checks block project configuration, preparation, and Git mutations until they finish', async (t) => {
+  const { request, project, events, workspaces, runtime } = await fixture(t)
+  const configs = new Map()
+  for (const filename of [
+    'lean-toolchain',
+    'lakefile.toml',
+    'lake-manifest.json',
+  ])
+    configs.set(
+      filename,
+      await workspaces.readFile(project.id, 'owner', filename),
+    )
+  configs.set('lakefile.lean', {
+    content: 'import Lake\nopen Lake DSL\npackage guarded_project\n',
+    hash: null,
+  })
+  const check = events.create('owner', { kind: 'check', projectId: project.id })
+  const callsBefore = runtime.calls.length,
+    spawnedBefore = runtime.spawned.length
+  const json = (body) => ({
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  for (const status of [
+    'queued',
+    'starting',
+    'running',
+    'stopping',
+    'verifying',
+    'preparing',
+  ]) {
+    events.update(check.id, { status })
+    for (const [filename, source] of configs) {
+      const response = await request(
+        `/api/projects/${project.id}/file?path=${filename}`,
+        {
+          method: 'PUT',
+          ...json({ content: source.content, expectedHash: source.hash }),
+        },
+      )
+      assert.equal(
+        response.status,
+        409,
+        `Configuration save ${filename} during ${status}`,
+      )
+    }
+    const preparation = await request(`/api/projects/${project.id}/prepare`, {
+      method: 'POST',
+      ...json({}),
+    })
+    assert.equal(preparation.status, 409, `Preparation during ${status}`)
+    for (const body of [
+      { action: 'branch', name: 'guarded-check' },
+      { action: 'commit', message: 'Guarded check commit' },
+    ]) {
+      const mutation = await request(`/api/projects/${project.id}/git`, {
+        method: 'POST',
+        ...json(body),
+      })
+      assert.equal(mutation.status, 409, `Git ${body.action} during ${status}`)
+    }
+  }
+  assert.equal(
+    runtime.calls.length,
+    callsBefore,
+    'Rejected mutations must not launch Lake or Git',
+  )
+  assert.equal(runtime.spawned.length, spawnedBefore)
+  for (const [filename, source] of configs)
+    if (source.hash !== null)
+      assert.deepEqual(
+        await workspaces.readFile(project.id, 'owner', filename),
+        source,
+      )
+  await assert.rejects(
+    workspaces.readFile(project.id, 'owner', 'lakefile.lean'),
+    { status: 404 },
+  )
+
+  events.update(check.id, { status: 'completed' })
+  events.create('bob', { kind: 'check', projectId: project.id })
+  events.create('owner', { kind: 'check', projectId: 'a-different-project' })
+  const source = configs.get('lean-toolchain')
+  const saved = await request(
+    `/api/projects/${project.id}/file?path=lean-toolchain`,
+    {
+      method: 'PUT',
+      ...json({ content: source.content, expectedHash: source.hash }),
+    },
+  )
+  assert.equal(
+    saved.status,
+    200,
+    'Finished checks and active jobs in another owner/project must not block this project',
+  )
+  const branch = await request(`/api/projects/${project.id}/git`, {
+    method: 'POST',
+    ...json({ action: 'branch', name: 'after-check' }),
+  })
+  assert.equal(branch.status, 200)
+  const prepared = await request(`/api/projects/${project.id}/prepare`, {
+    method: 'POST',
+    ...json({}),
+  })
+  assert.equal(prepared.status, 200)
+  await workspaces.jobs.get(project.id)
+  assert.equal(workspaces.get(project.id, 'owner').status, 'ready')
+  assert(runtime.calls.length > callsBefore)
 })
 
 test('WebSocket authentication, origin, and project ownership fail before any Lean worker starts', async (t) => {

@@ -94,6 +94,18 @@ test('instrumentation retains all source context and uses exact UTF-8 command en
   assert.ok(content.endsWith('end Ω\n'))
 })
 
+test('nested have proofs retain their inner assignment boundaries in optimization measurement', () => {
+  const body =
+    'by\n  have inner : 1 = 1 := by\n    rfl\n  have combined : True ∧ 1 = 1 := by\n    exact ⟨True.intro, inner⟩\n  exact combined.2'
+  const source = `theorem outer : 1 = 1 := ${body}\n\ntheorem next : True := by trivial\n`
+  const spans = optimizationTheorems(source)
+  assert.equal(source.slice(spans[0].bodyStart, spans[0].end).trim(), body)
+  assert.equal(spans[0].tokens, proofTokenCount(body))
+  const measured = instrumentOptimizationSource(source, 'nested')
+  assert(measured.content.includes(`theorem outer : 1 = 1 := ${body}`))
+  assert.equal(measured.theorems.length, 2)
+})
+
 test('unsupported declarations are explicit rather than returning guessed measurements', () => {
   for (const source of [
     'private theorem hidden : True := by trivial\n',

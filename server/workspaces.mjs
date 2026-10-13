@@ -5,6 +5,8 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { repositoryLocation, projectDirectory, uploadedFiles, detectProjectDirectory } from './project-import.mjs';
+import { projectLibraries } from './project-libraries.mjs';
 
 const MAX_FILE = 2 * 1024 * 1024;
 const MAX_FILES = 12000;
@@ -216,17 +218,19 @@ async function assertTrashTree(directory, depth = 0) {
 
 /** Persistent user-scoped workspaces. The runtime owns process isolation. */
 export class WorkspaceStore {
-  constructor({ dataDir, runtime, resolveHost = lookup }) {
+  constructor({ dataDir, runtime, resolveHost = lookup, setupRepair }) {
     if (!dataDir || !runtime) throw new Error('WorkspaceStore requires dataDir and runtime');
     this.dataDir = path.resolve(dataDir);
     this.runtime = runtime;
     this.resolveHost = resolveHost;
+    this.setupRepair = setupRepair;
     this.projectsDir = path.join(this.dataDir, 'projects');
     this.snapshotsDir = path.join(this.dataDir, 'candidates');
     this.historyDir = path.join(this.dataDir, 'history');
     this.trashDir = path.join(this.dataDir, 'trash');
     this.jobs = new Map();
     this.locks = new Map();
+    this.preparationControllers = new Map();
   }
 
   async init() {
@@ -236,10 +240,13 @@ export class WorkspaceStore {
     this.db.exec('CREATE TABLE IF NOT EXISTS trash (id TEXT PRIMARY KEY, owner TEXT NOT NULL, project TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS trash_owner ON trash(owner);');
     for (const row of this.db.prepare('SELECT data FROM projects').all()) {
       const project = JSON.parse(row.data);
-      if (project.root !== path.join(this.projectsDir, project.id)) throw new Error('Invalid persisted workspace directory');
+      const checkout = path.join(this.projectsDir, validateId(project.id));
+      const selected = path.join(checkout, projectDirectory(project.subdirectory));
+      if (project.root !== checkout && project.root !== selected) throw new Error('Invalid persisted workspace directory');
       if (project.status === 'preparing') {
         project.status = 'error';
         project.error = 'Preparation was interrupted by a server restart. Retry preparation to continue.';
+        if (project.setupRepair?.status === 'running') project.setupRepair = { ...project.setupRepair, status: 'failed', message: 'Lemex setup repair was interrupted by a server restart. Its source copy and any original configuration backup were retained.' };
         this.#save(project);
         this.#event(project, 'interrupted', project.error);
       }
@@ -466,22 +473,33 @@ export class WorkspaceStore {
   async create(owner, input = {}) {
     validateOwner(owner);
     if (!input || typeof input !== 'object' || Array.isArray(input)) fail('Invalid project configuration');
-    const preset = input.preset || 'mathlib';
-    if (!PRESETS.has(preset)) fail('Unknown project preset');
-    const revision = validateRef(input.revision);
-    const repository = input.repository ? await validateRepository(input.repository, this.resolveHost) : null;
-    if (revision && !repository) fail('A revision requires a Git repository');
+    const files = input.files === undefined ? null : uploadedFiles(input.files, value => relativeFile(value, { write: true }));
+    if (files && input.repository) fail('Choose a repository or local files, not both.');
+    if (input.autoRepair !== undefined && typeof input.autoRepair !== 'boolean') fail('Choose whether Lemex may repair project setup.');
     const definitions = await this.runtime.templates();
+    if (input.libraries !== undefined && (files || input.repository)) fail('Imported projects keep their own dependency configuration. Select libraries when creating a new project.');
+    const selection = projectLibraries(input.libraries, definitions);
+    const preset = selection?.preset || input.preset || (files ? 'lean' : 'mathlib');
+    if (!PRESETS.has(preset)) fail('Unknown project preset');
+    const location = input.repository ? repositoryLocation(input.repository, input) : { subdirectory: projectDirectory(input.subdirectory) };
+    const revision = validateRef(location.revision || input.revision);
+    const repository = location.repository ? await validateRepository(location.repository, this.resolveHost) : null;
+    if (revision && !repository) fail('A revision requires a Git repository');
     const definition = Array.isArray(definitions) ? definitions.find(p => (p.id || p.preset) === preset) : definitions[preset];
     const toolchain = input.toolchain ? validateToolchain(input.toolchain) : definition?.toolchain || null;
     if (!repository && preset !== 'lean' && input.toolchain && definition?.toolchain && toolchain !== definition.toolchain) fail(`The ${preset} preset requires ${definition.toolchain}. Choose Lean basics to use another pinned version.`);
     if (!repository && !toolchain) fail('The selected preset is not configured', 503);
-    const name = input.name || (repository ? new URL(repository).pathname.split('/').filter(Boolean).at(-1).replace(/\.git$/, '') : `${preset} project`);
+    const name = input.name || (location.subdirectory ? path.posix.basename(location.subdirectory) : repository ? new URL(repository).pathname.split('/').filter(Boolean).at(-1).replace(/\.git$/, '') : files ? 'Uploaded project' : `${preset} project`);
     if (typeof name !== 'string' || !name.trim() || name.length > 120 || /[\x00-\x1f]/.test(name)) fail('Project names must contain 1–120 printable characters');
     const id = randomUUID();
     const root = path.join(this.projectsDir, id);
     await fs.mkdir(root, { recursive: false, mode: 0o700 });
-    const project = { id, name: name.trim(), owner, status: 'preparing', toolchain, preset, repository, revision, root, createdAt: new Date().toISOString() };
+    const project = { id, name: name.trim(), owner, status: 'preparing', toolchain, preset, ...(selection ? { libraries: selection.libraries } : {}), repository, revision, root, subdirectory: location.subdirectory || '', uploaded: !!files, autoRepair: input.autoRepair !== false, createdAt: new Date().toISOString() };
+    if (files) for (const file of files) {
+      const destination = await guarded(root, file.path, { write: true });
+      await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+      await fs.writeFile(destination, file.content, { mode: 0o600, flag: 'wx' });
+    }
     this.#save(project);
     this.#event(project, 'created', `Creating ${project.name}.\n`);
     this.#beginPrepare(project);
@@ -490,12 +508,22 @@ export class WorkspaceStore {
 
   #beginPrepare(project) {
     if (this.jobs.has(project.id)) return;
-    const job = Promise.resolve().then(() => this.#locked(project.id, () => this.#prepareProject(project))).catch(error => {
+    const controller = new AbortController();
+    this.preparationControllers.set(project.id, controller);
+    const job = Promise.resolve().then(() => this.#locked(project.id, async () => {
+      try { await this.#prepareProject(project); }
+      catch (error) {
+        if (!project.autoRepair || !this.setupRepair || controller.signal.aborted || (!project.imported && !project.uploaded) || [403, 404, 409, 413].includes(error.status)) throw error;
+        await this.#repairPreparation(project, error, controller.signal);
+        await this.#prepareProject(project);
+      }
+    })).catch(error => {
       project.status = 'error';
-      project.error = error.message || 'Project preparation failed';
+      project.error = controller.signal.aborted ? 'Project setup stopped. You can retry when ready.' : error.message || 'Project preparation failed';
+      if (project.setupRepair?.status === 'running') project.setupRepair = { ...project.setupRepair, status: 'failed', message: project.error };
       this.#save(project);
       this.#event(project, 'error', `${project.error}\n`);
-    }).finally(() => this.jobs.delete(project.id));
+    }).finally(() => { this.jobs.delete(project.id); this.preparationControllers.delete(project.id); });
     this.jobs.set(project.id, job);
   }
 
@@ -505,15 +533,119 @@ export class WorkspaceStore {
     project.status = 'preparing';
     delete project.error;
     delete project.log;
+    if (project.setupRepair) {
+      project.setupRepairHistory = [...(project.setupRepairHistory || []), project.setupRepair];
+      delete project.setupRepair;
+    }
     this.#save(project);
     this.#beginPrepare(project);
     return clone(project);
   }
 
+  async stopPreparation(id, owner) {
+    this.get(id, owner);
+    this.preparationControllers.get(id)?.abort(new Error('Project setup stopped.'));
+    await this.jobs.get(id);
+    return this.get(id, owner);
+  }
+
+  repositoryRoot(project) { return path.join(this.projectsDir, validateId(project.id)); }
+
+  async upload(id, owner, input) {
+    const project = this.get(id, owner);
+    this.#ready(project);
+    const files = uploadedFiles(input, value => relativeFile(value, { write: true }));
+    return this.#locked(id, async () => {
+      for (const file of files) if (await exists(await guarded(project.root, file.path, { write: true }))) fail(`A file named ${file.path} already exists. Rename it before uploading; existing files are preserved.`, 409);
+      return this.#applyLocked(project, files.map(file => ({ path: file.path, beforeHash: null, before: null, after: file.content })), 'uploaded');
+    });
+  }
+
+  async gitFilePath(id, owner, filename) {
+    const project = this.get(id, owner);
+    const relative = relativeFile(filename, { write: true });
+    const stat = await exists(await guarded(project.root, relative, { write: true }));
+    if (stat && !stat.isFile()) fail('Only regular project files can be committed.', 403);
+    return relative;
+  }
+
+  async #repairPreparation(project, cause, signal) {
+    const attempt = randomUUID();
+    const container = path.join(this.dataDir, 'setup-repairs', attempt);
+    const candidate = path.join(container, 'workspace');
+    await fs.mkdir(container, { recursive: true, mode: 0o700 });
+    project.setupRepair = { id: attempt, status: 'running', startedAt: new Date().toISOString(), message: 'Automatic setup failed. Lemex is repairing the project configuration.' };
+    this.#save(project);
+    this.#event(project, 'setup-repair', `${project.setupRepair.message}\nOriginal error: ${cause.message}\n`);
+    await copyWorkspace(project.root, candidate, { omitDependencies: true });
+    const allowed = new Set(['lean-toolchain', 'lakefile.lean', 'lakefile.toml', 'lake-manifest.json']);
+    const before = new Map();
+    for (const entry of await this.#walk(candidate, { includeLinks: true, limit: Infinity }))
+      before.set(entry.path, entry.link === undefined ? { hash: await fileHash(await guarded(candidate, entry.path)) } : { link: entry.link });
+    await this.setupRepair({ root: candidate, project: { name: project.name, toolchain: project.toolchain }, error: cause.message, signal, onOutput: message => this.#event(project, 'setup-repair', message) });
+    signal.throwIfAborted();
+    // Evaluate repaired configuration in the disposable copy before admitting
+    // it. Lake files are executable; include any evaluation-time source edits
+    // in the integrity comparison below, and create the lockfile here.
+    const repairedToolchain = validateToolchain((await textFile(await guarded(candidate, 'lean-toolchain'))).content.trim());
+    let abortDownload;
+    try {
+      await Promise.race([
+        this.runtime.prepareToolchain(repairedToolchain),
+        new Promise((_, reject) => { abortDownload = () => reject(signal.reason); signal.addEventListener('abort', abortDownload, { once: true }); if (signal.aborted) abortDownload(); }),
+      ]);
+    } finally { signal.removeEventListener('abort', abortDownload); }
+    const commands = [];
+    if (!(await exists(path.join(candidate, 'lake-manifest.json')))) commands.push(['lake', 'update']);
+    commands.push(['lake', 'env', 'lean', '--version']);
+    for (const args of commands) {
+      const checked = await this.runtime.run(candidate, args, { signal, network: 'bridge', timeoutMs: 900000, onOutput: message => this.#event(project, 'setup-repair', message) });
+      signal.throwIfAborted();
+      if (checked.code !== 0) throw new Error(`Repaired setup did not pass its isolated environment check: ${(checked.stderr || checked.stdout || '').slice(-2000)}`);
+    }
+    const after = new Map((await this.#walk(candidate, { includeLinks: true, limit: Infinity })).map(entry => [entry.path, entry]));
+    const changes = [];
+    for (const filename of new Set([...before.keys(), ...after.keys()])) {
+      const previous = before.get(filename), entry = after.get(filename);
+      const changed = previous?.link !== entry?.link || (entry?.link === undefined && previous?.hash !== (entry ? await fileHash(await guarded(candidate, filename)) : undefined));
+      if (!changed) continue;
+      if (!allowed.has(filename) || entry?.link !== undefined) fail(`Setup repair tried to change ${filename}. Source files were preserved; only Lake configuration and lean-toolchain changes are accepted.`, 409);
+      const original = await textFile(await guarded(project.root, filename, { write: true }), true);
+      changes.push({ path: filename, before: original?.content ?? null, after: entry ? (await textFile(await guarded(candidate, filename))).content : null });
+    }
+    if (!changes.length) throw new Error('Lemex made no project configuration changes. Review the setup output and retry after fixing the reported problem.');
+    const pinned = await textFile(await guarded(candidate, 'lean-toolchain'));
+    validateToolchain(pinned.content.trim());
+    if (!(await exists(path.join(candidate, 'lakefile.lean'))) && !(await exists(path.join(candidate, 'lakefile.toml')))) fail('Setup repair did not produce a Lake project configuration.');
+    // Keep the original configuration outside every writable worker mount.
+    await fs.writeFile(path.join(container, 'changes.json'), JSON.stringify({ projectId: project.id, createdAt: new Date().toISOString(), changes }), { mode: 0o600 });
+    for (const change of changes) {
+      const parent = await writeParent(project.root, change.path);
+      try {
+        const destination = `${parent.anchor}/${parent.name}`;
+        if (change.after === null) await fs.unlink(destination);
+        else {
+          const temporary = `${parent.anchor}/.setup-${randomUUID()}`;
+          try {
+            await fs.writeFile(temporary, change.after, { mode: 0o600, flag: 'wx' });
+            await fs.rename(temporary, destination);
+          } finally { await fs.rm(temporary, { force: true }); }
+        }
+      } finally { await parent.handle.close(); }
+    }
+    project.setupRepair.changes = changes.map(change => change.path);
+    project.repairedConfiguration = true;
+    project.setupRepair.message = 'Lemex updated setup files. Checking the Lean environment again.';
+    this.#save(project);
+    this.#event(project, 'setup-repair', `${project.setupRepair.message}\nChanged: ${project.setupRepair.changes.join(', ')}\n`);
+  }
+
   async #command(project, args, timeoutMs = 900000, network = 'none') {
-    const result = await this.runtime.run(project.root, args, {
+    const result = await this.runtime.run(args[0] === 'git' ? this.repositoryRoot(project) : project.root, args, {
       timeoutMs,
       network,
+      signal: this.preparationControllers.get(project.id)?.signal,
+      ...(args[0] !== 'git' && project.repairedConfiguration ? { readOnlyWorkspace: true, writeLakeCache: true } : {}),
       env: { GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_LFS_SKIP_SMUDGE: '1' },
       onOutput: output => this.#event(project, 'output', typeof output === 'string' ? output : output?.text || output?.data || ''),
     });
@@ -522,9 +654,11 @@ export class WorkspaceStore {
   }
 
   async #prepareProject(project) {
+    this.preparationControllers.get(project.id)?.signal.throwIfAborted();
     this.#event(project, 'preparing', 'Preparing the project environment.\n');
-    if (project.repository) await this.runtime.clearInheritedDependencies?.(project.root);
-    const entries = await fs.readdir(project.root);
+    if (project.repository || project.uploaded) await this.runtime.clearInheritedDependencies?.(project.root);
+    const checkout = this.repositoryRoot(project);
+    const entries = await fs.readdir(checkout);
     if (project.repository && !project.imported && entries.length) fail('An interrupted import left project files. Create a new import to preserve these files safely.', 409);
     if (project.repository && !entries.length) {
       // Revalidate before each clone, rather than trusting a previously resolved URL.
@@ -546,6 +680,10 @@ export class WorkspaceStore {
         const inherit = typeof this.runtime.inheritDependencies === 'function';
         await copyWorkspace(template, project.root, { omitDependencies: inherit });
         if (inherit) await this.runtime.inheritDependencies(template, project.root);
+        if (project.libraries?.length) {
+          const selection = projectLibraries(project.libraries, await this.runtime.templates());
+          await fs.writeFile(path.join(project.root, 'Main.lean'), `${selection.imports.map(name => `import ${name}`).join('\n')}\n\ntheorem addition_commutes (a b : Nat) : a + b = b + a := by\n  exact Nat.add_comm a b\n`, { mode: 0o600 });
+        }
       } else {
         if (project.preset !== 'lean') fail(`The ${project.preset} preset is still being installed. Retry after the preset becomes ready.`, 503);
         await fs.writeFile(path.join(project.root, 'lean-toolchain'), `${project.toolchain}\n`, { mode: 0o600 });
@@ -553,21 +691,39 @@ export class WorkspaceStore {
         await fs.writeFile(path.join(project.root, 'Main.lean'), '-- Welcome to your Lean workspace.\n\ntheorem hello_lean (n : Nat) : n + 0 = n := by\n  simp\n', { mode: 0o600 });
       }
     }
+    if (project.repository || project.uploaded) {
+      if (!project.subdirectory) project.subdirectory = await detectProjectDirectory(checkout);
+      const selected = project.subdirectory ? await guarded(checkout, projectDirectory(project.subdirectory)) : checkout;
+      if (!(await exists(selected))?.isDirectory()) fail('The selected project subdirectory was not found.', 404);
+      if (selected !== project.root) this.#event(project, 'output', `Using Lean project in ${project.subdirectory}.\n`);
+      project.root = selected;
+      this.#save(project);
+    }
     const toolchainFile = await guarded(project.root, 'lean-toolchain');
     const pinned = await textFile(toolchainFile, true);
     if (!pinned) fail('This repository has no lean-toolchain file. Add a pinned Lean 4 toolchain before retrying.');
     const toolchain = validateToolchain(pinned.content.trim());
-    if (!project.repository && project.preset !== 'lean' && project.toolchain && project.toolchain !== toolchain) fail('The selected toolchain does not match the cached preset. Use a custom Lean project for another version.');
+    if (!project.repository && !project.uploaded && project.preset !== 'lean' && project.toolchain && project.toolchain !== toolchain) fail('The selected toolchain does not match the cached preset. Use a custom Lean project for another version.');
     project.toolchain = toolchain;
     this.#save(project);
-    await this.runtime.prepareToolchain(toolchain, { onOutput: message => this.#event(project, 'output', message) });
+    const signal = this.preparationControllers.get(project.id)?.signal;
+    // A shared toolchain download may serve another project. Stop this wait
+    // immediately without killing that shared download or changing its cache.
+    let abortWait;
+    try {
+      await Promise.race([
+        this.runtime.prepareToolchain(toolchain, { onOutput: message => { if (!signal?.aborted) this.#event(project, 'output', message); } }),
+        new Promise((_, reject) => { abortWait = () => reject(signal.reason); signal?.addEventListener('abort', abortWait, { once: true }); if (signal?.aborted) abortWait(); }),
+      ]);
+    } finally { signal?.removeEventListener('abort', abortWait); }
+    this.preparationControllers.get(project.id)?.signal.throwIfAborted();
     // Existing lockfiles are authoritative. Lake fetches missing packages using
     // the pinned manifest when evaluating its environment.
     if (!(await exists(path.join(project.root, 'lake-manifest.json'))) && !(await exists(path.join(project.root, '.lake')))) await this.#command(project, ['lake', 'update'], 900000, 'bridge');
     // Building a imported project's user proofs may fail legitimately. Preparation
     // requires usable dependencies and a Lake environment; proof errors belong in LSP.
     await this.#command(project, ['lake', 'env', 'lean', '--version'], 900000, 'bridge');
-    if (project.repository) {
+    if (project.repository || project.uploaded) {
       let manifest = null;
       try { manifest = JSON.parse((await textFile(await guarded(project.root, 'lake-manifest.json'))).content); } catch (error) { if (!(error instanceof WorkspaceError) && !(error instanceof SyntaxError)) throw error; }
       if (manifest?.packages?.some(dependency => dependency.name === 'mathlib')) await this.#command(project, ['lake', 'exe', 'cache', 'get'], 1800000, 'bridge');
@@ -577,22 +733,27 @@ export class WorkspaceStore {
       const build = await this.runtime.run(project.root, ['lake', 'build'], {
         timeoutMs: 1800000,
         network: 'none',
+        signal: this.preparationControllers.get(project.id)?.signal,
+        ...(project.repairedConfiguration ? { readOnlyWorkspace: true, writeLakeCache: true } : {}),
         onOutput: output => this.#event(project, 'output', typeof output === 'string' ? output : output?.text || output?.data || ''),
       });
+      signal?.throwIfAborted();
       if (build.code !== 0) {
         project.buildWarning = 'Some project targets did not compile. Open their files to inspect and repair the Lean errors.';
         this.#event(project, 'warning', `${project.buildWarning}\n`);
       } else delete project.buildWarning;
       await this.runtime.inheritDependencies?.(project.root, project.root);
     }
-    if (!project.repository && !(await exists(path.join(project.root, '.git')))) {
+    if (!project.repository && !(await exists(path.join(checkout, '.git')))) {
       if (!(await exists(path.join(project.root, '.gitignore')))) await fs.writeFile(path.join(project.root, '.gitignore'), '.lake/\n', { mode: 0o600 });
       await this.#command(project, [...GIT_ARGS, 'init', '-b', 'main'], 30000);
     }
-    if (await exists(path.join(project.root, '.git'))) {
+    if (await exists(path.join(checkout, '.git'))) {
       try { const result = await this.#command(project, [...GIT_ARGS, 'rev-parse', 'HEAD'], 30000); project.sourceRevision = result.stdout.trim(); } catch { /* Fresh projects can have no commit yet. */ }
     }
+    signal?.throwIfAborted();
     project.status = 'ready';
+    if (project.setupRepair?.status === 'running') project.setupRepair = { ...project.setupRepair, status: 'completed', message: 'Lemex repaired setup; the Lean environment check passed.' };
     delete project.error;
     this.#save(project);
     this.#event(project, 'ready', 'Project ready.\n');
@@ -678,7 +839,7 @@ export class WorkspaceStore {
   async gitStatus(id, owner) {
     const project = this.get(id, owner);
     this.#ready(project);
-    if (!(await exists(path.join(project.root, '.git')))) return { repository: false, branch: null, revision: null, changes: [], diff: '' };
+    if (!(await exists(path.join(this.repositoryRoot(project), '.git')))) return { repository: false, branch: null, revision: null, changes: [], diff: '' };
     const status = await this.#command(project, [...GIT_ARGS, 'status', '--porcelain=v1', '--branch', '-z'], 30000);
     const records = status.stdout.split('\0').filter(Boolean);
     const branchLine = records[0]?.startsWith('## ') ? records.shift().slice(3).split('...')[0] : null;
@@ -688,11 +849,17 @@ export class WorkspaceStore {
       const record = records[i];
       const item = { status: record.slice(0, 2), path: record.slice(3) };
       if (/[RC]/.test(item.status)) item.from = records[++i];
+      if (project.subdirectory) {
+        const prefix = project.subdirectory + '/';
+        if (!item.path.startsWith(prefix) || (item.from && !item.from.startsWith(prefix))) continue;
+        item.path = item.path.slice(prefix.length);
+        if (item.from) item.from = item.from.slice(prefix.length);
+      }
       try { relativeFile(item.path); if (item.from) relativeFile(item.from); changes.push(item); } catch { /* Secret paths never appear in API results. */ }
     }
     // Restrict diff pathspecs to visible files so accidental secrets cannot leak.
-    const visible = changes.map(c => c.path).filter(p => !p.startsWith('.lake/'));
-    const head = await this.runtime.run(project.root, [...GIT_ARGS, 'rev-parse', '--verify', 'HEAD'], { network: 'none', timeoutMs: 30000 });
+    const visible = changes.map(c => c.path).filter(p => !p.startsWith('.lake/')).map(p => project.subdirectory ? `${project.subdirectory}/${p}` : p);
+    const head = await this.runtime.run(this.repositoryRoot(project), [...GIT_ARGS, 'rev-parse', '--verify', 'HEAD'], { network: 'none', timeoutMs: 30000 });
     const revision = head.code === 0 && /^[a-f0-9]{40,64}$/.test(head.stdout.trim()) ? head.stdout.trim() : null;
     const diff = visible.length ? (await this.#command(project, [...GIT_ARGS, 'diff', '--no-ext-diff', '--no-textconv', ...(revision ? ['HEAD'] : []), '--', ...visible], 30000)).stdout : '';
     return { repository: true, branch, revision, changes, diff: diff.slice(0, 500000) };
@@ -720,7 +887,7 @@ export class WorkspaceStore {
         else files.push({ path: entry.path, hash: await fileHash(await guarded(root, entry.path)) });
       }
       let sourceRevision = project.sourceRevision || null;
-      if (await exists(path.join(project.root, '.git'))) {
+      if (await exists(path.join(this.repositoryRoot(project), '.git'))) {
         try { sourceRevision = (await this.#command(project, [...GIT_ARGS, 'rev-parse', 'HEAD'], 30000)).stdout.trim(); } catch { /* No commit yet. */ }
       }
       const snapshot = { root, files, links, sourceRevision, projectId: id, owner, runId, createdAt: new Date().toISOString() };

@@ -21,7 +21,7 @@
     "lint:fix": "oxlint --fix",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
-    "test": "node --test server/tests/*.test.mjs",
+    "test": "node --test server/tests/*.test.mjs client/src/studio/*.test.mjs",
     "dev": "concurrently -n server,client \"npm run dev:server\" \"npm run start:client\"",
     "dev:server": "node --watch server/studio.mjs",
     "check": "tsc --noEmit -p client/tsconfig.json",

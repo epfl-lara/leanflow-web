@@ -57,15 +57,28 @@ Use **New chat** to start an empty conversation or the chat selector to reopen a
 
 An empty chat offers two compact suggestions for the selected task. For example, Optimize offers **Shorten the proof** and **Reduce heartbeats**. Selecting a suggestion fills and focuses the message box while keeping the current task type; edit it before running.
 
-**Select files** attaches up to 12 exact saved paths. Read-only library sources can provide context; they remain read-only. The active editor file is also supplied to the run. Starting a run saves the current dirty buffer before capturing its source snapshot. Only one assistant run can be active in a project.
+Type **@** in the composer to find a project file, or use **Select files** to attach up to 12 exact saved paths. Arrow keys, Enter, and Escape control the mention picker. Read-only library sources can provide context; they remain read-only. The active editor file is also supplied to the run. Starting a run saves the current dirty buffer before capturing its source snapshot. Only one assistant run can be active in a project.
 
-The default **Until done** setting applies no application wall-clock cap. Choose 2, 5, 15, or 30 minutes to add a cap, or use **Stop** to cancel. The backend also accepts an explicit cap from 30 to 1,800 seconds. Finite caps include snapshot preparation and optimization measurements as well as the native task and verification. Runs still end on native completion, failure, cancellation, or server interruption; interrupted runs are not automatically restarted.
+Runs have no application time cap in the interface. **Options → Reasoning effort** offers only levels supported by the selected Lemex model. **Send update** queues additional instructions into the current native turn, with explicit pending/accepted/failed receipts. Accepted means the native runtime accepted the update for its next decision, not that the model has already read it. **Stop** remains visible and displays **Stopping…** until the worker and pending live edits are finished. Then Send can continue the same chat. Legacy API clients may explicitly request a finite cap; the browser always sends `maxSeconds=null`.
 
-The **Reasoning traces** setting controls capture for new runs. The interface renders reasoning text or summaries actually emitted by the selected model/runtime, separately from assistant messages and tool activity. A model may expose neither; the application does not generate missing traces. Assistant Markdown is rendered without raw HTML, and image references are links rather than automatic external image loads.
+The **Reasoning traces** setting controls capture for new runs. The interface renders reasoning text or summaries actually emitted by the selected model/runtime, inline with the corresponding conversation turn, with expand/collapse controls. Usage shows readable token categories; Raw data retains the original runtime record. A model may expose neither; the application does not generate missing traces. Assistant Markdown is rendered without raw HTML, and image references are links rather than automatic external image loads.
 
 While Lemex works, scroll up to read without incoming output moving your view. **Jump to latest** resumes following the output. Reasoning and activity start collapsed and keep your open/closed choice through updates. Streaming text uses a lightweight plain-text display; completed messages render Markdown. **Stop** stays above the conversation. You can navigate files, switch chats, and draft the next message during a run; submitting another task in the same project waits for the current one to stop.
 
-Task options collapse when opening a run to leave more space for messages. Open **Next task options** (or **Run options** when idle) to change the model, proof task, time limit, or live-edit preference for the next submission. Empty chats show these options expanded.
+Task options collapse when opening a run to leave more space for messages. Open **Next task options** (or **Run options** when idle) to change the model, proof task, time limit, or live-edit preference for the next submission. Options are collapsed by default, including in empty chats. Typed drafts, task type, and selected files are retained separately for each signed-in account, project, and chat.
+
+
+## Import, upload, and setup repair
+
+Paste a public HTTPS repository URL or a GitHub `tree/<revision>/<directory>` link into **Repository**. The importer retains the checkout but runs Lean and exposes source files inside the selected Lean subdirectory. Git status, diff, and commits are restricted to that subdirectory. For a branch containing slashes, use an encoded branch segment or set **More options → Branch or revision** explicitly. Uploaded folders detect a unique nested `lean-toolchain`; ambiguous folders ask for a subdirectory.
+
+**Upload** accepts files or folders from the chooser or drag-and-drop, up to 5,000 UTF-8 files, 2 MiB per file and 20 MiB in total. The client excludes Git/build caches and known private settings before sending. The Files header also uploads into the open project. Existing names cause an explicit conflict; files are never silently overwritten.
+
+**Let Lemex repair setup if needed** is enabled for new imports/uploads and can be disabled. After deterministic setup fails, the server announces one repair attempt in a disposable copy. Only the root `lean-toolchain`, `lakefile.lean`, `lakefile.toml`, and `lake-manifest.json` may be copied back. Proof/source changes or symlinks are rejected. Original configuration is retained under `.data/setup-repairs/<attempt>/changes.json`, outside writable worker mounts. The repaired configuration is first evaluated in its disposable copy and compared again for source changes. Normal checks then run with the original project source mounted read-only and only its `.lake` build directory writable; pre-existing cache hardlinks are rejected. A model's success claim alone cannot mark setup ready. **Stop setup** cancels that attempt; it stops waiting for a shared toolchain download without cancelling a cache download another project may need.
+
+New projects allow selecting multiple libraries. Mathlib + CSLib uses CSLib's tested Mathlib revision; Mathlib + Physlib uses Physlib's tested revision. Current CSLib and Physlib presets use different Lean versions, so that combination is disabled with an explanation. Imports keep their own lockfiles.
+
+LeanProbe is pinned to `646cb0ee3d428562b13740649aa7c1689ec0720a`, with `lean-interact==0.11.5` in its own environment. Its private worker-home cache uses packaged, pinned REPL source for Lean 4.29.0, 4.34.1, and 4.35.0-rc4; other releases follow LeanInteract's normal versioned build/download path. `LEAN_PROBE_AUTO_BUILD=0` keeps build output out of MCP stdout. Both `success` and `ok` must be true for a successful proof check; independent kernel verification still decides final acceptance.
 
 ## Live saved edits, review, and Undo
 
@@ -115,6 +128,7 @@ Worker tools:
 
 - `/opt/lemex/bin/lemex`: native app-server and CLI.
 - `/opt/tools/bin/lean-lsp-mcp --lean-project-path /workspace`: Lean goals, diagnostics, builds, tactic trials, and declaration searches including Loogle.
+- `/opt/tools/bin/lean-probe mcp`: warm Lean proof checks, complete declaration replacements, proof states, and tactic trials. Enabled by default; final server verification remains independent.
 - `/opt/tools/bin/lean-explore mcp serve --backend api`: hosted semantic declaration search.
 - `lean`, `lake`, Git, ripgrep, Python, Node, and uv.
 

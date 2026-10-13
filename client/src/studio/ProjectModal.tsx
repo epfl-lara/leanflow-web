@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Dialog } from './Dialog'
+import { UploadFiles, type UploadFile } from './UploadFiles'
 import { Icon } from './Icons'
 import { errorText, post, type Preset, type Project } from './api'
 
@@ -12,11 +13,23 @@ export function ProjectModal({
   onClose: () => void
   onCreated: (project: Project) => void
 }) {
-  const [kind, setKind] = useState<'create' | 'import'>('import')
+  const [kind, setKind] = useState<'create' | 'import' | 'upload'>('import')
   const [name, setName] = useState('')
   const [repository, setRepository] = useState('')
   const [revision, setRevision] = useState('')
-  const [preset, setPreset] = useState(templates[0]?.id || 'mathlib')
+  const [subdirectory, setSubdirectory] = useState('')
+  const [autoRepair, setAutoRepair] = useState(true)
+  const [files, setFiles] = useState<UploadFile[]>([])
+  const [libraries, setLibraries] = useState<string[]>(
+    templates.some((template) => template.id === 'mathlib') ? ['mathlib'] : [],
+  )
+  const preset = libraries.includes('cslib')
+    ? 'cslib'
+    : libraries.includes('physlib')
+      ? 'physlib'
+      : libraries.length
+        ? 'mathlib'
+        : 'lean'
   const [leanVersion, setLeanVersion] = useState(
     templates
       .find((template) => template.id === 'lean')
@@ -45,12 +58,16 @@ export function ProjectModal({
     try {
       const project = await post<Project>('/api/projects', {
         name: name.trim() || undefined,
+        autoRepair,
+        ...(subdirectory.trim() ? { subdirectory: subdirectory.trim() } : {}),
         ...(kind === 'import'
           ? {
               repository: repository.trim(),
               revision: revision.trim() || undefined,
             }
-          : { preset, ...(toolchain ? { toolchain } : {}) }),
+          : kind === 'upload'
+            ? { files }
+            : { libraries, ...(toolchain ? { toolchain } : {}) }),
       })
       onCreated(project)
     } catch (error) {
@@ -62,7 +79,7 @@ export function ProjectModal({
   return (
     <Dialog
       title="Open a Lean project"
-      subtitle="Import your repository or start with a prepared library."
+      subtitle="Paste a project link, upload local files, or start from a library."
       onClose={onClose}
       busy={busy}
     >
@@ -76,7 +93,17 @@ export function ProjectModal({
             disabled={busy}
           >
             <Icon name="git" />
-            Import repository
+            Repository
+          </button>
+          <button
+            type="button"
+            aria-pressed={kind === 'upload'}
+            className={kind === 'upload' ? 'selected' : ''}
+            onClick={() => setKind('upload')}
+            disabled={busy}
+          >
+            <Icon name="folder" />
+            Upload
           </button>
           <button
             type="button"
@@ -92,7 +119,7 @@ export function ProjectModal({
         {kind === 'import' ? (
           <>
             <label className="field-label" htmlFor="repository-url">
-              Git repository URL
+              Repository or GitHub folder link
             </label>
             <input
               id="repository-url"
@@ -105,39 +132,54 @@ export function ProjectModal({
               autoComplete="off"
             />
             <p className="field-help">
-              The project's Lean version and Lake dependencies are detected
-              automatically.
+              Repository and GitHub folder links work. Lean versions and
+              dependencies are detected automatically.
             </p>
-            <label className="field-label" htmlFor="revision">
-              Branch, tag, or commit <span>optional</span>
-            </label>
-            <input
-              id="revision"
-              placeholder="Default branch"
-              value={revision}
-              onChange={(event) => setRevision(event.target.value)}
-              disabled={busy}
-              autoComplete="off"
-            />
           </>
+        ) : kind === 'upload' ? (
+          <UploadFiles
+            files={files}
+            disabled={busy}
+            onChange={(values, folder) => {
+              setFiles(values)
+              if (folder && !name) setName(folder)
+            }}
+          />
         ) : (
           <>
             <label className="field-label" htmlFor="library-preset">
-              Library preset
+              Libraries
             </label>
             <div className="preset-list" id="library-preset">
               {templates.map((template) => (
                 <label
                   key={template.id}
-                  className={`preset-option ${preset === template.id ? 'chosen' : ''}`}
+                  className={`preset-option ${(template.id === 'lean' ? !libraries.length : libraries.includes(template.id)) ? 'chosen' : ''}`}
                 >
                   <input
-                    type="radio"
-                    name="preset"
+                    type="checkbox"
+                    name="libraries"
                     value={template.id}
-                    checked={preset === template.id}
-                    onChange={() => setPreset(template.id)}
-                    disabled={busy}
+                    checked={
+                      template.id === 'lean'
+                        ? !libraries.length
+                        : libraries.includes(template.id)
+                    }
+                    onChange={() =>
+                      setLibraries((values) =>
+                        template.id === 'lean'
+                          ? []
+                          : values.includes(template.id)
+                            ? values.filter((id) => id !== template.id)
+                            : [...values, template.id],
+                      )
+                    }
+                    disabled={
+                      busy ||
+                      (template.id === 'cslib' &&
+                        libraries.includes('physlib')) ||
+                      (template.id === 'physlib' && libraries.includes('cslib'))
+                    }
                   />
                   <div>
                     <strong>{template.name}</strong>
@@ -161,7 +203,10 @@ export function ProjectModal({
             )}
             {selected && (
               <p className="field-help">
-                Dependencies are installed in a persistent project workspace.
+                Select more than one library. CSLib and Physlib each supply
+                their compatible Mathlib revision. Their prepared releases use
+                different Lean versions, so CSLib and Physlib cannot currently
+                be combined.
               </p>
             )}
             {preset === 'lean' && (
@@ -191,19 +236,72 @@ export function ProjectModal({
             )}
           </>
         )}
-        <label className="field-label" htmlFor="project-name">
-          Project name <span>optional</span>
-        </label>
-        <input
-          id="project-name"
-          placeholder={
-            kind === 'import' ? 'Taken from the repository' : 'My Lean project'
-          }
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          disabled={busy}
-          maxLength={100}
-        />
+        <details className="import-options">
+          <summary>More options</summary>
+          <label className="field-label" htmlFor="project-name">
+            Project name <span>optional</span>
+          </label>
+          <input
+            id="project-name"
+            placeholder={
+              kind === 'import'
+                ? 'Detected from the link'
+                : kind === 'upload'
+                  ? 'Uploaded project'
+                  : 'My Lean project'
+            }
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            disabled={busy}
+            maxLength={100}
+          />
+          {kind !== 'create' && (
+            <>
+              <label className="field-label" htmlFor="project-subdirectory">
+                Lean project subdirectory <span>optional</span>
+              </label>
+              <input
+                id="project-subdirectory"
+                value={subdirectory}
+                placeholder="Detected automatically"
+                onChange={(event) => setSubdirectory(event.target.value)}
+                disabled={busy}
+              />
+            </>
+          )}
+          {kind === 'import' && (
+            <>
+              <label className="field-label" htmlFor="revision">
+                Branch, tag, or commit <span>optional</span>
+              </label>
+              <input
+                id="revision"
+                value={revision}
+                placeholder="From the link or default branch"
+                onChange={(event) => setRevision(event.target.value)}
+                disabled={busy}
+              />
+            </>
+          )}
+        </details>
+        {kind !== 'create' && (
+          <label className="setup-repair-choice">
+            <input
+              type="checkbox"
+              checked={autoRepair}
+              onChange={(event) => setAutoRepair(event.target.checked)}
+              disabled={busy}
+            />
+            <span>
+              Let Lemex repair setup if needed.
+              <br />
+              <span className="field-help">
+                We'll show when it starts, keep the original configuration, and
+                check the result.
+              </span>
+            </span>
+          </label>
+        )}
         {error && (
           <p role="alert" className="error-message">
             {error}
@@ -223,7 +321,11 @@ export function ProjectModal({
             className="button primary"
             disabled={
               busy ||
-              (kind === 'import' ? !repository.trim() : !templates.length)
+              (kind === 'import'
+                ? !repository.trim()
+                : kind === 'upload'
+                  ? !files.length
+                  : !templates.length)
             }
           >
             {busy ? (
@@ -233,7 +335,11 @@ export function ProjectModal({
               </>
             ) : (
               <>
-                {kind === 'import' ? 'Import project' : 'Create project'}
+                {kind === 'import'
+                  ? 'Import project'
+                  : kind === 'upload'
+                    ? 'Open uploaded project'
+                    : 'Create project'}
                 <Icon name="arrow" size={16} />
               </>
             )}

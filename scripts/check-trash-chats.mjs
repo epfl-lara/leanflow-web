@@ -154,13 +154,13 @@ async function newChat() {
   await page.locator('.assistant-starters').waitFor()
   await until(
     async () =>
-      (await page.getByLabel('Instructions for Lemex').inputValue()) === '' &&
+      (await page.getByLabel('Message Lemex').inputValue()) === '' &&
       !(await page
         .getByRole('button', { name: 'New chat', exact: true })
         .isDisabled()),
     'the cleared new-chat composer',
   )
-  assert.equal(await page.locator('.chat-previous-turn').count(), 0)
+  assert.equal(await page.locator('.conversation-turn').count(), 0)
   return chat
 }
 
@@ -354,12 +354,11 @@ try {
       .locator('.mode-tabs')
       .getByRole('button', { name, exact: true })
       .waitFor()
-  for (const name of ['Repair a proof', 'Find a proof']) {
+  await assistant.getByRole('button', { name: 'Proofs', exact: true }).click()
+  await assistant.locator('.chat-options > summary').click()
+  for (const name of ['Complete the proof', 'Fix Lean errors']) {
     await assistant.getByRole('button', { name, exact: true }).click()
-    assert.equal(
-      await assistant.getByLabel('Time limit (optional)').inputValue(),
-      'unlimited',
-    )
+    assert.equal(await assistant.getByLabel('Time limit (optional)').count(), 0)
     assert.equal(
       await assistant
         .getByRole('checkbox', { name: /Edit files live/ })
@@ -368,7 +367,7 @@ try {
     )
   }
   passed(
-    'Proofs/Formalize/Optimize/Search are visible; Repair and Prove share Until done and live edits',
+    'Proofs/Formalize/Optimize/Search are visible; unified proof suggestions share unlimited runs and live edits',
   )
 
   const first = await newChat()
@@ -378,7 +377,7 @@ try {
     'PATCH',
   )
   await page
-    .getByLabel('Instructions for Lemex')
+    .getByLabel('Message Lemex')
     .fill('A local draft that New chat must clear.')
   const second = await newChat()
   assert.notEqual(first.id, second.id)

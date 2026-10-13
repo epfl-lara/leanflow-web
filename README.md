@@ -6,16 +6,17 @@ The server uses the latest verified native Lemex revision, `2f0e12c10d0baf7404a8
 
 Features:
 
-- Persistent projects, HTTPS Git imports at a branch or commit, file creation/editing, branches, and explicit commits.
+- Persistent projects, GitHub repository or subfolder links, local file/folder uploads, file creation/editing, branches, and explicit commits. Failed import setup can trigger an announced, isolated Lemex repair followed by environment checks.
 - Monaco editor, Lean infoview, live diagnostics, checks of the selected file, resizable panels, and readable light/dark goals.
-- Prebuilt Mathlib, CSLib, and Physlib environments with compatible pinned dependencies. Lean basics can use another exact Lean release; imported repositories use their own toolchain.
+- Prebuilt Mathlib, CSLib, and Physlib environments with compatible pinned dependencies. Select Mathlib together with CSLib or Physlib; incompatible prepared versions are explained. Lean basics can use another exact Lean release; imported repositories use their own toolchain.
 - Four assistant sections: **Proofs** (repair/find), **Formalize**, **Optimize**, and **Search**, with model selection, progress streaming, cancellation, and saved runs.
-- Project chats with New chat, a chat selector, and up to 12 selected context files. Each run starts a fresh native worker and receives only the selected chat's bounded server-owned conversation context.
+- Continuous project chats with New chat, a chat selector, per-chat drafts, and up to 12 context files selected from the picker or with `@`. Send updates during a run, expand inline reasoning, or Stop and continue. Each run starts a fresh native worker and receives only the selected chat's bounded server-owned conversation context.
 - Saved agent edits appear live in the editor by default, with independent final verification and Undo. Disable **Edit files live** for a separate candidate and explicit diff review/Apply.
-- **Until done** runs with an optional time cap; reasoning traces show only what the selected model actually exposes.
+- Completed replies render Markdown tables, lists, links, and Lean code; wide tables scroll within the chat.
+- Runs continue until completion or Stop, with no time-limit control. Options expose the reasoning efforts supported by the selected Lemex model. Reasoning and readable usage totals show only data actually emitted by the runtime.
 - Recoverable deletion of files, folders, projects, and chats, with Undo and a Trash restore view.
 - Fresh verification workspaces, kernel replay, axiom inspection, and proof-body restrictions. Review-first acceptance checks the full saved baseline; live edits protect touched files and project configuration while preserving unrelated edits.
-- Configurable assistant instructions and tools, Loogle search, and extensible server-side MCP configuration.
+- LeanProbe for iterative proof checks, configurable assistant instructions and tools, Loogle search, and extensible server-side MCP configuration.
 - Separate collaborator accounts and isolated Docker workers with resource limits.
 
 ## Open the larapc2 installation

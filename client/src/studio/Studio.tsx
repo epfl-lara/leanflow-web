@@ -22,6 +22,7 @@ import { Dialog } from './Dialog'
 import { Icon } from './Icons'
 import { LeanWorkspace } from './LeanWorkspace'
 import { ProjectModal } from './ProjectModal'
+import { UploadModal } from './UploadFiles'
 import { SearchPanel } from './SearchPanel'
 import { SettingsModal } from './SettingsModal'
 import { FileBrowser } from './FileBrowser'
@@ -210,6 +211,9 @@ export function Studio() {
   const [notice, setNotice] = useState('')
   const [agentPendingFile, setAgentPendingFile] = useState<string | null>(null)
   const [projectModal, setProjectModal] = useState(false)
+  const [uploadModal, setUploadModal] = useState(false)
+  const [stoppingSetup, setStoppingSetup] = useState(false)
+  const [setupDetails, setSetupDetails] = useState(false)
   const [settingsModal, setSettingsModal] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
@@ -302,6 +306,14 @@ export function Studio() {
 
   const loadProjects = useCallback(async () => {
     const value = await api<Project[]>('/api/projects')
+    const selected = value.findIndex((item) => item.id === projectIdRef.current)
+    if (
+      selected >= 0 &&
+      (value[selected].status !== 'ready' || value[selected].setupRepair)
+    )
+      value[selected] = await api<Project>(
+        `/api/projects/${encodeURIComponent(value[selected].id)}`,
+      )
     setProjects(value)
     return value
   }, [])
@@ -329,6 +341,11 @@ export function Studio() {
   }, [session])
 
   const preparing = projects.some((item) => item.status === 'preparing')
+  useEffect(() => {
+    setSetupDetails(false)
+    if (projectId)
+      void loadProjects().catch((error) => setError(errorText(error)))
+  }, [projectId, loadProjects])
   useEffect(() => {
     if (!session || !preparing) return
     const timer = setInterval(() => {
@@ -912,6 +929,14 @@ export function Studio() {
               <span>Files</span>
               <div>
                 <button
+                  className="button small subtle"
+                  onClick={() => setUploadModal(true)}
+                  disabled={project?.status !== 'ready'}
+                  title="Upload local files or a folder"
+                >
+                  Upload
+                </button>
+                <button
                   className="icon-button"
                   onClick={() => {
                     setNewFileName('')
@@ -1216,6 +1241,22 @@ export function Studio() {
             </button>
           </div>
         </header>
+        {project?.status === 'ready' &&
+          project.setupRepair?.status === 'completed' && (
+            <div className="workspace-alert live-edit-alert">
+              <span>
+                Setup repaired by Lemex.{' '}
+                {project.setupRepair.changes?.length || 0} configuration files
+                updated.
+              </span>
+              <button
+                className="button small subtle"
+                onClick={() => setSetupDetails(true)}
+              >
+                Setup details
+              </button>
+            </div>
+          )}
         {agentPendingFile && file?.path === agentPendingFile && (
           <div className="workspace-alert live-edit-alert" role="status">
             <span>
@@ -1330,6 +1371,25 @@ export function Studio() {
                   Setting up the Lean toolchain and project dependencies. You
                   can return to another project while this runs.
                 </p>
+                <button
+                  className="button secondary"
+                  disabled={stoppingSetup}
+                  onClick={async () => {
+                    setStoppingSetup(true)
+                    try {
+                      await post(
+                        `/api/projects/${encodeURIComponent(project.id)}/prepare/stop`,
+                      )
+                      await loadProjects()
+                    } catch (error) {
+                      setError(errorText(error))
+                    } finally {
+                      setStoppingSetup(false)
+                    }
+                  }}
+                >
+                  {stoppingSetup ? 'Stopping setup…' : 'Stop setup'}
+                </button>
               </>
             ) : (
               <>
@@ -1342,6 +1402,21 @@ export function Studio() {
                   Retry setup
                 </button>
               </>
+            )}
+            {project.setupRepair && (
+              <div className="setup-repair-notice" role="status">
+                <strong>
+                  {project.setupRepair.status === 'running'
+                    ? 'Lemex is repairing setup'
+                    : project.setupRepair.status === 'completed'
+                      ? 'Setup repaired by Lemex'
+                      : 'Lemex setup repair needs attention'}
+                </strong>
+                <p>{project.setupRepair.message}</p>
+                {!!project.setupRepair.changes?.length && (
+                  <p>Updated: {project.setupRepair.changes.join(', ')}</p>
+                )}
+              </div>
             )}
             {project.log && (
               <details open={project.status === 'error'}>
@@ -1702,6 +1777,34 @@ export function Studio() {
             navigate(async () => setProjectId(created.id))
           }}
         />
+      )}
+      {uploadModal && projectId && (
+        <UploadModal
+          projectId={projectId}
+          onClose={() => setUploadModal(false)}
+          onUploaded={async () => {
+            await loadFiles(projectId)
+            setNotice('Local files uploaded')
+          }}
+        />
+      )}
+      {setupDetails && project?.setupRepair && (
+        <Dialog
+          title="Project setup repair"
+          onClose={() => setSetupDetails(false)}
+        >
+          <p>{project.setupRepair.message}</p>
+          <p>
+            Changed:{' '}
+            {project.setupRepair.changes?.join(', ') ||
+              'No configuration changes accepted'}
+          </p>
+          <p className="field-help">
+            The original configuration is retained with repair{' '}
+            {project.setupRepair.id}.
+          </p>
+          <pre className="setup-log">{project.log}</pre>
+        </Dialog>
       )}
       {settingsModal && (
         <SettingsModal

@@ -59,20 +59,30 @@ const checked = await until('/api/jobs/' + check.id, (j) =>
 assert.equal(checked.status, 'failed')
 console.log('Broken proof rejected by real Lean')
 const run = await api('/api/projects/' + project.id + '/runs', {
-  mode: 'repair',
+  mode: 'proofs',
   prompt:
     'Repair the proof in Main.lean. Keep the exact theorem statement and imports. Inspect the diagnostics or goal using the Lean MCP tools before fixing it. Run Lean to verify the repair. Return a concise explanation.',
   file: 'Main.lean',
-  maxSeconds: 180,
+  maxSeconds: null,
+  liveEdits: false,
 })
 console.log('Started live Lemex run', run.id)
 let last = ''
-const result = await until('/api/runs/' + run.id, (j) => {
-  if (j.status !== last) {
-    console.log('Run status', j.status)
-    last = j.status
-  }
-  return ['completed', 'failed', 'cancelled', 'interrupted'].includes(j.status)
+const result = await until(
+  '/api/runs/' + run.id,
+  (j) => {
+    if (j.status !== last) {
+      console.log('Run status', j.status)
+      last = j.status
+    }
+    return ['completed', 'failed', 'cancelled', 'interrupted'].includes(
+      j.status,
+    )
+  },
+  600000,
+).catch(async (error) => {
+  await api('/api/runs/' + run.id + '/stop', {})
+  throw error
 })
 await fs.writeFile(
   reportDir + '/application-verification.json',

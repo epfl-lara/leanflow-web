@@ -119,11 +119,11 @@ export function proofRisks(changes, mode) {
         `${change.path} changes the proof trust settings or declares an axiom.`,
       )
     if (
-      ['repair', 'prove', 'optimize'].includes(mode) &&
+      ['proofs', 'repair', 'prove', 'optimize'].includes(mode) &&
       /\b(?:sorry|admit)\b/.test(code)
     )
       problems.push(`${change.path} still contains an unfinished proof.`)
-    if (['repair', 'prove', 'optimize'].includes(mode) && change.before) {
+    if (['proofs', 'repair', 'prove', 'optimize'].includes(mode) && change.before) {
       if (ambiguousTheoremStatement(change.before) || ambiguousTheoremStatement(change.after)) {
         problems.push(`${change.path} contains unsupported theorem statement syntax. Review it manually before changing its proof.`)
         continue

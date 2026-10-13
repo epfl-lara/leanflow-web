@@ -50,6 +50,18 @@ export function FileContextPicker({
   useEffect(() => {
     if (disabled && details.current) details.current.open = false
   }, [disabled])
+  useEffect(() => {
+    const closeOutside = (event: PointerEvent) => {
+      if (
+        details.current?.open &&
+        event.target instanceof Node &&
+        !details.current.parentElement?.contains(event.target)
+      )
+        details.current.open = false
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    return () => document.removeEventListener('pointerdown', closeOutside)
+  }, [])
 
   function change(path: string, checked: boolean) {
     if (disabled) return
@@ -96,7 +108,7 @@ export function FileContextPicker({
     <div className="file-context-control">
       {selectedFiles.length > 0 && (
         <div className="file-context-chips" aria-label="Selected context files">
-          {selectedFiles.map((file) => (
+          {selectedFiles.slice(0, 3).map((file) => (
             <span
               key={file.path}
               className="file-context-chip"
@@ -119,6 +131,19 @@ export function FileContextPicker({
               </button>
             </span>
           ))}
+          {selectedFiles.length > 3 && (
+            <button
+              type="button"
+              className="file-context-more"
+              aria-label="Show all selected context files"
+              onClick={() => {
+                if (details.current) details.current.open = true
+              }}
+              disabled={disabled}
+            >
+              +{selectedFiles.length - 3} files
+            </button>
+          )}
         </div>
       )}
       <details

@@ -5,6 +5,7 @@ import { TERMINAL } from './events.mjs'
 import { proofRisks, verifyCandidate } from './verification.mjs'
 import { createAgentOutputHandler } from './agent-output.mjs'
 import { LiveMirror } from './agent-live.mjs'
+import { FollowupInbox } from './agent-followups.mjs'
 import {
   agentConversationContext,
   selectedContextFiles,
@@ -16,7 +17,14 @@ import {
   optimizationBaselineContext,
 } from './agent-optimization.mjs'
 
-const modes = new Set(['repair', 'prove', 'formalize', 'optimize', 'search'])
+const modes = new Set([
+  'proofs',
+  'repair',
+  'prove',
+  'formalize',
+  'optimize',
+  'search',
+])
 const instructions = await fs.readFile(
   new URL('../prompts/lean-assistant.md', import.meta.url),
   'utf8',
@@ -75,6 +83,13 @@ export class AgentManager {
     this.tasks = new Set()
     this.running = 0
     this.stopping = false
+    this.followups = new FollowupInbox({
+      events,
+      getActive: (id) => this.active.get(id),
+      emit: (id, type, data) => this.#emit(id, type, data),
+      redact: config.redact,
+    })
+    this.followups.recover()
   }
   start(owner, projectId, input) {
     if (this.stopping)
@@ -99,7 +114,7 @@ export class AgentManager {
       )
     if (!modes.has(input.mode))
       throw Object.assign(
-        new Error('Choose repair, prove, formalize, optimize, or search.'),
+        new Error('Choose proofs, formalize, optimize, or search.'),
         { status: 400 },
       )
     if (
@@ -148,9 +163,25 @@ export class AgentManager {
         status: 400,
       })
     const model = input.model || this.config.defaultModel
-    if (!this.config.models.some((item) => item.id === model))
+    const selectedModel = this.config.models.find((item) => item.id === model)
+    if (!selectedModel)
       throw Object.assign(
         new Error('This model is not in the server model catalog.'),
+        { status: 400 },
+      )
+    const effort =
+      input.effort === undefined || input.effort === null
+        ? selectedModel.defaultReasoningEffort || null
+        : input.effort
+    if (
+      effort !== null &&
+      (typeof effort !== 'string' ||
+        !selectedModel.reasoningEfforts?.some((level) => level.id === effort))
+    )
+      throw Object.assign(
+        new Error(
+          'Choose a reasoning effort supported by the selected Lemex model.',
+        ),
         { status: 400 },
       )
     if (this.queue.length >= 12)
@@ -197,7 +228,7 @@ export class AgentManager {
     const job = this.events.create(owner, {
       kind: 'agent',
       projectId,
-      mode: input.mode,
+      mode: ['repair', 'prove'].includes(input.mode) ? 'proofs' : input.mode,
       prompt: input.prompt.trim(),
       file:
         input.file ||
@@ -208,9 +239,12 @@ export class AgentManager {
       files,
       chatId,
       model,
+      effort,
       maxSeconds,
       liveEdits: input.mode !== 'search' && input.liveEdits !== false,
       liveRevision: 0,
+      followups: [],
+      progress: { label: 'Queued', updatedAt: new Date().toISOString() },
     })
     if (chatId) {
       try {
@@ -224,6 +258,7 @@ export class AgentManager {
       }
     }
     this.queue.push(job.id)
+    this.#emit(job.id, 'progress', job.progress)
     queueMicrotask(() => this.#drain())
     return job
   }
@@ -237,6 +272,53 @@ export class AgentManager {
   #log(id, text) {
     this.events.append(id, 'log', this.config.redact(text), 'activity')
   }
+  #progress(id, label, detail) {
+    const progress = {
+      label,
+      ...(detail ? { detail: this.config.redact(detail).slice(0, 1000) } : {}),
+      updatedAt: new Date().toISOString(),
+    }
+    this.events.update(id, { progress })
+    this.#emit(id, 'progress', progress)
+  }
+  async message(owner, id, input) {
+    const job = this.events.get(id, owner)
+    const files = selectedContextFiles(
+      { files: input?.files },
+      validateWorkspaceFilePath,
+    )
+    const submission = { ...input, files }
+    const messageId =
+      typeof input?.id === 'string' ? input.id.toLowerCase() : null
+    const existing = job.followups?.some((entry) => entry.id === messageId)
+    if (existing) return this.followups.queue(owner, id, submission).job
+    const saved = []
+    let size = 0
+    for (const file of files) {
+      const source = await this.workspaces.readFile(job.projectId, owner, file)
+      size += source.content.length
+      if (size > 64_000)
+        throw Object.assign(
+          new Error(
+            'Selected saved file context exceeds 64,000 characters. Select a smaller file set.',
+          ),
+          { status: 413 },
+        )
+      saved.push({
+        path: file,
+        hash: source.hash,
+        content: this.config.redact(source.content),
+      })
+    }
+    const queued = this.followups.queue(
+      owner,
+      id,
+      submission,
+      saved.length ? JSON.stringify(saved) : '',
+    )
+    if (queued.created) await this.followups.deliver(id)
+    return this.events.get(id, owner)
+  }
   #drain() {
     while (
       !this.stopping &&
@@ -244,13 +326,15 @@ export class AgentManager {
       this.queue.length
     ) {
       const id = this.queue.shift()
-      if (this.events.get(id).status === 'cancelled') continue
+      if (['cancelled', 'stopping'].includes(this.events.get(id).status))
+        continue
       this.running++
       const task = this.#execute(id)
         .catch((error) => {
-          if (this.events.get(id).status !== 'cancelled') {
+          if (!['cancelled', 'stopping'].includes(this.events.get(id).status)) {
             const message = this.config.redact(error.message)
             this.events.update(id, { status: 'failed', error: message })
+            this.#progress(id, 'Failed', message)
             this.#emit(id, 'error', { message })
           }
         })
@@ -272,7 +356,13 @@ export class AgentManager {
       timeout: null,
       mirror: null,
       output: null,
+      accepting: null,
+      completed: false,
+      childClosed: null,
     }
+    active.done = new Promise((resolve) => {
+      active.resolveDone = resolve
+    })
     this.active.set(id, active)
     if (Number.isFinite(job.maxSeconds) && job.maxSeconds > 0)
       active.timeout = setTimeout(() => {
@@ -282,6 +372,11 @@ export class AgentManager {
       }, job.maxSeconds * 1000)
     try {
       this.events.update(id, { status: 'running' })
+      this.#progress(
+        id,
+        'Preparing project',
+        'Checking selected files and capturing saved sources.',
+      )
       for (const file of new Set(
         [job.file, ...(job.files || [])].filter(Boolean),
       ))
@@ -303,6 +398,11 @@ export class AgentManager {
       })
       if (active.controller.signal.aborted) return
       if (job.mode === 'optimize') {
+        this.#progress(
+          id,
+          'Measuring proof',
+          'Measuring saved proof cost before optimization.',
+        )
         const paths = optimizationPaths(job)
         this.#log(id, 'Measuring the saved proof before optimization…\n')
         const baseline = await this.optimizationMeasure(
@@ -335,6 +435,12 @@ export class AgentManager {
           )
       }
       const home = await this.runtime.home(snapshot.root)
+      if (active.controller.signal.aborted) return
+      this.#progress(
+        id,
+        'Starting Lemex',
+        'Opening the isolated assistant session.',
+      )
       const preferences = await this.settings.get(job.owner)
       const config =
         [
@@ -351,6 +457,14 @@ export class AgentManager {
           'startup_timeout_sec = 90',
           'tool_timeout_sec = 120',
           `enabled = ${preferences.tools.lean}`,
+          '[mcp_servers.lean_probe]',
+          'command = "/opt/tools/bin/lean-probe"',
+          'args = ["mcp"]',
+          'startup_timeout_sec = 90',
+          'tool_timeout_sec = 600',
+          `enabled = ${preferences.tools.lean_probe !== false}`,
+          '[mcp_servers.lean_probe.env]',
+          'LEAN_PROBE_AUTO_BUILD = "0"',
           '[mcp_servers.lean_explore]',
           'url = "https://www.leanexplore.com/mcp"',
           'startup_timeout_sec = 30',
@@ -382,6 +496,10 @@ export class AgentManager {
           signal: active.controller.signal,
         },
       )
+      active.childClosed = new Promise((resolve) => {
+        child.once('close', resolve)
+        child.once('error', resolve)
+      })
       const rpc = (active.rpc = new AgentRpc(child))
       child.stderr.on('data', (text) => {
         // Runtime debug messages stay server-side; only bounded useful failures are surfaced.
@@ -428,19 +546,34 @@ export class AgentManager {
         } catch {}
       })
       rpc.on('notification', ({ method, params }) => {
-        if (this.events.get(id).status === 'cancelled') return
+        if (['cancelled', 'stopping'].includes(this.events.get(id).status))
+          return
         if (output.handle(method, params)) return
         if (method === 'item/started') {
           const item = params.item || {}
-          if (item.type === 'commandExecution')
+          if (item.type === 'commandExecution') {
             this.#log(id, `Running ${item.command || 'a workspace command'}\n`)
-          if (item.type === 'mcpToolCall')
+            this.#progress(
+              id,
+              'Running command',
+              item.command || 'A workspace command',
+            )
+          }
+          if (item.type === 'mcpToolCall') {
             this.#log(
               id,
               `Using ${item.server || ''} / ${item.tool || 'Lean tool'}\n`,
             )
-          if (item.type === 'fileChange')
+            this.#progress(
+              id,
+              'Using tool',
+              `${item.server || ''} / ${item.tool || 'Lean tool'}`,
+            )
+          }
+          if (item.type === 'fileChange') {
             this.#log(id, 'Preparing a candidate edit…\n')
+            this.#progress(id, 'Editing Lean files')
+          }
         } else if (method === 'item/completed') {
           const item = params.item || {}
           if (item.type === 'commandExecution' && item.exitCode !== 0)
@@ -450,11 +583,19 @@ export class AgentManager {
             )
           if (item.type === 'mcpToolCall' && item.error)
             this.#log(id, `Tool reported: ${JSON.stringify(item.error)}\n`)
+          if (
+            ['commandExecution', 'mcpToolCall', 'fileChange'].includes(
+              item.type,
+            )
+          )
+            this.#progress(id, 'Working')
         } else if (method === 'thread/tokenUsage/updated') {
           this.events.update(id, { usage: params.tokenUsage })
           this.#emit(id, 'usage', params.tokenUsage)
         } else if (method === 'turn/started') active.turnId = params.turn?.id
         else if (method === 'turn/completed') {
+          active.accepting = false
+          active.completed = true
           output.flush()
           resolveFinished(params.turn)
         } else if (method === 'error')
@@ -515,6 +656,7 @@ export class AgentManager {
       }
       const turn = await rpc.call('turn/start', {
         threadId: active.threadId,
+        ...(job.effort !== null ? { effort: job.effort } : {}),
         input: [
           {
             type: 'text',
@@ -524,15 +666,42 @@ export class AgentManager {
         ],
       })
       active.turnId = turn.turn.id
+      if (!active.completed && !active.controller.signal.aborted) {
+        active.accepting = true
+        this.#progress(
+          id,
+          'Working',
+          'Additional messages will reach Lemex at its next decision boundary.',
+        )
+        void this.followups
+          .deliver(id, active)
+          .catch((error) =>
+            this.#log(id, `Message delivery failed: ${error.message}\n`),
+          )
+      }
       const result = await finished
+      if (active.controller.signal.aborted) return
+      this.#progress(
+        id,
+        'Finishing task',
+        'Confirming message delivery and closing the worker.',
+      )
+      await this.followups.finish(id)
       rpc.close()
       active.rpc = null
+      await active.childClosed
       await active.mirror?.stop({ flush: result.status === 'completed' })
       if (active.controller.signal.aborted) return
       if (result.status !== 'completed')
         throw new Error(result.error?.message || `Lemex turn ${result.status}.`)
       this.events.update(id, { status: 'verifying' })
+      this.#progress(
+        id,
+        'Checking proof',
+        'Independent Lean verification of current saved context and candidate proofs.',
+      )
       const changes = await this.workspaces.changes(snapshot)
+      if (active.controller.signal.aborted) return
       this.events.update(id, { changes })
       this.#emit(id, 'changes', { changes })
       if (job.mode === 'search' && changes.length)
@@ -549,6 +718,11 @@ export class AgentManager {
           kind: 'search',
         }
         this.events.update(id, { verification, status: 'completed' })
+        this.#progress(
+          id,
+          'Completed',
+          'Search finished without changing project files.',
+        )
         this.#emit(id, 'verification', verification)
         return
       }
@@ -567,6 +741,7 @@ export class AgentManager {
           reason: 'Candidate requires manual review.',
         }
         this.events.update(id, { verification, status: 'completed' })
+        this.#progress(id, 'Review needed', verification.reason)
         this.#emit(id, 'verification', verification)
         return
       }
@@ -603,6 +778,11 @@ export class AgentManager {
       )
       if (active.controller.signal.aborted) return
       if (job.mode === 'optimize' && verification.complete) {
+        this.#progress(
+          id,
+          'Measuring proof',
+          'Measuring the independently verified candidate.',
+        )
         this.#log(id, 'Measuring the independently verified optimized proof…\n')
         const optimization = this.events.get(id).optimization
         const candidate = await this.optimizationMeasure(
@@ -624,13 +804,30 @@ export class AgentManager {
         this.#emit(id, 'optimization', measured)
       }
       this.events.update(id, { verification, status: 'completed' })
+      this.#progress(
+        id,
+        verification.complete ? 'Completed' : 'Review needed',
+        verification.reason || 'Independent Lean verification finished.',
+      )
       this.#emit(id, 'verification', verification)
     } finally {
       clearTimeout(active.timeout)
+      active.accepting = false
       active.rpc?.close()
-      active.output?.flush()
-      await active.mirror?.stop()
-      this.active.delete(id)
+      try {
+        await active.childClosed
+        active.output?.flush()
+        await active.mirror?.stop()
+        await this.followups.finish(
+          id,
+          active.controller.signal.aborted
+            ? 'The run stopped before this message was accepted.'
+            : undefined,
+        )
+      } finally {
+        this.active.delete(id)
+        active.resolveDone()
+      }
     }
   }
   async stop(owner, id, reason = 'Stopped by the user.') {
@@ -640,7 +837,15 @@ export class AgentManager {
       await active?.mirror?.stop()
       return this.events.get(id, owner)
     }
-    this.events.update(id, { status: 'cancelled', error: reason })
+    if (active?.stopPromise) return active.stopPromise
+    this.events.update(id, { status: 'stopping', error: reason })
+    this.#progress(
+      id,
+      'Stopping',
+      'Waiting for the worker, output, and live file updates to stop.',
+    )
+    if (active) active.accepting = false
+    if (!active) this.queue = this.queue.filter((queued) => queued !== id)
     active?.controller.abort()
     if (active?.rpc && active.threadId && active.turnId)
       active.rpc
@@ -652,8 +857,19 @@ export class AgentManager {
         .catch(() => {})
     active?.rpc?.close()
     active?.output?.flush()
-    await active?.mirror?.stop()
-    return this.events.get(id, owner)
+    const stopped = (async () => {
+      await active?.mirror?.stop()
+      await active?.done
+      await this.followups.finish(
+        id,
+        'The run stopped before this message was accepted.',
+      )
+      this.events.update(id, { status: 'cancelled' })
+      this.#progress(id, 'Stopped', reason)
+      return this.events.get(id, owner)
+    })()
+    if (active) active.stopPromise = stopped
+    return stopped
   }
   async apply(owner, id) {
     const job = this.events.get(id, owner)

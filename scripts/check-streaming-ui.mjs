@@ -7,6 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { chromium } from '@playwright/test'
+import { runMetadata, runTranscript } from './lib/chat-browser-fixture.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const base = process.env.STUDIO_TEST_URL || 'http://127.0.0.1:8090'
@@ -209,16 +210,22 @@ await page.route('**/api/**', async (route) => {
     }
     if (endpoint === `/api/projects/${projectId}/chats`) return json(chats)
     if (endpoint === `/api/projects/${projectId}/runs`)
-      return json([...runs.values()].reverse())
+      return json(
+        [...runs.values()]
+          .reverse()
+          .map((run) =>
+            url.searchParams.get('summary') === '1' ? runMetadata(run) : run,
+          ),
+      )
     const selectedChat = chats.find(
       (chat) => endpoint === `/api/chats/${chat.id}`,
     )
     if (selectedChat)
       return json({
         chat: selectedChat,
-        runs: [...runs.values()].filter(
-          (run) => run.chatId === selectedChat.id,
-        ),
+        runs: [...runs.values()]
+          .filter((run) => run.chatId === selectedChat.id)
+          .map(runTranscript),
       })
     const selectedRun = [...runs.values()].find(
       (run) => endpoint === `/api/runs/${run.id}`,
@@ -387,8 +394,10 @@ try {
     'long conversation scroll area',
   )
 
-  const reasoning = page.locator('.reasoning-trace'),
-    activity = page.locator('.activity-log')
+  const activeTurn = page.locator(`[data-run-id="${activeId}"]`)
+  await activeTurn.locator('.turn-details > summary').click()
+  const reasoning = activeTurn.locator('.reasoning-trace'),
+    activity = activeTurn.locator('.activity-log')
   assert.equal(
     await reasoning.getAttribute('open'),
     null,
@@ -411,6 +420,7 @@ try {
   report.checks.push(
     'Large reasoning and activity bodies are absent while collapsed',
   )
+  await activeTurn.locator('.turn-details > summary').click()
 
   await page.setViewportSize({ width: 1366, height: 768 })
   await until(
@@ -422,7 +432,7 @@ try {
     'Stop at laptop height',
   )
   await inViewport(
-    page.getByLabel('Instructions for Lemex'),
+    page.getByLabel('Message Lemex'),
     'Composer at laptop height',
   )
   await inViewport(
@@ -490,6 +500,7 @@ try {
   })
   report.checks.push('Jump to latest explicitly resumes following')
 
+  await activeTurn.locator('.turn-details > summary').click()
   await reasoning.locator('summary').click()
   await until(
     async () => (await page.locator('.reasoning-content').count()) === 1,
@@ -534,8 +545,9 @@ try {
   report.checks.push(
     'User detail choices persist through streaming and closed bodies unmount',
   )
+  await activeTurn.locator('.turn-details > summary').click()
 
-  const composer = page.getByLabel('Instructions for Lemex')
+  const composer = page.getByLabel('Message Lemex')
   assert(
     await composer.isEditable(),
     'Draft composer is locked while the agent works',
@@ -550,18 +562,17 @@ try {
   )
   assert(
     await page
-      .getByRole('button', { name: 'Run Lemex', exact: true })
-      .isDisabled(),
-    'A second same-project run should remain disabled',
+      .getByRole('button', { name: 'Send update', exact: true })
+      .isEnabled(),
+    'Guidance should remain available for the active task',
   )
-  await composer.press('Control+Enter')
   assert.equal(
     report.mockedRequests.filter(
       (request) =>
         request.method === 'POST' && request.endpoint.endsWith('/runs'),
     ).length,
     0,
-    'Keyboard shortcut submitted a concurrent run',
+    'Typing while active must not create a concurrent run',
   )
   await inViewport(
     page.getByRole('button', { name: 'Stop', exact: true }),
@@ -571,10 +582,14 @@ try {
     page.getByRole('button', { name: 'New chat', exact: true }),
     'New chat',
   )
-  await inViewport(page.getByLabel('Assistant history'), 'Assistant history')
+  assert.equal(
+    await page.getByLabel('Assistant history').count(),
+    0,
+    'History belongs in the continuous transcript',
+  )
   await inViewport(composer, 'Draft composer')
   report.checks.push(
-    'Draft remains editable while concurrent submission is blocked and key controls stay visible',
+    'Draft remains editable, guidance is available, and key controls stay visible',
   )
 
   await page.locator('.file-item[title="Notes.lean"]').click()
@@ -586,14 +601,14 @@ try {
     'file navigation during streaming',
   )
   await burst(3)
-  await page.getByLabel('Assistant history').selectOption(earlierId)
-  await until(
-    async () =>
-      (await conversation.innerText()).includes('Explain the earlier proof.'),
-    'history navigation during active task',
+  const earlierTurn = page.locator(`[data-run-id="${earlierId}"]`)
+  await earlierTurn.locator('.turn-details > summary').click()
+  assert(
+    (await conversation.innerText()).includes('Explain the earlier proof.'),
   )
+  await burst(3)
+  await earlierTurn.locator('.turn-details > summary').click()
   assert.equal(current.status, 'running')
-  await page.getByLabel('Assistant history').selectOption(activeId)
   await until(
     () =>
       page.evaluate(
@@ -610,9 +625,7 @@ try {
   await composer.fill('A separate chat draft.')
   assert(await composer.isEditable())
   assert(
-    await page
-      .getByRole('button', { name: 'Run Lemex', exact: true })
-      .isDisabled(),
+    await page.getByRole('button', { name: 'Send', exact: true }).isDisabled(),
   )
   await page.getByLabel('Select chat').selectOption(chatId)
   await until(
@@ -639,7 +652,10 @@ try {
     'navigate before Stop responds',
   )
   const afterStopChatId = await page.getByLabel('Select chat').inputValue()
-  await page.locator('.assistant-starters').waitFor()
+  await until(
+    async () => (await conversation.locator('[data-run-id]').count()) === 0,
+    'empty new chat before Stop response',
+  )
   await releaseStopResponse()
   await until(
     async () =>
@@ -652,8 +668,9 @@ try {
     afterStopChatId,
     'Late Stop response switched chats',
   )
-  assert(
-    await page.locator('.assistant-starters').isVisible(),
+  assert.equal(
+    await conversation.locator('[data-run-id]').count(),
+    0,
     'Late Stop response replaced the new chat with the old run',
   )
   assert.equal(

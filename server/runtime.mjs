@@ -32,6 +32,25 @@ function rejectSymlink(filename) {
   catch (error) { if (error.code !== 'ENOENT') throw error }
 }
 
+function writableLakeCache(root, { mountedPackages = false } = {}) {
+  const cache = ensurePrivateDirectory(root, '.lake')
+  // A writable alias of a source inode would bypass the read-only workspace
+  // mount. Symlinks remain governed by the destination mount permissions; do
+  // not follow them or inspect dependencies that receive a read-only mount.
+  const pending = [cache]
+  while (pending.length) {
+    const directory = pending.pop()
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (mountedPackages && directory === cache && entry.name === 'packages') continue
+      const filename = path.join(directory, entry.name)
+      const stat = fs.lstatSync(filename)
+      if (stat.isDirectory()) pending.push(filename)
+      else if (stat.isFile() && stat.nlink > 1) throw new Error('Writable Lake cache must not contain hardlinked files')
+    }
+  }
+  return cache
+}
+
 
 const updateRegistryScript = String.raw`
 import fcntl, json, os, sys, tempfile
@@ -148,11 +167,26 @@ export class Runtime {
     this.#reloadDependencies()
     const actual = this.#root(root)
     const source = this.dependencies.get(actual) || actual
+    const directory = this.#dependencyPackages(source)
+    if (!directory) return null
     try {
-      const directory = fs.realpathSync(path.join(source, '.lake/packages'))
-      if (!directory.startsWith(fs.realpathSync(this.dataDir) + path.sep)) return null
       return fs.readdirSync(directory).length ? source : null
-    } catch { return null }
+    } catch (error) { if (error.code === 'ENOENT') return null; throw error }
+  }
+
+  #dependencyPackages(source) {
+    // Worker-created symlinks must never expand a selected project's mount
+    // to another owned project. Check each ancestor, including dangling links.
+    let directory = source
+    try {
+      for (const segment of ['.lake', 'packages']) {
+        directory = path.join(directory, segment)
+        const stat = fs.lstatSync(directory)
+        if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('Dependency directories must be real directories inside the selected dependency project')
+      }
+      if (fs.realpathSync(directory) !== directory) throw new Error('Dependency mount escapes the selected dependency project')
+      return directory
+    } catch (error) { if (error.code === 'ENOENT') return null; throw error }
   }
 
   async inheritDependencies(sourceRoot, targetRoot) {
@@ -331,15 +365,18 @@ export class Runtime {
     if (this.stopping) throw Object.assign(new Error('Runtime is shutting down'), { status: 503 })
   }
 
-  spawn(root, args, { env = {}, timeoutMs = 0, onOutput, network = 'none', signal, readOnlyWorkspace = false, freshHome = false, readOnlyHome = false } = {}) {
+  spawn(root, args, { env = {}, timeoutMs = 0, onOutput, network = 'none', signal, readOnlyWorkspace = false, writeLakeCache = false, freshHome = false, readOnlyHome = false } = {}) {
     this.#assertReady()
     if (signal?.aborted) throw signal.reason || new Error('Worker job was cancelled')
     if (!Array.isArray(args) || !args.length || args.some(value => typeof value !== 'string' || value.includes('\0'))) throw new Error('Worker command must be a nonempty string argument array')
-    if ([readOnlyWorkspace, freshHome, readOnlyHome].some(value => typeof value !== 'boolean')) throw new Error('Worker mount options must be booleans')
+    if ([readOnlyWorkspace, writeLakeCache, freshHome, readOnlyHome].some(value => typeof value !== 'boolean')) throw new Error('Worker mount options must be booleans')
+    if (writeLakeCache && !readOnlyWorkspace) throw new Error('A writable Lake cache requires a read-only workspace')
     if (!['none', 'bridge'].includes(network)) throw new Error('Only isolated or outbound worker networks are supported')
     if (this.children.size >= this.maxConcurrent) throw Object.assign(new Error('All workspace workers are busy; try again shortly'), { status: 503 })
     this.#reloadDependencies()
     const actual = this.#root(root)
+    const dependencySource = this.dependencies.get(actual)
+    const lakeCache = writeLakeCache ? writableLakeCache(actual, { mountedPackages: Boolean(dependencySource) }) : null
     const home = this.#prepareHome(actual, { fresh: freshHome })
     const name = `lemex-web-${this.owner.slice(0, 8)}-${randomUUID().slice(0, 12)}`
     const dockerArgs = [
@@ -355,13 +392,15 @@ export class Runtime {
       '--env', 'ELAN_HOME=/home/worker/.elan', '--env', 'LEAN_PROJECT_PATH=/workspace',
       '--env', 'LAKE_CACHE_DIR=/home/worker/.cache/lake',
     ]
+    // Place this after the read-only workspace and before the read-only
+    // dependency overlay so only project-local build artifacts are writable.
+    if (lakeCache) dockerArgs.push('--mount', `type=bind,src=${lakeCache},dst=/workspace/.lake`)
     for (const [toolchain, source] of this.toolchains) {
       dockerArgs.push('--mount', `type=bind,src=${source},dst=/opt/lean-toolchains/${toolchainName(toolchain)},readonly`)
     }
-    const dependencySource = this.dependencies.get(actual)
     if (dependencySource) {
-      const directory = fs.realpathSync(path.join(dependencySource, '.lake/packages'))
-      if (!directory.startsWith(fs.realpathSync(this.dataDir) + path.sep)) throw new Error('Dependency mount escapes the owned data directory')
+      const directory = this.#dependencyPackages(dependencySource)
+      if (!directory) throw new Error('Selected dependency packages are unavailable')
       dockerArgs.push('--mount', `type=bind,src=${directory},dst=/workspace/.lake/packages,readonly`)
       if (dependencySource !== actual) {
         const sourceKey = createHash('sha256').update(dependencySource).digest('hex')

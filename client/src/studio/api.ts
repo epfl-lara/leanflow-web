@@ -9,7 +9,12 @@ export interface Preset {
 export interface Session {
   user: { id: string; name: string }
   templates: Preset[]
-  models: { id: string; name: string }[]
+  models: {
+    id: string
+    name: string
+    reasoningEfforts?: { id: string; description?: string }[]
+    defaultReasoningEffort?: string | null
+  }[]
   defaultModel?: string
   runtime?: Record<string, unknown>
   lemex?: {
@@ -26,10 +31,20 @@ export interface Project {
   status: 'preparing' | 'ready' | 'error'
   toolchain?: string
   preset?: string
+  libraries?: string[]
   repository?: string
   revision?: string
   error?: string
   log?: string
+  subdirectory?: string
+  uploaded?: boolean
+  autoRepair?: boolean
+  setupRepair?: {
+    id: string
+    status: 'running' | 'completed' | 'failed'
+    message: string
+    changes?: string[]
+  }
 }
 
 export interface FileEntry {
@@ -65,8 +80,20 @@ export interface Run {
   mode?: string
   prompt?: string
   createdAt?: string
+  chatId?: string | null
+  files?: string[]
+  followups?: RunFollowup[]
+  changeCount?: number
+  liveChangeCount?: number
+  reasoningChars?: number
+  reasoningSummaryChars?: number
+  logChars?: number
+  progress?: { label: string; detail?: string; updatedAt?: string }
   message?: string
+  messageBaseOffset?: number
+  messageTruncated?: boolean
   reasoning?: string
+  reasoningTruncated?: boolean
   reasoningSummary?: string
   log?: string
   eventCursor?: number
@@ -83,6 +110,16 @@ export interface Run {
   usage?: unknown
   appliedAt?: string
   [key: string]: unknown
+}
+
+export interface RunFollowup {
+  id: string
+  text: string
+  status: 'pending' | 'accepted' | 'failed'
+  createdAt: string
+  messageOffset: number
+  error?: string
+  files?: string[]
 }
 
 export class ApiError extends Error {

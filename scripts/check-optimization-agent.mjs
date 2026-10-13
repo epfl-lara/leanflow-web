@@ -96,14 +96,12 @@ try {
     .locator('.editor-loading')
     .waitFor({ state: 'hidden', timeout: 60000 })
   await page.getByRole('button', { name: 'Optimize', exact: true }).click()
+  await page.locator('.chat-options > summary').click()
   assert.equal(
-    await page.locator('.assistant-options select').first().inputValue(),
+    await page.getByLabel('Model', { exact: true }).inputValue(),
     session.defaultModel,
   )
-  assert.equal(
-    await page.getByLabel('Time limit (optional)').inputValue(),
-    'unlimited',
-  )
+  assert.equal(await page.getByLabel('Time limit (optional)').count(), 0)
   assert.equal(
     await page.getByRole('checkbox', { name: /Edit files live/ }).isChecked(),
     true,
@@ -111,7 +109,7 @@ try {
   let job = resumed
   if (!job) {
     await page
-      .getByLabel('Instructions for Lemex')
+      .getByLabel('Message Lemex')
       .fill(
         'Optimize the proof body of addition_commutes in Main.lean. Preserve its exact theorem statement and imports. Replace the verbose have/ exact sequence with the shorter proof body `by\n  exact Nat.add_comm a b`. Check the resulting proof with Lean. This is a small focused change; do not change any other file. Report the result briefly. The final independent measurements will report both proof tokens and heartbeats honestly, including any heartbeat regression.',
       )
@@ -120,7 +118,7 @@ try {
         response.request().method() === 'POST' &&
         new URL(response.url()).pathname.endsWith('/runs'),
     )
-    await page.getByRole('button', { name: 'Run Lemex', exact: true }).click()
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
     job = await (await started).json()
   }
   runId = job.id
@@ -222,7 +220,9 @@ try {
     'saved candidate visible in editor',
     15000,
   )
-  const panel = page.locator('.optimization-summary')
+  const turn = page.locator(`.conversation-turn[data-run-id="${runId}"]`)
+  await turn.locator('.turn-details > summary').click()
+  const panel = turn.locator('.optimization-summary')
   await panel.waitFor({ timeout: 15000 })
   await until(
     async () =>

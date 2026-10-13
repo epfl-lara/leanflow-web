@@ -76,16 +76,14 @@ try {
   await page
     .locator('.editor-loading')
     .waitFor({ state: 'hidden', timeout: 60000 })
-  assert.equal(
-    await page.getByLabel('Time limit (optional)').inputValue(),
-    'unlimited',
-  )
+  assert.equal(await page.getByLabel('Time limit (optional)').count(), 0)
+  await page.locator('.chat-options > summary').click()
   assert.equal(
     await page.getByRole('checkbox', { name: /Edit files live/ }).isChecked(),
     true,
   )
   await page
-    .getByLabel('Instructions for Lemex')
+    .getByLabel('Message Lemex')
     .fill(
       'Repair the proof in Main.lean, preserving its exact theorem statement and imports. Inspect the diagnostics and goal with the Lean tools before editing, and verify the repaired proof after editing. Explain the fix briefly. For our later chat, remember that I call this task the Aubergine case.',
     )
@@ -94,7 +92,7 @@ try {
       response.request().method() === 'POST' &&
       new URL(response.url()).pathname.endsWith('/runs'),
   )
-  await page.getByRole('button', { name: 'Run Lemex', exact: true }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
   const job = await (await started).json()
   runId = job.id
   assert.equal(job.maxSeconds, null)
@@ -155,7 +153,7 @@ try {
   // A second real turn checks conversation continuation; a new chat resets it.
   await page.getByRole('button', { name: 'Search', exact: true }).click()
   await page
-    .getByLabel('Instructions for Lemex')
+    .getByLabel('Message Lemex')
     .fill(
       'What informal nickname did I give our earlier proof task? Reply in one sentence. Do not edit any project files.',
     )
@@ -164,7 +162,7 @@ try {
       response.request().method() === 'POST' &&
       new URL(response.url()).pathname.endsWith('/runs'),
   )
-  await page.getByRole('button', { name: 'Run Lemex', exact: true }).click()
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
   const continued = await (await continuedResponse).json()
   assert.equal(continued.chatId, job.chatId)
   const continuation = await until(async () => {
@@ -192,8 +190,8 @@ try {
     fullPage: true,
   })
   await page.getByLabel('Select chat').selectOption(job.chatId)
-  await page.getByLabel('Assistant history').selectOption(runId)
   await page
+    .locator(`.conversation-turn[data-run-id="${runId}"]`)
     .getByRole('button', { name: 'Undo agent edits', exact: true })
     .click()
   await until(

@@ -6,7 +6,12 @@ import { Icon } from './Icons'
 interface Settings {
   extraInstructions: string
   showReasoning: boolean
-  tools: { lean: boolean; lean_explore: boolean; exa: boolean }
+  tools: {
+    lean: boolean
+    lean_probe?: boolean
+    lean_explore: boolean
+    exa: boolean
+  }
   basePrompt?: string
 }
 
@@ -125,6 +130,12 @@ export function SettingsModal({
                   'Inspect goals, diagnostics, and try proofs in the project.',
               },
               {
+                id: 'lean_probe' as const,
+                title: 'LeanProbe',
+                description:
+                  'Fast proof feedback and declaration checks in the current project.',
+              },
+              {
                 id: 'lean_explore' as const,
                 title: 'LeanExplore',
                 description:
@@ -140,7 +151,9 @@ export function SettingsModal({
               <label key={tool.id}>
                 <input
                   type="checkbox"
-                  checked={settings.tools?.[tool.id] ?? false}
+                  checked={
+                    settings.tools?.[tool.id] ?? tool.id === 'lean_probe'
+                  }
                   onChange={(event) =>
                     setSettings({
                       ...settings,
