@@ -1,4 +1,4 @@
-> **Upstream reference.** This document describes the original lean4web application. For LeanFlow Web, follow the [installation guide](../README.md#install) and [deployment and configuration](LemexWeb.md).
+> **Upstream reference.** This describes the original lean4web application. For LeanFlow Web, see [Install and run](LemexWeb.md#install-and-run) and [Configuration](Configuration.md).
 
 - [Back to README](../README.md)
 - User Manual

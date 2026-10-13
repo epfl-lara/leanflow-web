@@ -24,9 +24,9 @@ Follow the **[installation guide](doc/LemexWeb.md#install-and-run)** to prepare 
 
 ## Contribute
 
-After setup, use `npm run dev` for development. Run `npm test`, `npm run check`, `npm run lint`, and `npm run build` before submitting changes.
+After setup, use `npm run dev` for development with your settings exported. See [AGENTS.md](AGENTS.md) for code practices, formatting, and checks.
 
-See the [configuration guide](doc/LemexWeb.md) for hosting and [verification notes](doc/Verification.md) for runtime checks.
+See [Using LeanFlow Web](doc/UsingLeanFlow.md) for everyday tasks, [Configuration](doc/Configuration.md) for hosting, and [Verification](doc/Verification.md) for runtime checks.
 
 ## Credits
 
