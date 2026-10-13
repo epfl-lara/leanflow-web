@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, errorText } from './api'
+import { OutputText } from './AssistantText'
 import { Icon } from './Icons'
 import './search-results.css'
 
@@ -72,7 +73,9 @@ function Result({ value }: { value: unknown }) {
       {documentation && (
         <div className="search-documentation">
           <span className="search-result-label">Documentation</span>
-          <p>{documentation}</p>
+          <div className="markdown-body search-documentation-body">
+            <OutputText text={documentation} />
+          </div>
         </div>
       )}
       {module && (

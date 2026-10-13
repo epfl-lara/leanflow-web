@@ -69,13 +69,41 @@
   line-height: 1.65;
 }
 
-.search-documentation p {
-  margin: 0;
+.search-documentation-body {
   color: var(--text);
   font-size: 12px;
   line-height: 1.7;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.search-panel .search-documentation-body strong {
+  display: inline;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+}
+
+.search-panel .search-documentation-body a {
+  display: inline;
+  margin-top: 0;
+  font-size: inherit;
+  text-decoration: underline;
+}
+
+.search-documentation-body .markdown-table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.search-documentation-body table {
+  border-collapse: collapse;
+}
+
+.search-documentation-body th,
+.search-documentation-body td {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  text-align: left;
 }
 
 .search-module {

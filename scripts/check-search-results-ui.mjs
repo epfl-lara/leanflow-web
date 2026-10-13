@@ -43,6 +43,25 @@ const longType =
   '(f : Very.Long.' + 'Namespace'.repeat(15) + '.Function) : ∀ n : ℕ, f n = f n'
 const signature =
   'theorem List.map_id {α : Type u} (xs : List α) : xs.map id = xs'
+const documentation = [
+  "**Darboux's theorem**: the image of a convex set under `f'` is a convex set, `deriv` version.",
+  '',
+  '- A monotone function preserves the order.',
+  '- [Lean reference](https://lean-lang.org/)',
+  '',
+  '| Version | Declaration |',
+  '| --- | --- |',
+  '| Derivative | `Convex.image_deriv` |',
+  '',
+  '```lean',
+  'example : True := by trivial',
+  '```',
+  '',
+  '![diagram](https://example.com/search-image.png)',
+  '[Unsafe link](javascript:alert%281%29)',
+  '<img src=x onerror=alert(1)>',
+  '<script>window.__searchInjected = true</script>',
+].join('\n')
 const explore = {
   source: { name: 'LeanExplore', version: 'Fixture index' },
   results: [
@@ -51,7 +70,7 @@ const explore = {
       type,
       signature: type,
       kind: 'theorem',
-      doc: 'A monotone function preserves the order.\n<img src=x onerror=alert(1)>',
+      doc: documentation,
       module: 'Mathlib.Order.Monotone.Basic',
       url: 'https://leanprover-community.github.io/mathlib4_docs/Mathlib/Order/Monotone/Basic.html',
     },
@@ -162,15 +181,63 @@ async function checkTypes(theme) {
   assert.equal(await card('Missing.type').locator('.search-type').count(), 0)
   assert.match(await card('Missing.type').innerText(), /Type unavailable/)
   assert.equal(await page.locator('.search-result img').count(), 0)
-  assert.equal(await page.locator('.search-result a').count(), 1)
+  assert.equal(await page.locator('.search-result script').count(), 0)
+  assert.equal(await page.evaluate(() => window.__searchInjected), undefined)
+  assert.equal(await card('Missing.type').getByRole('link').count(), 0)
+  assert.equal(await card('Long.signature').getByRole('link').count(), 0)
   assert.equal(
-    await card('Monotone.map_le').getByRole('link').getAttribute('rel'),
+    await card('Monotone.map_le')
+      .getByRole('link', { name: 'Open source' })
+      .getAttribute('rel'),
     'noopener noreferrer',
   )
-  assert.match(
-    await card('Monotone.map_le').locator('.search-documentation').innerText(),
-    /<img src=x/,
+  const docs = card('Monotone.map_le').locator('.search-documentation-body')
+  assert.equal(await docs.locator('strong').innerText(), "Darboux's theorem")
+  assert.equal(await docs.locator('p > code').nth(0).innerText(), "f'")
+  assert.equal(await docs.locator('p > code').nth(1).innerText(), 'deriv')
+  assert.equal(await docs.locator('ul > li').count(), 2)
+  assert.equal(await docs.locator('table th').count(), 2)
+  assert.equal(
+    await docs.locator('table td code').innerText(),
+    'Convex.image_deriv',
   )
+  assert.equal(
+    await docs.locator('pre > code.language-lean').innerText(),
+    'example : True := by trivial\n',
+  )
+  const reference = docs.getByRole('link', { name: 'Lean reference' })
+  assert.equal(await reference.getAttribute('href'), 'https://lean-lang.org/')
+  assert.equal(await reference.getAttribute('target'), '_blank')
+  assert.equal(await reference.getAttribute('rel'), 'noopener noreferrer')
+  assert.equal(
+    await docs.getByText('Unsafe link', { exact: true }).getAttribute('href'),
+    '',
+  )
+  assert.equal(
+    await docs
+      .getByRole('link', { name: 'Image: diagram' })
+      .getAttribute('href'),
+    'https://example.com/search-image.png',
+  )
+  const docStyle = await docs.evaluate((element) => {
+    const bold = element.querySelector('strong')
+    const link = element.querySelector('li a')
+    return {
+      color: getComputedStyle(element).color,
+      boldColor: getComputedStyle(bold).color,
+      font: getComputedStyle(element).fontFamily,
+      boldFont: getComputedStyle(bold).fontFamily,
+      linkDisplay: getComputedStyle(link).display,
+      linkMargin: getComputedStyle(link).marginTop,
+      width: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+    }
+  })
+  assert.equal(docStyle.boldColor, docStyle.color)
+  assert.equal(docStyle.boldFont, docStyle.font)
+  assert.equal(docStyle.linkDisplay, 'inline')
+  assert.equal(docStyle.linkMargin, '0px')
+  assert(docStyle.scrollWidth <= docStyle.width + 1, JSON.stringify(docStyle))
   for (const name of ['Monotone.map_le', 'Long.signature']) {
     const style = await card(name)
       .locator('.search-type')
@@ -206,7 +273,7 @@ async function checkTypes(theme) {
   }
   await page.screenshot({ path: path.join(output, `search-${theme}.png`) })
   report.checks.push(
-    `${theme}: readable types, signatures, kinds, docs, wrapping, contrast, safe links`,
+    `${theme}: readable types and Markdown docs, bold, inline/fenced Lean code, lists, tables, wrapping, contrast, safe links and no injected HTML`,
   )
 }
 try {
