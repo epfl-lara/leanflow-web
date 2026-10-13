@@ -10,7 +10,8 @@ import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
 
-const source = `namespace Demo
+const source = `import Std
+namespace Demo
 /-- A comment with a fake theorem decoy : False := by sorry.
     /- Nested comment with def anotherDecoy := 1. -/
 -/
@@ -199,72 +200,92 @@ try {
     })
   })
   await fixture.ready()
-  const toolbar = page.getByLabel('Focus a proof', { exact: true })
-  await toolbar.getByRole('button', { name: 'Outline', exact: true }).click()
-  await page
-    .getByRole('button', { name: 'Demo.first line 2', exact: true })
-    .waitFor()
-  await page.getByLabel('Find a declaration').fill('second')
-  assert.equal(
-    await page
-      .getByRole('list', { name: 'Declarations in this file' })
-      .getByRole('button')
-      .count(),
-    1,
+  const outline = page.getByRole('region', { name: 'File outline' })
+  const list = outline.getByRole('list', { name: 'Declarations in this file' })
+  const entry = (name) =>
+    list.locator('.proof-outline-entry').filter({ hasText: name })
+  await entry('Demo.first').waitFor()
+  assert.equal(await list.locator('.proof-outline-entry').count(), 5)
+  assert.deepEqual(
+    await list.locator('.proof-outline-kind').allTextContents(),
+    ['import', 'theorem', 'def', 'theorem', 'example'],
   )
-  await page
-    .getByRole('button', { name: 'Demo.second line 11', exact: true })
-    .click()
-  await toolbar.getByRole('button', { name: 'Ask Lemex', exact: true }).click()
+  assert.match(await entry('Std').innerText(), /L1/)
+  assert.equal(
+    await list.getByRole('button', { name: 'Focus Std in chat' }).count(),
+    0,
+  )
+  assert(!/decoy|notADeclaration/.test(await list.innerText()))
+  const filesBox = await page
+    .getByRole('region', { name: 'Files', exact: true })
+    .boundingBox()
+  const outlineBox = await outline.boundingBox()
+  const projectsBox = await page
+    .getByRole('region', { name: 'Projects', exact: true })
+    .boundingBox()
+  assert(filesBox.y < outlineBox.y && outlineBox.y < projectsBox.y)
+  assert.equal(await page.locator('.proof-focus-toolbar').count(), 0)
+  result.checks.push(
+    'A permanent sidebar Outline sits below Files and above Projects, labels imports/theorems/definitions/examples, and ignores comment/string decoys.',
+  )
+
+  await page.getByLabel('Find a declaration').fill('second')
+  assert.equal(await list.locator('.proof-outline-entry').count(), 1)
+  await entry('Demo.second').focus()
+  await page.keyboard.press('Enter')
   await until(
     async () =>
-      (await page.getByLabel('Focused proof', { exact: true }).count()) > 0,
-    'chat focus chip',
+      (await entry('Demo.second').getAttribute('aria-current')) === 'location',
+    'selected outline declaration',
   )
+  assert.match(await outline.innerText(), /Demo\.second · lines 12–13/)
+  assert.equal(
+    await page.getByLabel('Focused proof', { exact: true }).count(),
+    0,
+    'Navigating does not silently send or attach.',
+  )
+  await outline.getByRole('button', { name: 'Ask Lemex', exact: true }).click()
+  await page.getByLabel('Focused proof', { exact: true }).waitFor()
   assert.match(
     await page.getByLabel('Focused proof', { exact: true }).innerText(),
     /second/,
   )
   assert.equal(
-    report.requests.filter((entry) => entry.method === 'POST').length,
+    report.requests.filter((request) => request.method === 'POST').length,
     0,
-    'Focusing must not send or save',
   )
-  assert.equal(
-    report.sockets.length,
-    1,
-    'Outline navigation must not restart Lean',
-  )
+  assert.equal(report.sockets.length, 1)
   result.checks.push(
-    'Search and choose a declaration, focus it in chat without sending, and preserve the same Lean connection.',
+    'Filter and navigate by keyboard, then Ask Lemex attaches the exact proof in chat without a save, run, or Lean reconnect.',
   )
 
   const sourceEditor = page.locator('.monaco-editor textarea').first()
   await sourceEditor.focus()
   await page.keyboard.press('ArrowRight')
-  assert.match(await toolbar.innerText(), /Demo\.second/)
+  assert.match(await outline.innerText(), /Demo\.second/)
   await page.keyboard.press('Control+Home')
-  assert.equal(
-    await toolbar
-      .getByRole('button', { name: 'Ask Lemex', exact: true })
-      .isDisabled(),
-    true,
+  await until(
+    async () =>
+      await outline
+        .getByRole('button', { name: 'Ask Lemex', exact: true })
+        .isDisabled(),
+    'no proof at import header',
   )
   await page
     .getByLabel('Focused proof', { exact: true })
     .getByRole('button', { name: /Demo\.second/ })
     .click()
   await until(
-    async () => /Demo\.second/.test(await toolbar.innerText()),
-    'proof chip reveal',
+    async () => /Demo\.second · lines/.test(await outline.innerText()),
+    'chat chip reveals proof',
   )
   result.checks.push(
-    'Cursor at the end of a proof identifies it; empty-context clicks never select the entire file; clicking the chat chip reveals its lines.',
+    'The proof end remains recognized, an import header cannot become a proof automatically, and the chat target reveals its exact lines.',
   )
 
   const composer = page.getByLabel('Message Lemex')
   await composer.fill('Keep my custom instructions.')
-  await toolbar.getByRole('button', { name: 'Optimize', exact: true }).click()
+  await outline.getByRole('button', { name: 'Optimize', exact: true }).click()
   assert.equal(await composer.inputValue(), 'Keep my custom instructions.')
   await until(
     async () =>
@@ -274,21 +295,241 @@ try {
         .getAttribute('aria-pressed')) === 'true',
     'optimize mode',
   )
+  await page.getByLabel('Find a declaration').fill('')
+  await list
+    .getByRole('button', { name: 'Focus Demo.first in chat', exact: true })
+    .click()
+  await until(
+    async () =>
+      /Demo\.first/.test(
+        await page.getByLabel('Focused proof', { exact: true }).innerText(),
+      ),
+    'one-click declaration focus',
+  )
+  assert.equal(await composer.inputValue(), 'Keep my custom instructions.')
+  await sourceEditor.focus()
+  await page.keyboard.press('ArrowRight')
+  await until(
+    async () => /Demo\.first · lines/.test(await outline.innerText()),
+    'explicit declaration focus aligns the visible editor selection',
+  )
   result.checks.push(
-    'Optimize changes the task mode while preserving the current message draft.',
+    'One-click +Chat actions attach and reveal a declaration; Optimize changes task mode while preserving custom message text.',
   )
 
-  // Keyboard-only selection still works when no symbols are available, and
-  // captures new unsaved text rather than an old source snapshot.
+  const heading = outline.getByRole('button', { name: /^Outline/ })
+  const splitter = page.getByRole('separator', {
+    name: 'Resize files and outline',
+    exact: true,
+  })
+  const originalSplit = Number(await splitter.getAttribute('aria-valuenow'))
+  await splitter.focus()
+  await page.keyboard.press('ArrowUp')
+  await until(
+    async () =>
+      Number(await splitter.getAttribute('aria-valuenow')) < originalSplit,
+    'keyboard files/outline resize',
+  )
+  await splitter.dblclick()
+  await until(
+    async () => Number(await splitter.getAttribute('aria-valuenow')) === 45,
+    'reset files/outline resize',
+  )
+  const openFilesHeight = (
+    await page.getByRole('region', { name: 'Files', exact: true }).boundingBox()
+  ).height
+  await heading.click()
+  assert.equal(await heading.getAttribute('aria-expanded'), 'false')
+  assert.equal(await list.count(), 0)
+  assert.equal(await splitter.isVisible(), false)
+  assert(
+    (
+      await page
+        .getByRole('region', { name: 'Files', exact: true })
+        .boundingBox()
+    ).height > openFilesHeight,
+  )
+  await heading.focus()
+  await page.keyboard.press('Enter')
+  assert.equal(await heading.getAttribute('aria-expanded'), 'true')
+  result.checks.push(
+    'Files and Outline resize by keyboard and reset by double click; collapsing Outline gives its space back to Files and reopening works by keyboard.',
+  )
+
+  const contrast = async () =>
+    list.locator('.proof-outline-kind').evaluateAll((elements) => {
+      const luminance = (color) => {
+        const values = color
+          .match(/[\d.]+/g)
+          .slice(0, 3)
+          .map(Number)
+          .map((value) => {
+            const channel = value / 255
+            return channel <= 0.04045
+              ? channel / 12.92
+              : ((channel + 0.055) / 1.055) ** 2.4
+          })
+        return 0.2126 * values[0] + 0.7152 * values[1] + 0.0722 * values[2]
+      }
+      return elements.map((element) => {
+        const style = getComputedStyle(element)
+        const foreground = luminance(style.color),
+          background = luminance(style.backgroundColor)
+        return {
+          kind: element.textContent,
+          foreground: style.color,
+          background: style.backgroundColor,
+          ratio:
+            (Math.max(foreground, background) + 0.05) /
+            (Math.min(foreground, background) + 0.05),
+        }
+      })
+    })
+  result.darkContrast = await contrast()
+  await page.screenshot({ path: path.join(reportDir, 'outline-dark.png') })
+  await page
+    .getByRole('button', { name: 'Use light theme', exact: true })
+    .click()
+  result.lightContrast = await contrast()
+  await page.screenshot({ path: path.join(reportDir, 'outline-light.png') })
+  assert(result.darkContrast.every((item) => item.ratio >= 4.5))
+  assert(
+    result.lightContrast.every((item) => item.ratio >= 4.5),
+    JSON.stringify(result.lightContrast),
+  )
+  await page
+    .getByRole('button', { name: 'Use dark theme', exact: true })
+    .click()
+  result.checks.push(
+    'Declaration kind badges meet 4.5:1 text contrast in dark and light themes.',
+  )
+
+  result.shortHeightLayouts = []
+  for (const viewport of [
+    { width: 844, height: 390 },
+    { width: 1280, height: 550 },
+  ]) {
+    await page.setViewportSize(viewport)
+    const layout = { viewport, controls: [] }
+    for (const [label, control] of [
+      [
+        'Ask Lemex',
+        outline.getByRole('button', { name: 'Ask Lemex', exact: true }),
+      ],
+      [
+        'Optimize',
+        outline.getByRole('button', { name: 'Optimize', exact: true }),
+      ],
+      ['First declaration', entry('Demo.first')],
+    ]) {
+      await control.scrollIntoViewIfNeeded()
+      await control.click({ trial: true })
+      const hit = await control.evaluate((button) => {
+        const bounds = button.getBoundingClientRect()
+        const section = button
+          .closest('.proof-outline-sidebar')
+          .getBoundingClientRect()
+        const x = bounds.left + bounds.width / 2,
+          y = bounds.top + bounds.height / 2
+        const front = document.elementFromPoint(x, y)
+        return {
+          center: { x, y },
+          insideOutline:
+            x >= section.left &&
+            x <= section.right &&
+            y >= section.top &&
+            y <= section.bottom,
+          controlReceivesPointer: button === front || button.contains(front),
+          frontTag: front?.tagName,
+          frontClass: front?.className,
+          outline: {
+            x: section.x,
+            y: section.y,
+            width: section.width,
+            height: section.height,
+          },
+        }
+      })
+      layout.controls.push({ label, ...hit })
+      assert(
+        hit.insideOutline && hit.controlReceivesPointer,
+        JSON.stringify({ viewport, label, hit }),
+      )
+    }
+    const resizeMinimum = Number(await splitter.getAttribute('aria-valuemin'))
+    const resizeMaximum = Number(await splitter.getAttribute('aria-valuemax'))
+    await splitter.focus()
+    await page.keyboard.press('Home')
+    await until(
+      async () =>
+        Number(await splitter.getAttribute('aria-valuenow')) === resizeMinimum,
+      'short-height outline minimum resize',
+    )
+    await page.keyboard.press('End')
+    await until(
+      async () =>
+        Number(await splitter.getAttribute('aria-valuenow')) === resizeMaximum,
+      'short-height outline maximum resize',
+    )
+    await splitter.dblclick()
+    await heading.click()
+    assert.equal(await heading.getAttribute('aria-expanded'), 'false')
+    assert.equal(await splitter.isVisible(), false)
+    await heading.click()
+    assert.equal(await heading.getAttribute('aria-expanded'), 'true')
+    await page.screenshot({
+      path: path.join(
+        reportDir,
+        `outline-${viewport.width}x${viewport.height}.png`,
+      ),
+    })
+    result.shortHeightLayouts.push(layout)
+  }
+  result.checks.push(
+    'At 844×390 and 1280×550, scrolling reaches Ask Lemex, Optimize and declarations within Outline; pointer hits do not fall through to Projects, and resize/collapse still work.',
+  )
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page
+    .getByRole('button', { name: 'Close tools panel', exact: true })
+    .click()
+  await page
+    .getByRole('button', { name: 'Open projects and files', exact: true })
+    .click()
+  await outline.waitFor()
+  await until(async () => {
+    const box = await outline.boundingBox()
+    return box && box.x >= 0 && box.x + box.width <= 391
+  }, 'mobile sidebar animation')
+  const mobileBox = await outline.boundingBox()
+  assert(mobileBox.x >= 0 && mobileBox.x + mobileBox.width <= 391)
+  await list
+    .getByRole('button', { name: 'Focus Demo.second in chat', exact: true })
+    .click()
+  await page.getByLabel('Focused proof', { exact: true }).waitFor()
+  assert.match(
+    await page.getByLabel('Focused proof', { exact: true }).innerText(),
+    /Demo\.second/,
+  )
+  assert(
+    !/sidebar-open/.test(await page.locator('.sidebar').getAttribute('class')),
+  )
+  await page
+    .getByRole('button', { name: 'Send', exact: true })
+    .click({ trial: true })
+  result.checks.push(
+    'At 390px the sidebar Outline is reachable; +Chat opens the visible focused composer and closes the sidebar without sending.',
+  )
+  await page.setViewportSize({ width: 1600, height: 1000 })
+
   documentSymbols = []
-  const editor = page.locator('.monaco-editor textarea').first()
-  await editor.focus()
+  await sourceEditor.focus()
   await page.keyboard.press('Control+Home')
   await page.keyboard.type('-- fresh unsaved selection')
   await page.keyboard.press('Enter')
   await page.keyboard.press('Control+Home')
   await page.keyboard.press('Shift+End')
-  await toolbar.getByRole('button', { name: 'Ask Lemex', exact: true }).click()
+  await outline.getByRole('button', { name: 'Ask Lemex', exact: true }).click()
   assert.match(
     await page.getByLabel('Focused proof', { exact: true }).innerText(),
     /1/,
@@ -301,7 +542,7 @@ try {
     .getByRole('button', { name: /Selected proof/ })
     .click()
   await until(
-    async () => /Selected lines · line 1/.test(await toolbar.innerText()),
+    async () => /Selected lines · line 1/.test(await outline.innerText()),
     'unsaved line reveal',
   )
   assert.match(
@@ -309,29 +550,12 @@ try {
     /fresh.unsaved.selection/,
   )
   assert.equal(
-    report.requests.filter((entry) => entry.method === 'POST').length,
+    report.requests.filter((request) => request.method === 'POST').length,
     0,
   )
   result.checks.push(
-    'Unsaved explicit line selection works with no outline; clicking its chat chip reveals the lines without reloading, saving, or losing editor edits.',
+    'Explicit unsaved line selection works without Lean symbols; the chat chip reveals its lines without reload, save, or loss of editor edits.',
   )
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page
-    .getByRole('button', { name: 'Close tools panel', exact: true })
-    .click()
-  await toolbar.getByRole('button', { name: 'Outline', exact: true }).click()
-  const outlineBox = await page.locator('.proof-outline-popover').boundingBox()
-  assert(outlineBox.x >= 0 && outlineBox.x + outlineBox.width <= 391)
-  await page.getByLabel('Find a declaration').press('Escape')
-  assert.equal(await page.locator('.proof-outline-popover').count(), 0)
-  await toolbar
-    .getByRole('button', { name: 'Ask Lemex', exact: true })
-    .click({ trial: true })
-  result.checks.push(
-    'Outline and focus actions remain accessible at 390px; Escape dismisses the searchable outline.',
-  )
-  await page.setViewportSize({ width: 1600, height: 1000 })
-  await page.getByRole('button', { name: 'Lemex', exact: true }).click()
   fixture.assertClean()
   await page.screenshot({ path: path.join(reportDir, 'focused-proof.png') })
   result.passed = true

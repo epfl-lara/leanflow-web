@@ -2282,6 +2282,27 @@ textarea {
   min-height: 0;
   overflow: hidden;
 }
+.sidebar-source-sections {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 var(--files-size, 65%);
+  min-height: 0;
+  overflow: hidden;
+}
+.sidebar-source-sections > .sidebar-files-section {
+  flex: 0 0 var(--file-tree-size, 45%);
+}
+.sidebar-source-sections:not(:has(.proof-outline-sidebar)) > .sidebar-files-section,
+.sidebar-source-sections:has(.proof-outline-sidebar.collapsed) > .sidebar-files-section {
+  flex: 1;
+}
+.outline-resize-handle {
+  top: calc(var(--file-tree-size, 45%) - 3px);
+}
+.sidebar-source-sections:has(.proof-outline-sidebar.collapsed) > .outline-resize-handle {
+  display: none;
+}
 .sidebar-projects-section {
   position: relative;
   display: flex;

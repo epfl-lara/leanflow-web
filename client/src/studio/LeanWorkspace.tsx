@@ -13,11 +13,13 @@ import { connectInfoviewTheme } from './infoviewTheme'
 import { ResizeHandle } from './ResizeHandle'
 import { DEFAULT_LAYOUT, useMediaQuery } from './layout'
 import type { ChatMode } from './chatModes'
-import { ProofOutline } from './ProofOutline'
 import {
   proofDeclarations,
   proofTargetForSelection,
   type ProofDeclaration,
+  type EditorProofState,
+  type ProofEditorRequest,
+  type EditorSelection,
   type ProofTarget,
 } from './proofTarget'
 
@@ -72,6 +74,9 @@ export function LeanWorkspace({
   onGoalsSizeChange,
   onFocusProof,
   revealTarget,
+  onProofStateChange,
+  focusEditorRequest,
+  onFocusEditorHandled,
 }: {
   projectId: string
   file: OpenFile | null
@@ -83,6 +88,9 @@ export function LeanWorkspace({
   goalsSize: number
   onGoalsSizeChange: (value: number) => void
   onFocusProof?: (target: ProofTarget, mode?: ChatMode) => void
+  onProofStateChange?: (state: EditorProofState | null) => void
+  focusEditorRequest?: ProofEditorRequest | null
+  onFocusEditorHandled?: (id: number) => void
   revealTarget?: {
     id: number
     target: Pick<ProofTarget, 'path' | 'startLine' | 'endLine' | 'name'>
@@ -114,6 +122,7 @@ export function LeanWorkspace({
     error?: string
   }>({ target: null })
   const revealed = useRef<number | null>(null)
+  const focusedRequest = useRef<number | null>(null)
   const [failure, setFailure] = useState('')
   const [loading, setLoading] = useState(true)
   const stacked = useMediaQuery('(max-width: 1250px)')
@@ -383,7 +392,12 @@ export function LeanWorkspace({
               model.getVersionId() !== version
             )
               return
-            const next = proofDeclarations(symbols, uri, model.getLineCount())
+            const next = proofDeclarations(
+              symbols,
+              uri,
+              model.getLineCount(),
+              model.getValue(),
+            )
             declarationsRef.current = next
             setDeclarations(next)
             setOutlineStatus('ready')
@@ -584,21 +598,7 @@ export function LeanWorkspace({
     revealed.current = revealTarget.id
   }, [revealTarget, loading, file?.path, file?.generation])
 
-  function selectDeclaration(declaration: ProofDeclaration) {
-    const editor = runtime.current?.editor?.editor
-    if (!editor) return
-    const range = {
-      startLineNumber: declaration.startLine,
-      startColumn: declaration.startColumn,
-      endLineNumber: declaration.endLine,
-      endColumn: declaration.endColumn,
-    }
-    editor.setSelection(range)
-    editor.revealRangeInCenter(range)
-    editor.focus()
-  }
-
-  function focusProof(mode: ChatMode) {
+  function focusProof(mode?: ChatMode, request?: ProofEditorRequest) {
     const editor = runtime.current?.editor?.editor
     const current = fileRef.current
     if (
@@ -609,16 +609,130 @@ export function LeanWorkspace({
     )
       return
     if (editor.getModel()?.uri.path !== `/workspace/${current.path}`) return
-    // Capture the current editor buffer, including unsaved edits, at click time.
+    if (request?.path && request.path !== current.path) {
+      setFocus({
+        target: null,
+        error: 'The active file changed. Choose the proof again.',
+      })
+      return
+    }
+    const model = editor.getModel()!
+    let selection: EditorSelection | null = editor.getSelection()
+    if (request?.declaration) {
+      const chosen = request.declaration
+      const currentDeclaration = declarationsRef.current.find(
+        (item) =>
+          item.name === chosen.name &&
+          item.startLine === chosen.startLine &&
+          item.startColumn === chosen.startColumn &&
+          item.endLine === chosen.endLine &&
+          item.endColumn === chosen.endColumn,
+      )
+      if (!currentDeclaration || currentDeclaration.kind === 'import') {
+        setFocus({
+          target: null,
+          error: 'The outline changed. Choose the proof again.',
+        })
+        return
+      }
+      selection = {
+        startLineNumber: chosen.startLine,
+        startColumn: chosen.startColumn,
+        endLineNumber: chosen.endLine,
+        endColumn: chosen.endColumn,
+      }
+    } else if (request?.lines) {
+      const { startLine, endLine } = request.lines
+      if (
+        !Number.isSafeInteger(startLine) ||
+        !Number.isSafeInteger(endLine) ||
+        startLine < 1 ||
+        endLine < startLine ||
+        endLine > model.getLineCount()
+      ) {
+        setFocus({
+          target: null,
+          error: `Choose lines between 1 and ${model.getLineCount()}.`,
+        })
+        return
+      }
+      selection = {
+        startLineNumber: startLine,
+        startColumn: 1,
+        endLineNumber: endLine,
+        endColumn: model.getLineMaxColumn(endLine),
+      }
+    }
+    // Read Monaco at the time of the request, including unsaved edits. Sidebar
+    // and chat actions never use a delayed copy of the parent file buffer.
     const latest = proofTargetForSelection(
       current.path,
       editor.getValue(),
-      editor.getSelection(),
+      selection,
       declarationsRef.current,
     )
-    setFocus(latest)
+    if (
+      latest.target &&
+      selection &&
+      (request?.declaration || request?.lines)
+    ) {
+      editor.setSelection(selection)
+      editor.revealRangeInCenter(selection)
+    }
+    setFocus(
+      latest.target || latest.error
+        ? latest
+        : {
+            target: null,
+            error:
+              'Select lines in the editor or choose a declaration to focus the chat.',
+          },
+    )
     if (latest.target) onFocusProofRef.current?.(latest.target, mode)
   }
+
+  useEffect(() => {
+    if (
+      !focusEditorRequest ||
+      loading ||
+      focusedRequest.current === focusEditorRequest.id
+    )
+      return
+    focusedRequest.current = focusEditorRequest.id
+    focusProof(focusEditorRequest.mode, focusEditorRequest)
+    onFocusEditorHandled?.(focusEditorRequest.id)
+  }, [focusEditorRequest, loading, onFocusEditorHandled])
+
+  useEffect(() => {
+    if (!file?.path.endsWith('.lean')) {
+      onProofStateChange?.(null)
+      return
+    }
+    const matching =
+      runtime.current?.editor?.editor.getModel()?.uri.path ===
+      `/workspace/${file.path}`
+    onProofStateChange?.({
+      path: file.path,
+      declarations: matching ? declarations : [],
+      status: outlineStatus,
+      target: matching ? focus.target : null,
+      error: matching ? focus.error : undefined,
+      disabled: loading || !!failure || !matching,
+      readOnly: !!file.readOnly,
+      lineCount: matching
+        ? runtime.current?.editor?.editor.getModel()?.getLineCount()
+        : undefined,
+    })
+  }, [
+    file?.path,
+    file?.readOnly,
+    declarations,
+    outlineStatus,
+    focus,
+    loading,
+    failure,
+    onProofStateChange,
+  ])
 
   return (
     <div
@@ -627,18 +741,6 @@ export function LeanWorkspace({
       style={{ '--goals-size': `${goalsSize}%` } as CSSProperties}
     >
       <div className="source-pane proof-source-pane">
-        {file && onFocusProof && (
-          <ProofOutline
-            declarations={declarations}
-            status={outlineStatus}
-            target={focus.target}
-            error={focus.error}
-            disabled={loading || !!failure}
-            readOnly={!!file.readOnly || !file.path.endsWith('.lean')}
-            onSelect={selectDeclaration}
-            onFocus={focusProof}
-          />
-        )}
         <div
           ref={editorEl}
           className="monaco-host"

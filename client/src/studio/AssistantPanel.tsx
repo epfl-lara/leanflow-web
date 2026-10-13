@@ -14,6 +14,7 @@ import { Dialog } from './Dialog'
 import { ChatPicker, type ChatChoice } from './ChatPicker'
 import { FileContextPicker } from './FileContextPicker'
 import { FileMentionTextarea } from './FileMentionTextarea'
+import { ChatFocusPicker } from './ChatFocusPicker'
 import { ChatOptions } from './ChatOptions'
 import { ConversationTurn } from './ConversationTurn'
 import { ChangeDiff, Verification } from './RunReview'
@@ -23,7 +24,11 @@ import { useRunStream } from './useRunStream'
 import { chatDraftKey, useChatDraft, type DraftSubmission } from './chatDrafts'
 import { chatModes } from './chatModes'
 import { runStatusLabel } from './chatTimeline'
-import type { ProofFocusRequest } from './proofTarget'
+import type {
+  EditorProofState,
+  ProofEditorRequest,
+  ProofFocusRequest,
+} from './proofTarget'
 import './chat-workbench.css'
 
 const chronological = (values: Run[]) =>
@@ -55,6 +60,8 @@ export function AssistantPanel({
   focusRequest,
   onOpenTarget,
   onFocusHandled,
+  editorProof,
+  onFocusEditor,
 }: {
   projectId: string
   file?: string
@@ -71,6 +78,8 @@ export function AssistantPanel({
   focusRequest?: ProofFocusRequest | null
   onOpenTarget?: (target: RunProofTarget) => void
   onFocusHandled?: (id: number) => void
+  editorProof?: EditorProofState
+  onFocusEditor?: (request: Omit<ProofEditorRequest, 'id'>) => void
 }) {
   const [chats, setChats] = useState<ChatChoice[]>([]),
     [chatId, setChatId] = useState<string | null>(null)
@@ -161,10 +170,19 @@ export function AssistantPanel({
     )
       return
     handledFocus.current = focusRequest.id
+    // Attaching a proof is an explicit choice of this visible draft. An old
+    // startup request must not replace it with the last saved conversation.
+    ++navigation.current
+    setChatBusy(false)
+    try {
+      localStorage.setItem(chatSelectionKey, chatRef.current || 'new')
+    } catch {
+      /* The focused draft remains available without browser storage. */
+    }
     draftRef.current.focusTarget(focusRequest.target, focusRequest.mode)
     document.getElementById('assistant-prompt')?.focus()
     onFocusHandled?.(focusRequest.id)
-  }, [focusRequest, projectId, onFocusHandled])
+  }, [focusRequest, projectId, onFocusHandled, chatSelectionKey])
   const dialogRun = [...runs, ...projectRuns].find(
     (item) => item.id === dialogId,
   )
@@ -385,10 +403,14 @@ export function AssistantPanel({
     let retry: ReturnType<typeof setTimeout> | undefined
     const request = navigation.current
     const initialDraft = draftRef.current.capture()
+    // On the first render the focus effect runs before this effect. Preserve
+    // that choice too, even though initialDraft already contains its target.
+    const initialFocus = handledFocus.current !== null
     const restoreSelection = async () => {
       try {
         const values = await loadChats()
         if (cancelled || navigation.current !== request) return
+        if (initialFocus) return
         // Typing into the visible new draft while chats reconnect is already a
         // choice. Do not replace that draft with a previously saved selection.
         if (draftRef.current.value.revision !== initialDraft.revision) {
@@ -880,6 +902,11 @@ export function AssistantPanel({
         )}
       </div>
       <form className="assistant-composer" onSubmit={submit}>
+        {editorProof?.error && (
+          <p className="error-message proof-focus-error" role="alert">
+            {editorProof.error}
+          </p>
+        )}
         {proofTarget && (
           <div className="composer-proof-target" aria-label="Focused proof">
             <button
@@ -891,6 +918,7 @@ export function AssistantPanel({
             >
               <Icon name="file" size={13} />
               <span>
+                <span className="proof-target-caption">Focused on</span>
                 <strong>{proofTarget.name || 'Selected proof'}</strong>
                 <small>
                   {proofTarget.path}:{proofTarget.startLine}
@@ -948,12 +976,17 @@ export function AssistantPanel({
           value={prompt}
           onChange={draft.setText}
         />
-        <FileContextPicker
-          files={files}
-          selected={contextFiles}
-          onChange={draft.setFiles}
-          disabled={false}
-        />
+        <div className="composer-attachments">
+          <FileContextPicker
+            files={files}
+            selected={contextFiles}
+            onChange={draft.setFiles}
+            disabled={false}
+          />
+          {onFocusEditor && (
+            <ChatFocusPicker editor={editorProof} onFocus={onFocusEditor} />
+          )}
+        </div>
         {error && (
           <p className="error-message" role="alert">
             {error}
