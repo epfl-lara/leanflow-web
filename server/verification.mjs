@@ -29,6 +29,13 @@ export function maskLean(source, preserveStrings = false) {
         if (a === '"') quoted = false
         output += preserveStrings ? a : a === '\n' ? '\n' : ' '
       }
+    } else if (a === "'" && !/[\p{L}\p{N}_'.]/u.test(source[i - 1] || '')) {
+      // A double quote inside a character literal must not mask later code.
+      const literal = /^'(?:\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)|[^'\\\r\n])'/u.exec(source.slice(i))?.[0]
+      if (literal) {
+        output += preserveStrings ? literal : ' '.repeat(literal.length)
+        i += literal.length - 1
+      } else output += a
     } else if (a === '"') {
       quoted = true
       output += preserveStrings ? a : ' '
@@ -82,7 +89,20 @@ export function proofRisks(changes, mode) {
       problems.push(`Deleting ${change.path} requires a separate manual edit.`)
       continue
     }
+    if (mode === 'optimize' && !change.before) {
+      problems.push(
+        `${change.path}: Optimize changes existing proof bodies; use Formalize for new declarations.`,
+      )
+      continue
+    }
     const code = maskLean(change.after || '')
+    if (
+      mode === 'optimize' &&
+      /\b(?:native_decide|ofReduceBool|ofReduceNat)\b/.test(code)
+    )
+      problems.push(
+        `${change.path} uses a construct excluded from proof optimization.`,
+      )
     if (
       /\b(?:run_tac|run_cmd|initialize|elab|macro_rules)\b|#(?:eval|reduce)|\bIO\s*\./.test(
         code,
@@ -99,17 +119,21 @@ export function proofRisks(changes, mode) {
         `${change.path} changes the proof trust settings or declares an axiom.`,
       )
     if (
-      (mode === 'repair' || mode === 'prove') &&
+      ['repair', 'prove', 'optimize'].includes(mode) &&
       /\b(?:sorry|admit)\b/.test(code)
     )
       problems.push(`${change.path} still contains an unfinished proof.`)
-    if ((mode === 'repair' || mode === 'prove') && change.before) {
+    if (['repair', 'prove', 'optimize'].includes(mode) && change.before) {
+      if (ambiguousTheoremStatement(change.before) || ambiguousTheoremStatement(change.after)) {
+        problems.push(`${change.path} contains unsupported theorem statement syntax. Review it manually before changing its proof.`)
+        continue
+      }
       const before = theoremHeaders(change.before),
         after = theoremHeaders(change.after)
       for (const [name, header] of before)
         if (after.get(name) !== header)
           problems.push(
-            `${change.path} changes the statement of ${name}. Repair/prove mode preserves existing theorem statements.`,
+            `${change.path} changes the statement of ${name}. Proof and optimization modes preserve existing theorem statements.`,
           )
       const context = (source) =>
         maskLean(source)
@@ -136,6 +160,25 @@ export function proofRisks(changes, mode) {
     }
   }
   return problems
+}
+
+// The conservative span parser cannot distinguish a statement's top-level let
+// assignment from the theorem's proof assignment. Refuse that syntax instead of
+// treating part of the statement as an editable proof body.
+function ambiguousTheoremStatement(source) {
+  const masked = maskLean(source)
+  const declarations = /^[ \t]*(?:@\[[^\n]*?\][ \t]*)*(?:(?:private|protected|noncomputable)\s+)*(?:theorem|lemma)\b/gm
+  for (const match of masked.matchAll(declarations)) {
+    let depth = 0
+    for (let i = match.index + match[0].length; i < masked.length; i++) {
+      if ('([{'.includes(masked[i])) depth++
+      else if (')]}'.includes(masked[i])) depth--
+      else if (depth === 0 && masked.startsWith(':=', i)) break
+      else if (depth === 0 && !/[\p{L}\p{N}_'.]/u.test(masked[i - 1] || '') && /^(?:let|have|fun|match|do|by)\b/.test(masked.slice(i))) return true
+      if (depth < 0) break
+    }
+  }
+  return false
 }
 
 function proofSpans(source) {
@@ -178,7 +221,7 @@ function proofSpans(source) {
 function hiddenProofCommands(source) {
   const masked = maskLean(source)
   return proofSpans(source).some(({ start, end }) =>
-    /(?:^|\n)[ \t]*(?:@\[|#|(?:(?:private|protected|noncomputable|local|scoped)\s+)*(?:theorem|lemma|def|opaque|abbrev|example|axiom|constant|structure|inductive|class|instance|attribute|notation|infixl|infixr|infix|prefix|postfix|macro|macro_rules|syntax|elab|initialize|set_option|namespace|section|variable|variables|include|omit|open|export|end)\b)/.test(
+    /(?:^|[^\p{L}\p{N}_'.])(?:@\[|#(?=[\p{L}_])|(?:(?:private|protected|noncomputable|local|scoped)\s+)*(?:theorem|lemma|def|opaque|abbrev|example|axiom|constant|structure|inductive|class|instance|attribute|notation|infixl|infixr|infix|prefix|postfix|macro|macro_rules|syntax|elab|initialize|set_option|namespace|section|variable|variables|include|omit|open|export|end)\b)/u.test(
       masked.slice(start, end),
     ),
   )
@@ -196,7 +239,7 @@ export function proofSkeleton(source) {
   outside += source.slice(previous)
   const stripped = maskLean(outside, true)
   // String literals remain exact; formatting and comments elsewhere are ignored.
-  return (stripped.match(/"(?:\\.|[^"\\])*"|[^\s]/g) || []).join('')
+  return (stripped.match(/"(?:\\.|[^"\\])*"|'(?:\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)|[^'\\\r\n])'|[^\s]/gu) || []).join('')
 }
 
 export function theoremHeaders(source) {

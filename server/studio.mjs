@@ -12,6 +12,7 @@ import { loadConfig } from './config.mjs'
 import { EventStore, JobManager } from './events.mjs'
 import { AgentManager } from './agents.mjs'
 import { Settings } from './settings.mjs'
+import { ChatStore } from './chats.mjs'
 import { searchDeclarations } from './search.mjs'
 import { LspFrames, frame, validateClientUris } from './rpc.mjs'
 import { acquireServerLease } from './lease.mjs'
@@ -29,12 +30,17 @@ export async function createStudio({ dataDir = process.env.STUDIO_DATA_DIR || pa
   await runtime.init()
   const workspaces = new WorkspaceStore({ dataDir, runtime }); await workspaces.init()
   const events = new EventStore(dataDir), settings = new Settings(dataDir)
-  const agents = new AgentManager({ runtime, workspaces, events, config, settings })
+  const chats = new ChatStore({ dataDir, workspaces, events }); await chats.init()
+  const agents = new AgentManager({ runtime, workspaces, events, config, settings, chats })
   const jobs = new JobManager({ runtime, workspaces, events })
-  const app = express(), server = http.createServer(app), sockets = new Set(), languageServers = new Map()
+  const app = express(), server = http.createServer(app), sockets = new Set(), languageServers = new Map(), socketProjects = new Map()
   const origin = process.env.STUDIO_ORIGIN
   const requireNoRun = (projectId, owner) => {
     if (events.list(owner, projectId).some(job => ['queued', 'running', 'verifying'].includes(job.status))) throw Object.assign(new Error('Stop the current Lemex run before changing the project environment.'), { status: 409 })
+  }
+  const requireNoActiveWork = (projectId, owner) => {
+    const active = events.db.prepare("SELECT 1 FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.status') IN ('queued','running','verifying') LIMIT 1").get(owner, projectId)
+    if (active || workspaces.jobs.has(projectId)) throw Object.assign(new Error('Stop active checks and Lemex runs, and wait for project preparation, before deleting or restoring project data.'), { status: 409 })
   }
   app.disable('x-powered-by')
   app.use((req, res, next) => {
@@ -77,6 +83,27 @@ export async function createStudio({ dataDir = process.env.STUDIO_DATA_DIR || pa
     if (['lean-toolchain', 'lakefile.lean', 'lakefile.toml', 'lake-manifest.json'].includes(req.query.path)) requireNoRun(req.params.id, req.user.id)
     res.json(await workspaces.writeFile(req.params.id, req.user.id, req.query.path, req.body.content, req.body.expectedHash))
   })
+  app.post('/api/projects/:id/trash', async (req, res) => {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || (req.body.path !== undefined && typeof req.body.path !== 'string')) throw Object.assign(new Error('Choose a file or folder path, or omit path to archive the project.'), { status: 400 })
+    workspaces.get(req.params.id, req.user.id)
+    const assertIdle = () => requireNoActiveWork(req.params.id, req.user.id)
+    assertIdle()
+    const receipt = await workspaces.trash(req.params.id, req.user.id, req.body.path, { assertIdle })
+    if (receipt.kind === 'project') for (const ws of sockets) if (socketProjects.get(ws) === receipt.projectId) ws.close(1001, 'Project archived.')
+    res.json(receipt)
+  })
+  app.get('/api/trash', (req, res) => res.json([...workspaces.listTrash(req.user.id), ...chats.listTrash(req.user.id)].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 100)))
+  app.post('/api/trash/:id/restore', async (req, res) => {
+    let entry
+    try { entry = workspaces.getTrash(req.params.id, req.user.id) }
+    catch (error) {
+      if (error.status !== 404) throw error
+      return res.json(chats.restore(req.user.id, req.params.id))
+    }
+    const assertIdle = () => requireNoActiveWork(entry.projectId, req.user.id)
+    assertIdle()
+    res.json(await workspaces.restore(req.params.id, req.user.id, { assertIdle }))
+  })
   app.get('/api/projects/:id/git', async (req, res) => res.json(await workspaces.gitStatus(req.params.id, req.user.id)))
   app.post('/api/projects/:id/git', async (req, res) => {
     const project = workspaces.get(req.params.id, req.user.id)
@@ -115,13 +142,27 @@ export async function createStudio({ dataDir = process.env.STUDIO_DATA_DIR || pa
   })
   app.post('/api/projects/:id/check', (req, res) => res.status(202).json(publicJob(jobs.check(req.user.id, req.params.id, req.body.path))))
   app.get('/api/jobs/:id', (req, res) => res.json(publicJob(events.get(req.params.id, req.user.id))))
+  app.get('/api/projects/:id/chats', (req, res) => res.json(chats.list(req.user.id, req.params.id)))
+  app.post('/api/projects/:id/chats', (req, res) => res.status(201).json(chats.create(req.user.id, req.params.id, req.body)))
+  app.get('/api/chats/:id', (req, res) => {
+    const { chat, runs } = chats.history(req.params.id, req.user.id)
+    res.json({ chat, runs: runs.map(publicJob) })
+  })
+  app.patch('/api/chats/:id', (req, res) => res.json(chats.rename(req.params.id, req.user.id, req.body)))
+  app.post('/api/chats/:id/runs', (req, res) => {
+    const chat = chats.get(req.params.id, req.user.id)
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || (req.body.chatId !== undefined && req.body.chatId !== chat.id)) throw Object.assign(new Error('Choose the same chat as this request.'), { status: 400 })
+    res.status(202).json(publicJob(agents.start(req.user.id, chat.projectId, { ...req.body, chatId: chat.id })))
+  })
+  app.post('/api/chats/:id/trash', (req, res) => res.json(chats.trash(req.user.id, req.params.id)))
   app.post('/api/projects/:id/runs', (req, res) => res.status(202).json(publicJob(agents.start(req.user.id, req.params.id, req.body))))
   app.get('/api/projects/:id/runs', (req, res) => {
     workspaces.get(req.params.id, req.user.id)
     res.json(events.list(req.user.id, req.params.id).map(publicJob))
   })
   app.get('/api/runs/:id', (req, res) => res.json(publicJob(events.get(req.params.id, req.user.id))))
-  app.post('/api/runs/:id/stop', (req, res) => res.json(publicJob(agents.stop(req.user.id, req.params.id))))
+  app.post('/api/runs/:id/stop', async (req, res) => res.json(publicJob(await agents.stop(req.user.id, req.params.id))))
+  app.post('/api/runs/:id/undo', async (req, res) => res.json(publicJob(await agents.undo(req.user.id, req.params.id))))
   app.post('/api/runs/:id/apply', async (req, res) => res.json(publicJob(await agents.apply(req.user.id, req.params.id))))
   app.get('/api/runs/:id/events', (req, res) => {
     events.get(req.params.id, req.user.id)
@@ -165,7 +206,7 @@ export async function createStudio({ dataDir = process.env.STUDIO_DATA_DIR || pa
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req, project))
   })
   wss.on('connection', (ws, _req, project) => {
-    sockets.add(ws); languageServers.set(project.id, (languageServers.get(project.id) || 0) + 1)
+    sockets.add(ws); socketProjects.set(ws, project.id); languageServers.set(project.id, (languageServers.get(project.id) || 0) + 1)
     let child, alive = true, lastActivity = Date.now()
     const pending = new Map()
     try {
@@ -196,7 +237,7 @@ export async function createStudio({ dataDir = process.env.STUDIO_DATA_DIR || pa
       if (!alive || Date.now() - lastActivity > 30 * 60_000) return ws.terminate()
       alive = false; ws.ping()
     }, 30_000)
-    ws.on('close', () => { clearInterval(heartbeat); child?.kill(); sockets.delete(ws); languageServers.set(project.id, Math.max(0, (languageServers.get(project.id) || 1) - 1)) })
+    ws.on('close', () => { clearInterval(heartbeat); child?.kill(); sockets.delete(ws); socketProjects.delete(ws); languageServers.set(project.id, Math.max(0, (languageServers.get(project.id) || 1) - 1)) })
     ws.on('error', () => child?.kill())
   })
   let closePromise
@@ -210,11 +251,11 @@ export async function createStudio({ dataDir = process.env.STUDIO_DATA_DIR || pa
       await runtime.shutdown?.()
       await Promise.allSettled([checksStopped, agentsStopped, ...workspaces.jobs.values()])
       await stopped
-      workspaces.close(); events.close()
+      chats.close(); workspaces.close(); events.close()
     })()
     return closePromise
   }
-  return { app, server, auth, runtime, workspaces, events, agents, config, settings, close }
+  return { app, server, auth, runtime, workspaces, events, agents, chats, config, settings, close }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

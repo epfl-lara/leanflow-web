@@ -1,7 +1,16 @@
 import { LeanMonaco, LeanMonacoEditor } from 'lean4monaco'
 import { FileUri } from 'lean4monaco/dist/vscode-lean4/vscode-lean4/src/utils/exturi'
-import { useEffect, useRef, useState } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react'
 import type { OpenFile } from './api'
+import { connectInfoviewTheme } from './infoviewTheme'
+import { ResizeHandle } from './ResizeHandle'
+import { DEFAULT_LAYOUT, useMediaQuery } from './layout'
 
 class BrowserLeanMonaco extends LeanMonaco {
   protected override getExtensionManifest() {
@@ -49,6 +58,8 @@ export function LeanWorkspace({
   onState,
   showInfoview,
   onOpenFile,
+  goalsSize,
+  onGoalsSizeChange,
 }: {
   projectId: string
   file: OpenFile | null
@@ -57,22 +68,37 @@ export function LeanWorkspace({
   onState: (state: string) => void
   showInfoview: boolean
   onOpenFile: (path: string, line?: number, column?: number) => void
+  goalsSize: number
+  onGoalsSizeChange: (value: number) => void
 }) {
+  const workspaceEl = useRef<HTMLDivElement>(null)
   const editorEl = useRef<HTMLDivElement>(null)
   const infoEl = useRef<HTMLDivElement>(null)
   const runtime = useRef<Runtime | null>(null)
   const fileRef = useRef(file)
+  const syncingContent = useRef(false)
+  const pendingLocalChange = useRef<{
+    path: string
+    generation: number
+    content: string
+  } | null>(null)
   const onChangeRef = useRef(onChange)
   const onStateRef = useRef(onState)
   const onOpenFileRef = useRef(onOpenFile)
   const themeRef = useRef(theme)
   const [failure, setFailure] = useState('')
   const [loading, setLoading] = useState(true)
+  const stacked = useMediaQuery('(max-width: 1250px)')
   fileRef.current = file
   onChangeRef.current = onChange
   onStateRef.current = onState
   onOpenFileRef.current = onOpenFile
   themeRef.current = theme
+
+  useEffect(() => {
+    if (!infoEl.current) return
+    return connectInfoviewTheme(infoEl.current)
+  }, [projectId])
 
   useEffect(() => {
     let cancelled = false
@@ -213,6 +239,7 @@ export function LeanWorkspace({
         // so a retained VS Code model cannot show a previous project's buffer.
         if (editor.getValue() !== snapshot.content)
           editor.setValue(snapshot.content)
+        pendingLocalChange.current = null
         editor.updateOptions({
           scrollBeyondLastLine: false,
           padding: { top: 16, bottom: 16 },
@@ -263,7 +290,14 @@ export function LeanWorkspace({
           }
         }
         active.subscription = editor.onDidChangeModelContent(() => {
-          onChangeRef.current(snapshot.path, editor.getValue())
+          if (syncingContent.current) return
+          const content = editor.getValue()
+          pendingLocalChange.current = {
+            path: snapshot.path,
+            generation: snapshot.generation,
+            content,
+          }
+          onChangeRef.current(snapshot.path, content)
         })
         setLoading(false)
       } catch (error) {
@@ -292,6 +326,87 @@ export function LeanWorkspace({
     }
   }, [projectId, file?.path, file?.generation])
 
+  useLayoutEffect(() => {
+    const draft = pendingLocalChange.current
+    if (
+      draft &&
+      draft.path === file?.path &&
+      draft.generation === file?.generation &&
+      draft.content === file?.content
+    )
+      pendingLocalChange.current = null
+  }, [file?.path, file?.generation, file?.content])
+
+  useEffect(() => {
+    let cancelled = false
+    const snapshot = fileRef.current
+    void serialize(() => {
+      if (cancelled || !snapshot) return
+      const current = fileRef.current
+      if (
+        !current ||
+        current.path !== snapshot.path ||
+        current.generation !== snapshot.generation ||
+        current.content !== snapshot.content
+      )
+        return
+      const editor = runtime.current?.editor?.editor
+      const model = editor?.getModel()
+      if (
+        !editor ||
+        !model ||
+        model.uri.scheme !== 'file' ||
+        model.uri.path !== `/workspace/${snapshot.path}`
+      )
+        return
+
+      // A keystroke may arrive after the server update was rendered but before
+      // this queued effect runs. Wait for the parent to acknowledge that local
+      // draft rather than replacing it with an earlier saved-file notification.
+      const draft = pendingLocalChange.current
+      if (
+        draft?.path === snapshot.path &&
+        draft.generation === snapshot.generation
+      ) {
+        if (draft.content !== snapshot.content) return
+        pendingLocalChange.current = null
+      }
+      if (model.getValue() === snapshot.content) return
+
+      const viewState = editor.saveViewState()
+      syncingContent.current = true
+      try {
+        model.pushStackElement()
+        model.pushEditOperations(
+          editor.getSelections() || [],
+          [
+            {
+              range: model.getFullModelRange(),
+              text: snapshot.content,
+              forceMoveMarkers: true,
+            },
+          ],
+          () => null,
+        )
+        model.pushStackElement()
+        if (viewState) editor.restoreViewState(viewState)
+      } finally {
+        syncingContent.current = false
+      }
+    }).catch((error) => {
+      if (!cancelled) {
+        onStateRef.current('Editor update failed')
+        console.error(
+          '[Lemex] Could not update the saved file in the editor.',
+          error,
+        )
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, file?.path, file?.generation, file?.content])
+
   useEffect(() => {
     void serialize(() =>
       runtime.current?.lean.updateVSCodeOptions({
@@ -302,7 +417,11 @@ export function LeanWorkspace({
   }, [theme])
 
   return (
-    <div className={`lean-workspace ${showInfoview ? '' : 'info-hidden'}`}>
+    <div
+      ref={workspaceEl}
+      className={`lean-workspace ${showInfoview ? '' : 'info-hidden'}`}
+      style={{ '--goals-size': `${goalsSize}%` } as CSSProperties}
+    >
       <div className="source-pane">
         <div
           ref={editorEl}
@@ -330,6 +449,24 @@ export function LeanWorkspace({
         className="infoview-pane"
         aria-label="Lean goals and diagnostics"
       >
+        {showInfoview && (
+          <ResizeHandle
+            className="goals-resize-handle"
+            label="Resize goals panel"
+            orientation={stacked ? 'horizontal' : 'vertical'}
+            value={goalsSize}
+            min={20}
+            max={65}
+            unit="percent"
+            onChange={onGoalsSizeChange}
+            onReset={() => onGoalsSizeChange(DEFAULT_LAYOUT.goals)}
+            pixelsPerUnit={() => {
+              const bounds = workspaceEl.current?.getBoundingClientRect()
+              return ((stacked ? bounds?.height : bounds?.width) || 100) / 100
+            }}
+            direction={-1}
+          />
+        )}
         <div className="pane-caption">
           <span className="status-dot" />
           Goals &amp; diagnostics{' '}

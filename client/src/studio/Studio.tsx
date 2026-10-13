@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type CSSProperties,
+} from 'react'
 import {
   api,
   ApiError,
@@ -18,7 +25,33 @@ import { ProjectModal } from './ProjectModal'
 import { SearchPanel } from './SearchPanel'
 import { SettingsModal } from './SettingsModal'
 import { FileBrowser } from './FileBrowser'
+import { ResizeHandle } from './ResizeHandle'
+import {
+  DEFAULT_LAYOUT,
+  clamp,
+  useElementSize,
+  useMediaQuery,
+  useStoredSize,
+} from './layout'
 import './studio.css'
+
+interface TrashItem {
+  chatId?: string
+  trashId: string
+  projectId: string
+  projectName?: string
+  name?: string
+  path: string | null
+  kind: 'project' | 'file' | 'folder' | 'chat'
+  createdAt: string
+}
+interface DeleteTarget {
+  chatId?: string
+  projectId: string
+  name: string
+  path?: string
+  kind: 'project' | 'file' | 'folder' | 'chat'
+}
 
 interface GitInfo {
   branch?: string
@@ -132,6 +165,39 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
 }
 
 export function Studio() {
+  const [studioElement, setStudioElement] = useState<HTMLDivElement | null>(
+    null,
+  )
+  const [navigationElement, setNavigationElement] =
+    useState<HTMLDivElement | null>(null)
+  const studioSize = useElementSize(studioElement)
+  const navigationSize = useElementSize(navigationElement)
+  const mobileLayout = useMediaQuery('(max-width: 720px)')
+  const overlayTools = useMediaQuery('(max-width: 1000px)')
+  const [sidebarSize, setSidebarSize] = useStoredSize(
+    'lemex-layout-sidebar',
+    DEFAULT_LAYOUT.sidebar,
+    180,
+    480,
+  )
+  const [assistantSize, setAssistantSize] = useStoredSize(
+    'lemex-layout-assistant',
+    DEFAULT_LAYOUT.assistant,
+    280,
+    640,
+  )
+  const [goalsSize, setGoalsSize] = useStoredSize(
+    'lemex-layout-goals',
+    DEFAULT_LAYOUT.goals,
+    20,
+    65,
+  )
+  const [filesSize, setFilesSize] = useStoredSize(
+    'lemex-layout-files',
+    DEFAULT_LAYOUT.files,
+    20,
+    85,
+  )
   const [session, setSession] = useState<Session | null>(null)
   const [authRequired, setAuthRequired] = useState(false)
   const [startupError, setStartupError] = useState('')
@@ -142,8 +208,17 @@ export function Studio() {
   const [git, setGit] = useState<GitInfo | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [agentPendingFile, setAgentPendingFile] = useState<string | null>(null)
   const [projectModal, setProjectModal] = useState(false)
   const [settingsModal, setSettingsModal] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
+  const [lastTrash, setLastTrash] = useState<TrashItem | null>(null)
+  const [trashOpen, setTrashOpen] = useState(false)
+  const [trashItems, setTrashItems] = useState<TrashItem[]>([])
+  const [trashError, setTrashError] = useState('')
+  const [restoring, setRestoring] = useState<string | null>(null)
   const [gitAction, setGitAction] = useState<'branch' | 'commit' | null>(null)
   const [gitInput, setGitInput] = useState('')
   const [gitError, setGitError] = useState('')
@@ -182,6 +257,27 @@ export function Studio() {
   filesRef.current = files
   projectIdRef.current = projectId
   const project = projects.find((item) => item.id === projectId)
+  const sidebarMaximum = Math.min(
+    480,
+    studioSize.width - 360 - (toolsOpen && !overlayTools ? 280 : 0),
+  )
+  const sidebarWidth = clamp(sidebarSize, 180, sidebarMaximum)
+  const assistantMaximum = Math.min(
+    640,
+    overlayTools
+      ? studioSize.width - 40
+      : studioSize.width - sidebarWidth - 360,
+  )
+  const assistantWidth = clamp(assistantSize, 280, assistantMaximum)
+  const filesMinimum = Math.min(
+    65,
+    Math.max(20, (110 / navigationSize.height) * 100),
+  )
+  const filesMaximum = Math.max(
+    filesMinimum,
+    Math.min(85, 100 - (90 / navigationSize.height) * 100),
+  )
+  const filesPercent = clamp(filesSize, filesMinimum, filesMaximum)
   const dirty = !!file && file.content !== file.savedContent
 
   const loadSession = useCallback(async () => {
@@ -554,6 +650,51 @@ export function Studio() {
     }
   }
 
+  const refreshLiveFiles = useCallback(
+    async (paths: string[]) => {
+      const id = projectIdRef.current
+      if (!id) return
+      await loadFiles(id)
+      void loadGit(id)
+      const current = fileRef.current
+      if (!current || (paths.length && !paths.includes(current.path))) return
+      if (savePromise.current || current.content !== current.savedContent) {
+        setAgentPendingFile(current.path)
+        return
+      }
+      const latest = await api<{ content: string; hash: string }>(
+        `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(current.path)}`,
+      )
+      const now = fileRef.current
+      if (
+        projectIdRef.current !== id ||
+        now?.path !== current.path ||
+        now.generation !== current.generation
+      )
+        return
+      if (savePromise.current || now.content !== now.savedContent) {
+        setAgentPendingFile(now.path)
+        return
+      }
+      if (now.hash !== current.hash) return
+      setFile((previous) =>
+        previous?.path === current.path &&
+        previous.hash === current.hash &&
+        previous.content === previous.savedContent
+          ? {
+              ...previous,
+              content: latest.content,
+              savedContent: latest.content,
+              hash: latest.hash,
+            }
+          : previous,
+      )
+      setAgentPendingFile(null)
+      setNotice('Agent edits updated live')
+    },
+    [loadFiles, loadGit],
+  )
+
   async function retryPrepare() {
     if (!projectId) return
     try {
@@ -594,6 +735,116 @@ export function Studio() {
     }
   }
 
+  function requestDelete(target: DeleteTarget) {
+    setDeleteError('')
+    setDeleteTarget(target)
+  }
+  async function showTrash() {
+    setTrashOpen(true)
+    setTrashError('')
+    try {
+      setTrashItems(await api<TrashItem[]>('/api/trash'))
+    } catch (error) {
+      setTrashError(errorText(error))
+    }
+  }
+  async function deleteItem() {
+    if (!deleteTarget || deleteBusy) return
+    const target = deleteTarget
+    setDeleteBusy(true)
+    setDeleteError('')
+    try {
+      if (savePromise.current)
+        throw new Error(
+          'Wait for the current file save to finish before deleting.',
+        )
+      const receipt = await post<TrashItem>(
+        target.kind === 'chat'
+          ? `/api/chats/${encodeURIComponent(target.chatId!)}/trash`
+          : `/api/projects/${encodeURIComponent(target.projectId)}/trash`,
+        target.path === undefined ? {} : { path: target.path },
+      )
+      setLastTrash({ ...receipt, name: target.name })
+      const active = projectIdRef.current === target.projectId
+      if (target.kind === 'chat') {
+        window.dispatchEvent(new Event('lemex-chats-changed'))
+      } else if (target.kind === 'project') {
+        if (active) {
+          ++openRequest.current
+          setFile(null)
+          setFiles([])
+          setGit(null)
+          setProjectId(null)
+          localStorage.removeItem('lemex-project')
+        }
+        const remaining = await loadProjects()
+        if (active) setProjectId(remaining[0]?.id || null)
+      } else if (active) {
+        const current = fileRef.current
+        const removed =
+          !!current &&
+          (current.path === target.path ||
+            current.path.startsWith(target.path + '/'))
+        if (removed) {
+          ++openRequest.current
+          setFile(null)
+        }
+        const remaining = await loadFiles(target.projectId)
+        await loadGit(target.projectId)
+        if (removed) {
+          const next = remaining.find(
+            (item) => !item.readOnly && item.path.endsWith('.lean'),
+          )
+          if (next) await openFile(target.projectId, next.path)
+        }
+      }
+      setNotice('Moved to Trash')
+      setDeleteTarget(null)
+    } catch (error) {
+      setDeleteError(errorText(error))
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+  async function restoreItem(item: TrashItem) {
+    if (restoring) return
+    setRestoring(item.trashId)
+    setTrashError('')
+    try {
+      await post(`/api/trash/${encodeURIComponent(item.trashId)}/restore`)
+      await loadProjects()
+      if (item.kind === 'chat')
+        window.dispatchEvent(new Event('lemex-chats-changed'))
+      else if (item.kind === 'project' && !projectIdRef.current)
+        setProjectId(item.projectId)
+      else if (projectIdRef.current === item.projectId) {
+        const restoredFiles = await loadFiles(item.projectId)
+        await loadGit(item.projectId)
+        if (!fileRef.current) {
+          const next = restoredFiles.find(
+            (file) =>
+              !file.readOnly &&
+              (file.path === item.path ||
+                file.path.startsWith(item.path + '/')) &&
+              file.path.endsWith('.lean'),
+          )
+          if (next) await openFile(item.projectId, next.path)
+        }
+      }
+      setTrashItems((previous) =>
+        previous.filter((entry) => entry.trashId !== item.trashId),
+      )
+      setLastTrash((previous) =>
+        previous?.trashId === item.trashId ? null : previous,
+      )
+      setNotice('Restored from Trash')
+    } catch (error) {
+      setTrashError(errorText(error))
+    } finally {
+      setRestoring(null)
+    }
+  }
+
   if (authRequired && !session)
     return (
       <Login
@@ -629,10 +880,20 @@ export function Studio() {
     )
 
   return (
-    <div className={`studio ${toolsOpen ? '' : 'tools-hidden'}`}>
+    <div
+      ref={setStudioElement}
+      className={`studio ${toolsOpen ? '' : 'tools-hidden'}`}
+      style={
+        {
+          '--sidebar-width': `${sidebarWidth}px`,
+          '--assistant-width': `${assistantWidth}px`,
+          '--files-size': `${filesPercent}%`,
+        } as CSSProperties
+      }
+    >
       <aside
         className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''}`}
-        aria-label="Projects and files"
+        aria-label="Files and projects"
       >
         <div className="sidebar-brand">
           <Brand />
@@ -645,110 +906,171 @@ export function Studio() {
             <Icon name="close" />
           </button>
         </div>
-        <div className="sidebar-section-title">
-          <span>Projects</span>
-          <button
-            className="icon-button"
-            onClick={() => setProjectModal(true)}
-            title="Import or create project"
-            aria-label="Import or create project"
-          >
-            <Icon name="plus" size={17} />
-          </button>
-        </div>
-        <div className="project-list">
-          {projects.map((item) => (
-            <button
-              key={item.id}
-              className={`project-item ${item.id === projectId ? 'selected' : ''}`}
-              aria-current={item.id === projectId ? 'page' : undefined}
-              onClick={() =>
-                navigate(async () => {
-                  setProjectId(item.id)
-                  setSidebarOpen(false)
-                })
-              }
-              title={item.name}
+        <div ref={setNavigationElement} className="sidebar-navigation">
+          <section className="sidebar-files-section" aria-label="Files">
+            <div className="sidebar-section-title">
+              <span>Files</span>
+              <div>
+                <button
+                  className="icon-button"
+                  onClick={() => {
+                    setNewFileName('')
+                    setNewFileError('')
+                    setNewFileModal(true)
+                  }}
+                  disabled={project?.status !== 'ready'}
+                  title="New file"
+                  aria-label="New file"
+                >
+                  <Icon name="plus" size={16} />
+                </button>
+                <button
+                  className="icon-button"
+                  onClick={() =>
+                    projectId &&
+                    void loadFiles(projectId).catch((error) =>
+                      setError(errorText(error)),
+                    )
+                  }
+                  disabled={project?.status !== 'ready'}
+                  title="Refresh files"
+                  aria-label="Refresh files"
+                >
+                  <Icon name="refresh" size={14} />
+                </button>
+              </div>
+            </div>
+            {files.length > 8 && (
+              <div className="file-filter">
+                <Icon name="search" size={13} />
+                <input
+                  aria-label="Filter files"
+                  value={fileFilter}
+                  onChange={(event) => setFileFilter(event.target.value)}
+                  placeholder="Find a file…"
+                />
+              </div>
+            )}
+            <FileBrowser
+              files={files}
+              selectedPath={file?.path}
+              dirty={dirty}
               disabled={opening || saving}
-            >
-              <span className={`project-icon ${item.status}`}>
-                <Icon name="folder" size={17} />
-              </span>
-              <span className="project-label">
-                <strong>{item.name}</strong>
-                <span>
-                  {item.status === 'preparing'
-                    ? 'Preparing dependencies…'
-                    : item.status === 'error'
-                      ? 'Needs attention'
-                      : item.toolchain?.replace('leanprover/lean4:', '') ||
-                        'Lean project'}
-                </span>
-              </span>
-              {item.status === 'preparing' && <span className="spinner" />}
-            </button>
-          ))}
-          {!projects.length && (
-            <p className="sidebar-empty">Your projects appear here.</p>
-          )}
-        </div>
-        <button className="import-button" onClick={() => setProjectModal(true)}>
-          <Icon name="plus" size={16} />
-          Import or create project
-        </button>
-        <div className="sidebar-divider" />
-        <div className="sidebar-section-title">
-          <span>Files</span>
-          <div>
+              filter={fileFilter}
+              ready={project?.status === 'ready'}
+              onSelect={chooseFile}
+              onDelete={(path, kind) =>
+                projectId &&
+                requestDelete({ projectId, path, name: path, kind })
+              }
+            />
+          </section>
+          <ResizeHandle
+            label="Resize files and projects"
+            orientation="horizontal"
+            value={filesPercent}
+            min={filesMinimum}
+            max={filesMaximum}
+            onChange={setFilesSize}
+            onReset={() => setFilesSize(DEFAULT_LAYOUT.files)}
+            pixelsPerUnit={() => navigationSize.height / 100}
+            unit="percent"
+            className="navigation-resize-handle"
+          />
+          <section className="sidebar-projects-section" aria-label="Projects">
+            <details className="sidebar-projects-details" open>
+              <summary className="sidebar-section-title">
+                <Icon name="chevron" size={13} />
+                <span>Projects</span>
+              </summary>
+              <div className="project-list">
+                {projects.map((item) => (
+                  <div className="project-row" key={item.id}>
+                    <button
+                      className={`project-item ${item.id === projectId ? 'selected' : ''}`}
+                      aria-current={item.id === projectId ? 'page' : undefined}
+                      onClick={() =>
+                        navigate(async () => {
+                          setProjectId(item.id)
+                          setSidebarOpen(false)
+                        })
+                      }
+                      title={item.name}
+                      disabled={opening || saving}
+                    >
+                      <span className={`project-icon ${item.status}`}>
+                        <Icon name="folder" size={17} />
+                      </span>
+                      <span className="project-label">
+                        <strong>{item.name}</strong>
+                        <span>
+                          {item.status === 'preparing'
+                            ? 'Preparing dependencies…'
+                            : item.status === 'error'
+                              ? 'Needs attention'
+                              : item.toolchain?.replace(
+                                  'leanprover/lean4:',
+                                  '',
+                                ) || 'Lean project'}
+                        </span>
+                      </span>
+                      {item.status === 'preparing' && (
+                        <span className="spinner" />
+                      )}
+                    </button>
+                    <button
+                      className="icon-button project-delete"
+                      aria-label={`Move project ${item.name} to trash`}
+                      title={`Delete project ${item.name}`}
+                      disabled={
+                        opening || saving || item.status === 'preparing'
+                      }
+                      onClick={() =>
+                        requestDelete({
+                          projectId: item.id,
+                          name: item.name,
+                          kind: 'project',
+                        })
+                      }
+                    >
+                      <Icon name="trash" size={14} />
+                    </button>
+                  </div>
+                ))}
+                {!projects.length && (
+                  <p className="sidebar-empty">Your projects appear here.</p>
+                )}
+              </div>
+            </details>
             <button
-              className="icon-button"
-              onClick={() => {
-                setNewFileName('')
-                setNewFileError('')
-                setNewFileModal(true)
-              }}
-              disabled={project?.status !== 'ready'}
-              title="New file"
-              aria-label="New file"
+              className="icon-button sidebar-projects-create"
+              onClick={() => setProjectModal(true)}
+              title="Import or create project"
+              aria-label="Import or create project"
+            >
+              <Icon name="plus" size={17} />
+            </button>
+            <button
+              className="import-button"
+              onClick={() => setProjectModal(true)}
             >
               <Icon name="plus" size={16} />
+              Import or create project
             </button>
-            <button
-              className="icon-button"
-              onClick={() =>
-                projectId &&
-                void loadFiles(projectId).catch((error) =>
-                  setError(errorText(error)),
-                )
-              }
-              disabled={project?.status !== 'ready'}
-              title="Refresh files"
-              aria-label="Refresh files"
-            >
-              <Icon name="refresh" size={14} />
-            </button>
-          </div>
+          </section>
         </div>
-        {files.length > 8 && (
-          <div className="file-filter">
-            <Icon name="search" size={13} />
-            <input
-              aria-label="Filter files"
-              value={fileFilter}
-              onChange={(event) => setFileFilter(event.target.value)}
-              placeholder="Find a file…"
-            />
-          </div>
+        {!mobileLayout && (
+          <ResizeHandle
+            label="Resize file sidebar"
+            orientation="vertical"
+            value={sidebarWidth}
+            min={180}
+            max={Math.max(180, sidebarMaximum)}
+            onChange={setSidebarSize}
+            onReset={() => setSidebarSize(DEFAULT_LAYOUT.sidebar)}
+            className="sidebar-resize-handle"
+          />
         )}
-        <FileBrowser
-          files={files}
-          selectedPath={file?.path}
-          dirty={dirty}
-          disabled={opening || saving}
-          filter={fileFilter}
-          ready={project?.status === 'ready'}
-          onSelect={chooseFile}
-        />
         {git && git.repository !== false && project?.status === 'ready' && (
           <div className="git-sidebar">
             <div className="git-sidebar-caption">
@@ -816,6 +1138,14 @@ export function Studio() {
             onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
           >
             <Icon name={theme === 'light' ? 'moon' : 'sun'} size={17} />
+          </button>
+          <button
+            className="icon-button"
+            aria-label="Open Trash"
+            title="Open Trash"
+            onClick={() => void showTrash()}
+          >
+            <Icon name="trash" size={16} />
           </button>
           <button
             className="logout-button"
@@ -886,6 +1216,71 @@ export function Studio() {
             </button>
           </div>
         </header>
+        {agentPendingFile && file?.path === agentPendingFile && (
+          <div className="workspace-alert live-edit-alert" role="status">
+            <span>
+              Lemex updated the saved file. Your unsaved edits are preserved in
+              this editor.
+            </span>
+            <button
+              className="button small secondary"
+              onClick={() =>
+                projectId &&
+                navigate(async () => {
+                  await openFile(projectId, agentPendingFile)
+                  setAgentPendingFile(null)
+                })
+              }
+            >
+              Reload saved file
+            </button>
+            <button
+              className="icon-button"
+              aria-label="Dismiss live edit notice"
+              onClick={() => setAgentPendingFile(null)}
+            >
+              <Icon name="close" size={14} />
+            </button>
+          </div>
+        )}
+        {lastTrash && (
+          <div className="trash-notice" role="status">
+            <span>
+              <strong>
+                {lastTrash.name ||
+                  lastTrash.path ||
+                  lastTrash.projectName ||
+                  'Project'}
+              </strong>{' '}
+              moved to Trash.
+            </span>
+            <button
+              className="button small secondary"
+              onClick={() => void restoreItem(lastTrash)}
+              disabled={!!restoring}
+            >
+              Undo
+            </button>
+            <button
+              className="button small subtle"
+              onClick={() => void showTrash()}
+            >
+              Open Trash
+            </button>
+            <button
+              className="icon-button"
+              aria-label="Dismiss deletion notice"
+              onClick={() => setLastTrash(null)}
+            >
+              <Icon name="close" size={14} />
+            </button>
+          </div>
+        )}
+        {trashError && !trashOpen && (
+          <div className="workspace-alert" role="alert">
+            {trashError}
+          </div>
+        )}
         {error && (
           <div className="workspace-alert" role="alert">
             <span>{error}</span>
@@ -1001,6 +1396,8 @@ export function Studio() {
               file={file}
               theme={theme}
               showInfoview={showInfoview}
+              goalsSize={goalsSize}
+              onGoalsSizeChange={setGoalsSize}
               onState={setLeanState}
               onChange={(path, content) =>
                 setFile((current) =>
@@ -1066,6 +1463,19 @@ export function Studio() {
         className={`tools-panel ${toolsOpen ? '' : 'closed'}`}
         aria-label="Assistant and search"
       >
+        {!mobileLayout && toolsOpen && (
+          <ResizeHandle
+            label="Resize assistant panel"
+            orientation="vertical"
+            value={assistantWidth}
+            min={280}
+            max={Math.max(280, assistantMaximum)}
+            onChange={setAssistantSize}
+            onReset={() => setAssistantSize(DEFAULT_LAYOUT.assistant)}
+            direction={-1}
+            className="assistant-resize-handle"
+          />
+        )}
         <header className="tools-header">
           <div
             className="tools-tabs"
@@ -1119,6 +1529,15 @@ export function Studio() {
                 key={project.id}
                 projectId={project.id}
                 file={file?.path}
+                files={files}
+                onDeleteChat={(chat) =>
+                  requestDelete({
+                    projectId: project.id,
+                    chatId: chat.id,
+                    name: chat.title,
+                    kind: 'chat',
+                  })
+                }
                 readOnly={file?.readOnly}
                 session={session}
                 dirty={dirty}
@@ -1126,6 +1545,7 @@ export function Studio() {
                 beforeApply={beforeApply}
                 onDiscard={discardUnsavedEdits}
                 onApplied={refreshAfterApply}
+                onFilesUpdated={refreshLiveFiles}
               />
             ) : (
               <div className="tool-idle">
@@ -1154,6 +1574,121 @@ export function Studio() {
           <span>Lean-checked candidates</span>
         </footer>
       </aside>
+      {deleteTarget && (
+        <Dialog
+          title={`Delete ${deleteTarget.kind}?`}
+          subtitle="Deleted items remain recoverable in Trash."
+          busy={deleteBusy}
+          onClose={() => setDeleteTarget(null)}
+        >
+          <div className="delete-confirmation">
+            <p>
+              Move <strong>{deleteTarget.name}</strong> to Trash?
+            </p>
+            {deleteTarget.kind === 'chat' && (
+              <p>
+                The conversation and its saved runs will be kept in Trash for
+                recovery.
+              </p>
+            )}
+            {deleteTarget.kind === 'folder' && (
+              <p>This includes all files and subfolders inside it.</p>
+            )}
+            {deleteTarget.kind === 'project' && (
+              <p>
+                The project will leave the sidebar. Its files and saved runs are
+                kept so you can restore it.
+              </p>
+            )}
+            {dirty &&
+              deleteTarget.projectId === projectId &&
+              (deleteTarget.kind === 'project' ||
+                file?.path === deleteTarget.path ||
+                file?.path.startsWith(deleteTarget.path + '/')) && (
+                <p className="review-note">
+                  Unsaved changes in this item will be discarded. Cancel to keep
+                  or save them first.
+                </p>
+              )}
+            {deleteError && (
+              <p className="error-message" role="alert">
+                {deleteError}
+              </p>
+            )}
+          </div>
+          <footer className="dialog-actions">
+            <button
+              className="button secondary"
+              disabled={deleteBusy}
+              onClick={() => setDeleteTarget(null)}
+            >
+              Cancel
+            </button>
+            <button
+              className="button danger"
+              disabled={deleteBusy}
+              onClick={() => void deleteItem()}
+            >
+              {deleteBusy ? 'Moving…' : 'Move to Trash'}
+            </button>
+          </footer>
+        </Dialog>
+      )}
+      {trashOpen && (
+        <Dialog
+          title="Trash"
+          subtitle="Restore deleted files, folders, or projects. Existing files are never overwritten."
+          busy={!!restoring}
+          onClose={() => setTrashOpen(false)}
+        >
+          <div className="trash-list">
+            {trashError && (
+              <p className="error-message" role="alert">
+                {trashError}
+              </p>
+            )}
+            {!trashItems.length && !trashError && (
+              <p className="field-help">Trash is empty.</p>
+            )}
+            {trashItems.map((item) => (
+              <div className="trash-item" key={item.trashId}>
+                <Icon
+                  name={item.kind === 'file' ? 'file' : 'folder'}
+                  size={18}
+                />
+                <div>
+                  <strong>
+                    {item.name ||
+                      item.path ||
+                      item.projectName ||
+                      'Deleted project'}
+                  </strong>
+                  <span>
+                    {item.kind} · {item.projectName || item.projectId} ·{' '}
+                    {new Date(item.createdAt).toLocaleString()}
+                  </span>
+                </div>
+                <button
+                  className="button small secondary"
+                  disabled={!!restoring}
+                  onClick={() => void restoreItem(item)}
+                >
+                  {restoring === item.trashId ? 'Restoring…' : 'Restore'}
+                </button>
+              </div>
+            ))}
+          </div>
+          <footer className="dialog-actions">
+            <button
+              className="button secondary"
+              disabled={!!restoring}
+              onClick={() => setTrashOpen(false)}
+            >
+              Close
+            </button>
+          </footer>
+        </Dialog>
+      )}
       {projectModal && (
         <ProjectModal
           templates={session.templates}

@@ -10,9 +10,13 @@ import {
   type Run,
   type RunEvent,
   type Session,
+  type FileEntry,
 } from './api'
 import { Icon } from './Icons'
 import { Dialog } from './Dialog'
+import { ChatPicker, type ChatChoice } from './ChatPicker'
+import { FileContextPicker } from './FileContextPicker'
+import { OptimizationSummary } from './OptimizationSummary'
 
 const markdownComponents: Components = {
   a: ({ node: _node, href, children, ...props }) => {
@@ -46,20 +50,50 @@ const markdownComponents: Components = {
     ),
 }
 
-type Mode = 'repair' | 'prove' | 'formalize' | 'search'
-const modes: { id: Mode; name: string; hint: string; placeholder: string }[] = [
+type Mode = 'repair' | 'prove' | 'formalize' | 'optimize' | 'search'
+const modes: {
+  id: Mode
+  name: string
+  hint: string
+  placeholder: string
+  suggestions: { label: string; prompt: string }[]
+}[] = [
   {
     id: 'repair',
     name: 'Repair',
     hint: 'Fix a broken proof while preserving its statement.',
     placeholder:
       'Fix the failing proof in this file. Preserve the theorem statement.',
+    suggestions: [
+      {
+        label: 'Fix Lean errors',
+        prompt:
+          'Fix the failing proof in this file. Preserve the theorem statement and verify the result.',
+      },
+      {
+        label: 'Fill in missing proofs',
+        prompt:
+          'Replace the unfinished proofs in this file with complete Lean proofs. Preserve the statements.',
+      },
+    ],
   },
   {
     id: 'prove',
     name: 'Prove',
     hint: 'Find and verify a proof of the selected theorem.',
     placeholder: 'Prove the theorem with a complete Lean proof.',
+    suggestions: [
+      {
+        label: 'Prove this theorem',
+        prompt:
+          'Find and verify a complete proof of the selected theorem. Preserve its statement.',
+      },
+      {
+        label: 'Try another approach',
+        prompt:
+          'Find a different proof approach for the selected theorem using relevant library lemmas. Preserve its statement and verify the proof.',
+      },
+    ],
   },
   {
     id: 'formalize',
@@ -67,12 +101,54 @@ const modes: { id: Mode; name: string; hint: string; placeholder: string }[] = [
     hint: 'Translate a mathematical idea into Lean. Review the resulting statement.',
     placeholder:
       'Describe the statement and mathematical argument you want to formalize…',
+    suggestions: [
+      {
+        label: 'Formalize a statement',
+        prompt: 'Formalize the following mathematical statement in Lean:\n\n',
+      },
+      {
+        label: 'Formalize an argument',
+        prompt:
+          'Formalize this statement and proof outline in Lean:\n\nStatement:\n\nProof outline:\n',
+      },
+    ],
+  },
+  {
+    id: 'optimize',
+    name: 'Optimize',
+    hint: 'Improve a valid proof while preserving its statement. Compare measured proof tokens and elaboration heartbeats.',
+    placeholder:
+      'Optimize this proof using existing lemmas and focused steps. Preserve the exact statement.',
+    suggestions: [
+      {
+        label: 'Shorten the proof',
+        prompt:
+          'Reduce the proof tokens using existing lemmas and simpler steps. Preserve the exact statement, verify the proof, and compare tokens and heartbeats.',
+      },
+      {
+        label: 'Reduce heartbeats',
+        prompt:
+          'Reduce elaboration heartbeats using focused tactics and existing lemmas. Preserve the exact statement, verify the proof, and compare heartbeats and tokens.',
+      },
+    ],
   },
   {
     id: 'search',
     name: 'Search',
     hint: 'Find useful declarations or explain a proof and its goals.',
     placeholder: 'Find a theorem, explain this proof, or explore an approach…',
+    suggestions: [
+      {
+        label: 'Find useful lemmas',
+        prompt:
+          'Find library lemmas relevant to the selected theorem or goal. Explain how they could help without editing files.',
+      },
+      {
+        label: 'Explain this proof',
+        prompt:
+          'Explain the selected proof and its main steps. Do not edit files.',
+      },
+    ],
   },
 ]
 
@@ -106,6 +182,16 @@ function eventText(event: RunEvent) {
 function Verification({ value }: { value: unknown }) {
   if (!value || typeof value !== 'object') return null
   const v = value as Record<string, unknown>
+  if (v.kind === 'search')
+    return (
+      <div className="verification-card verified">
+        <strong>
+          <Icon name="search" size={16} />
+          Search complete
+        </strong>
+        <p>{String(v.reason || 'No project files changed.')}</p>
+      </div>
+    )
   const hasDetails = (item: unknown) =>
     Array.isArray(item)
       ? item.length > 0
@@ -220,30 +306,46 @@ function ChangeDiff({ change }: { change: Change }) {
 export function AssistantPanel({
   projectId,
   file,
+  files,
+  onDeleteChat,
   session,
   beforeRun,
   beforeApply,
   onDiscard,
   onApplied,
+  onFilesUpdated,
   dirty,
   readOnly,
 }: {
   projectId: string
   file?: string
+  files: FileEntry[]
+  onDeleteChat: (chat: { id: string; title: string }) => void
   session: Session
   beforeRun: () => Promise<void>
   beforeApply: () => Promise<void>
   onDiscard: () => Promise<void>
   onApplied: () => Promise<void>
+  onFilesUpdated: (paths: string[]) => Promise<void>
   dirty: boolean
   readOnly?: boolean
 }) {
   const [mode, setMode] = useState<Mode>('repair')
+  const [proofMode, setProofMode] = useState<'repair' | 'prove'>('repair')
+  const [chats, setChats] = useState<ChatChoice[]>([])
+  const [chatId, setChatId] = useState<string | null>(null)
+  const [chatBusy, setChatBusy] = useState(false)
+  const [contextFiles, setContextFiles] = useState<string[]>([])
+  const [projectRuns, setProjectRuns] = useState<Run[]>([])
+  const chatIdRef = useRef<string | null>(null)
+  const chatRequest = useRef(0)
   const [model, setModel] = useState(
     session.defaultModel || session.models[0]?.id || '',
   )
   const [prompt, setPrompt] = useState('')
-  const [seconds, setSeconds] = useState('300')
+  const [seconds, setSeconds] = useState('unlimited')
+  const [liveEdits, setLiveEdits] = useState(true)
+  const [undoing, setUndoing] = useState(false)
   const [runs, setRuns] = useState<Run[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [run, setRun] = useState<Run | null>(null)
@@ -255,50 +357,172 @@ export function AssistantPanel({
   const [confirmDiscard, setConfirmDiscard] = useState(false)
   const [discarding, setDiscarding] = useState(false)
   const messagesEnd = useRef<HTMLDivElement>(null)
+  const onFilesUpdatedRef = useRef(onFilesUpdated)
+  onFilesUpdatedRef.current = onFilesUpdated
+  const liveRevision = useRef<string | null>(null)
+  const foreignRevisions = useRef(new Map<string, number>())
   const runRef = useRef(run)
   runRef.current = run
   const active = runIsActive(run)
-  const otherActive = runs.find(
+  const otherActive = projectRuns.find(
     (item) => item.id !== selectedId && runIsActive(item),
   )
   const hasActive = active || !!otherActive
+  const currentSection = mode === 'repair' || mode === 'prove' ? 'proofs' : mode
   const currentMode = modes.find((item) => item.id === mode)!
   useEffect(() => {
     if (readOnly) setMode('search')
   }, [readOnly])
 
-  const loadRuns = useCallback(async () => {
-    const result = await api<Run[]>(
-      `/api/projects/${encodeURIComponent(projectId)}/runs`,
+  const loadChats = useCallback(async () => {
+    const values = await api<ChatChoice[]>(
+      `/api/projects/${encodeURIComponent(projectId)}/chats`,
     )
-    setRuns(result)
+    setChats(values)
+    return values
+  }, [projectId])
+  const loadRuns = useCallback(async () => {
+    const selectedChat = chatIdRef.current
+    const [all, history] = await Promise.all([
+      api<Run[]>(`/api/projects/${encodeURIComponent(projectId)}/runs`),
+      selectedChat
+        ? api<{ chat: ChatChoice; runs: Run[] }>(
+            `/api/chats/${encodeURIComponent(selectedChat)}`,
+          )
+        : Promise.resolve({ runs: [] as Run[] }),
+    ])
+    setProjectRuns(all)
+    for (const job of all) {
+      if (
+        job.id === runRef.current?.id ||
+        !job.liveEdits ||
+        (!runIsActive(job) && !foreignRevisions.current.has(job.id))
+      )
+        continue
+      const revision = job.liveRevision || 0
+      if (foreignRevisions.current.get(job.id) === revision) continue
+      foreignRevisions.current.set(job.id, revision)
+      if (revision)
+        void onFilesUpdatedRef
+          .current((job.liveChanges || []).map((change) => change.path))
+          .catch((error) => setError(errorText(error)))
+    }
+    const result = [...history.runs].sort((a, b) =>
+      (b.createdAt || '').localeCompare(a.createdAt || ''),
+    )
+    if (chatIdRef.current === selectedChat) setRuns(result)
     return result
   }, [projectId])
-
+  const openChat = useCallback(
+    async (id: string | null) => {
+      const request = ++chatRequest.current
+      chatIdRef.current = id
+      setChatId(id)
+      setRun(null)
+      setRuns([])
+      setSelectedId(null)
+      setError('')
+      setShowDiff(false)
+      liveRevision.current = null
+      setChatBusy(true)
+      try {
+        const history = id
+          ? await api<{ chat: ChatChoice; runs: Run[] }>(
+              `/api/chats/${encodeURIComponent(id)}`,
+            )
+          : { runs: [] as Run[] }
+        if (request !== chatRequest.current) return
+        const values = [...history.runs].sort((a, b) =>
+          (b.createdAt || '').localeCompare(a.createdAt || ''),
+        )
+        setRuns(values)
+        setSelectedId(values[0]?.id || null)
+        setContextFiles(
+          Array.isArray(values[0]?.files) ? (values[0].files as string[]) : [],
+        )
+        if (id) localStorage.setItem(`lemex-chat-${projectId}`, id)
+        else localStorage.removeItem(`lemex-chat-${projectId}`)
+        const all = await api<Run[]>(
+          `/api/projects/${encodeURIComponent(projectId)}/runs`,
+        )
+        if (request === chatRequest.current) setProjectRuns(all)
+      } catch (error) {
+        if (request === chatRequest.current) setError(errorText(error))
+      } finally {
+        if (request === chatRequest.current) setChatBusy(false)
+      }
+    },
+    [projectId],
+  )
+  const createChat = async () => {
+    const created = await post<ChatChoice>(
+      `/api/projects/${encodeURIComponent(projectId)}/chats`,
+    )
+    setChats((previous) => [
+      created,
+      ...previous.filter((chat) => chat.id !== created.id),
+    ])
+    await openChat(created.id)
+    return created
+  }
+  const newChat = async () => {
+    setChatBusy(true)
+    setError('')
+    try {
+      await createChat()
+      setPrompt('')
+      setContextFiles([])
+    } catch (error) {
+      setError(errorText(error))
+      setChatBusy(false)
+    }
+  }
   useEffect(() => {
     let cancelled = false
-    setRun(null)
-    setRuns([])
-    setSelectedId(null)
-    setError('')
-    setShowDiff(false)
-    void api<Run[]>(`/api/projects/${encodeURIComponent(projectId)}/runs`)
-      .then((result) => {
-        if (!cancelled) {
-          setRuns(result)
-          setSelectedId(result[0]?.id || null)
-        }
+    void loadChats()
+      .then((values) => {
+        if (cancelled) return
+        const saved = localStorage.getItem(`lemex-chat-${projectId}`)
+        return openChat(
+          values.some((chat) => chat.id === saved)
+            ? saved
+            : values[0]?.id || null,
+        )
       })
       .catch((error) => {
         if (!cancelled) setError(errorText(error))
       })
     return () => {
       cancelled = true
+      ++chatRequest.current
     }
-  }, [projectId])
+  }, [projectId, loadChats, openChat])
+  useEffect(() => {
+    const refresh = () => {
+      void loadChats()
+        .then((values) => {
+          const selected = chatIdRef.current
+          if (selected && !values.some((chat) => chat.id === selected))
+            void openChat(values[0]?.id || null)
+        })
+        .catch((error) => setError(errorText(error)))
+    }
+    window.addEventListener('lemex-chats-changed', refresh)
+    return () => window.removeEventListener('lemex-chats-changed', refresh)
+  }, [loadChats, openChat])
+  useEffect(() => {
+    if (!projectRuns.some(runIsActive)) return
+    const timer = setInterval(() => {
+      void loadRuns().catch(() => {})
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [projectRuns, loadRuns])
 
   useEffect(() => {
-    if (!selectedId) return
+    if (!selectedId) {
+      setRun(null)
+      return
+    }
     let cancelled = false
     let stream: EventSource | undefined
     let poll: ReturnType<typeof setInterval> | undefined
@@ -309,11 +533,19 @@ export function AssistantPanel({
         )
         if (cancelled) return
         setRun((previous) => mergeRun(previous, value))
+        const revision = `${value.id}:${value.liveRevision || 0}:${!!value.liveUndone}`
+        if (value.liveEdits && revision !== liveRevision.current) {
+          liveRevision.current = revision
+          void onFilesUpdatedRef
+            .current((value.liveChanges || []).map((change) => change.path))
+            .catch((error) => setError(errorText(error)))
+        }
         if (!runIsActive(value)) {
           stream?.close()
           if (poll) clearInterval(poll)
           setConnection('')
           void loadRuns().catch(() => undefined)
+          void loadChats().catch(() => undefined)
         }
       } catch (error) {
         if (!cancelled) setError(errorText(error))
@@ -359,6 +591,13 @@ export function AssistantPanel({
               if (event.type === 'usage') next.usage = event.data
               return next
             })
+            if (
+              event.type === 'files-updated' &&
+              Array.isArray(event.data?.paths)
+            )
+              void onFilesUpdatedRef
+                .current(event.data.paths as string[])
+                .catch((error) => setError(errorText(error)))
             if (event.type === 'status') void refresh()
           } catch {
             void refresh()
@@ -380,13 +619,27 @@ export function AssistantPanel({
       stream?.close()
       if (poll) clearInterval(poll)
     }
-  }, [selectedId, loadRuns])
+  }, [selectedId, loadRuns, loadChats])
 
   const events = run ? normalizedEvents(run) : []
   const text = events
     .filter((event) => event.type === 'message')
     .map(eventText)
     .join('')
+  const reasoning =
+    events
+      .filter((event) => event.type === 'reasoning')
+      .map(eventText)
+      .join('') ||
+    run?.reasoning ||
+    ''
+  const reasoningSummary =
+    events
+      .filter((event) => event.type === 'reasoning-summary')
+      .map(eventText)
+      .join('') ||
+    run?.reasoningSummary ||
+    ''
   const activities = events.filter((event) =>
     ['activity', 'error'].includes(event.type),
   )
@@ -396,7 +649,7 @@ export function AssistantPanel({
         block: 'nearest',
         behavior: 'smooth',
       })
-  }, [text.length, active])
+  }, [text.length, reasoning.length, reasoningSummary.length, active])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -405,20 +658,29 @@ export function AssistantPanel({
     setError('')
     try {
       await beforeRun()
+      const selectedChat = chatIdRef.current || (await createChat()).id
       const created = await post<Run>(
-        `/api/projects/${encodeURIComponent(projectId)}/runs`,
+        `/api/chats/${encodeURIComponent(selectedChat)}/runs`,
         {
           mode,
           prompt: prompt.trim(),
           file,
           model: model || undefined,
-          maxSeconds: Number(seconds),
+          maxSeconds: seconds === 'unlimited' ? null : Number(seconds),
+          liveEdits,
+          files: contextFiles,
         },
       )
       setRuns((previous) => [
         created,
         ...previous.filter((item) => item.id !== created.id),
       ])
+      setContextFiles((created.files as string[]) || contextFiles)
+      setProjectRuns((previous) => [
+        created,
+        ...previous.filter((item) => item.id !== created.id),
+      ])
+      void loadChats().catch(() => undefined)
       setRun(created)
       setSelectedId(created.id)
       setPrompt('')
@@ -471,6 +733,27 @@ export function AssistantPanel({
     }
   }
 
+  async function undoLiveEdits() {
+    if (!run || undoing) return
+    setUndoing(true)
+    setError('')
+    try {
+      await beforeApply()
+      const value = await post<Run>(
+        `/api/runs/${encodeURIComponent(run.id)}/undo`,
+      )
+      setRun(value)
+      await onFilesUpdatedRef.current(
+        (value.liveChanges || []).map((change) => change.path),
+      )
+      await loadRuns()
+    } catch (error) {
+      setError(errorText(error))
+    } finally {
+      setUndoing(false)
+    }
+  }
+
   async function discardUnsavedEdits() {
     setDiscarding(true)
     setError('')
@@ -488,25 +771,60 @@ export function AssistantPanel({
     | { complete?: boolean; compiled?: boolean }
     | undefined
   const canApply =
+    run?.liveEdits !== true &&
     run?.status === 'completed' &&
     !!run.changes?.length &&
     verification?.complete === true
   return (
     <div className="assistant-panel">
+      <ChatPicker
+        chats={chats}
+        selectedId={chatId}
+        onSelect={(id) => void openChat(id)}
+        onNew={() => void newChat()}
+        onDelete={onDeleteChat}
+        disabled={busy || chatBusy}
+        loading={chatBusy}
+      />
       <div className="assistant-settings">
         <div className="mode-tabs" aria-label="Assistant mode">
-          {modes.map((item) => (
+          {[
+            { id: 'proofs', name: 'Proofs' },
+            { id: 'formalize', name: 'Formalize' },
+            { id: 'optimize', name: 'Optimize' },
+            { id: 'search', name: 'Search' },
+          ].map((item) => (
             <button
               key={item.id}
-              className={mode === item.id ? 'selected' : ''}
-              aria-pressed={mode === item.id}
-              onClick={() => setMode(item.id)}
-              disabled={hasActive || (readOnly && item.id !== 'search')}
+              className={currentSection === item.id ? 'selected' : ''}
+              aria-pressed={currentSection === item.id}
+              disabled={active || (readOnly && item.id !== 'search')}
+              onClick={() =>
+                setMode(item.id === 'proofs' ? proofMode : (item.id as Mode))
+              }
             >
               {item.name}
             </button>
           ))}
         </div>
+        {currentSection === 'proofs' && (
+          <div className="proof-task-tabs" aria-label="Proof task">
+            {(['repair', 'prove'] as const).map((task) => (
+              <button
+                key={task}
+                className={mode === task ? 'selected' : ''}
+                aria-pressed={mode === task}
+                disabled={active || readOnly}
+                onClick={() => {
+                  setProofMode(task)
+                  setMode(task)
+                }}
+              >
+                {task === 'repair' ? 'Repair a proof' : 'Find a proof'}
+              </button>
+            ))}
+          </div>
+        )}
         <p className="mode-hint">{currentMode.hint}</p>
         <div className="assistant-options">
           <label>
@@ -514,7 +832,7 @@ export function AssistantPanel({
             <select
               value={model}
               onChange={(event) => setModel(event.target.value)}
-              disabled={hasActive}
+              disabled={active}
             >
               {session.models.map((item) => (
                 <option key={item.id} value={item.id}>
@@ -524,12 +842,13 @@ export function AssistantPanel({
             </select>
           </label>
           <label>
-            Time limit
+            Time limit (optional)
             <select
               value={seconds}
               onChange={(event) => setSeconds(event.target.value)}
-              disabled={hasActive}
+              disabled={active}
             >
+              <option value="unlimited">Until done</option>
               <option value="120">2 minutes</option>
               <option value="300">5 minutes</option>
               <option value="900">15 minutes</option>
@@ -538,6 +857,22 @@ export function AssistantPanel({
           </label>
         </div>
       </div>
+      <label className="live-edit-choice">
+        <input
+          type="checkbox"
+          checked={liveEdits}
+          disabled={active}
+          onChange={(event) => setLiveEdits(event.target.checked)}
+        />
+        <span>
+          <strong>Edit files live</strong>
+          <span>
+            {liveEdits
+              ? 'Changes appear in your project as Lemex works.'
+              : 'Keep edits separate until you review and apply them.'}
+          </span>
+        </span>
+      </label>
       {runs.length > 0 && (
         <div className="run-history">
           <Icon name="log" size={15} />
@@ -562,7 +897,13 @@ export function AssistantPanel({
         <div className="other-active-run">
           <span className="spinner" />
           <span>A task is running in this project.</span>
-          <button onClick={() => setSelectedId(otherActive.id)}>
+          <button
+            onClick={() =>
+              typeof otherActive.chatId === 'string'
+                ? void openChat(otherActive.chatId)
+                : setSelectedId(otherActive.id)
+            }
+          >
             View task
           </button>
         </div>
@@ -593,10 +934,93 @@ export function AssistantPanel({
                 </button>
               )}
             </div>
+            {runs
+              .filter(
+                (item) =>
+                  item.id !== run.id &&
+                  (item.createdAt || '') < (run.createdAt || ''),
+              )
+              .reverse()
+              .map((item) => (
+                <div className="chat-previous-turn" key={item.id}>
+                  <div className="user-message">
+                    <span className="message-label">You · {item.mode}</span>
+                    <p>{item.prompt}</p>
+                  </div>
+                  {item.message && (
+                    <div className="assistant-message">
+                      <span className="message-label">
+                        <Icon name="bot" size={14} />
+                        Lemex
+                      </span>
+                      <div className="markdown-body">
+                        <ReactMarkdown skipHtml components={markdownComponents}>
+                          {item.message}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
+                  )}
+                  <button
+                    className="button small subtle"
+                    onClick={() => setSelectedId(item.id)}
+                  >
+                    Inspect this turn
+                  </button>
+                </div>
+              ))}
             {run.prompt && (
               <div className="user-message">
                 <span className="message-label">You · {run.mode}</span>
                 <p>{run.prompt}</p>
+              </div>
+            )}
+            {(reasoning || reasoningSummary) && (
+              <details className="reasoning-trace" open={active}>
+                <summary>
+                  <Icon name="bot" size={14} />
+                  Reasoning trace{active && <span className="spinner" />}
+                </summary>
+                <p className="field-help">Exposed by the selected model.</p>
+                {reasoningSummary && (
+                  <div className="markdown-body reasoning-summary">
+                    <ReactMarkdown skipHtml components={markdownComponents}>
+                      {reasoningSummary}
+                    </ReactMarkdown>
+                  </div>
+                )}
+                {reasoning && (
+                  <div className="markdown-body reasoning-content">
+                    <ReactMarkdown skipHtml components={markdownComponents}>
+                      {reasoning}
+                    </ReactMarkdown>
+                  </div>
+                )}
+              </details>
+            )}
+            {run.liveEdits && (
+              <div className="live-edit-status">
+                <strong>
+                  {run.liveUndone
+                    ? 'Live edits undone'
+                    : 'Editing project files live'}
+                </strong>
+                <p>
+                  {run.liveUndone
+                    ? 'The original saved files were restored.'
+                    : 'Edits are saved as the agent works. Lean verifies the final result; you can undo the run when it stops.'}
+                </p>
+                {run.liveEditConflict && (
+                  <p className="error-message">{run.liveEditConflict}</p>
+                )}
+                {!active && !run.liveUndone && !!run.liveChanges?.length && (
+                  <button
+                    className="button small secondary"
+                    disabled={undoing || dirty || hasActive}
+                    onClick={() => void undoLiveEdits()}
+                  >
+                    {undoing ? 'Undoing…' : 'Undo agent edits'}
+                  </button>
+                )}
               </div>
             )}
             {(text || run.message) && (
@@ -642,6 +1066,7 @@ export function AssistantPanel({
               </p>
             )}
             <Verification value={run.verification} />
+            <OptimizationSummary value={run.optimization} active={active} />
             {!!run.changes?.length && (
               <div className="candidate-card">
                 <strong>
@@ -649,9 +1074,13 @@ export function AssistantPanel({
                   {run.changes.length === 1 ? 'file' : 'files'}
                 </strong>
                 <p>
-                  {run.status === 'applied'
-                    ? 'These changes have been applied to the project.'
-                    : 'Review the candidate before applying it to your files.'}
+                  {run.liveEdits
+                    ? run.liveUndone
+                      ? 'These edits have been undone.'
+                      : 'Agent edits were saved live. You can inspect the diff.'
+                    : run.status === 'applied'
+                      ? 'These changes have been applied to the project.'
+                      : 'Review the candidate before applying it to your files.'}
                 </p>
                 <button
                   className="button secondary"
@@ -661,7 +1090,7 @@ export function AssistantPanel({
                   }}
                 >
                   <Icon name="file" size={15} />
-                  Review changes
+                  {run.liveEdits ? 'View edits' : 'Review changes'}
                 </button>
               </div>
             )}
@@ -674,38 +1103,33 @@ export function AssistantPanel({
             <div ref={messagesEnd} />
           </>
         ) : (
-          <div className="assistant-empty">
-            <div className="assistant-emblem">
-              <Icon name="bot" size={28} />
-            </div>
-            <h2>A proof partner in your workspace</h2>
-            <p>
-              Lemex reads your project, tries Lean tools, and returns a
-              candidate you can inspect.
-            </p>
-            <div className="suggestions">
-              {[
-                'Repair the failing proof in this file.',
-                'Explain the theorem and suggest useful lemmas.',
-                'Find a complete proof without changing the statement.',
-              ].map((suggestion, index) => (
-                <button
-                  key={suggestion}
-                  onClick={() => {
-                    setMode(
-                      index === 1 ? 'search' : index === 2 ? 'prove' : 'repair',
-                    )
-                    setPrompt(suggestion)
-                  }}
-                >
-                  {suggestion}
-                  <Icon name="arrow" size={14} />
-                </button>
-              ))}
-            </div>
+          <div
+            className="assistant-starters"
+            role="group"
+            aria-label={`${currentMode.name} suggestions`}
+          >
+            {currentMode.suggestions.map((suggestion) => (
+              <button
+                key={suggestion.label}
+                type="button"
+                disabled={busy || chatBusy}
+                onClick={() => {
+                  setPrompt(suggestion.prompt)
+                  document.getElementById('assistant-prompt')?.focus()
+                }}
+              >
+                {suggestion.label}
+              </button>
+            ))}
           </div>
         )}
       </div>
+      <FileContextPicker
+        files={files}
+        selected={contextFiles}
+        onChange={setContextFiles}
+        disabled={active || busy}
+      />
       <form className="assistant-composer" onSubmit={submit}>
         <div className="composer-context">
           <Icon name="file" size={13} />
@@ -721,7 +1145,7 @@ export function AssistantPanel({
           rows={3}
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
-          disabled={hasActive || busy}
+          disabled={active || busy}
           onKeyDown={(event) => {
             if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
               event.preventDefault()
@@ -746,6 +1170,7 @@ export function AssistantPanel({
             type="submit"
             className="button primary"
             disabled={
+              chatBusy ||
               !prompt.trim() ||
               hasActive ||
               busy ||
@@ -836,22 +1261,24 @@ export function AssistantPanel({
             >
               Close
             </button>
-            <button
-              className="button primary"
-              disabled={!canApply || applying || dirty || discarding}
-              onClick={apply}
-            >
-              {applying ? (
-                <span className="spinner" />
-              ) : (
-                <Icon name="check" size={15} />
-              )}
-              {run.status === 'applied'
-                ? 'Already applied'
-                : applying
-                  ? 'Applying…'
-                  : 'Apply changes'}
-            </button>
+            {!run.liveEdits && (
+              <button
+                className="button primary"
+                disabled={!canApply || applying || dirty || discarding}
+                onClick={apply}
+              >
+                {applying ? (
+                  <span className="spinner" />
+                ) : (
+                  <Icon name="check" size={15} />
+                )}
+                {run.status === 'applied'
+                  ? 'Already applied'
+                  : applying
+                    ? 'Applying…'
+                    : 'Apply changes'}
+              </button>
+            )}
           </footer>
         </Dialog>
       )}

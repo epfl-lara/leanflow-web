@@ -712,7 +712,7 @@ test('settings remain private per user, persist, and validate tool choices and i
     tools: { lean: true, lean_explore: false, exa: false },
   }
   await settings.save('alice', alice)
-  assert.deepEqual(await new Settings(directory).get('alice'), alice)
+  assert.deepEqual(await new Settings(directory).get('alice'), { ...alice, showReasoning: true })
   assert.equal((await settings.get('bob')).extraInstructions, '')
   for (const input of [
     null,
@@ -723,7 +723,7 @@ test('settings remain private per user, persist, and validate tool choices and i
   ])
     await assert.rejects(settings.save('alice', input), { status: 400 })
   await assert.rejects(settings.get('../alice'))
-  assert.deepEqual(await settings.get('alice'), alice)
+  assert.deepEqual(await settings.get('alice'), { ...alice, showReasoning: true })
 })
 
 test('concurrent settings saves each complete and leave one valid persisted configuration', async (t) => {
@@ -754,7 +754,8 @@ test('concurrent settings saves each complete and leave one valid persisted conf
   const persisted = await settings.get('alice')
   assert.ok(
     choices.some(
-      (choice) => JSON.stringify(choice) === JSON.stringify(persisted),
+      (choice) => choice.extraInstructions === persisted.extraInstructions &&
+        Object.entries(choice.tools).every(([key, value]) => persisted.tools[key] === value) && persisted.showReasoning === true,
     ),
   )
 })

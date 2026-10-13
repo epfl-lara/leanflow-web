@@ -60,6 +60,8 @@ function relativeFile(value, { write = false } = {}) {
   return parts.join('/');
 }
 
+export function validateWorkspaceFilePath(value) { return relativeFile(value); }
+
 // Reject all non-public IP ranges, including IPv4 mapped IPv6. HTTP redirects
 // and credential helpers are separately disabled for the Git subprocess.
 function publicAddress(address) {
@@ -198,6 +200,20 @@ async function writeParent(root, filename) {
   } catch (error) { await directory.close(); throw error; }
 }
 
+async function assertTrashTree(directory, depth = 0) {
+  if (depth > 64) fail('Folder nesting exceeds 64 levels', 413);
+  const handle = await fs.open(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    if (await fs.realpath(`/proc/self/fd/${handle.fd}`) !== directory) fail('Folder changed during deletion', 409);
+    for (const entry of await fs.readdir(`/proc/self/fd/${handle.fd}`, { withFileTypes: true })) {
+      if (isSecret(entry.name) || ['.lake', 'node_modules'].includes(entry.name)) fail(`The folder contains protected project data (${entry.name}). Archive the project to preserve it instead.`, 403);
+      if (entry.isSymbolicLink()) fail('Folders containing symbolic links cannot be deleted through the file browser. Archive the project instead.', 403);
+      if (entry.isDirectory()) await assertTrashTree(path.join(directory, entry.name), depth + 1);
+      else if (!entry.isFile()) fail('Only regular files and folders can be deleted', 403);
+    }
+  } finally { await handle.close(); }
+}
+
 /** Persistent user-scoped workspaces. The runtime owns process isolation. */
 export class WorkspaceStore {
   constructor({ dataDir, runtime, resolveHost = lookup }) {
@@ -208,14 +224,16 @@ export class WorkspaceStore {
     this.projectsDir = path.join(this.dataDir, 'projects');
     this.snapshotsDir = path.join(this.dataDir, 'candidates');
     this.historyDir = path.join(this.dataDir, 'history');
+    this.trashDir = path.join(this.dataDir, 'trash');
     this.jobs = new Map();
     this.locks = new Map();
   }
 
   async init() {
-    await Promise.all([this.projectsDir, this.snapshotsDir, this.historyDir].map(dir => fs.mkdir(dir, { recursive: true, mode: 0o700 })));
+    await Promise.all([this.projectsDir, this.snapshotsDir, this.historyDir, this.trashDir].map(dir => fs.mkdir(dir, { recursive: true, mode: 0o700 })));
     this.db = new DatabaseSync(path.join(this.dataDir, 'workspaces.sqlite'));
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, owner TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS projects_owner ON projects(owner); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, time TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS events_project ON events(project, id);');
+    this.db.exec('CREATE TABLE IF NOT EXISTS trash (id TEXT PRIMARY KEY, owner TEXT NOT NULL, project TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS trash_owner ON trash(owner);');
     for (const row of this.db.prepare('SELECT data FROM projects').all()) {
       const project = JSON.parse(row.data);
       if (project.root !== path.join(this.projectsDir, project.id)) throw new Error('Invalid persisted workspace directory');
@@ -225,6 +243,35 @@ export class WorkspaceStore {
         this.#save(project);
         this.#event(project, 'interrupted', project.error);
       }
+    }
+    for (const row of this.db.prepare('SELECT data FROM trash').all()) {
+      const entry = JSON.parse(row.data);
+      if (!['moving', 'restoring'].includes(entry.state)) continue;
+      const content = await exists(path.join(this.trashDir, validateId(entry.trashId, 'trash'), 'content'));
+      if (entry.state === 'moving') entry.state = content ? 'trashed' : 'failed';
+      else if (content) {
+        const project = this.#owned(entry.projectId, entry.owner);
+        try {
+          const destination = await guarded(project.root, entry.path, { write: true });
+          const restored = await exists(destination);
+          if (entry.kind === 'folder' && restored?.isDirectory() && restored.dev === entry.reserved?.dev && restored.ino === entry.reserved?.ino) {
+            // A crash can leave our empty restore reservation. Its recorded
+            // identity and rmdir's empty-only behavior protect user content.
+            const parent = await writeParent(project.root, entry.path);
+            try {
+              const anchored = `${parent.anchor}/${parent.name}`;
+              const current = await exists(anchored);
+              if (current?.isDirectory() && current.dev === entry.reserved.dev && current.ino === entry.reserved.ino) await fs.rmdir(anchored).catch(error => { if (!['ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error; });
+            } finally { await parent.handle.close(); }
+          }
+          entry.state = entry.kind === 'file' && restored?.dev === content.dev && restored?.ino === content.ino ? 'restored' : 'trashed';
+        } catch { entry.state = 'trashed'; }
+      }
+      else {
+        const project = this.#owned(entry.projectId, entry.owner);
+        try { entry.state = await exists(await guarded(project.root, entry.path, { write: true })) ? 'restored' : 'failed'; } catch { entry.state = 'failed'; }
+      }
+      this.#saveTrash(entry);
     }
     return this;
   }
@@ -248,18 +295,165 @@ export class WorkspaceStore {
 
   list(owner) {
     validateOwner(owner);
-    return this.db.prepare('SELECT data FROM projects WHERE owner=? ORDER BY rowid DESC').all(owner).map(r => JSON.parse(r.data));
+    return this.db.prepare('SELECT data FROM projects WHERE owner=? ORDER BY rowid DESC').all(owner).map(r => JSON.parse(r.data)).filter(project => !project.archivedAt);
   }
 
-  get(id, owner) {
+  #owned(id, owner) {
     validateId(id);
     validateOwner(owner);
     const row = this.db.prepare('SELECT data FROM projects WHERE id=? AND owner=?').get(id, owner);
     if (!row) fail('Project not found', 404);
-    const project = JSON.parse(row.data);
+    return JSON.parse(row.data);
+  }
+
+  get(id, owner) {
+    const project = this.#owned(id, owner);
+    if (project.archivedAt) fail('Project not found', 404);
     const events = this.db.prepare('SELECT data FROM events WHERE project=? ORDER BY id DESC LIMIT 60').all(id).reverse();
     project.log = events.map(r => JSON.parse(r.data).message).join('').slice(-20000);
     return project;
+  }
+
+  #saveTrash(entry) {
+    this.db.prepare('INSERT INTO trash(id,owner,project,data) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(entry.trashId, entry.owner, entry.projectId, JSON.stringify(entry));
+  }
+
+  #trashReceipt(entry) {
+    return { trashId: entry.trashId, projectId: entry.projectId, projectName: entry.projectName || this.#owned(entry.projectId, entry.owner).name, name: entry.name || (entry.path === null ? entry.projectName || this.#owned(entry.projectId, entry.owner).name : path.posix.basename(entry.path)), path: entry.path, kind: entry.kind, recoverable: entry.state === 'trashed', createdAt: entry.createdAt, ...(entry.state === 'restored' ? { restored: true } : {}) };
+  }
+
+  listTrash(owner) {
+    validateOwner(owner);
+    return this.db.prepare("SELECT data FROM trash WHERE owner=? AND json_extract(data,'$.state')='trashed' ORDER BY rowid DESC LIMIT 100").all(owner).map(row => this.#trashReceipt(JSON.parse(row.data)));
+  }
+
+  getTrash(trashId, owner) {
+    validateId(trashId, 'trash'); validateOwner(owner);
+    const row = this.db.prepare('SELECT data FROM trash WHERE id=? AND owner=?').get(trashId, owner);
+    if (!row) fail('Recoverable deletion not found', 404);
+    return this.#trashReceipt(JSON.parse(row.data));
+  }
+
+  async trash(id, owner, filename, { assertIdle = () => {} } = {}) {
+    this.get(id, owner);
+    if (filename !== undefined) relativeFile(filename, { write: true });
+    return this.#locked(id, async () => {
+      const project = this.get(id, owner);
+      if (project.status === 'preparing' || this.jobs.has(id)) fail('Wait for project preparation to finish before deleting files or archiving the project.', 409);
+      assertIdle();
+      const trashId = randomUUID(), createdAt = new Date().toISOString();
+      const container = path.join(this.trashDir, trashId);
+      if (filename === undefined) {
+        const entry = { trashId, projectId: id, projectName: project.name, name: project.name, owner, path: null, kind: 'project', createdAt, state: 'trashed' };
+        await fs.mkdir(container, { mode: 0o700 });
+        await fs.writeFile(path.join(container, 'metadata.json'), JSON.stringify(entry), { mode: 0o600, flag: 'wx' });
+        if (this.jobs.has(id) || this.get(id, owner).status === 'preparing') fail('Wait for project preparation to finish before archiving the project.', 409);
+        assertIdle();
+        // Archive the metadata only; cached dependency owners and project history
+        // retain their stable paths for completed candidates and later restores.
+        project.archivedAt = createdAt;
+        project.archivedTrashId = trashId;
+        this.db.exec('BEGIN IMMEDIATE');
+        try { this.#saveTrash(entry); this.#save(project); this.#event(project, 'archived', 'Project archived. Restore it from the recoverable deletion receipt.\n'); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+        return this.#trashReceipt(entry);
+      }
+      const destination = await guarded(project.root, filename, { write: true });
+      const stat = await exists(destination);
+      if (!stat) fail('File or folder not found', 404);
+      if (!stat.isFile() && !stat.isDirectory()) fail('Only regular files and folders can be deleted', 403);
+      if (stat.isDirectory()) await assertTrashTree(destination);
+      const entry = { trashId, projectId: id, projectName: project.name, name: path.posix.basename(filename), owner, path: filename, kind: stat.isDirectory() ? 'folder' : 'file', createdAt, state: 'moving' };
+      const parent = await writeParent(project.root, filename);
+      try {
+        const anchored = `${parent.anchor}/${parent.name}`;
+        const current = await fs.lstat(anchored);
+        if (current.isSymbolicLink() || current.dev !== stat.dev || current.ino !== stat.ino) fail('File or folder changed during deletion. Refresh the file tree and try again.', 409);
+        await fs.mkdir(container, { mode: 0o700 });
+        await fs.writeFile(path.join(container, 'metadata.json'), JSON.stringify({ ...entry, state: 'trashed' }), { mode: 0o600, flag: 'wx' });
+        this.#saveTrash(entry);
+        if (this.jobs.has(id) || this.get(id, owner).status === 'preparing') fail('Wait for project preparation to finish before deleting files.', 409);
+        assertIdle();
+        await fs.rename(anchored, path.join(container, 'content'));
+        entry.state = 'trashed';
+        this.#saveTrash(entry);
+        this.#event(project, 'trashed', `Moved ${filename} to recoverable trash (${trashId}).\n`);
+        return this.#trashReceipt(entry);
+      } catch (error) {
+        const moved = await exists(path.join(container, 'content'));
+        if (moved) entry.state = 'trashed';
+        else { entry.state = 'failed'; entry.error = 'Deletion did not move any project files.'; }
+        this.#saveTrash(entry);
+        throw error;
+      } finally { await parent.handle.close(); }
+    });
+  }
+
+  async restore(trashId, owner, { assertIdle = () => {} } = {}) {
+    validateId(trashId, 'trash'); validateOwner(owner);
+    const row = this.db.prepare('SELECT data FROM trash WHERE id=? AND owner=?').get(trashId, owner);
+    if (!row) fail('Recoverable deletion not found', 404);
+    const initial = JSON.parse(row.data);
+    return this.#locked(initial.projectId, async () => {
+      const entry = JSON.parse(this.db.prepare('SELECT data FROM trash WHERE id=? AND owner=?').get(trashId, owner).data);
+      if (entry.state === 'restored') return this.#trashReceipt(entry);
+      if (entry.state !== 'trashed') fail('This deletion is not ready to restore', 409);
+      const project = this.#owned(entry.projectId, owner);
+      if (project.status === 'preparing' || this.jobs.has(project.id)) fail('Wait for project preparation to finish before restoring deleted files.', 409);
+      assertIdle();
+      if (entry.kind === 'project') {
+        if (!project.archivedAt || project.archivedTrashId !== trashId) fail('This project archive no longer matches the deletion receipt', 409);
+        const root = await exists(project.root);
+        if (!root?.isDirectory() || root.isSymbolicLink()) fail('The archived project directory is unavailable', 409);
+        assertIdle();
+        delete project.archivedAt; delete project.archivedTrashId;
+        entry.state = 'restored'; entry.restoredAt = new Date().toISOString();
+        this.db.exec('BEGIN IMMEDIATE');
+        try { this.#saveTrash(entry); this.#save(project); this.#event(project, 'restored', 'Project restored.\n'); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+        return this.#trashReceipt(entry);
+      }
+      if (project.archivedAt) fail('Restore the archived project before restoring its files', 409);
+      const destination = await guarded(project.root, entry.path, { write: true });
+      if (await exists(destination)) fail('A file or folder already exists at the restore path. Move it before restoring.', 409);
+      const content = path.join(this.trashDir, trashId, 'content');
+      const source = await exists(content);
+      if (!source || source.isSymbolicLink() || (entry.kind === 'file' ? !source.isFile() : !source.isDirectory())) fail('The recoverable file data is unavailable', 409);
+      const parent = await writeParent(project.root, entry.path);
+      try {
+        const anchored = `${parent.anchor}/${parent.name}`;
+        if (await exists(anchored)) fail('A file or folder already exists at the restore path. Move it before restoring.', 409);
+        if (this.jobs.has(project.id) || this.get(project.id, owner).status === 'preparing') fail('Wait for project preparation to finish before restoring deleted files.', 409);
+        assertIdle();
+        entry.state = 'restoring'; this.#saveTrash(entry);
+        if (entry.kind === 'file') {
+          // link() publishes a regular file atomically with EEXIST protection.
+          // Keep the trash link rather than discarding stored data on restore.
+          await fs.link(content, anchored);
+        } else {
+          // Reserve an absent directory atomically. Renaming the saved tree can
+          // replace only our own empty reservation, never user files or a tree.
+          await fs.mkdir(anchored, { mode: 0o700 });
+          const reserved = await fs.lstat(anchored);
+          entry.reserved = { dev: reserved.dev, ino: reserved.ino }; this.#saveTrash(entry);
+          try {
+            const current = await fs.lstat(anchored);
+            if (!current.isDirectory() || current.dev !== reserved.dev || current.ino !== reserved.ino) fail('The restore path changed. Move the existing path before restoring.', 409);
+            await fs.rename(content, anchored);
+          } catch (error) {
+            const current = await exists(anchored);
+            if (current?.isDirectory() && current.dev === reserved.dev && current.ino === reserved.ino) await fs.rmdir(anchored).catch(() => {});
+            throw error;
+          }
+        }
+        entry.state = 'restored'; entry.restoredAt = new Date().toISOString();
+        this.#saveTrash(entry);
+        this.#event(project, 'restored', `Restored ${entry.path} from recoverable trash.\n`);
+        return this.#trashReceipt(entry);
+      } catch (error) {
+        if (await exists(content)) { entry.state = 'trashed'; this.#saveTrash(entry); }
+        if (['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EISDIR'].includes(error.code)) fail('A file or folder already exists at the restore path. Move it before restoring.', 409);
+        throw error;
+      } finally { await parent.handle.close(); }
+    });
   }
 
   async #locked(id, fn) {
@@ -588,15 +782,47 @@ export class WorkspaceStore {
     if (current.length !== expected.size || current.some(link => expected.get(link.path) !== link.link)) fail(message, 409);
   }
 
-  async #assertCurrent(manifest, project) {
+  async #assertCurrent(manifest, project, liveChanges = []) {
     if (manifest.projectId !== project.id || manifest.owner !== project.owner) fail('Candidate belongs to another project', 403);
     const entries = await this.#walk(project.root, { includeLinks: true, limit: Infinity });
     this.#checkLinks(manifest, entries, 'Project symbolic links changed during the assistant run. Start a new run from the current project.');
     const current = entries.filter(entry => entry.link === undefined);
     const base = new Map(manifest.files.map(file => [file.path, file.hash]));
+    for (const change of liveChanges) {
+      if (change.after === null) base.delete(change.path);
+      else base.set(change.path, sha(change.after));
+    }
     if (current.length !== base.size) fail('Project files changed during the assistant run. Start a new run from the current project.', 409);
     for (const entry of current) {
       if (base.get(entry.path) !== await fileHash(await guarded(project.root, entry.path))) fail(`Project changed during the assistant run: ${entry.path}. Start a new run from the current project.`, 409);
+    }
+    return true;
+  }
+
+  async #assertLiveCurrent(manifest, project, previous, next = []) {
+    if (manifest.projectId !== project.id || manifest.owner !== project.owner) fail('Candidate belongs to another project', 403);
+    const entries = await this.#walk(project.root, { includeLinks: true, limit: Infinity });
+    this.#checkLinks(manifest, entries, 'Project symbolic links changed during the assistant run. Start a new run from the current project.');
+    const base = new Map(manifest.files.map(file => [file.path, file.hash]));
+    for (const change of previous) base.set(change.path, sha(change.after));
+    const current = new Map(entries.filter(entry => entry.link === undefined).map(entry => [entry.path, entry]));
+    const touched = new Set([...previous, ...next].map(change => change.path));
+    const configuration = new Set(['lean-toolchain', 'lakefile.lean', 'lakefile.toml', 'lake-manifest.json']);
+    const protectedPath = filename => configuration.has(path.posix.basename(filename)) || touched.has(filename);
+    for (const filename of new Set([...base.keys(), ...current.keys()])) {
+      if (!protectedPath(filename)) continue;
+      const expected = base.get(filename) ?? null;
+      const actual = current.has(filename) ? await fileHash(await guarded(project.root, filename)) : null;
+      if (expected !== actual) fail(`Project changed during the assistant run: ${filename}. Start a new run from the current project.`, 409);
+    }
+    return true;
+  }
+
+  async #assertTouched(manifest, project, live) {
+    if (manifest.projectId !== project.id || manifest.owner !== project.owner) fail('Candidate belongs to another project', 403);
+    for (const change of live) {
+      const actual = await textFile(await guarded(project.root, change.path, { write: true }), true);
+      if (actual?.hash !== sha(change.after)) fail(`Project changed during the assistant run: ${change.path}. Undo cannot overwrite your saved changes.`, 409);
     }
     return true;
   }
@@ -607,39 +833,113 @@ export class WorkspaceStore {
     return this.#locked(project.id, () => this.#assertCurrent(manifest, project));
   }
 
-  async verificationCopy(snapshot, changes) {
-    const { manifest } = await this.#manifest(snapshot);
-    const project = this.get(manifest.projectId, manifest.owner);
+  async #leanChanges(manifest, container, changes) {
+    if (!Array.isArray(changes) || changes.length > 1000) fail('Invalid live Lean change set');
+    const original = new Map(manifest.files.map(file => [file.path, file.hash]));
+    const seen = new Set(), result = [];
+    for (const change of changes) {
+      if (!change || typeof change !== 'object') fail('Invalid live Lean change');
+      const filename = relativeFile(change.path, { write: true });
+      if (!filename.endsWith('.lean') || path.posix.basename(filename) === 'lakefile.lean') fail('Live assistant edits may change Lean source files only', 409);
+      if (seen.has(filename)) fail('A live change set contains duplicate paths');
+      seen.add(filename);
+      if (typeof change.after !== 'string' || Buffer.byteLength(change.after) > MAX_FILE || change.after.includes('\0')) fail('Live assistant edits require editable Lean text and cannot delete files', 409);
+      const beforeHash = original.get(filename) ?? null;
+      if (beforeHash !== change.beforeHash) fail(`Original baseline does not match ${filename}`, 409);
+      let before = null;
+      if (beforeHash !== null) {
+        const baseline = await textFile(await guarded(path.join(container, 'baseline'), filename));
+        if (baseline.hash !== beforeHash) fail('The protected assistant baseline changed', 409);
+        before = baseline.content;
+      }
+      if (change.before !== undefined && change.before !== before) fail(`Original baseline content does not match ${filename}`, 409);
+      if (change.after !== before) result.push({ path: filename, before, after: change.after, beforeHash });
+    }
+    return result;
+  }
+
+  #liveTransition(previous, next) {
+    const old = new Map(previous.map(change => [change.path, change]));
+    const desired = new Map(next.map(change => [change.path, change]));
+    const transition = [];
+    for (const filename of [...new Set([...old.keys(), ...desired.keys()])].sort()) {
+      const original = old.get(filename) || desired.get(filename);
+      const before = old.has(filename) ? old.get(filename).after : original.before;
+      const after = desired.has(filename) ? desired.get(filename).after : original.before;
+      if (before !== after) transition.push({ path: filename, before, after, beforeHash: before === null ? null : sha(before) });
+    }
+    return transition;
+  }
+
+  async syncLive(snapshot, changes, previousChanges = []) {
+    const { manifest, container } = await this.#manifest(snapshot);
+    const initial = this.get(manifest.projectId, manifest.owner);
+    return this.#locked(initial.id, async () => {
+      const project = this.get(initial.id, initial.owner); this.#ready(project);
+      const previous = await this.#leanChanges(manifest, container, previousChanges);
+      const next = await this.#leanChanges(manifest, container, changes);
+      await this.#assertLiveCurrent(manifest, project, previous, next);
+      await this.#applyLocked(project, this.#liveTransition(previous, next), 'live');
+      return next;
+    });
+  }
+
+  async assertLive(snapshot, liveChanges = []) {
+    const { manifest, container } = await this.#manifest(snapshot);
+    const initial = this.get(manifest.projectId, manifest.owner);
+    return this.#locked(initial.id, async () => {
+      const project = this.get(initial.id, initial.owner); this.#ready(project);
+      const live = await this.#leanChanges(manifest, container, liveChanges);
+      return this.#assertLiveCurrent(manifest, project, live);
+    });
+  }
+
+  async undoLive(snapshot, liveChanges) {
+    const { manifest, container } = await this.#manifest(snapshot);
+    const initial = this.get(manifest.projectId, manifest.owner);
+    return this.#locked(initial.id, async () => {
+      const project = this.get(initial.id, initial.owner); this.#ready(project);
+      const live = await this.#leanChanges(manifest, container, liveChanges);
+      await this.#assertTouched(manifest, project, live);
+      return this.#applyLocked(project, this.#liveTransition(live, []), 'undo');
+    });
+  }
+
+  async verificationCopy(snapshot, changes, options = {}) {
+    const { liveChanges = [] } = options;
+    const { manifest, container } = await this.#manifest(snapshot);
+    const initial = this.get(manifest.projectId, manifest.owner);
+    const project = initial;
     this.#ready(project);
     if (!Array.isArray(changes) || changes.length > 1000) fail('Invalid verification change set');
     return this.#locked(project.id, async () => {
-      await this.#assertCurrent(manifest, project);
-      const original = new Map(manifest.files.map(file => [file.path, file.hash]));
-      const seen = new Set();
-      for (const change of changes) {
-        if (!change || typeof change !== 'object') fail('Invalid verification file change');
-        const filename = relativeFile(change.path, { write: true });
-        if (!filename.endsWith('.lean') || filename === 'lakefile.lean') fail('Only Lean source changes can be independently verified', 409);
-        if (seen.has(filename)) fail('A verification change set contains duplicate paths');
-        seen.add(filename);
-        if (typeof change.after !== 'string' || Buffer.byteLength(change.after) > MAX_FILE || change.after.includes('\0')) fail('Invalid proposed Lean source content');
-        if ((original.get(filename) ?? null) !== change.beforeHash) fail(`Verification baseline does not match ${filename}`, 409);
-      }
+      const currentProject = this.get(project.id, project.owner); this.#ready(currentProject);
+      const previous = await this.#leanChanges(manifest, container, liveChanges);
+      const proposed = await this.#leanChanges(manifest, container, changes);
+      if (Object.hasOwn(options, 'liveChanges')) await this.#assertLiveCurrent(manifest, currentProject, previous, proposed);
+      else await this.#assertCurrent(manifest, currentProject);
       // Build from the saved project rather than copying anything controlled by
       // the model. The new root also gets a separate runtime HOME and artifacts.
-      const verified = await this.#capture(project, randomUUID());
-      for (const change of changes) {
+      const verified = await this.#capture(currentProject, randomUUID());
+      const transitions = this.#liveTransition(previous, proposed);
+      for (const change of transitions) {
         const destination = await guarded(verified.root, change.path, { write: true });
         const before = await textFile(destination, true);
         if ((before?.hash ?? null) !== change.beforeHash) fail(`Verification baseline changed for ${change.path}`, 409);
         const parent = await writeParent(verified.root, change.path);
         const temporary = `${parent.anchor}/.lemex-write-${randomUUID()}`;
         try {
-          await fs.writeFile(temporary, change.after, { flag: 'wx', mode: before?.mode ?? 0o600 });
-          await fs.rename(temporary, `${parent.anchor}/${parent.name}`);
+          if (change.after === null) {
+            const reverted = path.join(path.dirname(verified.root), 'reverted');
+            await fs.mkdir(reverted, { recursive: true, mode: 0o700 });
+            await fs.rename(`${parent.anchor}/${parent.name}`, path.join(reverted, randomUUID()));
+          } else {
+            await fs.writeFile(temporary, change.after, { flag: 'wx', mode: before?.mode ?? 0o600 });
+            await fs.rename(temporary, `${parent.anchor}/${parent.name}`);
+          }
         } finally { await fs.rm(temporary, { force: true }); await parent.handle.close(); }
       }
-      return { ...verified, purpose: 'verification', sourceRunId: manifest.runId };
+      return { ...verified, sourceRevision: manifest.sourceRevision, purpose: 'verification', sourceRunId: manifest.runId };
     });
   }
 
@@ -652,6 +952,13 @@ export class WorkspaceStore {
         const { manifest } = await this.#manifest(snapshot);
         await this.#assertCurrent(manifest, project);
       }
+      return this.#applyLocked(project, changes);
+    });
+  }
+
+  async #applyLocked(project, changes, reason = 'applied') {
+      project = this.get(project.id, project.owner); this.#ready(project);
+      const { id, owner } = project;
       const seen = new Set();
       const prepared = [];
       for (const change of changes) {
@@ -696,8 +1003,8 @@ export class WorkspaceStore {
         await Promise.all(applied.map(change => change.parent.handle.close()));
       }
       await fs.writeFile(path.join(transaction, 'applied.json'), JSON.stringify({ appliedAt: new Date().toISOString() }), { mode: 0o600 });
-      this.#event(project, 'applied', `Applied ${prepared.length} reviewed changes. Backup: ${path.relative(this.dataDir, transaction)}\n`);
+      const action = reason === 'live' ? `Saved ${prepared.length} live assistant edits` : reason === 'undo' ? `Undid ${prepared.length} live assistant edits` : `Applied ${prepared.length} reviewed changes`;
+      this.#event(project, reason, `${action}. Backup: ${path.relative(this.dataDir, transaction)}\n`);
       return { applied: prepared.length, files: prepared.map(change => ({ path: change.path, hash: change.after === null ? null : sha(change.after) })) };
-    });
   }
 }

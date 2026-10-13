@@ -66,6 +66,14 @@ export interface Run {
   prompt?: string
   createdAt?: string
   message?: string
+  reasoning?: string
+  reasoningSummary?: string
+  liveEdits?: boolean
+  liveChanges?: Change[]
+  liveRevision?: number
+  liveUndone?: boolean
+  liveEditConflict?: string
+  maxSeconds?: number | null
   error?: string
   events?: RunEvent[]
   changes?: Change[]

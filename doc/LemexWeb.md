@@ -34,6 +34,49 @@ node scripts/add-user.mjs "Collaborator name"
 
 The helper prints the new account token once. The account list refreshes on sign-in. Each account owns its projects; cross-account project sharing is a later extension.
 
+## Four assistant sections and optimization
+
+| Section | Task |
+|---|---|
+| Proofs | Repair an incorrect proof or find a complete proof while preserving its statement. |
+| Formalize | Translate the requested mathematics into Lean statements and proofs; review their mathematical meaning. |
+| Optimize | Refactor existing valid theorem/lemma proof bodies while preserving statements and surrounding code. |
+| Search | Ask the assistant to find declarations or explanations without changing project files; direct Loogle/LeanExplore lookup is also available. |
+
+Optimization compares the saved baseline with the independently verified candidate under the same project's exact Lean toolchain and dependency pins. It reports named theorems, proof-body token counts, raw heartbeats, and totals, keeping negative reductions visible. A shorter proof can require more elaboration work. An unsupported declaration shape or measurement failure is shown as unavailable rather than assigned a guessed cost; a failed baseline proof should be repaired first.
+
+The token convention mirrors the [pinned Arena tokenizer](https://github.com/delta-lab-ai/lean-refactor/blob/9c98a3a097e53724e35b2a2e7fe316c331efa20a/lean_refactor/cc_agent/scripts/proof_utils.py), including its operator merging, nested comment handling, and proof-body-only scope. The full provenance pin is `9c98a3a097e53724e35b2a2e7fe316c331efa20a`, as recorded by `TOKENIZER_SOURCE` in the local proof-reduction-competition verifier. Heartbeats adapt that verifier's synchronous `IO.getNumHeartbeats` command wrapper with `Elab.async=false` and `maxHeartbeats=0`; wall time and `--profile` are not heartbeat measurements. Displayed Lean heartbeats divide the raw counter by 1,000.
+
+`server/optimization.mjs` resolves the Lake environment before measurement, then uses the pinned Lean binary directly. Both workers have read-only project/home mounts, a fresh private home, no provider environment, and no network. Local imported modules are rebuilt from their current sources into `/tmp`; instrumented modules and their output libraries are temporary. Source context is retained, and Lean checks each wrapped command's exact UTF-8 end position. The competition backend, datasets, reference caches, and experiment results are not used or modified. These measurements are local project costs, not official Arena scores or compatibility results for other toolchains.
+
+`prompts/proof-optimization.md` encourages library lemma reuse, focused proof steps, and explicit tradeoffs. The compiler-only fixture in `scripts/check-optimization.mjs` demonstrated **11→7 tokens**, with raw heartbeats **38,220→38,353** in Lean basics and **39,336→39,416** in Mathlib. This is a measured length improvement with a slight heartbeat regression, not an improvement on both axes. See [verification evidence](Verification.md) for the recorded artifact and exact checked scope.
+
+## Chats, selected files, and run controls
+
+Use **New chat** to start an empty conversation or the chat selector to reopen an existing project chat. Chats are owned by the signed-in account and scoped to their project. Earlier user/assistant text from the selected chat is carried into a fresh native Lemex run as bounded conversation context: at most 12 earlier runs and 60,000 characters, with per-entry limits. It is not imported as privileged instructions, proof evidence, or native home state. Current saved files are authoritative, and each run must check them again. Personal Lemex sessions and unrelated chats are not loaded.
+
+An empty chat offers two compact suggestions for the selected task. For example, Optimize offers **Shorten the proof** and **Reduce heartbeats**. Selecting a suggestion fills and focuses the message box while keeping the current task type; edit it before running.
+
+**Select files** attaches up to 12 exact saved paths. Read-only library sources can provide context; they remain read-only. The active editor file is also supplied to the run. Starting a run saves the current dirty buffer before capturing its source snapshot. Only one assistant run can be active in a project.
+
+The default **Until done** setting applies no application wall-clock cap. Choose 2, 5, 15, or 30 minutes to add a cap, or use **Stop** to cancel. The backend also accepts an explicit cap from 30 to 1,800 seconds. Finite caps include snapshot preparation and optimization measurements as well as the native task and verification. Runs still end on native completion, failure, cancellation, or server interruption; interrupted runs are not automatically restarted.
+
+The **Reasoning traces** setting controls capture for new runs. The interface renders reasoning text or summaries actually emitted by the selected model/runtime, separately from assistant messages and tool activity. A model may expose neither; the application does not generate missing traces. Assistant Markdown is rendered without raw HTML, and image references are links rather than automatic external image loads.
+
+## Live saved edits, review, and Undo
+
+**Edit files live** is enabled by default for proof, formalization, and optimization tasks. Validated source-file updates from the isolated agent workspace are mirrored into the actual saved project as the agent works. A clean open editor updates its existing Monaco model so Lean sees the edits without restarting the language server. An unsaved editor buffer is preserved and receives a notice if the saved file changes underneath it. Live edits are intermediate work; the final result still needs independent Lean verification. **View edits** shows the diff and verification result.
+
+After the run stops, **Undo agent edits** restores the files that the run changed. The server checks their current contents before restoring them, preserves unrelated saved source and text edits, and refuses to overwrite conflicting user changes. Stop any active run in the project first; the interface also pauses Undo for a dirty editor buffer. Run changes and recovery records remain in owned application storage.
+
+Disable **Edit files live** to keep edits in a separate candidate. Review its diff and verification result, then explicitly **Apply changes**. Proof and optimization candidates must pass the integrity checks before acceptance. Apply is paused for an unsaved editor buffer; explicit discard restores only that buffer and sends no file-save request. In this review-first workflow, acceptance also checks the original saved snapshot for changes. A conflicting saved edit requires a new run against the current project. Live-mode conflicts likewise stop mirroring rather than overwrite saved work.
+
+## Layout, themes, and recoverable deletion
+
+Drag the separators to resize the file/project regions, editor goals, and assistant. Separators also support keyboard arrows, Home/End, and double-click reset. Layout choices persist locally. The goals view follows initial light/dark theme selection and subsequent toggles, including an explicit iframe background and readable binder/turnstile colors.
+
+Delete controls are available for writable project files and folders, projects, and the selected chat. They open a confirmation and move the item to recoverable **Trash**. Use the immediate **Undo** notice or open Trash and **Restore**. Restoring files does not overwrite existing paths. Chat deletion archives its conversation and saved runs together; restoration returns that same history. Stop an active run before deleting or restoring its chat. Library dependency files cannot be deleted through these controls.
+
 ## Provider configuration
 
 The server uses an independent provider configuration at `.data/provider.json` with permissions `0600`. The first startup can initialize it from `LEMEX_API_KEY` and `LEMEX_BASE_URL` in the server environment. Provider keys stay on the server and enter only the relevant assistant worker's environment; they are not passed to ordinary Lean checks or sent to the browser. Model catalog metadata is packaged without credentials.
@@ -127,13 +170,14 @@ Back up `.data/auth`, `.data/provider.json`, workspace metadata, source projects
 
 ## Verification
 
-Assistant output is rebuilt in a verification copy captured from the saved project, with only validated Lean changes applied. Verification receives a fresh home and artifacts, uses `python3 -I` for its audit helper, and runs with network access disabled. The trusted baseline Lake environment is resolved before building candidate code. Source/configuration fingerprints must remain unchanged during that build. The audit then uses the pinned Lean binary directly in another worker with a fresh read-only home and read-only project; it does not reevaluate build-controlled Lake files. Changed modules and their project-local imports compile from source into separate audit artifacts, and `leanchecker -v <Module>` replays every one through Lean's kernel. Existing project-local compiled artifacts are excluded from the audit search path; pinned library artifacts remain trusted imports. Axiom inspection checks for unfinished proofs and unexpected axioms. Kernel replay is part of the integrity check; formalized statements still need human review for mathematical intent. Repair/prove modes conservatively preserve existing statements and surrounding assumptions and reject commands hidden inside proof spans. Assistant changes containing executable metaprogramming (`run_tac`, `run_cmd`, `#eval`, and related constructs) require manual review. The interface pauses Apply while the current editor buffer has unsaved changes; explicit discard restores only that buffer, with no automatic save. Saving project sources during a run invalidates its baseline and requires a new run.
+Assistant output is rebuilt in a verification copy captured from the saved project, with only validated Lean changes applied. Verification receives a fresh home and artifacts, uses `python3 -I` for its audit helper, and runs with network access disabled. The trusted baseline Lake environment is resolved before building candidate code. Source/configuration fingerprints must remain unchanged during that build. The audit then uses the pinned Lean binary directly in another worker with a fresh read-only home and read-only project; it does not reevaluate build-controlled Lake files. Changed modules and their project-local imports compile from source into separate audit artifacts, and `leanchecker -v <Module>` replays every one through Lean's kernel. Existing project-local compiled artifacts are excluded from the audit search path; pinned library artifacts remain trusted imports. Axiom inspection checks for unfinished proofs and unexpected axioms. Kernel replay is part of the integrity check; formalized statements still need human review for mathematical intent. Repair/prove/optimize modes conservatively preserve existing statements and surrounding assumptions and reject commands hidden inside proof spans. Assistant changes containing executable metaprogramming (`run_tac`, `run_cmd`, `#eval`, and related constructs) require manual review. Apply and live Undo protect unsaved buffers and conflicting saved edits as described above; a verification badge does not authorize overwriting newer user work.
 
 ```bash
 npm test
 npm run check
 node scripts/check-runtime.mjs
 node scripts/check-verification.mjs
+node scripts/check-optimization.mjs
 ```
 
 This compiles a real Lean proof and replays it through the kernel, checks writable project/private-home isolation and read-only system files, and tests read-only dependency/artifact sharing, per-process secret scoping, and cancellation of a worker containing a child process. It asserts that cancelled containers have been removed, concurrent registry updates preserve each other, and server restart cleanup preserves helper and unrelated workers. It also verifies that the native Lemex command runs inside the image. The preset bootstrap adds full default-library import checks. Application and browser tests cover the separate workspace API, editor/infoview, assistant protocol, and diff-review flow.

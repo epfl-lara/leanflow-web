@@ -5,6 +5,7 @@ import { Icon } from './Icons'
 
 interface Settings {
   extraInstructions: string
+  showReasoning: boolean
   tools: { lean: boolean; lean_explore: boolean; exa: boolean }
   basePrompt?: string
 }
@@ -43,6 +44,7 @@ export function SettingsModal({
         body: JSON.stringify({
           extraInstructions: settings.extraInstructions,
           tools: settings.tools,
+          showReasoning: settings.showReasoning,
         }),
       })
       onSaved()
@@ -91,6 +93,28 @@ export function SettingsModal({
             Added to the workspace proof guidance. Verification requirements
             still apply.
           </p>
+          <div className="tool-checkboxes reasoning-setting">
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.showReasoning ?? true}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    showReasoning: event.target.checked,
+                  })
+                }
+                disabled={busy}
+              />
+              <span>
+                <strong>Reasoning traces</strong>
+                <span>
+                  Capture the reasoning that the selected model exposes during
+                  new runs.
+                </span>
+              </span>
+            </label>
+          </div>
           <span className="field-label">Available tools</span>
           <div className="tool-checkboxes">
             {[
