@@ -56,6 +56,72 @@ const {
   proofFocusPrompts,
 } = load('./chatDrafts.ts')
 const { OutputText } = load('./AssistantText.tsx')
+const { UsageSummary } = load('./UsageSummary.tsx')
+
+test('usage shows current context first and keeps cumulative request totals collapsed', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(UsageSummary, {
+      value: {
+        total: {
+          inputTokens: 3477092,
+          cachedInputTokens: 3350016,
+          outputTokens: 5603,
+          totalTokens: 3482695,
+        },
+        last: { inputTokens: 26556 },
+        modelContextWindow: 190000,
+      },
+    }),
+  )
+  assert.match(html, /Current context: 26,556 \/ 190,000 tokens \(14\.0%\)/)
+  assert(
+    html.indexOf('Current context') < html.indexOf('Totals for this request'),
+  )
+  assert.match(
+    html,
+    /<details class="usage-request"><summary>Totals for this request<\/summary>/,
+  )
+  assert.match(html, /Input \(including cached\)/)
+  assert.match(html, /3,477,092/)
+  assert.match(html, /Repeated context counts each time/)
+})
+
+test('missing context stays unknown instead of using request totals as context', () => {
+  for (const last of [
+    undefined,
+    { inputTokens: -1 },
+    { inputTokens: '26556' },
+  ]) {
+    const html = renderToStaticMarkup(
+      React.createElement(UsageSummary, {
+        value: {
+          total: { inputTokens: 3477092 },
+          last,
+          modelContextWindow: 190000,
+        },
+      }),
+    )
+    assert.match(html, /Current context was not reported/)
+    assert(!html.includes('Current context: 3,477,092'))
+  }
+})
+
+test('usage can show a reported context without a window or totals, including zero', () => {
+  for (const input of [0, 26556]) {
+    const html = renderToStaticMarkup(
+      React.createElement(UsageSummary, {
+        value: { last: { inputTokens: input } },
+      }),
+    )
+    assert(html.includes(`Current context: ${input.toLocaleString()} tokens`))
+    assert.match(html, /Token totals were not reported/)
+    assert(!html.includes('%'))
+  }
+  assert.equal(
+    renderToStaticMarkup(React.createElement(UsageSummary, { value: null })),
+    '',
+  )
+})
 const run = (fields = {}) => ({ id: 'run-1', status: 'completed', ...fields })
 const draft = {
   text: 'Use the attached lemma',

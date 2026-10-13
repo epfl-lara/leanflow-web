@@ -106,6 +106,7 @@ Object.assign(earlier, {
       reasoningOutputTokens: 140,
       totalTokens: 1540,
     },
+    last: { inputTokens: 800 },
     modelContextWindow: 200000,
   },
 })
@@ -272,7 +273,7 @@ try {
     () => page.evaluate((id) => window.__chatFixture.connected(id), active.id),
     'active chat stream',
   )
-  for (const name of ['Proofs', 'Formalize', 'Optimize', 'Search'])
+  for (const name of ['Proofs', 'Formalize', 'Optimize', 'Ask & Search'])
     await visible(
       page.locator('.mode-tabs').getByRole('button', { name, exact: true }),
       name,
@@ -576,7 +577,19 @@ try {
   report.checks.push(
     'Newer compact history verification preserves loaded error, warning and axiom details',
   )
-  await oldTurn.locator('.readable-usage > summary').click()
+  const context = oldTurn.locator('.usage-context')
+  await context.waitFor()
+  assert(
+    (await context.innerText()).includes(
+      'Current context: 800 / 200,000 tokens (0.4%)',
+    ),
+  )
+  assert.equal(
+    await oldTurn.locator('.usage-totals').isVisible(),
+    false,
+    'Request totals should start collapsed while current context is visible',
+  )
+  await oldTurn.getByText('Totals for this request', { exact: true }).click()
   const usage = oldTurn.locator('.usage-totals')
   await usage.waitFor()
   const usageText = await usage.innerText()

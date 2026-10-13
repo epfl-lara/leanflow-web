@@ -1,7 +1,9 @@
 import { pretty } from './api'
 
-const record = (value: unknown): Record<string, unknown> =>
-  value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+const field = (value: unknown, key: string): unknown =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? Reflect.get(value, key)
+    : undefined
 const count = (value: unknown) =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? value
@@ -10,50 +12,67 @@ const format = (value: number) => new Intl.NumberFormat().format(value)
 
 export function UsageSummary({ value }: { value: unknown }) {
   if (value == null) return null
-  const usage = record(value),
-    total = record(usage.total),
-    last = record(usage.last)
+  const total = field(value, 'total'),
+    last = field(value, 'last')
   const metrics = [
-    ['Input', count(total.inputTokens)],
-    ['Output', count(total.outputTokens)],
-    ['Cached input', count(total.cachedInputTokens)],
-    ['Cache write', count(total.cacheWriteInputTokens)],
-    ['Reasoning output', count(total.reasoningOutputTokens)],
-    ['Total reported', count(total.totalTokens)],
+    ['Input (including cached)', count(field(total, 'inputTokens'))],
+    ['Output', count(field(total, 'outputTokens'))],
+    ['Cached input', count(field(total, 'cachedInputTokens'))],
+    ['Cache write', count(field(total, 'cacheWriteInputTokens'))],
+    ['Reasoning output', count(field(total, 'reasoningOutputTokens'))],
+    ['Total tokens', count(field(total, 'totalTokens'))],
   ] as const
-  const input = count(last.inputTokens),
-    window = count(usage.modelContextWindow)
+  const input = count(field(last, 'inputTokens')),
+    window = count(field(value, 'modelContextWindow'))
   return (
-    <details className="usage-details readable-usage">
-      <summary>Usage</summary>
-      {metrics.some(([, value]) => value !== null) ? (
-        <dl className="usage-totals">
-          {metrics
-            .filter(([, value]) => value !== null)
-            .map(([label, value]) => (
-              <div key={label}>
-                <dt>{label}</dt>
-                <dd>{format(value!)}</dd>
-              </div>
-            ))}
-        </dl>
-      ) : (
-        <p className="field-help">Token totals were not reported.</p>
-      )}
-      {input !== null && window !== null && window > 0 && input <= window && (
-        <p className="usage-context">
-          Latest input: {format(input)} of {format(window)} reported
-          context-window tokens ({((100 * input) / window).toFixed(1)}%).
-        </p>
-      )}
-      <p className="field-help">
-        Reported counters; cache and reasoning fields are shown separately
-        without estimating charges.
+    <section className="usage-details readable-usage" aria-label="Usage">
+      <p className="usage-context">
+        {input === null ? (
+          'Current context was not reported.'
+        ) : (
+          <>
+            Current context: {format(input)}
+            {window !== null && window > 0 ? (
+              <>
+                {' / '}
+                {format(window)} tokens
+                {input <= window &&
+                  ` (${((100 * input) / window).toFixed(1)}%)`}
+              </>
+            ) : (
+              ' tokens'
+            )}
+            . Based on the latest model call.
+          </>
+        )}
       </p>
-      <details className="usage-raw">
-        <summary>Raw data</summary>
-        <pre>{pretty(value)}</pre>
+      <details className="usage-request">
+        <summary>Totals for this request</summary>
+        <p className="field-help">
+          Processing across all model calls for this request. Repeated context
+          counts each time; these totals are not the current context size.
+          Cached input is included in Input.
+        </p>
+        {metrics.some(([, value]) => value !== null) ? (
+          <dl className="usage-totals">
+            {metrics.map(
+              ([label, value]) =>
+                value !== null && (
+                  <div key={label}>
+                    <dt>{label}</dt>
+                    <dd>{format(value)}</dd>
+                  </div>
+                ),
+            )}
+          </dl>
+        ) : (
+          <p className="field-help">Token totals were not reported.</p>
+        )}
+        <details className="usage-raw">
+          <summary>Raw data</summary>
+          <pre>{pretty(value)}</pre>
+        </details>
       </details>
-    </details>
+    </section>
   )
 }

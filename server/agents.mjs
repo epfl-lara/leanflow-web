@@ -4,6 +4,7 @@ import { AgentRpc } from './rpc.mjs'
 import { TERMINAL } from './events.mjs'
 import { proofRisks, verifyCandidate } from './verification.mjs'
 import { createAgentOutputHandler } from './agent-output.mjs'
+import { createHoverLookupGuard } from './agent-hover-guard.mjs'
 import { LiveMirror } from './agent-live.mjs'
 import { FollowupInbox } from './agent-followups.mjs'
 import {
@@ -614,6 +615,12 @@ export class AgentManager {
       // This promise may reject before turn/start returns; attach immediately.
       finished.catch(() => {})
       rpc.on('closed', rejectFinished)
+      const hoverGuard = createHoverLookupGuard({
+        active,
+        rpc,
+        onNotice: (text) => this.#log(id, text),
+        onFailure: rejectFinished,
+      })
       rpc.on('request', (request) => {
         this.#log(
           id,
@@ -668,6 +675,8 @@ export class AgentManager {
           }
         } else if (method === 'item/completed') {
           const item = params.item || {}
+          hoverGuard.handle(item)
+          if (active.accepting === false && !active.completed) return
           if (item.type === 'commandExecution' && item.exitCode !== 0)
             this.#log(
               id,
