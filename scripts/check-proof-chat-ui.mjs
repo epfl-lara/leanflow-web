@@ -88,17 +88,24 @@ async function chooseChat(id) {
   )
 }
 async function focus(name, mode = 'proofs') {
-  await page.getByRole('button', { name: 'Outline', exact: true }).click()
   await page
-    .getByRole('list', { name: 'Declarations in this file' })
-    .getByRole('button', { name: new RegExp(`^${name}`) })
-    .click()
-  await page
-    .locator('.proof-focus-actions')
+    .getByLabel('Assistant mode')
     .getByRole('button', {
-      name: mode === 'optimize' ? 'Optimize' : 'Ask Lemex',
+      name: mode === 'optimize' ? 'Optimize' : 'Proofs',
       exact: true,
     })
+    .click()
+  await page
+    .getByRole('button', { name: 'Focus proof / lines', exact: true })
+    .click()
+  const picker = page.getByRole('dialog', {
+    name: 'Choose a proof or lines',
+    exact: true,
+  })
+  await picker.getByLabel('Find a proof to focus').fill(name)
+  await page
+    .getByRole('list', { name: 'Proof targets in this file' })
+    .getByRole('button', { name: new RegExp(name) })
     .click()
   await until(
     async () =>

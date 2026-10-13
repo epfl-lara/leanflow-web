@@ -288,11 +288,11 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
+  padding: 8px 10px;
   margin-bottom: 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--accent);
   border-radius: 6px;
-  background: var(--surface);
+  background: var(--accent-soft);
 }
 .proof-target-link,
 .message-proof-target {
@@ -328,6 +328,180 @@
 .proof-target-link small,
 .message-proof-target {
   font-size: 11px;
+}
+.proof-target-caption {
+  display: block;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.chat-focus-control {
+  position: static;
+  flex-shrink: 0;
+}
+.chat-focus-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 7px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.chat-focus-trigger:hover,
+.chat-focus-trigger[aria-expanded='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.chat-focus-popover {
+  position: fixed;
+  z-index: 40;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 8px 26px #0003;
+}
+.chat-focus-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 9px;
+}
+.chat-focus-heading span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+.chat-focus-current {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 8px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.chat-focus-current strong,
+.chat-focus-current small {
+  display: block;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.chat-focus-current small {
+  color: var(--muted);
+  font-weight: normal;
+}
+.chat-focus-current:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+.chat-focus-popover input {
+  min-width: 0;
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+}
+.chat-focus-declarations {
+  max-height: min(190px, 27dvh);
+  overflow: auto;
+  margin: 6px 0 8px;
+}
+.chat-focus-declaration {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 4px;
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.chat-focus-declaration:not(:disabled):hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.chat-focus-declaration:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.chat-focus-declaration .declaration-kind {
+  display: inline-block;
+  flex-shrink: 0;
+  min-width: 52px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10px;
+}
+.chat-focus-declaration .declaration-kind-theorem,
+.chat-focus-declaration .declaration-kind-lemma,
+.chat-focus-declaration .declaration-kind-example {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.chat-focus-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-focus-line {
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.chat-focus-lines {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.chat-focus-lines label,
+.chat-focus-help {
+  color: var(--muted);
+  font-size: 11px;
+}
+.chat-focus-lines input {
+  flex: 1;
+}
+.chat-focus-lines .button {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.chat-focus-help {
+  margin: 7px 0 0;
+  line-height: 1.5;
 }
 .message-proof-target {
   margin-top: 7px;
@@ -371,6 +545,24 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 5px;
+}
+.composer-attachments {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+.chat-workbench .composer-attachments .file-context-control {
+  flex: 1 1 140px;
+  min-width: 0;
+  margin: 0;
+  position: static;
+}
+.chat-workbench .composer-attachments .file-context-chips {
+  order: 1;
+  flex-basis: 100%;
 }
 .chat-workbench .file-context-chips {
   max-height: 58px;

@@ -25,6 +25,7 @@ import { AssistantPanel } from './AssistantPanel'
 import { Dialog } from './Dialog'
 import { Icon } from './Icons'
 import { LeanWorkspace } from './LeanWorkspace'
+import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
 import { UploadModal } from './UploadFiles'
 import { SearchPanel } from './SearchPanel'
@@ -33,7 +34,12 @@ import { FileBrowser } from './FileBrowser'
 import { GitModal } from './GitModal'
 import { ResizeHandle } from './ResizeHandle'
 import { SessionRecovery } from './SessionRecovery'
-import type { ProofFocusRequest, ProofTarget } from './proofTarget'
+import type {
+  EditorProofState,
+  ProofEditorRequest,
+  ProofFocusRequest,
+  ProofTarget,
+} from './proofTarget'
 import {
   DEFAULT_LAYOUT,
   clamp,
@@ -175,8 +181,11 @@ export function Studio() {
   )
   const [navigationElement, setNavigationElement] =
     useState<HTMLDivElement | null>(null)
+  const [sourceSectionsElement, setSourceSectionsElement] =
+    useState<HTMLDivElement | null>(null)
   const studioSize = useElementSize(studioElement)
   const navigationSize = useElementSize(navigationElement)
+  const sourceSectionsSize = useElementSize(sourceSectionsElement)
   const mobileLayout = useMediaQuery('(max-width: 720px)')
   const overlayTools = useMediaQuery('(max-width: 1000px)')
   const [sidebarSize, setSidebarSize] = useStoredSize(
@@ -203,6 +212,12 @@ export function Studio() {
     20,
     85,
   )
+  const [fileTreeSize, setFileTreeSize] = useStoredSize(
+    'lemex-layout-file-tree',
+    45,
+    20,
+    80,
+  )
   const [session, setSession] = useState<Session | null>(null)
   const [authRequired, setAuthRequired] = useState(false)
   const [startupError, setStartupError] = useState('')
@@ -211,6 +226,9 @@ export function Studio() {
   const [files, setFiles] = useState<FileEntry[]>([])
   const [file, setFile] = useState<OpenFile | null>(null)
   const [proofFocus, setProofFocus] = useState<ProofFocusRequest | null>(null)
+  const [editorProof, setEditorProof] = useState<EditorProofState | null>(null)
+  const [focusEditorRequest, setFocusEditorRequest] =
+    useState<ProofEditorRequest | null>(null)
   const [revealProof, setRevealProof] = useState<{
     id: number
     target: Pick<ProofTarget, 'path' | 'startLine' | 'endLine' | 'name'>
@@ -268,6 +286,8 @@ export function Studio() {
   filesRef.current = files
   projectIdRef.current = projectId
   const project = projects.find((item) => item.id === projectId)
+  const currentEditorProof =
+    editorProof?.path === file?.path ? editorProof : null
   const sidebarMaximum = Math.min(
     480,
     studioSize.width - 360 - (toolsOpen && !overlayTools ? 280 : 0),
@@ -289,6 +309,15 @@ export function Studio() {
     Math.min(85, 100 - (90 / navigationSize.height) * 100),
   )
   const filesPercent = clamp(filesSize, filesMinimum, filesMaximum)
+  const fileTreeMinimum = Math.min(
+    60,
+    Math.max(20, (80 / sourceSectionsSize.height) * 100),
+  )
+  const fileTreeMaximum = Math.max(
+    fileTreeMinimum,
+    Math.min(80, 100 - (100 / sourceSectionsSize.height) * 100),
+  )
+  const fileTreePercent = clamp(fileTreeSize, fileTreeMinimum, fileTreeMaximum)
   const dirty = !!file && file.content !== file.savedContent
 
   const loadSession = useCallback(async () => {
@@ -445,6 +474,8 @@ export function Studio() {
     setFiles([])
     setFile(null)
     setProofFocus(null)
+    setEditorProof(null)
+    setFocusEditorRequest(null)
     setRevealProof(null)
     setGit(null)
     setGitOpen(false)
@@ -911,6 +942,7 @@ export function Studio() {
           '--sidebar-width': `${sidebarWidth}px`,
           '--assistant-width': `${assistantWidth}px`,
           '--files-size': `${filesPercent}%`,
+          '--file-tree-size': `${fileTreePercent}%`,
         } as CSSProperties
       }
     >
@@ -930,72 +962,129 @@ export function Studio() {
           </button>
         </div>
         <div ref={setNavigationElement} className="sidebar-navigation">
-          <section className="sidebar-files-section" aria-label="Files">
-            <div className="sidebar-section-title">
-              <span>Files</span>
-              <div>
-                <button
-                  className="button small subtle"
-                  onClick={() => setUploadModal(true)}
-                  disabled={project?.status !== 'ready'}
-                  title="Upload local files or a folder"
-                >
-                  Upload
-                </button>
-                <button
-                  className="icon-button"
-                  onClick={() => {
-                    setNewFileName('')
-                    setNewFileError('')
-                    setNewFileModal(true)
-                  }}
-                  disabled={project?.status !== 'ready'}
-                  title="New file"
-                  aria-label="New file"
-                >
-                  <Icon name="plus" size={16} />
-                </button>
-                <button
-                  className="icon-button"
-                  onClick={() =>
-                    projectId &&
-                    void loadFiles(projectId).catch((error) =>
-                      setError(errorText(error)),
-                    )
-                  }
-                  disabled={project?.status !== 'ready'}
-                  title="Refresh files"
-                  aria-label="Refresh files"
-                >
-                  <Icon name="refresh" size={14} />
-                </button>
+          <div
+            ref={setSourceSectionsElement}
+            className="sidebar-source-sections"
+          >
+            <section className="sidebar-files-section" aria-label="Files">
+              <div className="sidebar-section-title">
+                <span>Files</span>
+                <div>
+                  <button
+                    className="button small subtle"
+                    onClick={() => setUploadModal(true)}
+                    disabled={project?.status !== 'ready'}
+                    title="Upload local files or a folder"
+                  >
+                    Upload
+                  </button>
+                  <button
+                    className="icon-button"
+                    onClick={() => {
+                      setNewFileName('')
+                      setNewFileError('')
+                      setNewFileModal(true)
+                    }}
+                    disabled={project?.status !== 'ready'}
+                    title="New file"
+                    aria-label="New file"
+                  >
+                    <Icon name="plus" size={16} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    onClick={() =>
+                      projectId &&
+                      void loadFiles(projectId).catch((error) =>
+                        setError(errorText(error)),
+                      )
+                    }
+                    disabled={project?.status !== 'ready'}
+                    title="Refresh files"
+                    aria-label="Refresh files"
+                  >
+                    <Icon name="refresh" size={14} />
+                  </button>
+                </div>
               </div>
-            </div>
-            {files.length > 8 && (
-              <div className="file-filter">
-                <Icon name="search" size={13} />
-                <input
-                  aria-label="Filter files"
-                  value={fileFilter}
-                  onChange={(event) => setFileFilter(event.target.value)}
-                  placeholder="Find a file…"
+              {files.length > 8 && (
+                <div className="file-filter">
+                  <Icon name="search" size={13} />
+                  <input
+                    aria-label="Filter files"
+                    value={fileFilter}
+                    onChange={(event) => setFileFilter(event.target.value)}
+                    placeholder="Find a file…"
+                  />
+                </div>
+              )}
+              <FileBrowser
+                files={files}
+                selectedPath={file?.path}
+                dirty={dirty}
+                disabled={opening || saving}
+                filter={fileFilter}
+                ready={project?.status === 'ready'}
+                onSelect={chooseFile}
+                onDelete={(path, kind) =>
+                  projectId &&
+                  requestDelete({ projectId, path, name: path, kind })
+                }
+              />
+            </section>
+            {file?.path.endsWith('.lean') && project?.status === 'ready' && (
+              <>
+                <ResizeHandle
+                  label="Resize files and outline"
+                  orientation="horizontal"
+                  value={fileTreePercent}
+                  min={fileTreeMinimum}
+                  max={fileTreeMaximum}
+                  onChange={setFileTreeSize}
+                  onReset={() => setFileTreeSize(45)}
+                  pixelsPerUnit={() => sourceSectionsSize.height / 100}
+                  unit="percent"
+                  className="outline-resize-handle"
                 />
-              </div>
+                <ProofOutline
+                  key={file.path}
+                  declarations={currentEditorProof?.declarations || []}
+                  status={currentEditorProof?.status || 'loading'}
+                  target={currentEditorProof?.target || null}
+                  error={currentEditorProof?.error}
+                  disabled={!currentEditorProof || currentEditorProof.disabled}
+                  readOnly={!!file.readOnly}
+                  onSelect={(item) => {
+                    setRevealProof({
+                      id: ++proofRequestId.current,
+                      target: {
+                        path: file.path,
+                        startLine: item.startLine,
+                        endLine: item.endLine,
+                        name: item.name,
+                      },
+                    })
+                    setSidebarOpen(false)
+                  }}
+                  onFocus={(mode) =>
+                    setFocusEditorRequest({
+                      id: ++proofRequestId.current,
+                      path: file.path,
+                      mode,
+                    })
+                  }
+                  onUseDeclaration={(declaration, mode) =>
+                    setFocusEditorRequest({
+                      id: ++proofRequestId.current,
+                      path: file.path,
+                      declaration,
+                      mode,
+                    })
+                  }
+                />
+              </>
             )}
-            <FileBrowser
-              files={files}
-              selectedPath={file?.path}
-              dirty={dirty}
-              disabled={opening || saving}
-              filter={fileFilter}
-              ready={project?.status === 'ready'}
-              onSelect={chooseFile}
-              onDelete={(path, kind) =>
-                projectId &&
-                requestDelete({ projectId, path, name: path, kind })
-              }
-            />
-          </section>
+          </div>
           <ResizeHandle
             label="Resize files and projects"
             orientation="horizontal"
@@ -1453,6 +1542,13 @@ export function Studio() {
               goalsSize={goalsSize}
               onGoalsSizeChange={setGoalsSize}
               revealTarget={revealProof || undefined}
+              onProofStateChange={setEditorProof}
+              focusEditorRequest={focusEditorRequest}
+              onFocusEditorHandled={(id) =>
+                setFocusEditorRequest((current) =>
+                  current?.id === id ? null : current,
+                )
+              }
               onFocusProof={(target, mode) => {
                 setProofFocus({
                   id: ++proofRequestId.current,
@@ -1462,6 +1558,7 @@ export function Studio() {
                 })
                 setToolTab('assistant')
                 setToolsOpen(true)
+                setSidebarOpen(false)
               }}
               onState={setLeanState}
               onChange={(path, content) =>
@@ -1596,6 +1693,15 @@ export function Studio() {
                 file={file?.path}
                 files={files}
                 focusRequest={proofFocus || undefined}
+                editorProof={currentEditorProof || undefined}
+                onFocusEditor={(request) => {
+                  if (!currentEditorProof) return
+                  setFocusEditorRequest({
+                    ...request,
+                    id: ++proofRequestId.current,
+                    path: currentEditorProof.path,
+                  })
+                }}
                 onFocusHandled={(id) =>
                   setProofFocus((current) =>
                     current?.id === id ? null : current,

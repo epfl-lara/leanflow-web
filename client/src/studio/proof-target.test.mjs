@@ -177,3 +177,168 @@ test('foreign, invalid and out-of-buffer symbols cannot select source', () => {
     [],
   )
 })
+
+test('outline labels Lean command kinds without guessing declaration boundaries', () => {
+  const source = [
+    'import Mathlib.Data.Nat.Basic',
+    '/-- theorem fake : False --/',
+    '@[simp] private theorem actual : True := by trivial',
+    'protected def evaluate := "lemma fake := by"',
+    'lemma useful : True := by trivial',
+    'example : True := by trivial',
+    'structure Point where x : Nat',
+    'inductive Color | red',
+    'abbrev Number := Nat',
+    'instance : Inhabited Number := ⟨0⟩',
+    'axiom assumed : True',
+  ].join('\n')
+  const commands = [
+    ['actual', 1, 2],
+    ['evaluate', 3, 3],
+    ['useful', 4, 4],
+    ['example', 5, 5],
+    ['Point', 6, 6],
+    ['Color', 7, 7],
+    ['Number', 8, 8],
+    ['instInhabitedNumber', 9, 9],
+    ['assumed', 10, 10],
+  ].map(([name, start, end]) => ({
+    name,
+    kind: 6,
+    range: {
+      start: { line: start, character: 0 },
+      end: { line: end, character: source.split('\n')[end].length },
+    },
+  }))
+  const result = proofDeclarations(commands, uri, 11, source)
+  assert.deepEqual(
+    result.map(({ name, kind }) => [name, kind]),
+    [
+      ['Mathlib.Data.Nat.Basic', 'import'],
+      ['actual', 'theorem'],
+      ['evaluate', 'def'],
+      ['useful', 'lemma'],
+      ['example', 'example'],
+      ['Point', 'structure'],
+      ['Color', 'inductive'],
+      ['Number', 'abbrev'],
+      ['instInhabitedNumber', 'instance'],
+      ['assumed', 'other'],
+    ],
+  )
+  assert.deepEqual(result[1], {
+    name: 'actual',
+    kind: 'theorem',
+    startLine: 2,
+    startColumn: 1,
+    endLine: 3,
+    endColumn: source.split('\n')[2].length + 1,
+  })
+})
+
+test('import header retains exact locations and ignores nested comments', () => {
+  const source = [
+    '/- import Fake',
+    '  /- import Nested -/',
+    '-/',
+    'prelude',
+    '  import Mathlib -- import AlsoFake',
+    'public import CSLib',
+    'namespace Demo',
+    'import NotInTheHeader',
+  ].join('\r\n')
+  assert.deepEqual(proofDeclarations([], uri, 8, source), [
+    {
+      name: 'Mathlib',
+      kind: 'import',
+      startLine: 5,
+      startColumn: 3,
+      endLine: 5,
+      endColumn: 17,
+    },
+    {
+      name: 'CSLib',
+      kind: 'import',
+      startLine: 6,
+      startColumn: 1,
+      endLine: 6,
+      endColumn: 20,
+    },
+  ])
+})
+
+test('imports and command kinds are never taken from strings or syntax quotations', () => {
+  const source = [
+    'import Mathlib',
+    'def text := "',
+    'import InAString',
+    'theorem InAString : True := by trivial"',
+    'def quoted := `(command|',
+    '  /- nested /- theorem Fake -/ -/',
+    '  import InAQuotation',
+    "  def nested := ')'",
+    ')',
+    'import AfterACommand',
+  ].join('\n')
+  const symbols = [
+    {
+      name: 'quoted',
+      kind: 6,
+      range: {
+        start: { line: 4, character: 0 },
+        end: { line: 8, character: 1 },
+      },
+    },
+  ]
+  const result = proofDeclarations(symbols, uri, 10, source)
+  assert.deepEqual(
+    result.map(({ name, kind }) => [name, kind]),
+    [
+      ['Mathlib', 'import'],
+      ['quoted', 'def'],
+    ],
+  )
+  // A range beginning at a term quotation is still not a declaration keyword.
+  assert.equal(
+    proofDeclarations(
+      [
+        {
+          name: 'term',
+          kind: 6,
+          range: {
+            start: { line: 4, character: 14 },
+            end: { line: 8, character: 1 },
+          },
+        },
+      ],
+      uri,
+      10,
+      source,
+    ).find(({ name }) => name === 'term').kind,
+    'other',
+  )
+})
+
+test('cursor on an import navigates without implicitly setting a proof target', () => {
+  const source = 'import Mathlib\ntheorem actual : True := by trivial'
+  const items = proofDeclarations([], uri, 2, source)
+  assert.equal(
+    proofTargetForSelection('Main.lean', source, cursor(1), items).target,
+    null,
+  )
+  // An explicit line selection remains available when the user asks about an import.
+  assert.equal(
+    proofTargetForSelection(
+      'Main.lean',
+      source,
+      {
+        startLineNumber: 1,
+        startColumn: 1,
+        endLineNumber: 1,
+        endColumn: 8,
+      },
+      items,
+    ).target.source,
+    'import Mathlib',
+  )
+})
