@@ -494,6 +494,11 @@ export class Runtime {
     this.reaped += orphans.length
   }
 
+  toolchainSourceRoot(toolchain) {
+    const root = this.toolchains.get(toolchain)
+    return root ? path.join(root, 'src', 'lean') : null
+  }
+
   info() {
     return {
       ready: this.ready,

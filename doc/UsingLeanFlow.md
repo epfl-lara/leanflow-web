@@ -51,6 +51,10 @@ After stopping, **Undo agent edits** restores changes without overwriting confli
 
 **Search** defaults to LeanExplore, with Loogle also available. Results show a **Type** or **Signature** and available documentation/source links. Check results against your project's versions.
 
+Choose **Open locally** to view a module from the project's pinned Lean installation or installed library packages. The viewer is read only and leaves your editor's unsaved changes intact. It selects the declaration when its signature matches the local file; otherwise it shows the module without guessing a line from another version. **Open source** opens the search index's version on the web.
+
+To jump to a declaration from the editor, put the cursor on its name and press **F12**, or right-click and choose **Go to Definition**. Project files open in the editor; definitions in Lean's installed library open in the scrollable read-only viewer at the position reported by Lean. Navigation between project files uses the usual unsaved-edit prompt.
+
 In **Source control**, save files, review the diff, and enter a commit message. Use **New branch** if needed. To push, choose a repository and branch in **Publish**, then **Preview push**. Review it and provide a repository token with push permission; the token is used only for that push and stays out of the proof agent.
 
 Deleted files, folders, projects, and chats go to **Trash**. Use **Restore** or the immediate **Undo** notice. Stop an active chat before deleting it.

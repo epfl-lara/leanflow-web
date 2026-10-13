@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, errorText } from './api'
 import { OutputText } from './AssistantText'
 import { Icon } from './Icons'
+import type { SourceRequest } from './LibrarySourceDialog'
 import './search-results.css'
 
 interface SearchResponse {
@@ -29,7 +30,13 @@ function sourceUrl(value: unknown) {
   }
 }
 
-function Result({ value }: { value: unknown }) {
+function Result({
+  value,
+  onOpenLocal,
+}: {
+  value: unknown
+  onOpenLocal?: (request: SourceRequest) => void
+}) {
   const item =
     value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
   const name = resultText(
@@ -50,6 +57,7 @@ function Result({ value }: { value: unknown }) {
   )
   const module = resultText(item.module, item.source_file)
   const url = sourceUrl(item.url || item.link)
+  const localSignature = resultText(item.signature) || ''
   return (
     <article className="search-result">
       <header className="search-result-heading">
@@ -89,11 +97,30 @@ function Result({ value }: { value: unknown }) {
           Open source <Icon name="external" size={13} />
         </a>
       )}
+      {module && onOpenLocal && (
+        <button
+          className="button secondary search-open-local"
+          onClick={() =>
+            onOpenLocal({
+              module,
+              signature: localSignature.length <= 16_000 ? localSignature : '',
+            })
+          }
+        >
+          Open locally
+        </button>
+      )}
     </article>
   )
 }
 
-export function SearchPanel({ projectId }: { projectId?: string }) {
+export function SearchPanel({
+  projectId,
+  onOpenSource,
+}: {
+  projectId?: string
+  onOpenSource: (request: SourceRequest) => void
+}) {
   const [backend, setBackend] = useState<'loogle' | 'leanexplore'>(
     'leanexplore',
   )
@@ -225,14 +252,23 @@ export function SearchPanel({ projectId }: { projectId?: string }) {
           )}
           {Array.isArray(results) ? (
             results.length ? (
-              results.map((item, index) => <Result key={index} value={item} />)
+              results.map((item, index) => (
+                <Result
+                  key={index}
+                  value={item}
+                  onOpenLocal={projectId ? onOpenSource : undefined}
+                />
+              ))
             ) : (
               <p className="field-help">
                 No declarations matched. Try a broader query.
               </p>
             )
           ) : (
-            <Result value={results ?? response} />
+            <Result
+              value={results ?? response}
+              onOpenLocal={projectId ? onOpenSource : undefined}
+            />
           )}
         </div>
       )}

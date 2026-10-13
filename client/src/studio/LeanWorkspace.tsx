@@ -1,5 +1,6 @@
 import { LeanMonaco, LeanMonacoEditor } from 'lean4monaco'
 import { FileUri } from 'lean4monaco/dist/vscode-lean4/vscode-lean4/src/utils/exturi'
+import type { SourceRequest } from './LibrarySourceDialog'
 import { CancellationTokenSource } from 'monaco-editor'
 import {
   useEffect,
@@ -70,6 +71,7 @@ export function LeanWorkspace({
   onState,
   showInfoview,
   onOpenFile,
+  onOpenLibrary,
   goalsSize,
   onGoalsSizeChange,
   onFocusProof,
@@ -85,6 +87,7 @@ export function LeanWorkspace({
   onState: (state: string) => void
   showInfoview: boolean
   onOpenFile: (path: string, line?: number, column?: number) => void
+  onOpenLibrary: (request: SourceRequest) => void
   goalsSize: number
   onGoalsSizeChange: (value: number) => void
   onFocusProof?: (target: ProofTarget, mode?: ChatMode) => void
@@ -110,6 +113,7 @@ export function LeanWorkspace({
   const onChangeRef = useRef(onChange)
   const onStateRef = useRef(onState)
   const onOpenFileRef = useRef(onOpenFile)
+  const onOpenLibraryRef = useRef(onOpenLibrary)
   const themeRef = useRef(theme)
   const onFocusProofRef = useRef(onFocusProof)
   const declarationsRef = useRef<ProofDeclaration[]>([])
@@ -130,6 +134,7 @@ export function LeanWorkspace({
   onChangeRef.current = onChange
   onStateRef.current = onState
   onOpenFileRef.current = onOpenFile
+  onOpenLibraryRef.current = onOpenLibrary
   themeRef.current = theme
   onFocusProofRef.current = onFocusProof
 
@@ -311,9 +316,17 @@ export function LeanWorkspace({
           const replacement = async (...args: unknown[]) => {
             const result = await previous.apply(service, args)
             const input = args[0] as {
-              resource?: { path?: string }
+              resource?: {
+                path?: string
+                scheme?: string
+                toString?: () => string
+              }
               options?: {
-                selection?: { startLineNumber?: number; startColumn?: number }
+                selection?: {
+                  startLineNumber?: number
+                  startColumn?: number
+                  endLineNumber?: number
+                }
               }
             }
             if (
@@ -325,6 +338,16 @@ export function LeanWorkspace({
                 input.options?.selection?.startLineNumber,
                 input.options?.selection?.startColumn,
               )
+            } else if (
+              result == null &&
+              input?.resource?.scheme === 'file' &&
+              input.resource.toString
+            ) {
+              onOpenLibraryRef.current({
+                uri: input.resource.toString(),
+                line: input.options?.selection?.startLineNumber || 1,
+                endLine: input.options?.selection?.endLineNumber,
+              })
             }
             return result
           }

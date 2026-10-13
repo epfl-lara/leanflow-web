@@ -19,6 +19,14 @@ Set `LEMEX_API_KEY` and `LEMEX_BASE_URL` for your Lemex provider to enable the a
 
 See [`.env.example`](../.env.example) for a ready-to-edit file. `npm start` and `npm run dev` do not load `.env` automatically. Exported environment variables override values loaded with Node's `--env-file`.
 
+## Search service
+
+The Search panel uses the hosted LeanExplore HTTP API by default. It does not run `lean-explore data fetch`. Opening a result locally reads the project's installed sources; it does not require a local search index.
+
+To use your own compatible search service, set `STUDIO_LEANEXPLORE_URL` to its full HTTP search endpoint. The service must accept `GET` requests with `q` and `limit` parameters and return LeanExplore v2 JSON results. The configured endpoint is used by the Search panel; assistant MCP tools keep their own configuration.
+
+LeanExplore's local backend requires `lean-explore[local]`, `lean-explore data fetch`, and embedding/reranker models. Its `lean-explore mcp serve --backend local` command provides MCP, which is a different protocol from the Search panel's HTTP API. Provide an HTTP adapter for that backend before configuring this setting. See [LeanExplore's local backend guide](https://github.com/justincasher/lean-explore/blob/main/docs/local-backend.md).
+
 ## Adjust capacity
 
 Use the `STUDIO_MAX_*` settings in [`.env.example`](../.env.example) to set editor, agent, search, worker, and queue limits. Set `STUDIO_WORKER_CPUS` and `STUDIO_WORKER_MEMORY` for each worker; defaults are 2 CPUs and 4 GiB.

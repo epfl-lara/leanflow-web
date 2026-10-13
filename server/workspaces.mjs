@@ -18,6 +18,11 @@ import {
   dependencyBuildTargets,
 } from './project-libraries.mjs'
 import { configurationDigest } from './shared-dependencies.mjs'
+import {
+  libraryModulePath,
+  sourceSelection,
+  toolchainSourceModule,
+} from './library-sources.mjs'
 
 const MAX_FILE = 2 * 1024 * 1024
 const MAX_FILES = 12000
@@ -1992,6 +1997,86 @@ export class WorkspaceStore {
       : project.root
     const { content, hash } = await textFile(await guarded(root, filename))
     return { content, hash }
+  }
+
+  async readLibrarySource(id, owner, input) {
+    const project = this.get(id, owner)
+    if (
+      !input ||
+      typeof input !== 'object' ||
+      Array.isArray(input) ||
+      (input.uri !== undefined && input.module !== undefined)
+    )
+      fail('Choose a module or a Lean definition location.')
+    const module =
+      input.uri !== undefined
+        ? toolchainSourceModule(project.toolchain, input.uri)
+        : input.module
+    const signature = input.signature === undefined ? '' : input.signature
+    const filename = libraryModulePath(module)
+    if (typeof signature !== 'string' || signature.length > 16_000)
+      fail('The declaration signature must be at most 16,000 characters.')
+    let source
+    let displayPath
+    if (/^(?:Init|Lean|Std)(?:\.|$)/.test(module)) {
+      const root = this.runtime.toolchainSourceRoot?.(project.toolchain)
+      if (!root)
+        fail(
+          'The project’s Lean sources are unavailable. Prepare the project and try again.',
+          404,
+        )
+      try {
+        source = await textFile(await guarded(root, filename))
+      } catch (error) {
+        if (error.code === 'ENOENT' || error.status === 404)
+          fail(
+            'This module is unavailable in the project’s Lean installation. Use Open source to view the indexed version.',
+            404,
+          )
+        throw error
+      }
+      displayPath = `Lean library/${filename}`
+    } else {
+      // Use the module, never the declaration's namespace. Existing workspace
+      // reads also handle packages mounted from a shared dependency cache.
+      const candidates = (await this.files(id, owner)).filter(
+        (file) =>
+          file.path.startsWith('.lake/packages/') &&
+          file.path.endsWith(`/${filename}`),
+      )
+      if (candidates.length !== 1)
+        fail(
+          candidates.length
+            ? 'More than one installed library contains this module. Open it from the library file tree.'
+            : 'This module is not installed in the project. Use Open source to view the indexed version.',
+          404,
+        )
+      displayPath = candidates[0].path
+      source = await this.readFile(id, owner, displayPath)
+    }
+    let selection = sourceSelection(source.content, signature)
+    if (input.uri !== undefined) {
+      const endLine = input.endLine ?? input.line
+      if (
+        !Number.isSafeInteger(input.line) ||
+        input.line < 1 ||
+        !Number.isSafeInteger(endLine) ||
+        endLine < input.line ||
+        endLine > source.content.split('\n').length
+      )
+        fail(
+          'The definition position is outside the local source file. Request its definition again.',
+        )
+      selection = { line: input.line, endLine }
+    }
+    return {
+      module,
+      path: displayPath,
+      toolchain: project.toolchain || null,
+      content: source.content,
+      readOnly: true,
+      ...selection,
+    }
   }
 
   async writeFile(id, owner, filename, content, expectedHash) {

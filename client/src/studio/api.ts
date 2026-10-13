@@ -82,6 +82,15 @@ export interface OpenFile {
   line?: number
   column?: number
 }
+export interface LibrarySource {
+  module: string
+  path: string
+  toolchain: string | null
+  content: string
+  readOnly: true
+  line: number | null
+  endLine: number | null
+}
 export interface RunEvent {
   seq: number
   type: string

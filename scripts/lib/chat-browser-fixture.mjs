@@ -85,6 +85,7 @@ export async function chatBrowserFixture({
   chats,
   runs,
   documentSymbols = [],
+  definitionLocations = null,
   legacyReasoning = false,
   failReasoningHistory = false,
 }) {
@@ -107,6 +108,7 @@ export async function chatBrowserFixture({
     chats,
     runs,
     documentSymbols,
+    definitionLocations,
     onMessage: null,
     onStop: null,
     onUndo: null,
@@ -311,7 +313,10 @@ export async function chatBrowserFixture({
       let result = null
       if (message.method === 'initialize')
         result = {
-          capabilities: { textDocumentSync: 1 },
+          capabilities: {
+            textDocumentSync: 1,
+            ...(state.definitionLocations ? { definitionProvider: true } : {}),
+          },
           serverInfo: { name: 'Browser fixture', version: '0.2.0' },
         }
       if (message.method === '$/lean/rpc/connect')
@@ -319,6 +324,14 @@ export async function chatBrowserFixture({
       if (/plainGoal/.test(message.method || '')) result = { goals: [] }
       if (message.method === 'textDocument/documentSymbol')
         result = state.documentSymbols
+      if (message.method === 'textDocument/definition') {
+        result = state.definitionLocations || []
+        report.requests.push({
+          method: 'LSP',
+          endpoint: 'textDocument/definition',
+          body: message.params,
+        })
+      }
       if (message.method === '$/lean/rpc/call') {
         if (message.params?.method === 'Lean.Widget.getInteractiveGoals')
           result = { goals: [] }

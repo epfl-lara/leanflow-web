@@ -108,7 +108,7 @@ test('LeanExplore v2 source_text produces a signature, docs, kind and source lin
   assert.equal(response.results[0].type, '')
   assert.equal(response.results[0].signatureSource, 'source')
   assert.equal(response.results[0].kind, 'theorem')
-  assert.equal(response.results[0].url, link)
+  assert.equal(response.results[0].url, link.replace('/src/lean/', '/src/'))
   assert.equal(response.results[1].kind, 'class')
   assert.equal(
     response.results[1].signature,
@@ -329,4 +329,75 @@ test('search response and individual fields remain bounded', async () => {
     }),
     { message: 'Search response exceeded the size limit.' },
   )
+})
+
+test('Lean core links use repository paths and preserve revisions, namespaces and line ranges', async () => {
+  const links = [
+    'https://github.com/leanprover/lean4/blob/v4.32.0/src/lean/Init/Data/Nat/Basic.lean#L334-L334',
+    'https://github.com/leanprover/lean4/blob/v4.32.0/src/lean/Lean/Level.lean#L424-L429',
+    'https://github.com/leanprover/lean4/blob/abc123/src/lean/Std/Data/HashMap/Basic.lean#L12-L15',
+    'https://github.com/leanprover/lean4/blob/v4.32.0/src/lean/Init.lean#L1',
+    'https://github.com/leanprover/lean4/blob/v4.32.0/src/Init/Data/Nat/Basic.lean#L334',
+    'https://github.com/leanprover-community/mathlib4/blob/abc123/Mathlib/Data/Nat/Basic.lean#L10',
+    'https://github.com/someone/lean4/blob/main/src/lean/Lean/Level.lean#L2',
+    'https://example.com/leanprover/lean4/blob/main/src/lean/Init.lean',
+  ]
+  const { response } = await search({
+    results: links.map((source_link) => ({
+      name: 'Deep.Nested.Namespace.declaration',
+      module: 'Init.Data.Nat.Basic',
+      source_link,
+    })),
+  })
+  for (const [index, result] of response.results.entries()) {
+    assert.equal(
+      result.url,
+      index < 4 ? links[index].replace('/src/lean/', '/src/') : links[index],
+    )
+    assert.equal(result.module, 'Init.Data.Nat.Basic')
+  }
+})
+
+test('a configured LeanExplore HTTP endpoint receives queries without using hosted search', async () => {
+  const calls = []
+  const response = await searchDeclarations(
+    {
+      query: 'Nat.pos_of_neZero',
+      backend: 'leanexplore',
+      projectId: 'project',
+    },
+    owner,
+    workspaces,
+    {
+      leanExploreUrl: 'http://127.0.0.1:8000/api/v2/search',
+      fetchImpl: async (url) => {
+        calls.push(url)
+        return new Response(JSON.stringify({ results: [] }))
+      },
+    },
+  )
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].origin, 'http://127.0.0.1:8000')
+  assert.equal(calls[0].pathname, '/api/v2/search')
+  assert.equal(calls[0].searchParams.get('q'), 'Nat.pos_of_neZero')
+  assert.equal(calls[0].searchParams.get('limit'), '12')
+  assert.equal(response.source.version, 'Configured index')
+  for (const leanExploreUrl of [
+    'file:///etc/passwd',
+    'https://user:password@example.com/search',
+    'invalid',
+  ])
+    await assert.rejects(
+      searchDeclarations(
+        { query: 'Nat.pos_of_neZero', backend: 'leanexplore' },
+        owner,
+        workspaces,
+        {
+          leanExploreUrl,
+          fetchImpl: async () =>
+            assert.fail('Invalid endpoints must not be fetched'),
+        },
+      ),
+      { status: 503 },
+    )
 })

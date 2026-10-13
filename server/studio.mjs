@@ -337,6 +337,11 @@ export async function createStudio({
       await workspaces.readFile(req.params.id, req.user.id, req.query.path),
     ),
   )
+  app.post('/api/projects/:id/library-source', async (req, res) =>
+    res.json(
+      await workspaces.readLibrarySource(req.params.id, req.user.id, req.body),
+    ),
+  )
   app.put('/api/projects/:id/file', async (req, res) => {
     if (
       [

@@ -29,6 +29,7 @@ import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
 import { UploadModal } from './UploadFiles'
 import { SearchPanel } from './SearchPanel'
+import { LibrarySourceDialog, type SourceRequest } from './LibrarySourceDialog'
 import { SettingsModal } from './SettingsModal'
 import { FileBrowser } from './FileBrowser'
 import { GitModal } from './GitModal'
@@ -257,6 +258,7 @@ export function Studio() {
   const [newFileError, setNewFileError] = useState('')
   const [saving, setSaving] = useState(false)
   const [opening, setOpening] = useState(false)
+  const [librarySource, setLibrarySource] = useState<SourceRequest | null>(null)
   const [fileFilter, setFileFilter] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [toolTab, setToolTab] = useState<'assistant' | 'search'>('assistant')
@@ -473,6 +475,7 @@ export function Studio() {
   useEffect(() => {
     setFiles([])
     setFile(null)
+    setLibrarySource(null)
     setProofFocus(null)
     setEditorProof(null)
     setFocusEditorRequest(null)
@@ -1569,6 +1572,7 @@ export function Studio() {
               onOpenFile={(path, line, column) =>
                 navigate(() => openFile(project.id, path, line, column))
               }
+              onOpenLibrary={setLibrarySource}
             />
             {job && (
               <section className={`build-output ${jobOpen ? 'expanded' : ''}`}>
@@ -1756,6 +1760,7 @@ export function Studio() {
           >
             <SearchPanel
               projectId={project?.status === 'ready' ? project.id : undefined}
+              onOpenSource={setLibrarySource}
             />
           </div>
         </div>
@@ -1767,6 +1772,13 @@ export function Studio() {
           <span>Lean-checked candidates</span>
         </footer>
       </aside>
+      {librarySource && projectId && (
+        <LibrarySourceDialog
+          projectId={projectId}
+          request={librarySource}
+          onClose={() => setLibrarySource(null)}
+        />
+      )}
       {deleteTarget && (
         <Dialog
           title={`Delete ${deleteTarget.kind}?`}

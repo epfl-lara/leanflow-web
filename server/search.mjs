@@ -1,3 +1,5 @@
+import { correctSourceUrl } from './library-sources.mjs'
+
 const declarationKinds = new Set([
   'theorem',
   'lemma',
@@ -216,7 +218,7 @@ function normalizeHit(hit) {
       [hit.module, hit.module_name, hit.source_file, hit.file_path],
       2_000,
     ),
-    url: safeUrl([hit.url, hit.source_url, hit.source_link]),
+    url: correctSourceUrl(safeUrl([hit.url, hit.source_url, hit.source_link])),
   }
 }
 
@@ -224,7 +226,10 @@ export async function searchDeclarations(
   { query, backend, projectId },
   owner,
   workspaces,
-  { fetchImpl = fetch } = {},
+  {
+    fetchImpl = fetch,
+    leanExploreUrl = process.env.STUDIO_LEANEXPLORE_URL,
+  } = {},
 ) {
   if (typeof query !== 'string' || !query.trim() || query.length > 2000)
     throw Object.assign(
@@ -239,8 +244,16 @@ export async function searchDeclarations(
   const endpoint =
     backend === 'loogle'
       ? 'https://loogle.lean-lang.org/json'
-      : 'https://www.leanexplore.com/api/v2/search'
-  const url = new URL(endpoint)
+      : leanExploreUrl || 'https://www.leanexplore.com/api/v2/search'
+  const validEndpoint = safeUrl([endpoint])
+  if (!validEndpoint)
+    throw Object.assign(
+      new Error(
+        'The configured search endpoint must be an HTTP or HTTPS URL without credentials.',
+      ),
+      { status: 503 },
+    )
+  const url = new URL(validEndpoint)
   url.searchParams.set('q', query.trim())
   if (backend === 'leanexplore') url.searchParams.set('limit', '12')
   const response = await fetchImpl(url, {
@@ -285,7 +298,10 @@ export async function searchDeclarations(
     source: {
       name: backend === 'loogle' ? 'Loogle' : 'LeanExplore',
       url: endpoint,
-      version: 'Hosted index',
+      version:
+        backend === 'leanexplore' && leanExploreUrl
+          ? 'Configured index'
+          : 'Hosted index',
       workspaceToolchain: project?.toolchain || null,
     },
     results: hits.map(normalizeHit),
