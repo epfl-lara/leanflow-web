@@ -1,0 +1,39 @@
+[
+  {
+    "id": "lean",
+    "name": "Lean basics",
+    "description": "A fast, minimal Lean project for learning and small proofs.",
+    "toolchain": "leanprover/lean4:v4.34.1",
+    "import": "Lean"
+  },
+  {
+    "id": "mathlib",
+    "name": "Mathematics · Mathlib",
+    "description": "Mathlib with prebuilt mathematics dependencies and a pinned Lean version.",
+    "toolchain": "leanprover/lean4:v4.35.0-rc4",
+    "repository": "https://github.com/leanprover-community/mathlib4.git",
+    "revision": "105b9b1ce126e77b467aac6f6ba36b510ac57368",
+    "package": "mathlib",
+    "import": "Mathlib"
+  },
+  {
+    "id": "cslib",
+    "name": "Computer science · CSLib",
+    "description": "CSLib and its pinned Mathlib dependency, ready for verified computer science.",
+    "toolchain": "leanprover/lean4:v4.35.0-rc4",
+    "repository": "https://github.com/leanprover/cslib.git",
+    "revision": "5281222cc03740a7ebaa040c48c594f476018ce5",
+    "package": "cslib",
+    "import": "Cslib"
+  },
+  {
+    "id": "physlib",
+    "name": "Physics · Physlib",
+    "description": "Physlib and its compatible Mathlib dependency for physics in Lean.",
+    "toolchain": "leanprover/lean4:v4.34.1",
+    "repository": "https://github.com/leanprover-community/physlib.git",
+    "revision": "89d99e898104b7ffd93df322e0ab1ea999645116",
+    "package": "Physlib",
+    "import": "Physlib"
+  }
+]

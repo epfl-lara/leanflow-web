@@ -2,16 +2,17 @@
   "name": "@leanweb/server",
   "private": true,
   "bin": {
-    "server": "index.mjs"
+    "server": "studio.mjs"
   },
   "type": "module",
   "scripts": {
-    "dev": "cross-env NODE_ENV=development nodemon index.mjs",
-    "prod": "cross-env NODE_ENV=production nodemon index.mjs",
-    "build": "echo 'deprecated, use build:projects instead' && npm run build:projects",
-    "build:projects": "./build.sh"
+    "dev": "node --watch studio.mjs",
+    "prod": "node studio.mjs",
+    "build": "node --check studio.mjs",
+    "build:projects": "node ../scripts/bootstrap-presets.mjs"
   },
   "dependencies": {
+    "compression": "^1.8.2",
     "cross-env": "^10.1.0",
     "express": "^5.1.0",
     "ip-anonymize": "^0.1.0",

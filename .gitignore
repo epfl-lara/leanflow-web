@@ -28,3 +28,12 @@ cypress/videos
 *.njsproj
 *.sln
 *.sw?
+
+# Lemex Web private state, credentials, workers and dependency artifacts
+.data/
+.runtime/
+.env
+.env.*
+!.env.example
+playwright-report/
+test-results/

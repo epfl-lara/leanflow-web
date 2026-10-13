@@ -55,18 +55,19 @@ export default defineConfig({
   publicDir: 'public',
   base: '/', // setting this to `/leanweb/` means the server is now accessible at `localhost:3000/leanweb`
   server: {
+    host: '127.0.0.1',
     port: 3000,
     proxy: {
       '/websocket': {
-        target: 'ws://localhost:8080',
+        target: 'ws://localhost:8090',
         ws: true,
       },
       '/yjs-signaling': {
-        target: 'ws://localhost:8080',
+        target: 'ws://localhost:8090',
         ws: true,
       },
       '/api': {
-        target: 'http://localhost:8080',
+        target: 'http://localhost:8090',
       },
     },
     watch: {

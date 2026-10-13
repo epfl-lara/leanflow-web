@@ -1,0 +1,1335 @@
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import {
+  api,
+  ApiError,
+  errorText,
+  post,
+  pretty,
+  type FileEntry,
+  type OpenFile,
+  type Project,
+  type Session,
+} from './api'
+import { AssistantPanel } from './AssistantPanel'
+import { Dialog } from './Dialog'
+import { Icon } from './Icons'
+import { LeanWorkspace } from './LeanWorkspace'
+import { ProjectModal } from './ProjectModal'
+import { SearchPanel } from './SearchPanel'
+import { SettingsModal } from './SettingsModal'
+import { FileBrowser } from './FileBrowser'
+import './studio.css'
+
+interface GitInfo {
+  branch?: string
+  head?: string
+  status?: unknown
+  changes?: unknown[]
+  repository?: boolean
+  [key: string]: unknown
+}
+interface Job {
+  id: string
+  status: string
+  log?: string
+  result?: unknown
+  error?: string
+  [key: string]: unknown
+}
+const terminalJob = (job: Job) =>
+  ['completed', 'failed', 'cancelled', 'interrupted', 'error'].includes(
+    job.status,
+  )
+
+function Brand({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className="brand">
+      <span className="brand-mark" aria-hidden="true">
+        λ
+      </span>
+      {!compact && (
+        <div>
+          <strong>Lemex</strong>
+          <span>Lean workspace</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Login({ onSession }: { onSession: (session: Session) => void }) {
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      await post('/api/login', { token: token.trim() })
+      onSession(await api<Session>('/api/session'))
+    } catch (error) {
+      setError(errorText(error))
+      setBusy(false)
+    }
+  }
+  return (
+    <main className="login-screen">
+      <div className="login-card">
+        <Brand />
+        <h1>
+          Your Lean workspace,
+          <br />
+          with a proof partner.
+        </h1>
+        <p>Sign in to open projects, inspect goals, and work with Lemex.</p>
+        <form onSubmit={submit}>
+          <label className="field-label" htmlFor="access-token">
+            Access token
+          </label>
+          <input
+            id="access-token"
+            type="password"
+            value={token}
+            onChange={(event) => setToken(event.target.value)}
+            placeholder="Enter your collaborator token"
+            required
+            autoFocus
+            autoComplete="current-password"
+            disabled={busy}
+          />
+          {error && (
+            <p role="alert" className="error-message">
+              {error}
+            </p>
+          )}
+          <button className="button primary" disabled={busy || !token.trim()}>
+            {busy ? (
+              <span className="spinner" />
+            ) : (
+              <Icon name="arrow" size={16} />
+            )}
+            {busy ? 'Signing in…' : 'Open workspace'}
+          </button>
+        </form>
+        <p className="login-help">
+          Use the token provided by your server administrator. For the first
+          sign-in, the owner token is in <code>.data/auth/owner.token</code> on
+          the server.
+        </p>
+      </div>
+      <div className="login-art" aria-hidden="true">
+        <div className="proof-orbit">
+          <span>∀</span>
+          <span>→</span>
+          <span>∎</span>
+          <span>λ</span>
+        </div>
+        <p>Write. Explore. Verify.</p>
+      </div>
+    </main>
+  )
+}
+
+export function Studio() {
+  const [session, setSession] = useState<Session | null>(null)
+  const [authRequired, setAuthRequired] = useState(false)
+  const [startupError, setStartupError] = useState('')
+  const [projects, setProjects] = useState<Project[]>([])
+  const [projectId, setProjectId] = useState<string | null>(null)
+  const [files, setFiles] = useState<FileEntry[]>([])
+  const [file, setFile] = useState<OpenFile | null>(null)
+  const [git, setGit] = useState<GitInfo | null>(null)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [projectModal, setProjectModal] = useState(false)
+  const [settingsModal, setSettingsModal] = useState(false)
+  const [gitAction, setGitAction] = useState<'branch' | 'commit' | null>(null)
+  const [gitInput, setGitInput] = useState('')
+  const [gitError, setGitError] = useState('')
+  const [gitBusy, setGitBusy] = useState(false)
+  const [newFileModal, setNewFileModal] = useState(false)
+  const [newFileName, setNewFileName] = useState('')
+  const [newFileError, setNewFileError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [opening, setOpening] = useState(false)
+  const [fileFilter, setFileFilter] = useState('')
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [toolTab, setToolTab] = useState<'assistant' | 'search'>('assistant')
+  const [toolsOpen, setToolsOpen] = useState(() => window.innerWidth > 1000)
+  const [showInfoview, setShowInfoview] = useState(true)
+  const [leanState, setLeanState] = useState('')
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    const saved = localStorage.getItem('lemex-theme')
+    return saved === 'light' || saved === 'dark'
+      ? saved
+      : matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark'
+        : 'light'
+  })
+  const [pendingAction, setPendingAction] = useState<
+    (() => Promise<void>) | null
+  >(null)
+  const [job, setJob] = useState<Job | null>(null)
+  const [jobOpen, setJobOpen] = useState(false)
+  const fileRef = useRef(file)
+  const filesRef = useRef(files)
+  const projectIdRef = useRef(projectId)
+  const openRequest = useRef(0)
+  const generation = useRef(0)
+  const savePromise = useRef<Promise<void> | null>(null)
+  fileRef.current = file
+  filesRef.current = files
+  projectIdRef.current = projectId
+  const project = projects.find((item) => item.id === projectId)
+  const dirty = !!file && file.content !== file.savedContent
+
+  const loadSession = useCallback(async () => {
+    setStartupError('')
+    try {
+      setSession(await api<Session>('/api/session'))
+      setAuthRequired(false)
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401)
+        setAuthRequired(true)
+      else setStartupError(errorText(error))
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadSession()
+  }, [loadSession])
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    localStorage.setItem('lemex-theme', theme)
+  }, [theme])
+
+  const loadProjects = useCallback(async () => {
+    const value = await api<Project[]>('/api/projects')
+    setProjects(value)
+    return value
+  }, [])
+
+  useEffect(() => {
+    if (!session) return
+    let cancelled = false
+    void api<Project[]>('/api/projects')
+      .then((value) => {
+        if (cancelled) return
+        setProjects(value)
+        const savedId = localStorage.getItem('lemex-project')
+        setProjectId(
+          value.some((item) => item.id === savedId)
+            ? savedId
+            : value[0]?.id || null,
+        )
+      })
+      .catch((error) => {
+        if (!cancelled) setError(errorText(error))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [session])
+
+  const preparing = projects.some((item) => item.status === 'preparing')
+  useEffect(() => {
+    if (!session || !preparing) return
+    const timer = setInterval(() => {
+      void loadProjects().catch((error) => setError(errorText(error)))
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [session, preparing, loadProjects])
+
+  const loadFiles = useCallback(async (id: string) => {
+    const value = await api<FileEntry[]>(
+      `/api/projects/${encodeURIComponent(id)}/files`,
+    )
+    if (projectIdRef.current === id) setFiles(value)
+    return value
+  }, [])
+
+  const loadGit = useCallback(async (id: string) => {
+    try {
+      const value = await api<GitInfo>(
+        `/api/projects/${encodeURIComponent(id)}/git`,
+      )
+      if (projectIdRef.current === id) setGit(value)
+    } catch {
+      if (projectIdRef.current === id) setGit(null)
+    }
+  }, [])
+
+  const openFile = useCallback(
+    async (id: string, path: string, line?: number, column?: number) => {
+      const request = ++openRequest.current
+      setOpening(true)
+      setError('')
+      try {
+        const value = await api<{
+          content: string
+          hash: string
+          readOnly?: boolean
+        }>(
+          `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
+        )
+        if (request !== openRequest.current || projectIdRef.current !== id)
+          return
+        setFile({
+          path,
+          content: value.content,
+          savedContent: value.content,
+          hash: value.hash,
+          generation: ++generation.current,
+          readOnly:
+            value.readOnly ||
+            path.startsWith('.lake/packages/') ||
+            filesRef.current.find((item) => item.path === path)?.readOnly,
+          line,
+          column,
+        })
+        localStorage.setItem(`lemex-file-${id}`, path)
+        setSidebarOpen(false)
+      } catch (error) {
+        if (request === openRequest.current) setError(errorText(error))
+      } finally {
+        if (request === openRequest.current) setOpening(false)
+      }
+    },
+    [],
+  )
+
+  useEffect(() => {
+    setFiles([])
+    setFile(null)
+    setGit(null)
+    setJob(null)
+    setFileFilter('')
+    setLeanState('')
+    ++openRequest.current
+    if (!projectId) return
+    localStorage.setItem('lemex-project', projectId)
+    if (project?.status !== 'ready') return
+    let cancelled = false
+    void loadFiles(projectId)
+      .then((value) => {
+        if (cancelled || projectIdRef.current !== projectId) return
+        const savedPath = localStorage.getItem(`lemex-file-${projectId}`)
+        const first =
+          value.find((item) => item.path === savedPath) ||
+          value.find((item) => item.path === 'Main.lean') ||
+          value.find((item) => item.path.endsWith('.lean')) ||
+          value[0]
+        if (first) void openFile(projectId, first.path)
+      })
+      .catch((error) => {
+        if (!cancelled) setError(errorText(error))
+      })
+    void loadGit(projectId)
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, project?.status, loadFiles, loadGit, openFile])
+
+  const saveFile = useCallback(async () => {
+    if (savePromise.current) return savePromise.current
+    const snapshot = fileRef.current
+    const id = projectIdRef.current
+    if (
+      !snapshot ||
+      !id ||
+      snapshot.readOnly ||
+      snapshot.content === snapshot.savedContent
+    )
+      return
+    const task = (async () => {
+      setSaving(true)
+      try {
+        const value = await api<{ content: string; hash: string }>(
+          `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(snapshot.path)}`,
+          {
+            method: 'PUT',
+            body: JSON.stringify({
+              content: snapshot.content,
+              expectedHash: snapshot.hash,
+            }),
+          },
+        )
+        if (projectIdRef.current === id)
+          setFile((current) =>
+            current?.path === snapshot.path
+              ? {
+                  ...current,
+                  savedContent: value.content ?? snapshot.content,
+                  hash: value.hash,
+                }
+              : current,
+          )
+        setNotice('File saved')
+        void loadGit(id)
+      } finally {
+        setSaving(false)
+        savePromise.current = null
+      }
+    })()
+    savePromise.current = task
+    return task
+  }, [loadGit])
+
+  const saveCompletely = useCallback(async () => {
+    // Saving is optimistic: preserve edits made during the request and save them
+    // before handing a snapshot to an assistant or changing the current file.
+    await saveFile()
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    const current = fileRef.current
+    if (current && current.content !== current.savedContent) await saveFile()
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    if (
+      fileRef.current &&
+      fileRef.current.content !== fileRef.current.savedContent
+    )
+      throw new Error(
+        'The file is still being edited. Save it before continuing.',
+      )
+  }, [saveFile])
+
+  const beforeApply = useCallback(async () => {
+    if (savePromise.current)
+      throw new Error(
+        'A file save is still in progress. Wait for it to finish before applying the candidate.',
+      )
+    const current = fileRef.current
+    if (current && current.content !== current.savedContent)
+      throw new Error(
+        'The editor has unsaved changes. Keep them and start a new run, or discard them before applying this candidate.',
+      )
+  }, [])
+
+  const discardUnsavedEdits = useCallback(async () => {
+    if (savePromise.current)
+      throw new Error(
+        'A file save is still in progress. Wait for it to finish before discarding edits.',
+      )
+    setFile((current) =>
+      current
+        ? {
+            ...current,
+            content: current.savedContent,
+            generation: ++generation.current,
+          }
+        : current,
+    )
+    setNotice('Unsaved edits discarded')
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  }, [])
+
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault()
+        void saveFile().catch((error) => setError(errorText(error)))
+      }
+    }
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (
+        fileRef.current &&
+        fileRef.current.content !== fileRef.current.savedContent
+      ) {
+        event.preventDefault()
+        event.returnValue = ''
+      }
+    }
+    window.addEventListener('keydown', keydown)
+    window.addEventListener('beforeunload', beforeUnload)
+    return () => {
+      window.removeEventListener('keydown', keydown)
+      window.removeEventListener('beforeunload', beforeUnload)
+    }
+  }, [saveFile])
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(''), 2500)
+    return () => clearTimeout(timer)
+  }, [notice])
+
+  const navigate = useCallback((action: () => Promise<void>) => {
+    if (
+      fileRef.current &&
+      fileRef.current.content !== fileRef.current.savedContent
+    )
+      setPendingAction(() => action)
+    else void action().catch((error) => setError(errorText(error)))
+  }, [])
+
+  const chooseFile = useCallback(
+    (path: string) => {
+      const id = projectIdRef.current
+      if (id) navigate(() => openFile(id, path))
+    },
+    [navigate, openFile],
+  )
+
+  async function continueNavigation(save: boolean) {
+    if (!pendingAction) return
+    try {
+      if (save) await saveCompletely()
+      const action = pendingAction
+      setPendingAction(null)
+      await action()
+    } catch (error) {
+      setError(errorText(error))
+    }
+  }
+
+  async function check() {
+    if (!projectId || !file) return
+    setError('')
+    try {
+      await saveCompletely()
+      const value = await post<Job>(
+        `/api/projects/${encodeURIComponent(projectId)}/check`,
+        { path: file.path },
+      )
+      setJob(value)
+      setJobOpen(true)
+    } catch (error) {
+      setError(errorText(error))
+    }
+  }
+
+  useEffect(() => {
+    if (!job || terminalJob(job)) return
+    const id = job.id
+    let cancelled = false
+    const timer = setInterval(() => {
+      void api<Job>(`/api/jobs/${encodeURIComponent(id)}`)
+        .then((value) => {
+          if (!cancelled) setJob(value)
+        })
+        .catch((error) => {
+          if (!cancelled) setError(errorText(error))
+        })
+    }, 2000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [job?.id, job?.status])
+
+  async function refreshAfterApply() {
+    if (!projectId) return
+    await loadFiles(projectId)
+    if (fileRef.current) await openFile(projectId, fileRef.current.path)
+    await loadGit(projectId)
+  }
+
+  async function createFile(event: FormEvent) {
+    event.preventDefault()
+    if (!projectId || !newFileName.trim()) return
+    const path = newFileName.trim()
+    if (files.some((file) => file.path === path)) {
+      setNewFileError('A file with this path already exists.')
+      return
+    }
+    setOpening(true)
+    setNewFileError('')
+    try {
+      await saveCompletely()
+      await api(
+        `/api/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ content: '', expectedHash: null }),
+        },
+      )
+      await loadFiles(projectId)
+      await openFile(projectId, path)
+      setNewFileModal(false)
+      setNewFileName('')
+    } catch (error) {
+      setNewFileError(errorText(error))
+    } finally {
+      setOpening(false)
+    }
+  }
+
+  async function retryPrepare() {
+    if (!projectId) return
+    try {
+      const value = await post<Project>(
+        `/api/projects/${encodeURIComponent(projectId)}/prepare`,
+      )
+      setProjects((previous) =>
+        previous.map((item) => (item.id === value.id ? value : item)),
+      )
+    } catch (error) {
+      setError(errorText(error))
+    }
+  }
+
+  async function performGitAction(event: FormEvent) {
+    event.preventDefault()
+    if (!projectId || !gitAction || !gitInput.trim()) return
+    setGitBusy(true)
+    setGitError('')
+    try {
+      await saveCompletely()
+      const value = await post<GitInfo>(
+        `/api/projects/${encodeURIComponent(projectId)}/git`,
+        {
+          action: gitAction,
+          ...(gitAction === 'branch'
+            ? { name: gitInput.trim() }
+            : { message: gitInput.trim() }),
+        },
+      )
+      setGit(value)
+      setNotice(gitAction === 'branch' ? 'Branch created' : 'Changes committed')
+      setGitAction(null)
+    } catch (error) {
+      setGitError(errorText(error))
+    } finally {
+      setGitBusy(false)
+    }
+  }
+
+  if (authRequired && !session)
+    return (
+      <Login
+        onSession={(value) => {
+          setSession(value)
+          setAuthRequired(false)
+        }}
+      />
+    )
+  if (!session)
+    return (
+      <main className="startup-screen">
+        <Brand />
+        {startupError ? (
+          <>
+            <h1>Cannot reach the workspace</h1>
+            <p className="error-message">{startupError}</p>
+            <button
+              className="button primary"
+              onClick={() => void loadSession()}
+            >
+              <Icon name="refresh" size={16} />
+              Try again
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="spinner" />
+            <p>Opening your workspace…</p>
+          </>
+        )}
+      </main>
+    )
+
+  return (
+    <div className={`studio ${toolsOpen ? '' : 'tools-hidden'}`}>
+      <aside
+        className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''}`}
+        aria-label="Projects and files"
+      >
+        <div className="sidebar-brand">
+          <Brand />
+          <button
+            className="icon-button mobile-only"
+            title="Close sidebar"
+            aria-label="Close sidebar"
+            onClick={() => setSidebarOpen(false)}
+          >
+            <Icon name="close" />
+          </button>
+        </div>
+        <div className="sidebar-section-title">
+          <span>Projects</span>
+          <button
+            className="icon-button"
+            onClick={() => setProjectModal(true)}
+            title="Import or create project"
+            aria-label="Import or create project"
+          >
+            <Icon name="plus" size={17} />
+          </button>
+        </div>
+        <div className="project-list">
+          {projects.map((item) => (
+            <button
+              key={item.id}
+              className={`project-item ${item.id === projectId ? 'selected' : ''}`}
+              aria-current={item.id === projectId ? 'page' : undefined}
+              onClick={() =>
+                navigate(async () => {
+                  setProjectId(item.id)
+                  setSidebarOpen(false)
+                })
+              }
+              title={item.name}
+              disabled={opening || saving}
+            >
+              <span className={`project-icon ${item.status}`}>
+                <Icon name="folder" size={17} />
+              </span>
+              <span className="project-label">
+                <strong>{item.name}</strong>
+                <span>
+                  {item.status === 'preparing'
+                    ? 'Preparing dependencies…'
+                    : item.status === 'error'
+                      ? 'Needs attention'
+                      : item.toolchain?.replace('leanprover/lean4:', '') ||
+                        'Lean project'}
+                </span>
+              </span>
+              {item.status === 'preparing' && <span className="spinner" />}
+            </button>
+          ))}
+          {!projects.length && (
+            <p className="sidebar-empty">Your projects appear here.</p>
+          )}
+        </div>
+        <button className="import-button" onClick={() => setProjectModal(true)}>
+          <Icon name="plus" size={16} />
+          Import or create project
+        </button>
+        <div className="sidebar-divider" />
+        <div className="sidebar-section-title">
+          <span>Files</span>
+          <div>
+            <button
+              className="icon-button"
+              onClick={() => {
+                setNewFileName('')
+                setNewFileError('')
+                setNewFileModal(true)
+              }}
+              disabled={project?.status !== 'ready'}
+              title="New file"
+              aria-label="New file"
+            >
+              <Icon name="plus" size={16} />
+            </button>
+            <button
+              className="icon-button"
+              onClick={() =>
+                projectId &&
+                void loadFiles(projectId).catch((error) =>
+                  setError(errorText(error)),
+                )
+              }
+              disabled={project?.status !== 'ready'}
+              title="Refresh files"
+              aria-label="Refresh files"
+            >
+              <Icon name="refresh" size={14} />
+            </button>
+          </div>
+        </div>
+        {files.length > 8 && (
+          <div className="file-filter">
+            <Icon name="search" size={13} />
+            <input
+              aria-label="Filter files"
+              value={fileFilter}
+              onChange={(event) => setFileFilter(event.target.value)}
+              placeholder="Find a file…"
+            />
+          </div>
+        )}
+        <FileBrowser
+          files={files}
+          selectedPath={file?.path}
+          dirty={dirty}
+          disabled={opening || saving}
+          filter={fileFilter}
+          ready={project?.status === 'ready'}
+          onSelect={chooseFile}
+        />
+        {git && git.repository !== false && project?.status === 'ready' && (
+          <div className="git-sidebar">
+            <div className="git-sidebar-caption">
+              <Icon name="git" size={14} />
+              <span title={git.branch}>{git.branch || 'Detached HEAD'}</span>
+              <button
+                className="icon-button"
+                aria-label="Refresh Git status"
+                title="Refresh Git status"
+                onClick={() => projectId && void loadGit(projectId)}
+              >
+                <Icon name="refresh" size={13} />
+              </button>
+            </div>
+            <details>
+              <summary>
+                Working tree · {git.changes?.length ?? ''} changes
+              </summary>
+              <pre>
+                {git.changes
+                  ? git.changes.length
+                    ? git.changes
+                        .map((change) => {
+                          const c = change as { status: string; path: string }
+                          return `${c.status} ${c.path}`
+                        })
+                        .join('\n')
+                    : 'Working tree is clean.'
+                  : pretty(git.status || 'Working tree is clean.')}
+              </pre>
+            </details>
+            <div className="git-sidebar-actions">
+              <button
+                onClick={() => {
+                  setGitAction('branch')
+                  setGitInput('')
+                  setGitError('')
+                }}
+              >
+                Create branch
+              </button>
+              <button
+                onClick={() => {
+                  setGitAction('commit')
+                  setGitInput('')
+                  setGitError('')
+                }}
+              >
+                Commit…
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="sidebar-footer">
+          <span className="user-avatar">
+            {session.user.name?.[0]?.toUpperCase() || 'U'}
+          </span>
+          <span className="user-name">{session.user.name}</span>
+          <button
+            className="icon-button"
+            title={theme === 'light' ? 'Use dark theme' : 'Use light theme'}
+            aria-label={
+              theme === 'light' ? 'Use dark theme' : 'Use light theme'
+            }
+            onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+          >
+            <Icon name={theme === 'light' ? 'moon' : 'sun'} size={17} />
+          </button>
+          <button
+            className="logout-button"
+            onClick={() =>
+              navigate(async () => {
+                await post('/api/logout')
+                setSession(null)
+                setAuthRequired(true)
+                setProjectId(null)
+                setFile(null)
+              })
+            }
+          >
+            Sign out
+          </button>
+        </div>
+      </aside>
+      {sidebarOpen && (
+        <button
+          className="sidebar-backdrop"
+          aria-label="Close project sidebar"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+      <main className="workbench">
+        <header className="workbench-header">
+          <button
+            className="icon-button mobile-only"
+            title="Open sidebar"
+            aria-label="Open projects and files"
+            onClick={() => setSidebarOpen(true)}
+          >
+            <Icon name="menu" />
+          </button>
+          <div className="workspace-title">
+            <Icon name="folder" size={18} />
+            <strong>{project?.name || 'Welcome'}</strong>
+            {git?.branch && (
+              <span className="branch-label">
+                <Icon name="git" size={13} />
+                {git.branch}
+              </span>
+            )}
+          </div>
+          <div className="header-actions">
+            <button
+              className={`button small ${showInfoview ? 'subtle selected' : 'subtle'}`}
+              onClick={() => setShowInfoview((value) => !value)}
+              aria-pressed={showInfoview}
+            >
+              Goals
+            </button>
+            <button
+              className={`button small ${toolsOpen ? 'subtle selected' : 'subtle'}`}
+              onClick={() => setToolsOpen((value) => !value)}
+              aria-pressed={toolsOpen}
+            >
+              <Icon name="bot" size={15} />
+              Lemex
+            </button>
+            <button
+              className="icon-button"
+              aria-label="Assistant settings"
+              title="Assistant settings"
+              onClick={() => setSettingsModal(true)}
+            >
+              <Icon name="settings" size={17} />
+            </button>
+          </div>
+        </header>
+        {error && (
+          <div className="workspace-alert" role="alert">
+            <span>{error}</span>
+            <button
+              className="icon-button"
+              onClick={() => setError('')}
+              aria-label="Dismiss error"
+            >
+              <Icon name="close" size={16} />
+            </button>
+          </div>
+        )}
+        {!project ? (
+          <div className="welcome-state">
+            <span className="welcome-mark">λ</span>
+            <div className="eyebrow">A place to work on proofs</div>
+            <h1>Start with your project.</h1>
+            <p>
+              Bring a Lean repository, or create a workspace with Mathlib,
+              CSLib, or Physlib. Your files and assistant sessions stay with the
+              project.
+            </p>
+            <button
+              className="button primary"
+              onClick={() => setProjectModal(true)}
+            >
+              <Icon name="plus" size={17} />
+              Import or create project
+            </button>
+            <div className="welcome-presets">
+              {session.templates.map((preset) => (
+                <div key={preset.id}>
+                  <Icon name="folder" size={18} />
+                  <strong>{preset.name}</strong>
+                  <p>{preset.description}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : project.status !== 'ready' ? (
+          <div className="preparation-state">
+            {project.status === 'preparing' ? (
+              <>
+                <span className="spinner large" />
+                <h1>Preparing {project.name}</h1>
+                <p>
+                  Setting up the Lean toolchain and project dependencies. You
+                  can return to another project while this runs.
+                </p>
+              </>
+            ) : (
+              <>
+                <h1>Project setup needs attention</h1>
+                <p className="error-message">
+                  {project.error || 'The environment could not be prepared.'}
+                </p>
+                <button className="button primary" onClick={retryPrepare}>
+                  <Icon name="refresh" size={16} />
+                  Retry setup
+                </button>
+              </>
+            )}
+            {project.log && (
+              <details open={project.status === 'error'}>
+                <summary>Setup output</summary>
+                <pre className="setup-log">{project.log}</pre>
+              </details>
+            )}
+            {project.repository && (
+              <p className="field-help">{project.repository}</p>
+            )}
+          </div>
+        ) : (
+          <>
+            <div className="file-toolbar">
+              <div className="file-tab">
+                <Icon name="file" size={15} />
+                <span title={file?.path}>{file?.path || 'Choose a file'}</span>
+                {file?.readOnly && <span className="tag">Read only</span>}
+                {dirty && (
+                  <span className="dirty-dot" aria-label="Unsaved changes" />
+                )}
+                {opening && <span className="spinner" />}
+              </div>
+              <div className="file-actions">
+                <button
+                  className="button small secondary"
+                  onClick={() =>
+                    void saveFile().catch((error) => setError(errorText(error)))
+                  }
+                  disabled={!dirty || saving || opening || file?.readOnly}
+                >
+                  <Icon name="save" size={14} />
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+                <button
+                  className="button small primary"
+                  onClick={check}
+                  disabled={
+                    !file?.path.endsWith('.lean') ||
+                    saving ||
+                    !!(job && !terminalJob(job))
+                  }
+                >
+                  <Icon name="check" size={14} />
+                  {job && !terminalJob(job) ? 'Checking…' : 'Check Lean'}
+                </button>
+              </div>
+            </div>
+            <LeanWorkspace
+              key={project.id}
+              projectId={project.id}
+              file={file}
+              theme={theme}
+              showInfoview={showInfoview}
+              onState={setLeanState}
+              onChange={(path, content) =>
+                setFile((current) =>
+                  current?.path === path ? { ...current, content } : current,
+                )
+              }
+              onOpenFile={(path, line, column) =>
+                navigate(() => openFile(project.id, path, line, column))
+              }
+            />
+            {job && (
+              <section className={`build-output ${jobOpen ? 'expanded' : ''}`}>
+                <button
+                  className="build-caption"
+                  onClick={() => setJobOpen((value) => !value)}
+                >
+                  <Icon name="log" size={14} />
+                  <strong>Lean check</strong>
+                  <span
+                    className={`tag ${job.status === 'completed' ? 'success' : job.status === 'failed' ? 'danger' : ''}`}
+                  >
+                    {!terminalJob(job) && <span className="spinner" />}
+                    {job.status}
+                  </span>
+                  <Icon
+                    name="chevron"
+                    size={13}
+                    style={{ transform: jobOpen ? 'rotate(90deg)' : undefined }}
+                  />
+                </button>
+                {jobOpen && (
+                  <pre>
+                    {job.log ||
+                      (job.result
+                        ? pretty(job.result)
+                        : job.error || 'Waiting for Lean…')}
+                  </pre>
+                )}
+              </section>
+            )}
+          </>
+        )}
+        <footer className="statusbar">
+          <span>
+            <span
+              className={`status-dot ${project?.status === 'ready' && leanState === 'Lean connected' ? '' : 'muted'}`}
+            />
+            {project?.status === 'ready'
+              ? leanState || 'Connecting to Lean'
+              : project
+                ? project.status
+                : 'Ready to open a project'}
+          </span>
+          <span className="statusbar-notice" role="status">
+            {notice || (dirty ? 'Unsaved changes' : file ? 'Saved' : '')}
+          </span>
+          <span title={project?.toolchain}>
+            {project?.toolchain?.replace('leanprover/lean4:', 'Lean ')}
+          </span>
+        </footer>
+      </main>
+      <aside
+        className={`tools-panel ${toolsOpen ? '' : 'closed'}`}
+        aria-label="Assistant and search"
+      >
+        <header className="tools-header">
+          <div
+            className="tools-tabs"
+            role="tablist"
+            aria-label="Workspace tools"
+          >
+            <button
+              id="assistant-tab"
+              role="tab"
+              aria-selected={toolTab === 'assistant'}
+              className={toolTab === 'assistant' ? 'selected' : ''}
+              onClick={() => setToolTab('assistant')}
+            >
+              <Icon name="bot" size={16} />
+              Assistant
+            </button>
+            <button
+              id="search-tab"
+              role="tab"
+              aria-selected={toolTab === 'search'}
+              className={toolTab === 'search' ? 'selected' : ''}
+              onClick={() => setToolTab('search')}
+            >
+              <Icon name="search" size={15} />
+              Search
+            </button>
+          </div>
+          <button
+            className="icon-button"
+            onClick={() => setToolsOpen(false)}
+            aria-label="Close tools panel"
+            title="Close tools panel"
+          >
+            <Icon name="close" size={16} />
+          </button>
+        </header>
+        <div
+          className="tools-content"
+          role="tabpanel"
+          aria-labelledby={
+            toolTab === 'assistant' ? 'assistant-tab' : 'search-tab'
+          }
+        >
+          <div
+            className={
+              toolTab === 'assistant' ? 'tool-view' : 'tool-view hidden'
+            }
+          >
+            {project?.status === 'ready' ? (
+              <AssistantPanel
+                key={project.id}
+                projectId={project.id}
+                file={file?.path}
+                readOnly={file?.readOnly}
+                session={session}
+                dirty={dirty}
+                beforeRun={saveCompletely}
+                beforeApply={beforeApply}
+                onDiscard={discardUnsavedEdits}
+                onApplied={refreshAfterApply}
+              />
+            ) : (
+              <div className="tool-idle">
+                <Icon name="bot" size={30} />
+                <h2>Your proof partner</h2>
+                <p>
+                  Open a prepared project to repair proofs, formalize
+                  mathematics, and explore your library with Lemex.
+                </p>
+              </div>
+            )}
+          </div>
+          <div
+            className={toolTab === 'search' ? 'tool-view' : 'tool-view hidden'}
+          >
+            <SearchPanel
+              projectId={project?.status === 'ready' ? project.id : undefined}
+            />
+          </div>
+        </div>
+        <footer className="tools-footer" title={session.lemex?.revision}>
+          Lemex{session.lemex?.version ? ` ${session.lemex.version}` : ''}
+          {session.lemex?.revision
+            ? ` · ${session.lemex.revision.slice(0, 8)}`
+            : ''}
+          <span>Lean-checked candidates</span>
+        </footer>
+      </aside>
+      {projectModal && (
+        <ProjectModal
+          templates={session.templates}
+          onClose={() => setProjectModal(false)}
+          onCreated={(created) => {
+            setProjectModal(false)
+            setProjects((previous) => [
+              created,
+              ...previous.filter((item) => item.id !== created.id),
+            ])
+            navigate(async () => setProjectId(created.id))
+          }}
+        />
+      )}
+      {settingsModal && (
+        <SettingsModal
+          onClose={() => setSettingsModal(false)}
+          onSaved={() => setNotice('Assistant settings saved')}
+        />
+      )}
+      {gitAction && (
+        <Dialog
+          title={
+            gitAction === 'branch'
+              ? 'Create a branch'
+              : 'Commit saved text changes'
+          }
+          subtitle={
+            gitAction === 'branch'
+              ? 'Create and switch to a new branch in this project.'
+              : 'Saves the editor and commits eligible project text changes. Binary files and private files are excluded.'
+          }
+          onClose={() => setGitAction(null)}
+          busy={gitBusy}
+        >
+          <form onSubmit={performGitAction}>
+            <label className="field-label" htmlFor="git-action-input">
+              {gitAction === 'branch' ? 'Branch name' : 'Commit message'}
+            </label>
+            <input
+              id="git-action-input"
+              autoFocus
+              value={gitInput}
+              onChange={(event) => setGitInput(event.target.value)}
+              placeholder={
+                gitAction === 'branch'
+                  ? 'proof/my-theorem'
+                  : 'Complete the theorem proof'
+              }
+              disabled={gitBusy}
+              required
+            />
+            {gitError && (
+              <p className="error-message" role="alert">
+                {gitError}
+              </p>
+            )}
+            <footer className="dialog-actions">
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => setGitAction(null)}
+                disabled={gitBusy}
+              >
+                Cancel
+              </button>
+              <button
+                className="button primary"
+                disabled={gitBusy || !gitInput.trim()}
+              >
+                {gitBusy ? (
+                  <span className="spinner" />
+                ) : (
+                  <Icon name="git" size={15} />
+                )}
+                {gitAction === 'branch'
+                  ? 'Create branch'
+                  : 'Commit text changes'}
+              </button>
+            </footer>
+          </form>
+        </Dialog>
+      )}
+      {pendingAction && (
+        <Dialog
+          title="Save your changes?"
+          subtitle={`${file?.path || 'This file'} has unsaved edits.`}
+          onClose={() => setPendingAction(null)}
+          busy={saving}
+        >
+          <p className="dialog-body">
+            Save the current file before continuing, or discard these edits.
+          </p>
+          <footer className="dialog-actions">
+            <button
+              className="button secondary"
+              onClick={() => setPendingAction(null)}
+              disabled={saving}
+            >
+              Cancel
+            </button>
+            <button
+              className="button secondary"
+              onClick={() => void continueNavigation(false)}
+              disabled={saving}
+            >
+              Discard edits
+            </button>
+            <button
+              className="button primary"
+              onClick={() => void continueNavigation(true)}
+              disabled={saving}
+            >
+              {saving ? (
+                <span className="spinner" />
+              ) : (
+                <Icon name="save" size={15} />
+              )}
+              Save &amp; continue
+            </button>
+          </footer>
+        </Dialog>
+      )}
+      {newFileModal && (
+        <Dialog
+          title="Create a file"
+          subtitle="Use a path relative to the project root."
+          onClose={() => setNewFileModal(false)}
+          busy={opening}
+        >
+          <form onSubmit={createFile}>
+            <label className="field-label" htmlFor="new-file-name">
+              File path
+            </label>
+            <input
+              id="new-file-name"
+              autoFocus
+              placeholder="Main/Extra.lean"
+              value={newFileName}
+              onChange={(event) => setNewFileName(event.target.value)}
+              required
+              disabled={opening}
+            />
+            <p className="field-help">
+              Put Lean modules inside your project's library directory. Preset
+              projects use Main.
+            </p>
+            {newFileError && (
+              <p className="error-message" role="alert">
+                {newFileError}
+              </p>
+            )}
+            <footer className="dialog-actions">
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => setNewFileModal(false)}
+                disabled={opening}
+              >
+                Cancel
+              </button>
+              <button
+                className="button primary"
+                disabled={opening || !newFileName.trim()}
+              >
+                {opening ? (
+                  <span className="spinner" />
+                ) : (
+                  <Icon name="plus" size={15} />
+                )}
+                Create file
+              </button>
+            </footer>
+          </form>
+        </Dialog>
+      )}
+    </div>
+  )
+}

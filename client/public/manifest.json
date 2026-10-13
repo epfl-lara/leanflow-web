@@ -1,6 +1,6 @@
 {
-  "short_name": "Lean Web",
-  "name": "Lean 4 code playground",
+  "short_name": "Lemex",
+  "name": "Lemex Lean workspace",
   "icons": [
     {
       "src": "favicon.ico",
@@ -10,6 +10,6 @@
   ],
   "start_url": ".",
   "display": "standalone",
-  "theme_color": "#000000",
+  "theme_color": "#f6f7fa",
   "background_color": "#ffffff"
 }
