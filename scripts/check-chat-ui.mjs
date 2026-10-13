@@ -272,7 +272,7 @@ try {
     () => page.evaluate((id) => window.__chatFixture.connected(id), active.id),
     'active chat stream',
   )
-  for (const name of ['Proofs', 'Formalize', 'Optimize', 'Search'])
+  for (const name of ['Proofs', 'Formalize', 'Optimize', 'Ask & Search'])
     await visible(
       page.locator('.mode-tabs').getByRole('button', { name, exact: true }),
       name,

@@ -62,19 +62,25 @@ export const chatModes: {
   },
   {
     id: 'search',
-    name: 'Search',
-    hint: 'Find declarations or understand a proof without editing files.',
-    placeholder: 'Find a theorem, explain a proof, or explore an approach…',
+    name: 'Ask & Search',
+    hint: 'Ask about Lean, understand proofs and definitions, or find useful lemmas. No files are changed.',
+    placeholder:
+      'Ask a Lean question, explain a proof or definition, or find lemmas…',
     suggestions: [
-      {
-        label: 'Find useful lemmas',
-        prompt:
-          'Find library lemmas relevant to the selected theorem or goal. Explain how they could help without editing files.',
-      },
       {
         label: 'Explain this proof',
         prompt:
           'Explain the selected proof and its main steps. Do not edit files.',
+      },
+      {
+        label: 'Explain a definition',
+        prompt:
+          'Explain the selected definition, its meaning, and how it is used. Include a simple example. Do not edit files.',
+      },
+      {
+        label: 'Find useful lemmas',
+        prompt:
+          'Find library lemmas relevant to the selected theorem or goal. Explain how they could help without editing files.',
       },
     ],
   },
