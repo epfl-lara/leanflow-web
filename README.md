@@ -16,8 +16,8 @@ Developed by [EPFL LARA](https://lara.epfl.ch/).
 LeanFlow Web is self-hosted for you and trusted collaborators. You'll need Linux, Node.js 24+, Python 3.11+, Git, Docker, and a native Lemex installation.
 
 ```bash
-git clone https://github.com/epfl-lara/lemex-web.git
-cd lemex-web
+git clone https://github.com/epfl-lara/leanflow-web.git
+cd leanflow-web
 ```
 
 Follow the **[installation guide](doc/LemexWeb.md#install-and-run)** to prepare Lemex, build the worker, configure your provider, and start the app. It also covers sign-in and access from another computer.

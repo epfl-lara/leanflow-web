@@ -31,18 +31,18 @@ Share the printed token privately. Each account has its own projects and chats. 
 
 ## Run as a service
 
-The [systemd example](../deploy/lemex-web.service) assumes a checkout at `~/lemex-web`. Adjust its paths and Node 24+ `PATH` for your installation. Stop any existing foreground server first.
+The [systemd example](../deploy/leanflow-web.service) assumes a checkout at `~/leanflow-web`. Adjust its paths and Node 24+ `PATH` for your installation. Stop any existing foreground server first.
 
 ```bash
 mkdir -p .data ~/.config/systemd/user
 cp .env .data/server.env
 chmod 600 .data/server.env
-cp deploy/lemex-web.service ~/.config/systemd/user/
+cp deploy/leanflow-web.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now lemex-web.service
+systemctl --user enable --now leanflow-web.service
 ```
 
-Check status with `systemctl --user status lemex-web.service`; read logs with `journalctl --user -u lemex-web.service`. Ask the host administrator to enable user lingering if it must survive logout.
+Check status with `systemctl --user status leanflow-web.service`; read logs with `journalctl --user -u leanflow-web.service`. Ask the host administrator to enable user lingering if it must survive logout.
 
 ## Use an HTTPS address
 
@@ -67,7 +67,7 @@ Set `STUDIO_ORIGIN=https://your-hostname` in `.data/server.env`. Wait for proof 
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user restart lemex-web.service
+systemctl --user restart leanflow-web.service
 systemctl --user enable --now leanflow-proxy.service
 ```
 
