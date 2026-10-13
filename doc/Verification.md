@@ -42,7 +42,7 @@ Verified upstream Lemex source and native build: `2f0e12c10d0baf7404a83da3b8cb8f
 
 The runtime reports provenance read from that exact image rather than a mutable host manifest. The earlier owned bundle is retained in `.runtime/lemex-e77c7045`. Personal Lemex authentication, configuration, sessions, and source builds were not changed by this application.
 
-Lean basics, Mathlib, CSLib, and Physlib all passed real default-import checks without network access and are marked ready. Exact library/toolchain pins are listed in [deployment documentation](LemexWeb.md) and `server/presets.json`. The full Physlib build passed, including its private Lake cache and inherited read-only artifacts.
+Lean basics, Mathlib, CSLib, and Physlib all passed real default-import checks without network access and are marked ready. Exact library/toolchain pins are listed in [server/presets.json](../server/presets.json). The full Physlib build passed, including its private Lake cache and inherited read-only artifacts.
 
 ## Executed checks
 
@@ -86,7 +86,7 @@ Tokens mirror the published convention pinned at `9c98a3a097e53724e35b2a2e7fe316
 
 The workbench now exposes **Proofs**, **Formalize**, **Optimize**, and **Search** sections. Project chats offer New chat, selection, saved runs, selected context files, and recoverable chat deletion/restoration. New native runs receive bounded, server-owned history only from the selected chat; personal native sessions and other chats are not imported.
 
-Live saved edits are the default for editing tasks, with clean-buffer updates, final independent verification, a diff, and guarded Undo after stopping. Disabling live edits keeps the separate candidate/review-first flow. The current interface has no time-limit control: new runs continue until completion or Stop. Legacy API clients may still supply a finite cap. Reasoning displays only traces or summaries the model/runtime actually emits. Panel resizing, initial/live light/dark goals, and recoverable file/folder/project deletion are implemented as described in [the workbench guide](LemexWeb.md).
+Live saved edits are the default for editing tasks, with clean-buffer updates, final independent verification, a diff, and guarded Undo after stopping. Disabling live edits keeps the separate candidate/review-first flow. The current interface has no time-limit control: new runs continue until completion or Stop. Legacy API clients may still supply a finite cap. Reasoning displays only traces or summaries the model/runtime actually emits. Panel resizing, initial/live light/dark goals, and recoverable file/folder/project deletion are implemented as described in [the usage guide](UsingLeanFlow.md).
 
 `node scripts/check-live-agent.mjs` passed with two real provider turns in project `369cc05a-f3a1-4e71-906b-afb147db3d79`. Repair run `ea9a8071-a35b-4a4a-851f-4457c87bf687` used the unlimited default, exposed 591 characters of reasoning, updated both saved source and the open editor before completion, and passed independent kernel verification. A second Search turn remembered the first turn's task nickname. New chat created a different empty conversation; reopening the first chat and using Undo restored its original proof. The editor retained one Lean connection, with no browser exceptions. Evidence: `.runtime/live-agent/result.json` and screenshots.
 
