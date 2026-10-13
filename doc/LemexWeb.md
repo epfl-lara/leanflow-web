@@ -7,8 +7,8 @@ You need Linux, Node.js 24+, Python 3.11+, Git, and Docker running with access f
 ### 1. Get the app
 
 ```bash
-git clone https://github.com/epfl-lara/lemex-web.git
-cd lemex-web
+git clone https://github.com/epfl-lara/leanflow-web.git
+cd leanflow-web
 CYPRESS_INSTALL_BINARY=0 npm ci
 ```
 

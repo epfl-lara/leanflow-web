@@ -1,6 +1,6 @@
 [Unit]
 Description=LeanFlow Web HTTPS proxy
-After=network-online.target lemex-web.service
+After=network-online.target leanflow-web.service
 Wants=network-online.target
 
 [Service]
