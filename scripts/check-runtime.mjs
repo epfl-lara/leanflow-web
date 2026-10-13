@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { promisify } from 'node:util'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Runtime } from '../server/runtime.mjs'
 
@@ -43,7 +44,7 @@ with tempfile.TemporaryDirectory() as directory:
  env=dict(os.environ);env['LEAN_PATH']=directory
  subprocess.run(['leanchecker','-v','Main'],env=env,check=True)`], { readOnlyWorkspace: true, freshHome: true, readOnlyHome: true })
   assert.equal(audit.code, 0, audit.stderr)
-  const isolation = await runtime.run(root, ['python3', '-c', `import os, json\nassert os.getcwd() == '/workspace'\nassert os.environ['HOME'] == '/home/worker'\nassert not os.path.exists('/var/run/docker.sock')\nassert not os.path.exists('/localhome/milikic/.lemex/auth.json')\ntry:\n open('/etc/worker-write-test', 'w')\n raise AssertionError('Root filesystem was writable')\nexcept OSError:\n pass\nprint('source/home/container isolation verified')`])
+  const isolation = await runtime.run(root, ['python3', '-c', `import os, json\nassert os.getcwd() == '/workspace'\nassert os.environ['HOME'] == '/home/worker'\nassert not os.path.exists('/var/run/docker.sock')\nassert not os.path.exists(${JSON.stringify(path.join(os.homedir(), '.lemex/auth.json'))})\ntry:\n open('/etc/worker-write-test', 'w')\n raise AssertionError('Root filesystem was writable')\nexcept OSError:\n pass\nprint('source/home/container isolation verified')`])
   assert.equal(isolation.code, 0, isolation.stderr)
   const env = await runtime.run(root, ['python3', '-c', 'import os; assert os.getenv("LEMEX_TEST_SECRET") == "private-only"; print("scoped env verified")'], { env: { LEMEX_TEST_SECRET: 'private-only' } })
   assert.equal(env.code, 0, env.stderr)
@@ -88,7 +89,7 @@ print('readonly packages and immutable cache sharing verified')`])
   const tamperRoot = path.join(dataDir, 'tamper')
   await fs.mkdir(tamperRoot, { recursive: true })
   const tamperHome = await runtime.home(tamperRoot)
-  const tamper = await runtime.run(tamperRoot, ['sh', '-c', 'rm -rf "$HOME/.elan/toolchains" && ln -s /localhome/milikic/.elan/toolchains "$HOME/.elan/toolchains"'])
+  const tamper = await runtime.run(tamperRoot, ['sh', '-c', 'rm -rf "$HOME/.elan/toolchains" && ln -s /host-private/toolchains "$HOME/.elan/toolchains"'])
   assert.equal(tamper.code, 0, tamper.stderr)
   await assert.rejects(runtime.home(tamperRoot), /managed worker directory/)
   await fs.unlink(path.join(tamperHome, '.elan/toolchains'))

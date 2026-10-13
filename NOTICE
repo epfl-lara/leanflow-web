@@ -1,0 +1,13 @@
+LeanFlow Web
+Developed by EPFL LARA (https://lara.epfl.ch/).
+
+This project is derived from lean4web:
+https://github.com/leanprover-community/lean4web
+Upstream base commit: 9c4cd4f4ed804b06a24257788894314c93008276
+
+The Apache License, Version 2.0 is retained in LICENSE. Existing copyright
+and third-party notices remain applicable. Included dependency assets retain
+their own licenses, including client/public/fonts/LICENSE-JuliaMono.
+
+LeanFlow Web's product mark is distinct from the EPFL and LARA institutional
+marks. The developer attribution does not replace upstream authorship credits.

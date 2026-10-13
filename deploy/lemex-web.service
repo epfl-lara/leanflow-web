@@ -1,5 +1,5 @@
 [Unit]
-Description=Lemex Lean Studio
+Description=LeanFlow Web — developed by EPFL LARA
 After=network-online.target
 Wants=network-online.target
 
@@ -10,10 +10,10 @@ WorkingDirectory=%h/lemex-web
 Environment=HOST=127.0.0.1
 Environment=PORT=8090
 Environment=STUDIO_DATA_DIR=%h/lemex-web/.data
-Environment=PATH=%h/miniconda3/bin:%h/.local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-%h/lemex-web/.data/server.env
 # Adjust Node to the host's supported Node 24+ installation.
-ExecStart=%h/miniconda3/bin/node %h/lemex-web/server/studio.mjs
+ExecStart=/usr/bin/env node %h/lemex-web/server/studio.mjs
 Restart=on-failure
 RestartSec=5
 KillMode=control-group

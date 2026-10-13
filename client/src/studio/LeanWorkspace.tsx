@@ -397,7 +397,7 @@ export function LeanWorkspace({
       if (!cancelled) {
         onStateRef.current('Editor update failed')
         console.error(
-          '[Lemex] Could not update the saved file in the editor.',
+          '[LeanFlow Web] Could not update the saved file in the editor.',
           error,
         )
       }

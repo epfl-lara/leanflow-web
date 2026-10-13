@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import os from 'node:os'
 import { Runtime } from '../server/runtime.mjs'
 
 const dataDir = path.resolve(process.env.STUDIO_DATA_DIR || '.data')
@@ -49,7 +50,7 @@ try {
   const script = String.raw`
 import json, os, pathlib
 P = pathlib.Path
-for filename in ${JSON.stringify([hostOnly, baseline, process.env.HOME || '/localhome/milikic', '/var/run/docker.sock', '/run/docker.sock'])}:
+for filename in ${JSON.stringify([hostOnly, baseline, os.homedir(), '/var/run/docker.sock', '/run/docker.sock'])}:
     assert not P(filename).exists(), 'Unexpected host path exposed: ' + filename
 assert not P('/workspace/outside-link').exists(), 'Absolute host symlink escaped the worker'
 assert os.environ.get('${environmentKey}') is None, 'Host environment leaked into worker'

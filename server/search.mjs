@@ -6,7 +6,7 @@ export async function searchDeclarations({ query, backend, projectId }, owner, w
   const url = new URL(endpoint)
   url.searchParams.set('q', query.trim())
   if (backend === 'leanexplore') url.searchParams.set('limit', '12')
-  const response = await fetch(url, { signal: AbortSignal.timeout(20_000), headers: { accept: 'application/json', 'user-agent': 'LemexWeb/0.1' } })
+  const response = await fetch(url, { signal: AbortSignal.timeout(20_000), headers: { accept: 'application/json', 'user-agent': 'LeanFlowWeb/0.1' } })
   if (!response.ok) throw Object.assign(new Error(`${backend === 'loogle' ? 'Loogle' : 'LeanExplore'} is unavailable (HTTP ${response.status}). Try again later or use the other search service.`), { status: 502 })
   const text = await response.text()
   if (text.length > 2_000_000) throw new Error('Search response exceeded the size limit.')

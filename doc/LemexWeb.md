@@ -1,27 +1,38 @@
-# Lemex Lean Studio
+# LeanFlow Web deployment and configuration
 
 A self-hosted Lean editor with persistent projects, Git import, an infoview, and a Lemex assistant. The initial deployment is for the machine owner and trusted collaborators. Projects and assistant sessions live under the application data directory rather than the upstream `Projects` examples.
 
-## Run on larapc2
+Developed by [EPFL LARA](https://lara.epfl.ch/).
 
-Requirements: a Linux host, Node 24+, Python 3.11+, Docker Engine, and enough disk for Lean dependency caches. Docker commands run under the server account. On larapc2, the supported Node executable is `/localhome/milikic/miniconda3/bin/node`.
+## Install and run
+
+Requirements: Linux, Node.js 24+, Python 3.11+, Git, Docker Engine accessible to the server account, and disk space for Lean dependency caches. Prepare a verified native Lemex installation and its model catalog as described in [Native Lemex and tools](#native-lemex-and-tools).
 
 ```bash
-cd /localhome/milikic/lemex-web
-export PATH=/localhome/milikic/miniconda3/bin:/localhome/milikic/.local/bin:/usr/bin:/bin
+git clone https://github.com/epfl-lara/lemex-web.git
+cd lemex-web
 CYPRESS_INSTALL_BINARY=0 npm ci
-scripts/build-worker.sh
-node scripts/bootstrap-presets.mjs
-npm run build:client
-scripts/run-studio.sh
+npm run worker:build -- --source /path/to/native/lemex --config /path/to/lemex/config.toml
+npm run presets:install
+npm run build
+cp .env.example .env
+chmod 600 .env
 ```
+
+Edit `.env` with your provider settings, then start the server:
+
+```bash
+node --env-file=.env server/studio.mjs
+```
+
+`npm start`, `npm run dev`, and `scripts/run-studio.sh` use the process environment; they do not load `.env` themselves. The systemd example instead reads `.data/server.env` explicitly. Never commit either file. Node's `--env-file` option uses existing exported environment values in preference to values in the file.
 
 The web server binds to `127.0.0.1:8090` by default. It creates `.data/auth/owner.token` on first startup. Read that file locally and paste its token into the sign-in screen. Keep tokens private; the server stores SHA256 hashes in `users.json`, and sessions use an HTTP-only cookie.
 
 Access it from another computer through SSH:
 
 ```bash
-ssh -L 8090:127.0.0.1:8090 milikic@larapc2
+ssh -L 8090:127.0.0.1:8090 user@your-server
 ```
 
 Then open `http://localhost:8090`. The sidebar provides project creation, pinned library presets, and a Git URL import flow. The file tree and editor remain available beside the assistant so changes can be reviewed in context.
@@ -29,10 +40,10 @@ Then open `http://localhost:8090`. The sidebar provides project creation, pinned
 Add a trusted collaborator locally:
 
 ```bash
-node scripts/add-user.mjs "Collaborator name"
+node --env-file=.env scripts/add-user.mjs "Collaborator name"
 ```
 
-The helper prints the new account token once. The account list refreshes on sign-in. Each account owns its projects; cross-account project sharing is a later extension.
+The helper prints the new account token once. Use the same environment file or exported `STUDIO_DATA_DIR` as the server (for systemd, `--env-file=.data/server.env`). The account list refreshes on sign-in. Each account owns its projects; cross-account project sharing is a later extension.
 
 ## Four assistant sections and optimization
 
@@ -110,9 +121,9 @@ Publishing is handled by the server, outside the proof agent. Only exported Git 
 
 ## Provider configuration
 
-The server uses an independent provider configuration at `.data/provider.json` with permissions `0600`. The first startup can initialize it from `LEMEX_API_KEY` and `LEMEX_BASE_URL` in the server environment. Provider keys stay on the server and enter only the relevant assistant worker's environment; they are not passed to ordinary Lean checks or sent to the browser. Model catalog metadata is packaged without credentials.
+The server uses an independent provider configuration at `.data/provider.json` with permissions `0600`. Startup reads `LEMEX_API_KEY` and `LEMEX_BASE_URL` from the server environment or the saved provider file, and persists updated credentials when a key is supplied. Provider keys stay on the server and enter only the relevant assistant worker's environment; they are not passed to ordinary Lean checks or sent to the browser. Model catalog metadata is packaged without credentials.
 
-Set `STUDIO_MODEL` to override the configured default model. The larapc2 default follows the current Lemex configuration, `deepseek-ai/DeepSeek-V4.1-Flash`. Configure a provider endpoint and authentication appropriate to that model. Agent runs incur the configured provider's usage charges.
+Set `STUDIO_MODEL` to override the configured default model. The default follows the model in the installed Lemex configuration, falling back to `deepseek-ai/DeepSeek-V4.1-Flash` when none is configured. Configure a provider endpoint and authentication appropriate to that model. Agent runs incur the configured provider's usage charges.
 
 ## Environment variables
 
@@ -122,7 +133,10 @@ Set `STUDIO_MODEL` to override the configured default model. The larapc2 default
 | `PORT` | `8090` | Web port |
 | `STUDIO_DATA_DIR` | `.data` in this checkout | Persistent account, project, job, and cache directory |
 | `STUDIO_ORIGIN` | Local origin | Expected browser origin when deployed behind HTTPS |
-| `STUDIO_MODEL` | Current configured model | Assistant default |
+| `STUDIO_MODEL` | Installed Lemex model, otherwise DeepSeek Flash | Assistant default |
+| `LEMEX_API_KEY` | Saved provider value | Lemex RCP provider key; required for assistant requests |
+| `LEMEX_BASE_URL` | Saved provider value | Provider API base URL; also used for chat naming |
+| `LEMEX_HOME` | `~/.lemex` | Installed model configuration/catalog read by the server |
 | `STUDIO_MAX_WORKERS` | `6` | Active application worker limit |
 | `LEMEX_WORKER_IMAGE` | `lemex-web-worker:local` | Isolated Lean and Lemex runtime |
 
@@ -130,13 +144,13 @@ The server package defines the application API, and `server/runtime.mjs` owns wo
 
 ## Native Lemex and tools
 
-The packaged runtime is the latest verified upstream Lemex revision at implementation time:
+This release was verified with native Lemex revision:
 
 ```
 2f0e12c10d0baf7404a83da3b8cb8f04b77822c9
 ```
 
-`scripts/package-lemex.py` verifies both `source_commit` and `native_build_commit` against the requested commit, checks that Lemex is a native ELF executable, and copies only native runtime assets plus an allowlisted configuration and model catalog. It does not copy host authentication, history, session databases, trusted-project lists, hooks, MCP secrets, or home directories. `.runtime/lemex/manifest.json` records SHA256 hashes. The user's installed Lemex remains unchanged. The final bundle uses the already installed native `dev-small` build at this commit. Its CLI embeds the full compiled commit, and both native binaries match the existing Cargo artifacts by SHA256. When upstream installation metadata is absent, packaging verifies a clean checkout at the requested commit, those artifact hashes, and the compiled CLI stamp, then records that evidence in the owned bundle. It does not rebuild or restamp an older executable.
+`scripts/package-lemex.py` verifies both `source_commit` and `native_build_commit` against the requested commit, checks that Lemex is a native ELF executable, and copies only native runtime assets plus an allowlisted configuration and model catalog. It does not copy host authentication, history, session databases, trusted-project lists, hooks, MCP secrets, or home directories. `.runtime/lemex/manifest.json` records SHA256 hashes. The user's installed Lemex remains unchanged. The recorded deployment used a native `dev-small` build at this commit. Its CLI embeds the full compiled commit, and both native binaries match the existing Cargo artifacts by SHA256. When upstream installation metadata is absent, packaging verifies a clean checkout at the requested commit, those artifact hashes, and the compiled CLI stamp, then records that evidence in the owned bundle. It does not rebuild or restamp an older executable.
 
 Worker tools:
 
@@ -146,9 +160,22 @@ Worker tools:
 - `/opt/tools/bin/lean-explore mcp serve --backend api`: hosted semantic declaration search.
 - `lean`, `lake`, Git, ripgrep, Python, Node, and uv.
 
-The image pins `lean-lsp-mcp==0.31.0`, `lean-explore==1.3.0`, and `uv==0.13.0`. Lean LSP MCP and LeanExplore use separate Python environments because their MCP package requirements conflict. Both command-line interfaces are checked during image construction. Hosted search results may describe a different library revision; candidates must compile against the active project's exact dependencies. At implementation-time verification, LeanExplore's hosted endpoint denied larapc2 requests with HTTP 403 (Cloudflare browser-signature policy). Its integration remains available, and failures are reported; Loogle and local Lean diagnostics provide working alternatives.
+The image pins `lean-lsp-mcp==0.31.0`, `lean-explore==1.3.0`, and `uv==0.13.0`. Lean LSP MCP and LeanExplore use separate Python environments because their MCP package requirements conflict. Both command-line interfaces are checked during image construction. Hosted search results may describe a different library revision; candidates must compile against the active project's exact dependencies. During the recorded host verification, the hosted LeanExplore endpoint returned HTTP 403. Search failures are reported in the interface; this historical observation does not establish availability from another host. LeanExplore is the default direct-search provider, with Loogle selectable as an alternative.
 
-To update Lemex, install and verify a native revision separately, then run `scripts/build-worker.sh --source /path/to/native/runtime --expected-commit <full-commit>` and restart the server. If installation metadata is absent, also provide `--source-checkout /path/to/clean/repo --build-artifacts /path/to/cargo/profile`; the larapc2 defaults point to `~/lemex-fork` and `~/.cache/lemex-native-build/dev-small`. Native asset permissions are normalized only in the owned bundle so the container worker can execute root-owned Docker copies.
+The native installation directory must contain `bin/lemex`, `bin/lemex-code-mode-host`, `codex-path`, and `codex-resources`. Supply its configuration with `--config`; that file must refer to a curated model catalog (or have a sibling `models.json`). The server also reads the installed model configuration/catalog from `LEMEX_HOME` (default `~/.lemex`), so set that environment variable when using a custom configuration directory. Provider inference uses Lemex's RCP provider; set `LEMEX_API_KEY` and `LEMEX_BASE_URL` appropriately for that provider.
+
+A native installation with `lemex-install.json` must record matching `source_commit` and `native_build_commit`. Without that metadata, supply the exact clean source checkout and the matching Cargo artifact directory explicitly:
+
+```bash
+npm run worker:build -- \
+  --source /path/to/native/lemex \
+  --config /path/to/lemex/config.toml \
+  --source-checkout /path/to/clean/lemex-source \
+  --build-artifacts /path/to/cargo/dev-small \
+  --expected-commit 2f0e12c10d0baf7404a83da3b8cb8f04b77822c9
+```
+
+The artifact directory must be named `dev-small` or `release`. Packaging compares both binaries with those artifacts and checks the compiled commit stamp; it never builds or changes the source checkout. To upgrade, install and verify another native revision separately, pass its full commit with `--expected-commit`, and rebuild the image. Native asset permissions are normalized only in the owned bundle so the container worker can execute Docker's root-owned copies.
 
 For a running service, stage with `LEMEX_RUNTIME_DIR=.runtime/lemex-next scripts/build-worker.sh ...`. Verify the staged image, then stop the service and adopt the staged bundle before restarting. Active runtimes pin their image ID and cache the native provenance read from that exact image, so repackaging or retagging does not change the revision reported by a live runtime.
 
@@ -169,7 +196,7 @@ The library presets preserve their transitive dependency pins. They are separate
 
 The runtime registers existing host Lean release toolchains only through curated, read-only per-toolchain mounts and verifies each binary's version in a container. Missing versions install into the application's owned `.data/runtime/elan` cache. A worker sees only the registered toolchain directories, never the host's home directory.
 
-Library artifacts occupy multiple gigabytes. The host filesystem does not support reflinks, so projects and candidate snapshots inherit dependency directories through read-only mounts instead of copying their complete contents. An actual Mathlib import and Lake build were checked against this arrangement. Physlib also enables Lake artifact caching. The runtime places that cache in the private home, then shares immutable source artifacts through read-only mounts and private symlinks while copying only small lookup maps. Candidate source files and newly generated artifacts remain private and writable. Keep template caches while projects reference them.
+Library artifacts occupy multiple gigabytes. Projects and candidate snapshots inherit dependency directories through read-only mounts instead of copying their complete contents; this also works on filesystems without reflink support. An actual Mathlib import and Lake build were checked against this arrangement. Physlib also enables Lake artifact caching. The runtime places that cache in the private home, then shares immutable source artifacts through read-only mounts and private symlinks while copying only small lookup maps. Candidate source files and newly generated artifacts remain private and writable. Keep template caches while projects reference them.
 
 ## Worker isolation and limits
 
@@ -194,9 +221,21 @@ Dependency and toolchain registry updates merge the latest on-disk values under 
 
 ## HTTPS and a durable service
 
-`deploy/lemex-web.service` is a user-service example for larapc2's paths. Review its working directory and Node path, then copy it to `~/.config/systemd/user/lemex-web.service`, reload the user manager, and enable it. Docker Engine must already be running, and the account must have access to its socket. This user service is installed and enabled on larapc2; user lingering is enabled so it continues after logout. Use `systemctl --user status lemex-web.service` and `journalctl --user -u lemex-web.service` for status and logs. `.data/server.env` is an optional mode-`0600` environment file.
+`deploy/lemex-web.service` is a user-service example for a checkout at `~/lemex-web`. Adjust the working/data directories and the `PATH` so `node` resolves to Node 24 or newer. Docker Engine must already be running, and the account must have access to its socket. The service reads `.data/server.env`; create it from the example, edit your provider settings, and restrict its permissions:
 
-For a public hostname, use an HTTPS reverse proxy. `deploy/Caddyfile.example` forwards to the loopback server. Set `STUDIO_ORIGIN=https://your-hostname` so WebSocket and request origin checks match the external address. Keep account allowlisting enabled. Service installation and reverse-proxy changes are explicit deployment steps.
+```bash
+mkdir -p .data ~/.config/systemd/user
+cp .env.example .data/server.env
+chmod 600 .data/server.env
+# Edit .data/server.env before starting the service.
+cp deploy/lemex-web.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now lemex-web.service
+```
+
+Use `systemctl --user status lemex-web.service` and `journalctl --user -u lemex-web.service` for status and logs. A host administrator can enable user lingering if the service should survive logout. Service logs may contain deployment paths or project details; keep them private. The service/unit filenames retain `lemex-web` to match the repository and existing installations; the displayed product name is LeanFlow Web.
+
+For a public hostname, use an HTTPS reverse proxy. `deploy/Caddyfile.example` forwards to the loopback server. Set `STUDIO_ORIGIN=https://your-hostname` so WebSocket and request origin checks match the external address. Keep token-based account authentication enabled. Service installation and reverse-proxy changes are explicit deployment steps.
 
 Back up `.data/auth`, `.data/provider.json`, workspace metadata, source projects, and saved jobs. Dependency caches and native runtime assets can be reproduced from the pinned manifests, but they must remain present during a live run. Stop jobs or capture a consistent snapshot before moving data. Preserve restrictive permissions for backups containing provider credentials or login tokens.
 
@@ -207,6 +246,8 @@ Assistant output is rebuilt in a verification copy captured from the saved proje
 ```bash
 npm test
 npm run check
+npm run lint
+npm run build
 node scripts/check-runtime.mjs
 node scripts/check-verification.mjs
 node scripts/check-optimization.mjs

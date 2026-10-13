@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import { cpSync } from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -115,7 +116,7 @@ assert not os.path.exists('/workspace/.git')
 assert not os.path.exists('/workspace/Lean/Main.lean')
 assert not os.path.exists('/workspace/private.env')
 assert not os.path.exists(SOURCE_PATH)
-assert not os.path.exists('/localhome/milikic/.ssh')
+assert not os.path.exists(HOST_SSH_PATH)
 config = pathlib.Path('/workspace/repository.git/config').read_text()
 assert 'poison' not in config and 'hooksPath' not in config and 'helper' not in config
 assert not os.path.exists('/workspace/repository.git/hooks/pre-push')
@@ -154,6 +155,7 @@ if result.returncode == 0:
     subprocess.run(['git', '--git-dir=/tmp/remote.git', 'bundle', 'create', '/home/worker/remote.bundle', '--all'], check=True, stdin=subprocess.DEVNULL)
 sys.exit(result.returncode)
 `.replace('SOURCE_PATH', JSON.stringify(source))
+  .replace('HOST_SSH_PATH', JSON.stringify(path.join(os.homedir(), '.ssh')))
 
 async function publishTransport({ root, args, env, credentials }) {
   assert.equal(credentials.token, token)

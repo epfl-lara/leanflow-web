@@ -736,7 +736,7 @@ export async function createStudio({
       })
       child.stderr.on('data', (chunk) =>
         console.error(
-          `[Lean ${project.id}] ${config.redact(chunk.toString()).slice(0, 2000)}`,
+          `[LeanFlow Web · Lean ${project.id}] ${config.redact(chunk.toString()).slice(0, 2000)}`,
         ),
       )
       child.on('error', () => ws.close(1011, 'Lean could not start.'))
@@ -839,11 +839,11 @@ if (
     host = process.env.HOST || '127.0.0.1'
   studio.server.listen(port, host, () =>
     console.log(
-      `Lemex Web: http://${host}:${port}\nAccess token: ${path.join(process.env.STUDIO_DATA_DIR || path.join(projectDir, '.data'), 'auth/owner.token')}\nLemex revision: ${studio.config.lemex.revision || 'unknown'}`,
+      `LeanFlow Web: http://${host}:${port}\nDeveloped by EPFL LARA · https://lara.epfl.ch/\nAccess token file: ${path.join(process.env.STUDIO_DATA_DIR || path.join(projectDir, '.data'), 'auth/owner.token')}\nLemex revision: ${studio.config.lemex.revision || 'unknown'}`,
     ),
   )
   studio.server.on('error', (error) => {
-    console.error(error.message)
+    console.error(`[LeanFlow Web] ${studio.config.redact(error.message)}`)
     studio
       .close()
       .finally(release)

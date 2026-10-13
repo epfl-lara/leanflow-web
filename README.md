@@ -1,71 +1,74 @@
-# Lemex Web
+<p align="center"><img src="client/public/leanflow-mark.svg" width="80" height="80" alt="LeanFlow Web logo"></p>
 
-A self-hosted Lean workspace for the machine owner and trusted collaborators. Import a Git project from the sidebar, open its Lean files with live goals and diagnostics, and ask Lemex to find, repair, or optimize proofs, formalize mathematics, and search for declarations.
+# LeanFlow Web
 
-The server uses the latest verified native Lemex revision, `2f0e12c10d0baf7404a83da3b8cb8f04b77822c9`. It keeps its own state and leaves the user's installed Lemex configuration and conversation history untouched.
+A self-hosted Lean workspace with a Lemex proof assistant. Import a project, explore its files with live goals and diagnostics, and work on proofs, formalization, optimization, and declaration search in one place.
 
-Features:
+Developed by [EPFL LARA](https://lara.epfl.ch/).
 
-- Persistent projects, GitHub repository or subfolder links, local file/folder uploads, file creation/editing, branches, reviewed commits, and explicit pushes using a one-use repository token. Failed import setup can trigger an announced, isolated Lemex repair followed by environment checks.
-- Monaco editor, Lean infoview, live diagnostics, checks of the selected file, resizable panels, and readable light/dark goals.
-- Prebuilt Mathlib, CSLib, and Physlib environments with compatible pinned dependencies. Select Mathlib together with CSLib or Physlib; incompatible prepared versions are explained. Lean basics can use another exact Lean release; imported repositories use their own toolchain.
-- Four assistant sections: **Proofs** (repair/find), **Formalize**, **Optimize**, and **Search**, with model selection, progress streaming, cancellation, and saved runs.
-- Continuous project chats with New chat, a chat selector, per-chat drafts, and up to 12 context files selected from the picker or with `@`. Send updates during a run, expand inline reasoning, or Stop and continue. Each run starts a fresh native worker and receives only the selected chat's bounded server-owned conversation context.
-- Saved agent edits appear live in the editor by default, with independent final verification and Undo. Disable **Edit files live** for a separate candidate and explicit diff review/Apply.
-- Completed replies render Markdown tables, lists, links, and Lean code; wide tables scroll within the chat.
-- Runs continue until completion or Stop, with no time-limit control. Options expose the reasoning efforts supported by the selected Lemex model. Reasoning and readable usage totals show only data actually emitted by the runtime.
-- Recoverable deletion of files, folders, projects, and chats, with Undo and a Trash restore view.
-- Fresh verification workspaces, kernel replay, axiom inspection, and proof-body restrictions. Review-first acceptance checks the full saved baseline; live edits protect touched files and project configuration while preserving unrelated edits.
-- LeanProbe for iterative proof checks, configurable assistant instructions and tools, Loogle search, and extensible server-side MCP configuration.
-- Separate collaborator accounts and isolated Docker workers with resource limits.
+## Features
 
-## Open the larapc2 installation
+- **Projects:** public Git repositories and GitHub subfolder links, local file/folder uploads, pinned Lean versions, and prepared Mathlib, CSLib, and Physlib environments. Compatible libraries can be combined when creating a project.
+- **Lean editor:** Monaco, the Lean infoview, live diagnostics, resizable panels, and light/dark themes.
+- **Assistant:** Proofs, Formalize, Optimize, and Search; model and reasoning-effort selection; readable streaming conversations; updates and cancellation during a run; saved chats with automatic or manual names; and `@` file references.
+- **Live edits:** see saved agent changes in your project while Lemex works, with independent verification and guarded Undo. A separate candidate/review/Apply workflow is also available.
+- **Tools:** LeanProbe, Lean LSP tools, LeanExplore semantic search by default, Loogle type-pattern search, and configurable MCP servers.
+- **Source control:** review changes, create branches and commits, and explicitly push with a one-use repository token kept separate from the proof agent.
+- **Recovery:** recoverable file, folder, project, and chat deletion; announced setup repair in a disposable workspace when an import needs help.
 
-The enabled user service listens on `127.0.0.1:8090` and persists across logout. From your own computer:
+Workers are contained in Docker, and accounts own separate projects. The deployment model is **a machine owner and trusted collaborators using trusted repositories**. This is not an anonymous code-execution service. See [worker isolation and limits](doc/LemexWeb.md#worker-isolation-and-limits) for the precise boundary.
 
-```bash
-ssh -L 8090:127.0.0.1:8090 milikic@larapc2
-```
+## Install
 
-Open **http://localhost:8090**. On larapc2, obtain the owner sign-in token with:
+Requirements: Linux, Node.js 24 or newer, Python 3.11 or newer, Git, Docker Engine accessible to the server account, and a verified **native** Lemex installation with its model catalog. Dependency caches require several gigabytes of disk space.
+
+This release packages Lemex revision `2f0e12c10d0baf7404a83da3b8cb8f04b77822c9`. Install/build that native revision using the [Lemex project](https://github.com/Lemmy00/lemex), then supply the native installation and configuration paths below. An npm launcher alone is insufficient. See [native runtime packaging](doc/LemexWeb.md#native-lemex-and-tools) for provenance requirements and installations without metadata.
 
 ```bash
-cd /localhome/milikic/lemex-web
-npm run access
-```
-
-The owner token is also stored in `.data/auth/owner.token` with mode `0600`. Use **Import or create project** in the left sidebar. Library dependencies are already installed on this machine.
-
-Choose an assistant section, start or select a chat, and use **Select files** to attach saved project or read-only library context. **Optimize** preserves existing theorem statements and compares proof-body tokens and genuine synchronous Lean heartbeats under the project's exact toolchain. Shorter proofs can cost more heartbeats; the interface keeps both results visible. These are local measurements, not official competition scores or cross-version compatibility results.
-
-## Install elsewhere
-
-Requirements: a Linux host, Node 24 or newer, Python 3.11 or newer, Docker Engine, Git, and a verified native Lemex installation. Set `LEMEX_API_KEY` and optionally `LEMEX_BASE_URL` in the server environment for the configured RCP provider.
-
-```bash
+git clone https://github.com/epfl-lara/lemex-web.git
+cd lemex-web
 CYPRESS_INSTALL_BINARY=0 npm ci
-npm run worker:build
+
+# Replace these with your native Lemex installation and config paths.
+npm run worker:build -- \
+  --source /path/to/native/lemex \
+  --config /path/to/lemex/config.toml
+
 npm run presets:install
 npm run build
-npm start
+cp .env.example .env
+chmod 600 .env
 ```
 
-For development, `npm run dev` serves the client on port 3000 and the authenticated backend on port 8090. Production serves the built client and API from port 8090.
+Edit `.env` to set `LEMEX_API_KEY` and `LEMEX_BASE_URL` for your Lemex RCP provider, and optionally choose `STUDIO_MODEL`. If the installed configuration/catalog is outside `~/.lemex`, also set `LEMEX_HOME` to the directory containing `config.toml` and its referenced model catalog; the worker build's `--config` option does not set this server variable. Start the server with explicit environment-file loading:
+
+```bash
+node --env-file=.env server/studio.mjs
+```
+
+Open **http://localhost:8090**. In another terminal in the checkout, run `node --env-file=.env scripts/access.mjs` to display the owner sign-in token using the same configuration. With the default data directory, `npm run access` also works. For a remote host, use an SSH tunnel such as `ssh -L 8090:127.0.0.1:8090 user@your-server` and open the same local address.
+
+`.env` is **not loaded automatically** by `npm start` or `npm run dev`; those commands use the exported process environment. A systemd example with an explicit environment file is included in [deployment and configuration](doc/LemexWeb.md).
+
+Keep `.env`, `.data`, `.runtime`, tokens, provider keys, project contents, and run logs private. These paths are excluded from Git. Provider credentials are retained in the application's private data directory; publishing this source repository does not publish a running instance or its projects.
+
+## Development and checks
+
+`npm run dev` serves the client on port 3000 and the backend on port 8090. Export the desired configuration first. Production serves the built client and API together on port 8090.
+
+The ordinary checks need no model credentials, worker image, or prepared Lean caches:
 
 ```bash
 npm test
 npm run check
-node scripts/check-runtime.mjs
-node scripts/check-verification.mjs
-node scripts/check-optimization.mjs
+npm run lint
+npm run build
 ```
 
-`node scripts/check-application.mjs` makes a real provider request, repairs a broken proof in a new test project, verifies and applies the result, and checks it again. `node scripts/check-browser.mjs` checks live diagnostics and the desktop/mobile interface in a separate project. `node scripts/check-optimization.mjs` uses compiler-only fixtures with no model or worker network to check measurements in the installed Lean and Mathlib presets. See [verification evidence](doc/Verification.md) for completed checks, the measured token/heartbeat tradeoff, and Claude Code reviews.
+After preparing the Docker runtime and presets, `node scripts/check-runtime.mjs`, `node scripts/check-verification.mjs`, and `node scripts/check-optimization.mjs` exercise real Lean execution and verification. `node scripts/check-application.mjs` additionally makes a real provider request and incurs provider usage. Browser checks require Playwright Chromium. See [deployment and configuration](doc/LemexWeb.md#verification) and [recorded verification evidence](doc/Verification.md) for scope and limitations.
 
-Read [deployment and configuration](doc/LemexWeb.md) for account management, systemd, HTTPS, native-runtime updates, dependency caches, and backups. Private-repository imports, shared-project ACLs, and real-time coediting are future extensions; current imports use public HTTPS repositories. Publishing accepts an HTTPS repository destination and a token entered for that push.
+## Credits and license
 
-Hosted LeanExplore is configured, but its upstream service currently returns HTTP 403 to requests from larapc2. Loogle and the local Lean tools work; search failures are surfaced in the interface.
+Built from [lean4web](https://github.com/leanprover-community/lean4web), using [lean4monaco](https://github.com/hhu-adam/lean4monaco), the Lean infoview, [Lemex](https://github.com/Lemmy00/lemex), and [LeanProbe](https://github.com/epfl-lara/LeanProbe). Original upstream files and notices are retained. The application entry points are `server/studio.mjs` and `client/src/studio/Studio.tsx`.
 
-## Upstream
-
-Built from [lean4web](https://github.com/leanprover-community/lean4web), using [lean4monaco](https://github.com/hhu-adam/lean4monaco), the Lean infoview, and [Lemex](https://github.com/Lemmy00/lemex). Original upstream files remain for provenance; the application entry points are `server/studio.mjs` and `client/src/studio/Studio.tsx`. Apache-2.0 licensing and existing notices are preserved.
+Licensed under [Apache-2.0](LICENSE); existing third-party license notices continue to apply. LeanFlow Web uses its own product mark; the EPFL LARA attribution identifies its developers.

@@ -69,18 +69,21 @@ const terminalJob = (job: Job) =>
     job.status,
   )
 
-function Brand({ compact = false }: { compact?: boolean }) {
+function Brand() {
   return (
     <div className="brand">
-      <span className="brand-mark" aria-hidden="true">
-        λ
-      </span>
-      {!compact && (
-        <div>
-          <strong>Lemex</strong>
-          <span>Lean workspace</span>
-        </div>
-      )}
+      <div className="brand-main">
+        <img className="brand-mark" src="/leanflow-mark.svg" alt="" />
+        <strong>LeanFlow Web</strong>
+      </div>
+      <a
+        className="brand-credit"
+        href="https://lara.epfl.ch/"
+        target="_blank"
+        rel="noreferrer"
+      >
+        Developed by EPFL LARA
+      </a>
     </div>
   )
 }
@@ -1281,7 +1284,7 @@ export function Studio() {
         )}
         {!project ? (
           <div className="welcome-state">
-            <span className="welcome-mark">λ</span>
+            <img className="welcome-mark" src="/leanflow-mark.svg" alt="" />
             <div className="eyebrow">A place to work on proofs</div>
             <h1>Start with your project.</h1>
             <p>

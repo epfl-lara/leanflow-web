@@ -605,7 +605,7 @@ export class AgentManager {
           )
       })
       await rpc.call('initialize', {
-        clientInfo: { name: 'lemex_web', title: 'Lemex Web', version: '0.1.0' },
+        clientInfo: { name: 'lemex_web', title: 'LeanFlow Web', version: '0.1.0' },
       })
       rpc.notify('initialized')
       const project = this.workspaces.get(job.projectId, job.owner)

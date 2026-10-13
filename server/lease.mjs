@@ -68,7 +68,7 @@ export async function acquireServerLease(dataDir, { scriptPath = studioScript } 
   const lease = { ...identity, token: randomUUID() }
   guarded(dataDir, () => {
     const previous = readLease(filename)
-    if (liveLease(previous, path.resolve(scriptPath))) throw new Error(`A Lemex Web server is already running (PID ${previous.pid}).`)
+    if (liveLease(previous, path.resolve(scriptPath))) throw new Error(`A LeanFlow Web server is already running (PID ${previous.pid}).`)
     try { unlinkSync(filename) } catch (error) { if (error.code !== 'ENOENT') throw error }
     writeFileSync(filename, JSON.stringify(lease), { mode: 0o600, flag: 'wx' })
   })
