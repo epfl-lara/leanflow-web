@@ -666,6 +666,39 @@ test('changing proof focus mode updates only generated prompts and preserves cus
   )
 })
 
+test('Ask & Search focuses declarations with a read-only prompt and preserves custom drafts', () => {
+  const target = {
+    path: 'Main.lean',
+    startLine: 3,
+    endLine: 3,
+    name: 'negate',
+    source: 'def negate (b : Bool) := !b',
+  }
+  for (const text of ['', '  ', ...Object.values(proofFocusPrompts)]) {
+    const focused = focusDraft({ ...draft, text }, target, 'search')
+    assert.equal(focused.mode, 'search')
+    assert.equal(
+      focused.text,
+      'Explain this proof or definition and find relevant lemmas. Do not edit files.',
+    )
+    assert.deepEqual(focused.proofTarget, target)
+    assert.deepEqual(focused.files, draft.files)
+    assert.equal(focused.revision, draft.revision + 1)
+    assert.equal(
+      focusDraft(focused, target, 'optimize').text,
+      proofFocusPrompts.optimize,
+    )
+    assert.equal(
+      focusDraft(focused, target, 'proofs').text,
+      proofFocusPrompts.proofs,
+    )
+  }
+  const custom = focusDraft(draft, target, 'search')
+  assert.equal(custom.mode, 'search')
+  assert.equal(custom.text, draft.text)
+  assert.deepEqual(custom.proofTarget, target)
+})
+
 test('completed replies render GFM tables, Lean code, lists and safe external links', () => {
   const text = String.raw`| Theorem | New body | Main idea |
 | --- | --- | --- |

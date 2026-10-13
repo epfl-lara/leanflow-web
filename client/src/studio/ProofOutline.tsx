@@ -146,8 +146,8 @@ export function ProofOutline({
               <button
                 type="button"
                 disabled={disabled || readOnly || !target}
-                title="Add the current proof or selected lines to the chat"
-                onClick={() => onFocus('proofs')}
+                title="Ask about the current proof, definition, or selected lines"
+                onClick={() => onFocus('search')}
               >
                 <Icon name="bot" size={15} /> Ask Lemex
               </button>

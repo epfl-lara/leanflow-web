@@ -246,6 +246,17 @@ try {
   )
   await outline.getByRole('button', { name: 'Ask Lemex', exact: true }).click()
   await page.getByLabel('Focused proof', { exact: true }).waitFor()
+  const searchMode = page
+    .getByLabel('Assistant mode')
+    .getByRole('button', { name: 'Ask & Search', exact: true })
+  await until(
+    async () => (await searchMode.getAttribute('aria-pressed')) === 'true',
+    'Ask Lemex opens Ask & Search',
+  )
+  assert.equal(
+    await page.getByLabel('Message Lemex').inputValue(),
+    'Explain this proof or definition and find relevant lemmas. Do not edit files.',
+  )
   assert.match(
     await page.getByLabel('Focused proof', { exact: true }).innerText(),
     /second/,
@@ -256,7 +267,7 @@ try {
   )
   assert.equal(report.sockets.length, 1)
   result.checks.push(
-    'Filter and navigate by keyboard, then Ask Lemex attaches the exact proof in chat without a save, run, or Lean reconnect.',
+    'Filter and navigate by keyboard, then Ask Lemex opens Ask & Search with the exact proof and an explanation prompt without a save, run, or Lean reconnect.',
   )
 
   const sourceEditor = page.locator('.monaco-editor textarea').first()
@@ -315,6 +326,21 @@ try {
   )
   result.checks.push(
     'One-click +Chat actions attach and reveal a declaration; Optimize changes task mode while preserving custom message text.',
+  )
+
+  await entry('Demo.quoted').click()
+  await outline.getByRole('button', { name: 'Ask Lemex', exact: true }).click()
+  await until(
+    async () => (await searchMode.getAttribute('aria-pressed')) === 'true',
+    'Ask Lemex switches from Optimize to Ask & Search for a definition',
+  )
+  assert.match(
+    await page.getByLabel('Focused proof', { exact: true }).innerText(),
+    /Demo\.quoted/,
+  )
+  assert.equal(await composer.inputValue(), 'Keep my custom instructions.')
+  result.checks.push(
+    'Ask Lemex also opens Ask & Search for definitions and preserves a custom message when switching from Optimize.',
   )
 
   const heading = outline.getByRole('button', { name: /^Outline/ })
@@ -530,6 +556,7 @@ try {
   await page.keyboard.press('Control+Home')
   await page.keyboard.press('Shift+End')
   await outline.getByRole('button', { name: 'Ask Lemex', exact: true }).click()
+  assert.equal(await searchMode.getAttribute('aria-pressed'), 'true')
   assert.match(
     await page.getByLabel('Focused proof', { exact: true }).innerText(),
     /1/,

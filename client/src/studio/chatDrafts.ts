@@ -20,6 +20,8 @@ export interface DraftSubmission {
 export const proofFocusPrompts = {
   proofs: 'Complete or repair this proof while preserving its statement.',
   optimize: 'Optimize this proof while preserving its statement.',
+  search:
+    'Explain this proof or definition and find relevant lemmas. Do not edit files.',
 }
 
 export function focusDraft(
@@ -35,7 +37,7 @@ export function focusDraft(
     text:
       !current.text.trim() ||
       Object.values(proofFocusPrompts).includes(current.text)
-        ? proofFocusPrompts[nextMode === 'optimize' ? 'optimize' : 'proofs']
+        ? proofFocusPrompts[nextMode === 'formalize' ? 'proofs' : nextMode]
         : current.text,
     revision: current.revision + 1,
   }
