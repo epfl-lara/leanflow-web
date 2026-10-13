@@ -43,12 +43,16 @@ export function ChatOptions({
         <label>
           Reasoning effort
           <select
+            aria-label="Reasoning effort"
+            aria-describedby={
+              !levels.length ? 'reasoning-effort-help' : undefined
+            }
             value={levels.some((level) => level.id === effort) ? effort : ''}
             onChange={(event) => onEffort(event.target.value)}
             disabled={!levels.length}
           >
             <option value="">
-              Model default
+              Default
               {selected?.defaultReasoningEffort
                 ? ` (${selected.defaultReasoningEffort})`
                 : ''}
@@ -59,6 +63,11 @@ export function ChatOptions({
               </option>
             ))}
           </select>
+          {!levels.length && (
+            <span id="reasoning-effort-help" className="field-help">
+              This model has no adjustable reasoning effort.
+            </span>
+          )}
         </label>
       </div>
       <label className="chat-live-choice">

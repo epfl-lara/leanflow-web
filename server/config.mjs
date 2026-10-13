@@ -1,6 +1,8 @@
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { DEFAULT_MODEL, rcpModelCatalog } from './model-catalog.mjs'
 
 export function catalogModels(catalog, defaultModel) {
   const list = Array.isArray(catalog) ? catalog : catalog.models || []
@@ -43,19 +45,33 @@ export function catalogModels(catalog, defaultModel) {
   return models
 }
 
-export async function loadConfig(dataDir) {
+export async function loadConfig(
+  dataDir,
+  {
+    env = process.env,
+    packagedHome = new URL('../.runtime/lemex/', import.meta.url),
+  } = {},
+) {
+  // The packaged catalog is what the isolated workers run. Do not display
+  // different capabilities from a newer host installation.
+  const packagedAvailable = await fs
+    .access(new URL('config.toml', packagedHome))
+    .then(
+      () => true,
+      () => false,
+    )
   const installedHome =
-    process.env.LEMEX_HOME || path.join(os.homedir(), '.lemex')
+    env.LEMEX_HOME ||
+    (packagedAvailable
+      ? fileURLToPath(packagedHome)
+      : path.join(os.homedir(), '.lemex'))
   let text = ''
   try {
     text = await fs.readFile(path.join(installedHome, 'config.toml'), 'utf8')
   } catch {}
   const value = (name) =>
     new RegExp(`^${name}\\s*=\\s*"([^"\\n]+)"`, 'm').exec(text)?.[1]
-  const defaultModel =
-    process.env.STUDIO_MODEL ||
-    value('model') ||
-    'deepseek-ai/DeepSeek-V4.1-Flash'
+  const defaultModel = env.STUDIO_MODEL || DEFAULT_MODEL
   let catalog
   const catalogFile = value('model_catalog_json') || 'models.json'
   try {
@@ -65,6 +81,7 @@ export async function loadConfig(dataDir) {
   } catch {
     catalog = { models: [] }
   }
+  catalog = rcpModelCatalog(catalog)
   const models = catalogModels(catalog, defaultModel)
   const providerFile = path.join(dataDir, 'provider.json')
   let stored = {}
@@ -74,8 +91,8 @@ export async function loadConfig(dataDir) {
     if (e.code !== 'ENOENT') throw e
   }
   const provider = {
-    LEMEX_API_KEY: process.env.LEMEX_API_KEY || stored.LEMEX_API_KEY,
-    LEMEX_BASE_URL: process.env.LEMEX_BASE_URL || stored.LEMEX_BASE_URL,
+    LEMEX_API_KEY: env.LEMEX_API_KEY || stored.LEMEX_API_KEY,
+    LEMEX_BASE_URL: env.LEMEX_BASE_URL || stored.LEMEX_BASE_URL,
   }
   if (
     provider.LEMEX_API_KEY &&
@@ -127,6 +144,7 @@ export async function loadConfig(dataDir) {
   return {
     defaultModel,
     models,
+    modelCatalog: catalog,
     provider,
     redact,
     mcp,

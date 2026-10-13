@@ -572,6 +572,12 @@ export class AgentManager {
       await fs.writeFile(path.join(home, '.lemex/config.toml'), config, {
         mode: 0o600,
       })
+      if (this.config.modelCatalog)
+        await fs.writeFile(
+          path.join(home, '.lemex/models.json'),
+          JSON.stringify(this.config.modelCatalog),
+          { mode: 0o600 },
+        )
       if (active.controller.signal.aborted) return
       const child = this.runtime.spawn(
         snapshot.root,

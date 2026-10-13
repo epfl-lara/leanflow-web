@@ -13,6 +13,8 @@ import { validateWorkspaceFilePath } from '../workspaces.mjs'
 import { ChatStore } from '../chats.mjs'
 import { EventEmitter } from 'node:events'
 import { PassThrough, Writable } from 'node:stream'
+import { catalogModels } from '../config.mjs'
+import { DEFAULT_MODEL, rcpModelCatalog } from '../model-catalog.mjs'
 
 test('chat continuation carries prior user and assistant messages but excludes reasoning and native state', () => {
   const job = {
@@ -151,13 +153,18 @@ test('agent chat selection is scoped to owner and project before a run is create
     liveEdits: false,
   }
   await assert.rejects(() => manager.start('bob', 'p', input), { status: 404 })
-  await assert.rejects(() => manager.start('alice', 'other', input), { status: 404 })
+  await assert.rejects(() => manager.start('alice', 'other', input), {
+    status: 404,
+  })
   for (const chatId of ['', 0, false, {}])
-    await assert.rejects(() => manager.start('alice', 'p', { ...input, chatId }), {
-      status: 400,
-    })
+    await assert.rejects(
+      () => manager.start('alice', 'p', { ...input, chatId }),
+      {
+        status: 400,
+      },
+    )
   assert.deepEqual(events.list('alice', 'p'), [])
-  const job = (await manager.start('alice', 'p', input))
+  const job = await manager.start('alice', 'p', input)
   assert.equal(job.chatId, 'chat')
   assert.equal(job.file, 'Proofs/A.lean')
   assert.deepEqual(job.files, input.files)
@@ -208,11 +215,11 @@ test('selected file access fails before a native worker can read a missing or fo
       redact: String,
     },
   })
-  const job = (await manager.start('alice', 'p', {
+  const job = await manager.start('alice', 'p', {
     mode: 'prove',
     prompt: 'Prove these.',
     files: ['Main.lean', 'Missing.lean'],
-  }))
+  })
   await new Promise((resolve) =>
     events.on(job.id, (event) => {
       if (event.type === 'status' && event.data.status === 'failed') resolve()
@@ -369,6 +376,7 @@ test('real chat history reaches a fresh native RPC thread as current user contex
       return child
     },
   }
+  const modelCatalog = rcpModelCatalog({ models: [{ slug: DEFAULT_MODEL }] })
   const manager = new AgentManager({
     runtime,
     workspaces,
@@ -383,8 +391,9 @@ test('real chat history reaches a fresh native RPC thread as current user contex
     },
     config: {
       provider: { LEMEX_API_KEY: 'fake-provider-secret' },
-      defaultModel: 'model',
-      models: [{ id: 'model' }],
+      defaultModel: DEFAULT_MODEL,
+      models: catalogModels(modelCatalog, DEFAULT_MODEL),
+      modelCatalog,
       redact: String,
     },
   })
@@ -394,12 +403,12 @@ test('real chat history reaches a fresh native RPC thread as current user contex
     events.close()
     await fs.rm(root, { recursive: true, force: true })
   })
-  const job = (await manager.start('alice', 'p', {
+  const job = await manager.start('alice', 'p', {
     chatId: chat.id,
     mode: 'search',
     prompt: 'Which lemma did we discuss?',
     files: ['Main.lean', 'Notes.md'],
-  }))
+  })
   await new Promise((resolve) =>
     events.on(job.id, (event) => {
       if (
@@ -411,6 +420,16 @@ test('real chat history reaches a fresh native RPC thread as current user contex
   )
   await manager.shutdown()
   assert.equal(events.get(job.id).status, 'completed', events.get(job.id).error)
+  assert.equal(
+    requests.find((request) => request.method === 'turn/start').params.effort,
+    'max',
+  )
+  assert.deepEqual(
+    JSON.parse(
+      await fs.readFile(path.join(home, '.lemex/models.json'), 'utf8'),
+    ),
+    modelCatalog,
+  )
   assert.equal(
     requests.filter((request) => request.method === 'thread/start').length,
     1,
@@ -545,10 +564,10 @@ test('failed and interrupted native turns never verify an unchanged baseline or 
         events.close()
         await fs.rm(root, { recursive: true, force: true })
       })
-      const job = (await manager.start('alice', 'p', {
+      const job = await manager.start('alice', 'p', {
         mode: 'search',
         prompt: 'Search without modifying sources.',
-      }))
+      })
       await new Promise((resolve) =>
         events.on(job.id, (event) => {
           if (event.type === 'status' && event.data.status === 'failed')

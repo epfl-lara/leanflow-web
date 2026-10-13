@@ -6,18 +6,20 @@ Start with the [installation guide](LemexWeb.md#install-and-run). Put settings i
 
 Set `LEMEX_API_KEY` and `LEMEX_BASE_URL` for your Lemex provider to enable the assistant. Leave them empty to use the editor without inference. Assistant requests use your provider's billing.
 
-| Setting                           | Use                                                              |
-| --------------------------------- | ---------------------------------------------------------------- |
-| `LEMEX_API_KEY`, `LEMEX_BASE_URL` | Provider credentials and API endpoint.                           |
-| `LEMEX_HOME`                      | Lemex configuration directory; defaults to `~/.lemex`.           |
-| `STUDIO_MODEL`                    | Default model; otherwise use the installed Lemex configuration.  |
-| `HOST`, `PORT`                    | Listen address and port; defaults to `127.0.0.1:8090`.           |
-| `STUDIO_DATA_DIR`                 | Accounts, projects, chats, and caches; defaults to `.data`.      |
-| `STUDIO_ORIGIN`                   | Exact public HTTPS origin, including a nonstandard port if used. |
-| `STUDIO_MAX_WORKERS`              | Maximum active workers; defaults to `6`.                         |
-| `LEMEX_WORKER_IMAGE`              | Worker image; defaults to `lemex-web-worker:local`.              |
+| Setting                           | Use                                                                                                    |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `LEMEX_API_KEY`, `LEMEX_BASE_URL` | Provider credentials and API endpoint.                                                                 |
+| `LEMEX_HOME`                      | Override the packaged Lemex config and model catalog; falls back to `~/.lemex` when no package exists. |
+| `STUDIO_MODEL`                    | Override the default model, `deepseek-ai/DeepSeek-V4.1-Flash`.                                         |
+| `HOST`, `PORT`                    | Listen address and port; defaults to `127.0.0.1:8090`.                                                 |
+| `STUDIO_DATA_DIR`                 | Accounts, projects, chats, and caches; defaults to `.data`.                                            |
+| `STUDIO_ORIGIN`                   | Exact public HTTPS origin, including a nonstandard port if used.                                       |
+| `STUDIO_MAX_WORKERS`              | Maximum active workers; defaults to `6`.                                                               |
+| `LEMEX_WORKER_IMAGE`              | Worker image; defaults to `lemex-web-worker:local`.                                                    |
 
 See [`.env.example`](../.env.example) for a ready-to-edit file. `npm start` and `npm run dev` do not load `.env` automatically. Exported environment variables override values loaded with Node's `--env-file`.
+
+With the default configuration, the assistant opens with DeepSeek-V4.1-Flash at `max`, its highest supported reasoning effort. Model and effort changes apply while the assistant is open; reopening it restores the default. The server offers each model's supported levels and disables the effort selector for models without adjustable effort. The UI and isolated Lemex workers use the same corrected catalog.
 
 ## Add a collaborator
 

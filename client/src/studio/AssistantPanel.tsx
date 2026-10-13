@@ -133,7 +133,9 @@ export function AssistantPanel({
   const currentMode = chatModes.find((item) => item.id === mode)!
   const chatSelectionKey = `lemex-chat:${session.user.id}:${projectId}`
   const preferenceKey = `lemex-chat-options:${session.user.id}:${projectId}`
-  const preferencesLoaded = useRef(false)
+  const [preferencesLoaded, setPreferencesLoaded] = useState<string | null>(
+    null,
+  )
   const conversationScroll = useConversationScroll(chatId)
   const activeRun = projectRuns.find(runIsActive)
   const statusRun =
@@ -151,7 +153,9 @@ export function AssistantPanel({
     (level) => level.id === efforts[model],
   )
     ? efforts[model]
-    : ''
+    : Object.hasOwn(efforts, model)
+      ? ''
+      : selectedModel?.defaultReasoningEffort || ''
   const target =
     proofTarget?.path ||
     (!readOnly && file?.endsWith('.lean')
@@ -447,34 +451,31 @@ export function AssistantPanel({
     }
   }, [loadChats, loadProject, openChat, chatSelectionKey])
   useEffect(() => {
+    // Each project opens at the server default; model/effort changes apply
+    // only while this assistant is open.
+    setModel(session.defaultModel || session.models[0]?.id || '')
+    setEfforts({})
     try {
       const preferences = JSON.parse(
         localStorage.getItem(preferenceKey) || 'null',
       )
       if (preferences) {
-        if (session.models.some((item) => item.id === preferences.model))
-          setModel(preferences.model)
         if (typeof preferences.liveEdits === 'boolean')
           setLiveEdits(preferences.liveEdits)
-        if (preferences.efforts && typeof preferences.efforts === 'object')
-          setEfforts(preferences.efforts)
       }
     } catch {
       /* Default options remain usable if browser storage is unavailable. */
     }
-    preferencesLoaded.current = true
-  }, [preferenceKey, session.models])
+    setPreferencesLoaded(preferenceKey)
+  }, [preferenceKey, session.models, session.defaultModel])
   useEffect(() => {
-    if (!preferencesLoaded.current) return
+    if (preferencesLoaded !== preferenceKey) return
     try {
-      localStorage.setItem(
-        preferenceKey,
-        JSON.stringify({ model, liveEdits, efforts }),
-      )
+      localStorage.setItem(preferenceKey, JSON.stringify({ liveEdits }))
     } catch {
       /* Options remain in memory. */
     }
-  }, [preferenceKey, model, liveEdits, efforts])
+  }, [preferenceKey, liveEdits, preferencesLoaded])
   useEffect(() => {
     const refresh = () => {
       if (document.hidden) return
