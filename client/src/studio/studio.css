@@ -1184,6 +1184,19 @@ textarea {
 .markdown-body {
   white-space: normal;
 }
+.user-message .markdown-body p {
+  white-space: normal;
+}
+.markdown-body .katex {
+  font-size: 1.1em;
+  overflow-wrap: normal;
+}
+.markdown-body .katex-display {
+  max-width: 100%;
+  padding: 3px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
 .markdown-body > :first-child {
   margin-top: 0;
 }

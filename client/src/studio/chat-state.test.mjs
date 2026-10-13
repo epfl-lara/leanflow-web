@@ -8,6 +8,8 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 
 // Exercise the actual frontend functions and renderer without a browser build.
 // Their extensionless imports target Vite, so transpile only in this test loader.
@@ -15,6 +17,8 @@ const require = createRequire(import.meta.url)
 const modules = new Map([
   ['react-markdown', { __esModule: true, default: ReactMarkdown }],
   ['remark-gfm', { __esModule: true, default: remarkGfm }],
+  ['remark-math', { __esModule: true, default: remarkMath }],
+  ['rehype-katex', { __esModule: true, default: rehypeKatex }],
 ])
 function load(name) {
   if (modules.has(name)) return modules.get(name)
@@ -32,6 +36,7 @@ function load(name) {
   const module = { exports: {} }
   modules.set(name, module.exports)
   const imports = (id) => {
+    if (id.endsWith('.css')) return {}
     if (id.endsWith('.mjs')) return require(id)
     if (id.startsWith('.')) {
       const suffix = id === './Icons' ? '.tsx' : '.ts'
@@ -727,13 +732,100 @@ theorem useful : True := by trivial
   assert.doesNotMatch(html, /<img|<script/)
 })
 
-test('live output stays plain text until the response finishes', () => {
+test('live output renders Markdown and completed formulas while incomplete math stays readable', () => {
   const html = renderToStaticMarkup(
     React.createElement(OutputText, {
-      text: '| a | b |\n|---|---|',
+      text: '| a | b |\n|---|---|\n\n$C^\\infty$ and $\\frac{1}',
       streaming: true,
     }),
   )
-  assert.match(html, /class="streaming-text"/)
-  assert.doesNotMatch(html, /<table>/)
+  assert.match(html, /class="streaming-text markdown-body"/)
+  assert.match(html, /<table>/)
+  assert.match(html, /class="katex"/)
+  assert.match(html, /\$\\frac\{1\}/)
+})
+
+test('math renders dollar and LaTeX delimiters inline and in display mode', () => {
+  const text = String.raw`The force $f(x,t)$ is smooth ($C^\infty$) for $t \ge 0$.
+
+$$
+\int_0^1 x^2\,dx = \frac{1}{3}
+$$
+
+Also \(a^2 + b^2 = c^2\).
+
+\[
+\sum_{n=1}^\infty \frac{1}{n^2} = \frac{\pi^2}{6}
+\]`
+  for (const streaming of [false, true]) {
+    const html = renderToStaticMarkup(
+      React.createElement(OutputText, { text, streaming }),
+    )
+    assert.equal((html.match(/class="katex"/g) || []).length, 6)
+    assert.equal((html.match(/class="katex-display"/g) || []).length, 2)
+    assert.equal((html.match(/<math /g) || []).length, 6)
+    assert.doesNotMatch(html, /katex-error/)
+  }
+})
+
+test('math parsing preserves code, escaped delimiters and link destinations', () => {
+  const text = [
+    String.raw`Literal \`$x$\` and \`\(x\)\`. Escaped \\(x\\) and \$5.`,
+    '',
+    '[Reference](https://example.com/$x$)',
+    '',
+    '```lean',
+    String.raw`-- $x$ and \(x\) are literal Lean comments`,
+    'example : True := by trivial',
+    '```',
+    '',
+    '    -- $x$ and \\(x\\) are literal indented code',
+  ]
+    .join('\n')
+    .replaceAll('\\`', '`')
+  const html = renderToStaticMarkup(React.createElement(OutputText, { text }))
+  assert.doesNotMatch(html, /class="katex"/)
+  assert.match(html, /<code>\$x\$<\/code>/)
+  assert.match(html, /<code>\\\(x\\\)<\/code>/)
+  assert.match(html, /Escaped \\\(x\\\) and \$5/)
+  assert.match(html, /href="https:\/\/example.com\/\$x\$"/)
+  assert.match(html, /<pre><code class="language-lean">-- \$x\$/)
+})
+
+test('every streamed LaTeX prefix renders safely, including multiline and CRLF formulas', () => {
+  for (const formula of [
+    String.raw`\(\frac{1}{2} + x^2\)`,
+    '\\[\r\n\\sum_{n=1}^3 n = 6\r\n\\]',
+    '\\[\n\\begin{aligned}a &= b \\\\ c &= d\\end{aligned}\n\\]',
+  ]) {
+    for (let length = 0; length <= formula.length; length++) {
+      assert.doesNotThrow(() =>
+        renderToStaticMarkup(
+          React.createElement(OutputText, {
+            text: formula.slice(0, length),
+            streaming: true,
+          }),
+        ),
+      )
+    }
+    const html = renderToStaticMarkup(
+      React.createElement(OutputText, { text: formula, streaming: true }),
+    )
+    assert.match(html, /class="katex"/)
+    assert.doesNotMatch(html, /katex-error/)
+  }
+})
+
+test('unsupported and untrusted math stays readable without creating unsafe elements', () => {
+  for (const streaming of [false, true]) {
+    const text = String.raw`$\unknownMacro{x}$ $\href{javascript:alert(1)}{click}$ $\includegraphics{https://example.com/image.png}$ <script>alert(1)</script>`
+    const html = renderToStaticMarkup(
+      React.createElement(OutputText, { text, streaming }),
+    )
+    assert.match(html, /\\unknownMacro/)
+    assert.doesNotMatch(
+      html,
+      /<a[\s>]|<img[\s>]|<script[\s>]|href="javascript:/,
+    )
+  }
 })

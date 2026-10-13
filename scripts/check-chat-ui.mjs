@@ -25,7 +25,7 @@ const earlier = {
   status: 'completed',
   mode: 'repair',
   createdAt: '2026-10-13T08:00:00Z',
-  prompt: 'Earlier proof question.',
+  prompt: 'Earlier proof question. $a^2$',
   message:
     earlierAnswer +
     '\n\n' +
@@ -42,6 +42,13 @@ const earlier = {
 ![Diagram](https://example.invalid/never-load-this-image.png)`,
   eventCursor: 1,
 }
+earlier.message +=
+  '\n\n' +
+  String.raw`A smooth force $C^\infty$ and \(a^2+b^2=c^2\).
+
+$$
+\frac{1}{2} + \frac{1}{2} = 1
+$$`
 const active = {
   id: 'active-proof',
   projectId,
@@ -51,7 +58,8 @@ const active = {
   createdAt: '2026-10-13T09:00:00Z',
   prompt: 'Continue proving the same theorem.',
   message: 'ACTIVE_ANSWER: I am checking the next proof over ℕ. 🔎\n\n',
-  reasoning: 'TRACE_FIXTURE: Inspecting the target and relevant declarations.',
+  reasoning: String.raw`TRACE_FIXTURE: Inspecting $x^2$ and \(a+b\).`,
+  reasoningSummary: String.raw`SUMMARY_FIXTURE: Compare $t \ge 0$.`,
   log: 'ACTIVITY_FIXTURE: lean_diagnostics is running.\n',
   progress: {
     label: 'Checking Main.lean',
@@ -294,7 +302,8 @@ try {
   assert((await conversation.innerText()).includes(active.message.trim()))
   const initialOrder = await conversation.innerText()
   assert(
-    initialOrder.indexOf(earlier.prompt) < initialOrder.indexOf(active.prompt),
+    initialOrder.indexOf('Earlier proof question.') <
+      initialOrder.indexOf(active.prompt),
     'Chat turns must be chronological',
   )
   const options = page.locator('.chat-options > summary')
@@ -381,6 +390,7 @@ try {
     'DRAFT_ALPHA: Keep this thought with Alpha.',
   )
   assert.deepEqual(await selectedFiles(), ['Notes.lean'])
+  await page.locator('.editor-loading').waitFor({ state: 'hidden' })
   await page.reload()
   await until(
     async () =>
@@ -401,6 +411,14 @@ try {
         'Other chat fixture',
       ),
     'other project',
+  )
+  // Monaco focuses its new editor on startup. Wait before typing in chat so
+  // project loading cannot redirect the fixture's keystrokes into Main.lean.
+  await page.locator('.editor-loading').waitFor({ state: 'hidden' })
+  await until(
+    async () =>
+      (await page.locator('.statusbar').innerText()).includes('Lean connected'),
+    'other project editor ready',
   )
   assert.equal(
     await composer.inputValue(),
@@ -449,6 +467,12 @@ try {
   const oldTurn = page.locator(`[data-run-id="${earlier.id}"]`)
   const table = oldTurn.locator('.markdown-table table')
   await table.waitFor()
+  assert.equal(await oldTurn.locator('.user-message .katex').count(), 1)
+  assert.equal(await oldTurn.locator('.assistant-message .katex').count(), 3)
+  assert.equal(
+    await oldTurn.locator('.assistant-message .katex-display').count(),
+    1,
+  )
   assert.equal(await table.getByRole('columnheader').count(), 2)
   assert.equal(await table.locator('tbody tr').count(), 2)
   assert.equal(await table.locator('tbody td').count(), 4)
@@ -473,7 +497,7 @@ try {
     1,
   )
   report.checks.push(
-    'Completed Markdown renders real tables, escaped pipes and Lean inline code, lists and safe external links without fetching remote images',
+    'User messages and completed replies render math; Markdown renders real tables, escaped pipes and Lean inline code, lists and safe external links without fetching remote images',
   )
   const oldRunReads = () =>
     report.requests.filter(
@@ -831,7 +855,68 @@ try {
     async () => (await currentTurn().textContent()).includes('TRACE_FIXTURE'),
     'reported reasoning detail',
   )
-  await currentTurn().locator('.reasoning-trace > summary').click()
+  assert.equal(
+    await currentTurn().locator('.reasoning-content .katex').count(),
+    2,
+  )
+  assert.equal(
+    await currentTurn().locator('.reasoning-summary .katex').count(),
+    1,
+  )
+  await emit(active, 'reasoning', String.raw` More math \(\frac{1`)
+  await until(
+    async () => (await currentTurn().locator('.reasoning-trace').count()) === 2,
+    'new live reasoning step',
+  )
+  await currentTurn()
+    .locator('.reasoning-trace')
+    .last()
+    .locator('summary')
+    .click()
+  assert.equal(
+    await currentTurn().locator('.reasoning-content .katex').count(),
+    2,
+  )
+  await emit(active, 'reasoning', String.raw`}{2}\).`)
+  await until(
+    async () =>
+      (await currentTurn().locator('.reasoning-content .katex').count()) === 3,
+    'incrementally completed reasoning formula',
+  )
+  await emit(active, 'message', String.raw` Live math $x^2$ and \(a+b\).`)
+  await until(
+    async () =>
+      (await currentTurn().locator('.assistant-message .katex').count()) === 2,
+    'live assistant math',
+  )
+  await emit(active, 'followup', {
+    id: 'math-guidance',
+    text: String.raw`MATH_GUIDANCE: Use $t \ge 0$.`,
+    status: 'accepted',
+    createdAt: new Date().toISOString(),
+    messageOffset: active.message.length,
+  })
+  await until(
+    async () =>
+      (await currentTurn()
+        .locator('[data-followup-id="math-guidance"] .katex')
+        .count()) === 1,
+    'math in user follow-up',
+  )
+  await composer.fill(
+    'MATH_DRAFT: typing remains responsive while math arrives.',
+  )
+  assert.equal(
+    await composer.inputValue(),
+    'MATH_DRAFT: typing remains responsive while math arrives.',
+  )
+  report.checks.push(
+    'Live replies, reasoning, summaries and user follow-ups render math; split formulas finish incrementally while typing remains responsive',
+  )
+  const openReasoning = currentTurn().locator(
+    '.reasoning-trace[open] > summary',
+  )
+  while (await openReasoning.count()) await openReasoning.first().click()
   await emit(active, 'reasoning', '\nMore reported reasoning.')
   await sleep(350)
   assert(

@@ -71,7 +71,9 @@ export const ConversationTurn = memo(function ConversationTurn({
       {run.prompt && (
         <div className="user-message">
           <span className="message-label">You</span>
-          <p>{run.prompt}</p>
+          <div className="markdown-body">
+            <OutputText text={run.prompt} />
+          </div>
           {run.proofTarget && (
             <TargetLabel target={run.proofTarget} onOpen={onOpenTarget} />
           )}
@@ -111,7 +113,9 @@ export const ConversationTurn = memo(function ConversationTurn({
             data-followup-id={segment.followup.id}
           >
             <span className="message-label">You · update</span>
-            <p>{segment.followup.text}</p>
+            <div className="markdown-body">
+              <OutputText text={segment.followup.text} />
+            </div>
             {segment.followup.proofTarget && (
               <TargetLabel
                 target={segment.followup.proofTarget}

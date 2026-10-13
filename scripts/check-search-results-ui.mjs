@@ -46,6 +46,14 @@ const signature =
 const documentation = [
   "**Darboux's theorem**: the image of a convex set under `f'` is a convex set, `deriv` version.",
   '',
+  String.raw`The force $f(x,t)$ is smooth ($C^\infty$) for $t \ge 0$. Also \(a^2+b^2=c^2\).`,
+  '',
+  '$$',
+  String.raw`\int_0^1 x^2\,dx = \frac{1}{3}`,
+  '$$',
+  '',
+  String.raw`\[\underbrace{x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x}_{\text{a long equation}}\]`,
+  '',
   '- A monotone function preserves the order.',
   '- [Lean reference](https://lean-lang.org/)',
   '',
@@ -192,6 +200,26 @@ async function checkTypes(theme) {
     'noopener noreferrer',
   )
   const docs = card('Monotone.map_le').locator('.search-documentation-body')
+  assert.equal(await docs.locator('.katex').count(), 6)
+  assert.equal(await docs.locator('.katex-display').count(), 2)
+  assert.equal(await docs.locator('math').count(), 6)
+  assert.equal(await docs.locator('.katex-error').count(), 0)
+  await page.evaluate(() => document.fonts.ready)
+  const mathStyle = await docs
+    .locator('.katex .mathnormal')
+    .first()
+    .evaluate((element) => ({
+      font: getComputedStyle(element).fontFamily,
+      height: element.getBoundingClientRect().height,
+    }))
+  assert.match(mathStyle.font, /KaTeX/)
+  assert(mathStyle.height > 0)
+  for (const display of await docs.locator('.katex-display').all()) {
+    assert.equal(
+      await display.evaluate((element) => getComputedStyle(element).overflowX),
+      'auto',
+    )
+  }
   assert.equal(await docs.locator('strong').innerText(), "Darboux's theorem")
   assert.equal(await docs.locator('p > code').nth(0).innerText(), "f'")
   assert.equal(await docs.locator('p > code').nth(1).innerText(), 'deriv')
@@ -273,7 +301,7 @@ async function checkTypes(theme) {
   }
   await page.screenshot({ path: path.join(output, `search-${theme}.png`) })
   report.checks.push(
-    `${theme}: readable types and Markdown docs, bold, inline/fenced Lean code, lists, tables, wrapping, contrast, safe links and no injected HTML`,
+    `${theme}: readable types and Markdown docs, inline/display math with local fonts, contained wide equations, literal Lean code, lists, tables, wrapping, contrast, safe links and no injected HTML`,
   )
 }
 try {
