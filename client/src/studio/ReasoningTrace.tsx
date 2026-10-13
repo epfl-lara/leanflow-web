@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { runIsActive, type Run } from './api'
 import { OutputText } from './AssistantText'
 
@@ -12,6 +12,23 @@ export function ReasoningTrace({
   const [open, setOpen] = useState(false),
     [loading, setLoading] = useState(false),
     [error, setError] = useState('')
+  const summary = useRef<HTMLElement>(null)
+  const restoreFocus = useRef(false)
+  useLayoutEffect(() => {
+    if (open || !restoreFocus.current) return
+    restoreFocus.current = false
+    const toggle = summary.current
+    if (!toggle) return
+    toggle.focus({ preventScroll: true })
+    const viewport = toggle.closest('.assistant-conversation')
+    if (!viewport) return
+    const bounds = viewport.getBoundingClientRect()
+    const position = toggle.getBoundingClientRect()
+    if (position.top < bounds.top)
+      viewport.scrollTop += position.top - bounds.top
+    else if (position.bottom > bounds.bottom)
+      viewport.scrollTop += position.bottom - bounds.bottom
+  }, [open])
   if (
     !(
       run.reasoning ||
@@ -40,7 +57,12 @@ export function ReasoningTrace({
         }
       }}
     >
-      <summary>
+      <summary
+        ref={summary}
+        onClick={() => {
+          if (open) restoreFocus.current = true
+        }}
+      >
         Reasoning trace{' '}
         {active && (
           <span className="reasoning-live">
@@ -48,6 +70,7 @@ export function ReasoningTrace({
             Live
           </span>
         )}
+        <span className="reasoning-toggle-label">{open ? 'Hide' : 'Show'}</span>
       </summary>
       {open && (
         <>
@@ -69,6 +92,16 @@ export function ReasoningTrace({
               <OutputText text={run.reasoning} streaming={active} />
             </div>
           )}
+          <button
+            type="button"
+            className="turn-action reasoning-collapse"
+            onClick={() => {
+              restoreFocus.current = true
+              setOpen(false)
+            }}
+          >
+            Hide reasoning trace
+          </button>
         </>
       )}
     </details>

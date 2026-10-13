@@ -2293,14 +2293,17 @@ textarea {
 .sidebar-source-sections > .sidebar-files-section {
   flex: 0 0 var(--file-tree-size, 45%);
 }
-.sidebar-source-sections:not(:has(.proof-outline-sidebar)) > .sidebar-files-section,
-.sidebar-source-sections:has(.proof-outline-sidebar.collapsed) > .sidebar-files-section {
+.sidebar-source-sections:not(:has(.proof-outline-sidebar))
+  > .sidebar-files-section,
+.sidebar-source-sections:has(.proof-outline-sidebar.collapsed)
+  > .sidebar-files-section {
   flex: 1;
 }
 .outline-resize-handle {
   top: calc(var(--file-tree-size, 45%) - 3px);
 }
-.sidebar-source-sections:has(.proof-outline-sidebar.collapsed) > .outline-resize-handle {
+.sidebar-source-sections:has(.proof-outline-sidebar.collapsed)
+  > .outline-resize-handle {
   display: none;
 }
 .sidebar-projects-section {
@@ -2607,6 +2610,22 @@ body.panel-resizing iframe {
   cursor: pointer;
   font-weight: 600;
   font-size: 12px;
+  min-height: 32px;
+  background: var(--surface);
+}
+.reasoning-trace[open] > summary {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  box-shadow: 0 1px 0 var(--border);
+}
+.reasoning-toggle-label {
+  margin-left: auto;
+  color: var(--accent);
+}
+.reasoning-collapse {
+  margin-top: 12px;
+  min-height: 32px;
 }
 .reasoning-trace summary::before {
   content: '▸';
