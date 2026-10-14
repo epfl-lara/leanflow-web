@@ -495,6 +495,19 @@ export async function createStudio({
   app.get('/api/projects/:id/files', async (req, res) =>
     res.json(await workspaces.files(req.params.id, req.user.id)),
   )
+  app.get('/api/projects/:id/folders', async (req, res) =>
+    res.json(await workspaces.folders(req.params.id, req.user.id)),
+  )
+  app.post(
+    '/api/projects/:id/folders',
+    sourceRequestHandler(async (req, res) =>
+      res
+        .status(201)
+        .json(
+          await workspaces.createFolder(req.params.id, req.user.id, req.body),
+        ),
+    ),
+  )
   app.get('/api/projects/:id/file', async (req, res) =>
     res.json(
       await workspaces.readFile(req.params.id, req.user.id, req.query.path),

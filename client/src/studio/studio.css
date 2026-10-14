@@ -385,6 +385,14 @@ textarea {
 .sidebar-section-title > div {
   display: flex;
 }
+.sidebar-files-section .sidebar-section-title {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sidebar-files-section .sidebar-section-title > div {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
 .project-list {
   max-height: 31vh;
   overflow: auto;
@@ -2523,6 +2531,33 @@ body.panel-resizing iframe {
 }
 .folder-group {
   min-width: 0;
+}
+.project-root-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.project-root-label strong {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+.project-root-label svg,
+.project-root-label > span {
+  flex-shrink: 0;
+}
+.empty-folder {
+  margin: 0;
+  padding-top: 4px;
+  padding-bottom: 8px;
+}
+.entry-path-preview {
+  overflow-wrap: anywhere;
 }
 .trash-notice {
   display: flex;

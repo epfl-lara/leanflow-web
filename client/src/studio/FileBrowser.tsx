@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useState } from 'react'
 import type { FileEntry } from './api'
 import { Icon } from './Icons'
+import { parentFolders } from './projectPaths'
 
 const MAX_VISIBLE = 200
 
@@ -20,13 +21,11 @@ function visibleFiles(files: FileEntry[], selectedPath?: string) {
   return visible
 }
 
-function folderTree(files: FileEntry[]): FolderNode {
+function folderTree(files: FileEntry[], folders: string[]): FolderNode {
   const root: FolderNode = { path: '', name: '', folders: new Map(), files: [] }
-  for (const file of files) {
-    const segments = file.path.split('/')
-    segments.pop()
+  function addFolder(path: string) {
     let parent = root
-    for (const name of segments) {
+    for (const name of path.split('/').filter(Boolean)) {
       let folder = parent.folders.get(name)
       if (!folder) {
         folder = {
@@ -39,21 +38,25 @@ function folderTree(files: FileEntry[]): FolderNode {
       }
       parent = folder
     }
-    parent.files.push(file)
+    return parent
+  }
+  for (const folder of folders) addFolder(folder)
+  for (const file of files) {
+    const parent = parentFolders(file.path).at(-1) || ''
+    addFolder(parent).files.push(file)
   }
   return root
 }
 
 function addAncestors(folders: Set<string>, path: string) {
-  const segments = path.split('/')
-  segments.pop()
-  for (let index = 1; index <= segments.length; index++) {
-    folders.add(segments.slice(0, index).join('/'))
-  }
+  for (const folder of parentFolders(path)) folders.add(folder)
 }
 
 export const FileBrowser = memo(function FileBrowser({
   files,
+  folders,
+  projectName,
+  revealFolder,
   selectedPath,
   dirty,
   disabled,
@@ -63,6 +66,9 @@ export const FileBrowser = memo(function FileBrowser({
   onDelete,
 }: {
   files: FileEntry[]
+  folders: string[]
+  projectName?: string
+  revealFolder: string | null
   selectedPath?: string
   dirty: boolean
   disabled: boolean
@@ -83,21 +89,42 @@ export const FileBrowser = memo(function FileBrowser({
         dependencies.push(file)
       else project.push(file)
     }
-    return { project, dependencies }
-  }, [files, filter])
-  const projectTree = useMemo(
-    () =>
-      folderTree(
-        visibleFiles(
-          [
-            ...filtered.project.filter((file) => !file.path.includes('/')),
-            ...filtered.project.filter((file) => file.path.includes('/')),
-          ],
-          selectedPath,
-        ),
+    return {
+      project,
+      dependencies,
+      folders: folders.filter(
+        (folder) => !query || folder.toLowerCase().includes(query),
       ),
-    [filtered.project, selectedPath],
-  )
+    }
+  }, [files, folders, filter])
+  const projectTree = useMemo(() => {
+    const visibleFolders = filtered.folders.slice(0, MAX_VISIBLE)
+    if (
+      revealFolder &&
+      filtered.folders.includes(revealFolder) &&
+      !visibleFolders.includes(revealFolder)
+    )
+      visibleFolders[visibleFolders.length - 1] = revealFolder
+    return folderTree(
+      visibleFiles(
+        [
+          ...filtered.project.filter((file) => !file.path.includes('/')),
+          ...filtered.project.filter((file) => file.path.includes('/')),
+        ],
+        selectedPath,
+      ),
+      visibleFolders,
+    )
+  }, [filtered.project, filtered.folders, selectedPath, revealFolder])
+
+  useEffect(() => {
+    if (!revealFolder) return
+    setOpenFolders((current) => {
+      const next = new Set(current)
+      addAncestors(next, `${revealFolder}/`)
+      return next
+    })
+  }, [revealFolder])
 
   useEffect(() => {
     if (
@@ -117,9 +144,10 @@ export const FileBrowser = memo(function FileBrowser({
     setOpenFolders((current) => {
       const next = new Set(current)
       for (const file of filtered.project) addAncestors(next, file.path)
+      for (const folder of filtered.folders) addAncestors(next, `${folder}/`)
       return next.size === current.size ? current : next
     })
-  }, [filter, filtered.project])
+  }, [filter, filtered.project, filtered.folders])
 
   function toggleFolder(path: string) {
     setOpenFolders((current) => {
@@ -219,7 +247,21 @@ export const FileBrowser = memo(function FileBrowser({
                   <Icon name="trash" size={14} />
                 </button>
               </div>
-              {open && folderRows(folder, depth + 1)}
+              {open &&
+                (folder.folders.size || folder.files.length ? (
+                  folderRows(folder, depth + 1)
+                ) : (
+                  <p
+                    className="sidebar-empty empty-folder"
+                    style={{ paddingLeft: (depth + 1) * 12 + 9 }}
+                  >
+                    {files.some((file) =>
+                      file.path.startsWith(folder.path + '/'),
+                    )
+                      ? 'Filter to find files'
+                      : 'Empty folder'}
+                  </p>
+                ))}
             </div>
           )
         })}
@@ -232,11 +274,27 @@ export const FileBrowser = memo(function FileBrowser({
   const visibleDependencies = visibleFiles(filtered.dependencies, selectedPath)
   return (
     <div className="file-list">
-      {folderRows(projectTree)}
+      {projectName && (
+        <div
+          className="project-root-label"
+          title={`Project root — ${projectName}`}
+        >
+          <Icon name="folder" size={15} />
+          <strong>{projectName}</strong>
+          <span>Project root</span>
+        </div>
+      )}
+      {folderRows(projectTree, projectName ? 1 : 0)}
       {filtered.project.length > MAX_VISIBLE && (
         <p className="sidebar-empty file-count">
           Showing up to {MAX_VISIBLE} files. Filter by folder or file name to
           find more.
+        </p>
+      )}
+      {filtered.folders.length > MAX_VISIBLE && (
+        <p className="sidebar-empty file-count">
+          Showing up to {MAX_VISIBLE} folders. Filter by folder name to find
+          more.
         </p>
       )}
       {filtered.dependencies.length > 0 && (
@@ -269,17 +327,20 @@ export const FileBrowser = memo(function FileBrowser({
           )}
         </>
       )}
-      {ready && files.length === 0 && (
+      {ready && files.length === 0 && folders.length === 0 && (
         <p className="sidebar-empty">
           No source files yet.
           <br />
-          Use + to create one.
+          Use New file or New folder to get started.
         </p>
       )}
-      {files.length > 0 &&
+      {(files.length > 0 || folders.length > 0) &&
         !filtered.project.length &&
+        !filtered.folders.length &&
         !filtered.dependencies.length && (
-          <p className="sidebar-empty">No files match this filter.</p>
+          <p className="sidebar-empty">
+            No files or folders match this filter.
+          </p>
         )}
     </div>
   )

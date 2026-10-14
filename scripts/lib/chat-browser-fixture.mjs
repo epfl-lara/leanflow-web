@@ -260,6 +260,17 @@ export async function chatBrowserFixture({
               size: content.length,
             })),
           )
+        if (endpoint === `${prefix}/folders`) {
+          const folders = new Set()
+          for (const filename of Object.keys(sources)) {
+            if (filename.startsWith('.lake/')) continue
+            const segments = filename.split('/')
+            segments.pop()
+            for (let index = 1; index <= segments.length; index++)
+              folders.add(segments.slice(0, index).join('/'))
+          }
+          return respond([...folders].sort())
+        }
         if (endpoint === `${prefix}/file`) {
           const path = url.searchParams.get('path')
           if (path in sources)

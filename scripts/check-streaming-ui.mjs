@@ -213,6 +213,8 @@ await page.route('**/api/**', async (route) => {
           size: content.length,
         })),
       )
+    if (endpoint === `/api/projects/${projectId}/folders`) return json([])
+    if (endpoint === `/api/projects/${projectId}/checks`) return json([])
     if (endpoint === `/api/projects/${projectId}/git`)
       return json({ branch: 'fixture', changes: [], repository: true })
     if (endpoint === `/api/projects/${projectId}/file`) {

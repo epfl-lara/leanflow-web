@@ -51,6 +51,8 @@ import { SearchPanel } from './SearchPanel'
 import { LibrarySourceDialog, type SourceRequest } from './LibrarySourceDialog'
 import { SettingsModal } from './SettingsModal'
 import { FileBrowser } from './FileBrowser'
+import { CreateEntryDialog, type EntryKind } from './CreateEntryDialog'
+import { parentFolders } from './projectPaths'
 import { GitModal } from './GitModal'
 import { ResizeHandle } from './ResizeHandle'
 import { SessionRecovery } from './SessionRecovery'
@@ -252,6 +254,9 @@ export function Studio() {
   const [projects, setProjects] = useState<Project[]>([])
   const [projectId, setProjectId] = useState<string | null>(null)
   const [files, setFiles] = useState<FileEntry[]>([])
+  const [folders, setFolders] = useState<string[]>([])
+  const [foldersAvailable, setFoldersAvailable] = useState<boolean | null>(null)
+  const [createdFolder, setCreatedFolder] = useState<string | null>(null)
   const [file, setFile] = useState<OpenFile | null>(null)
   const [markdownPreview, setMarkdownPreview] = useState(false)
   const [proofFocus, setProofFocus] = useState<ProofFocusRequest | null>(null)
@@ -290,9 +295,7 @@ export function Studio() {
   const [trashError, setTrashError] = useState('')
   const [restoring, setRestoring] = useState<string | null>(null)
   const [gitOpen, setGitOpen] = useState<'changes' | 'publish' | null>(null)
-  const [newFileModal, setNewFileModal] = useState(false)
-  const [newFileName, setNewFileName] = useState('')
-  const [newFileError, setNewFileError] = useState('')
+  const [newEntryKind, setNewEntryKind] = useState<EntryKind | null>(null)
   const [saving, setSaving] = useState(false)
   const [opening, setOpening] = useState(false)
   const [librarySource, setLibrarySource] = useState<SourceRequest | null>(null)
@@ -415,7 +418,6 @@ export function Studio() {
       setError('')
       setDeleteError('')
       setTrashError('')
-      setNewFileError('')
     }
     window.addEventListener(SESSION_EXPIRED_EVENT, expired)
     window.addEventListener(SESSION_RESTORED_EVENT, restored)
@@ -480,10 +482,24 @@ export function Studio() {
   }, [session, preparing, loadProjects])
 
   const loadFiles = useCallback(async (id: string) => {
-    const value = await api<FileEntry[]>(
-      `/api/projects/${encodeURIComponent(id)}/files`,
-    )
-    if (projectIdRef.current === id) setFiles(value)
+    const base = `/api/projects/${encodeURIComponent(id)}`
+    const [value, directories] = await Promise.all([
+      api<FileEntry[]>(`${base}/files`),
+      api<string[]>(`${base}/folders`).catch(() => null),
+    ])
+    if (projectIdRef.current === id) {
+      setFiles(value)
+      setFoldersAvailable(directories !== null)
+      // A server being updated or an unavailable folder listing must not hide files.
+      const parents = new Set<string>()
+      if (!directories) {
+        for (const file of value) {
+          if (file.readOnly || file.path.startsWith('.lake/')) continue
+          for (const folder of parentFolders(file.path)) parents.add(folder)
+        }
+      }
+      setFolders(directories ?? [...parents].sort())
+    }
     return value
   }, [])
 
@@ -557,6 +573,10 @@ export function Studio() {
     if (loadedProjectId.current !== projectId) {
       loadedProjectId.current = projectId
       setFiles([])
+      setFolders([])
+      setFoldersAvailable(null)
+      setCreatedFolder(null)
+      setNewEntryKind(null)
       setFile(null)
       setLibrarySource(null)
       setProofFocus(null)
@@ -904,16 +924,32 @@ export function Studio() {
     await loadGit(projectId)
   }
 
-  async function createFile(event: FormEvent) {
-    event.preventDefault()
-    if (!projectId || !newFileName.trim()) return
-    const path = newFileName.trim()
-    if (files.some((file) => file.path === path)) {
-      setNewFileError('A file with this path already exists.')
+  async function createEntry(path: string, kind: EntryKind) {
+    if (!projectId) throw new Error('Choose a project first.')
+    if (files.some((file) => file.path === path) || folders.includes(path)) {
+      throw new Error(
+        'A file or folder with this name already exists. Choose another name.',
+      )
+    }
+    if (kind === 'folder') {
+      await post(`/api/projects/${encodeURIComponent(projectId)}/folders`, {
+        path,
+      })
+      setFileFilter('')
+      setCreatedFolder(path)
+      setFolders((current) =>
+        [...new Set([...current, ...parentFolders(path), path])].sort(),
+      )
+      try {
+        await loadFiles(projectId)
+      } catch {
+        setError(
+          `Created folder ${path}, but the file list could not refresh. Use Refresh files to try again.`,
+        )
+      }
       return
     }
     setOpening(true)
-    setNewFileError('')
     try {
       await saveCompletely()
       const saved = await api<{ requiresPreparation: boolean }>(
@@ -923,15 +959,23 @@ export function Studio() {
           body: JSON.stringify({ content: '', expectedHash: null }),
         },
       )
-      if (saved.requiresPreparation) await loadProjects()
-      else {
-        await loadFiles(projectId)
-        await openFile(projectId, path)
+      setFiles((current) =>
+        current.some((entry) => entry.path === path)
+          ? current
+          : [...current, { path, size: 0 }],
+      )
+      setFileFilter('')
+      try {
+        if (saved.requiresPreparation) await loadProjects()
+        else {
+          await loadFiles(projectId)
+          await openFile(projectId, path)
+        }
+      } catch {
+        setError(
+          `Created file ${path}, but the project could not refresh. Use Refresh files to try again.`,
+        )
       }
-      setNewFileModal(false)
-      setNewFileName('')
-    } catch (error) {
-      setNewFileError(errorText(error))
     } finally {
       setOpening(false)
     }
@@ -1096,6 +1140,7 @@ export function Studio() {
           ++openRequest.current
           setFile(null)
           setFiles([])
+          setFolders([])
           setGit(null)
           setProjectId(null)
           localStorage.removeItem('lemex-project')
@@ -1310,16 +1355,37 @@ export function Studio() {
                     </button>
                     <button
                       className="icon-button"
-                      onClick={() => {
-                        setNewFileName('')
-                        setNewFileError('')
-                        setNewFileModal(true)
-                      }}
-                      disabled={!workspaceEditable}
+                      onClick={() => setNewEntryKind('file')}
+                      disabled={!workspaceEditable || opening || saving}
                       title="New file"
                       aria-label="New file"
                     >
-                      <Icon name="plus" size={16} />
+                      <Icon name="filePlus" size={16} />
+                    </button>
+                    <button
+                      className="icon-button"
+                      onClick={() => {
+                        setCreatedFolder(null)
+                        setNewEntryKind('folder')
+                      }}
+                      disabled={
+                        !workspaceEditable ||
+                        opening ||
+                        saving ||
+                        !foldersAvailable
+                      }
+                      title={
+                        !workspaceEditable
+                          ? 'Choose a ready project to create a folder.'
+                          : foldersAvailable === null
+                            ? 'Loading folders…'
+                            : foldersAvailable
+                              ? 'New folder'
+                              : 'Folder creation is unavailable. Refresh files to try again.'
+                      }
+                      aria-label="New folder"
+                    >
+                      <Icon name="folderPlus" size={16} />
                     </button>
                     <button
                       className="icon-button"
@@ -1337,19 +1403,23 @@ export function Studio() {
                     </button>
                   </div>
                 </div>
-                {files.length > 8 && (
+                {files.length + folders.length > 8 && (
                   <div className="file-filter">
                     <Icon name="search" size={13} />
                     <input
                       aria-label="Filter files"
                       value={fileFilter}
                       onChange={(event) => setFileFilter(event.target.value)}
-                      placeholder="Find a file…"
+                      placeholder="Find a file or folder…"
                     />
                   </div>
                 )}
                 <FileBrowser
+                  key={projectId}
                   files={files}
+                  folders={folders}
+                  projectName={project?.name}
+                  revealFolder={createdFolder}
                   selectedPath={file?.path}
                   dirty={dirty}
                   disabled={opening || saving}
@@ -2425,58 +2495,17 @@ export function Studio() {
           </footer>
         </Dialog>
       )}
-      {newFileModal && (
-        <Dialog
-          title="Create a file"
-          subtitle="Use a path relative to the project root."
-          onClose={() => setNewFileModal(false)}
-          busy={opening}
-        >
-          <form onSubmit={createFile}>
-            <label className="field-label" htmlFor="new-file-name">
-              File path
-            </label>
-            <input
-              id="new-file-name"
-              autoFocus
-              placeholder="Main/Extra.lean"
-              value={newFileName}
-              onChange={(event) => setNewFileName(event.target.value)}
-              required
-              disabled={opening}
-            />
-            <p className="field-help">
-              Put Lean modules inside your project's library directory. Preset
-              projects use Main.
-            </p>
-            {newFileError && (
-              <p className="error-message" role="alert">
-                {newFileError}
-              </p>
-            )}
-            <footer className="dialog-actions">
-              <button
-                type="button"
-                className="button secondary"
-                onClick={() => setNewFileModal(false)}
-                disabled={opening}
-              >
-                Cancel
-              </button>
-              <button
-                className="button primary"
-                disabled={opening || !newFileName.trim()}
-              >
-                {opening ? (
-                  <span className="spinner" />
-                ) : (
-                  <Icon name="plus" size={15} />
-                )}
-                Create file
-              </button>
-            </footer>
-          </form>
-        </Dialog>
+      {newEntryKind && project && (
+        <CreateEntryDialog
+          kind={newEntryKind}
+          projectName={project.name}
+          presetProject={
+            !!project.preset && !project.repository && !project.uploaded
+          }
+          folders={folders}
+          onCreate={(path) => createEntry(path, newEntryKind)}
+          onClose={() => setNewEntryKind(null)}
+        />
       )}
       {authRequired && <SessionRecovery user={session.user} />}
     </div>

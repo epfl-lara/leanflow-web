@@ -174,6 +174,53 @@ function rejectedSocket(url, headers) {
   })
 }
 
+test('HTTP folder creation validates input, enforces authentication and ownership, and reports collisions', async (t) => {
+  const f = await fixture(t)
+  const endpoint = `/api/projects/${f.project.id}/folders`
+  const create = (body, access = f.token) =>
+    f.request(
+      endpoint,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      access,
+    )
+  const calls = f.runtime.calls.length
+  assert.equal((await f.request(endpoint, {}, null)).status, 401)
+  assert.equal((await create({ path: 'Secret' }, null)).status, 401)
+  assert.equal((await f.request(endpoint, {}, f.otherToken)).status, 404)
+  assert.equal((await create({ path: 'Secret' }, f.otherToken)).status, 404)
+  for (const input of [
+    {},
+    [],
+    { path: false },
+    { path: '../outside' },
+    { path: '.lake/New' },
+    { path: 'lakefile.lean' },
+    { path: 'lakefile.lean/Sub' },
+  ]) {
+    const response = await create(input)
+    assert.equal(response.status, 400)
+    assert.equal(typeof (await response.json()).error, 'string')
+  }
+  const response = await create({ path: 'Proofs/Empty' })
+  assert.equal(response.status, 201)
+  assert.deepEqual(await response.json(), { path: 'Proofs/Empty' })
+  const listing = await f.request(endpoint)
+  assert.equal(listing.status, 200)
+  assert.deepEqual(await listing.json(), ['Proofs', 'Proofs/Empty'])
+  assert.equal((await create({ path: 'Proofs/Empty' })).status, 409)
+  assert.equal((await create({ path: 'Main.lean' })).status, 409)
+  assert.deepEqual(
+    await fs.readdir(path.join(f.project.root, 'Proofs/Empty')),
+    [],
+  )
+  assert.equal(f.runtime.calls.length, calls)
+  assert.equal(f.runtime.spawned.length, 0)
+})
+
 function finishedJob(events, id) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {

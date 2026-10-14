@@ -227,6 +227,179 @@ test('saves new files and rejects stale concurrent saves', async (t) => {
   )
 })
 
+test('creates and lists empty nested folders without running commands or changing the Lean environment', async (t) => {
+  const { store, project, runtime } = await fixture(t)
+  const configuration = store.configurationFingerprint(project.id, 'alice')
+  const calls = runtime.calls.length
+  assert.deepEqual(
+    await store.createFolder(project.id, 'alice', { path: 'Proofs/Nested' }),
+    { path: 'Proofs/Nested' },
+  )
+  assert.deepEqual(await store.folders(project.id, 'alice'), [
+    'Proofs',
+    'Proofs/Nested',
+  ])
+  assert.deepEqual(
+    await fs.readdir(path.join(project.root, 'Proofs/Nested')),
+    [],
+  )
+  assert.equal(
+    (await fs.stat(path.join(project.root, 'Proofs/Nested'))).mode & 0o777,
+    0o700,
+  )
+  assert.equal(
+    (await store.files(project.id, 'alice')).some(
+      (file) => file.path === 'Proofs/Nested',
+    ),
+    false,
+  )
+  await store.writeFile(
+    project.id,
+    'alice',
+    'Proofs/Nested/Extra.lean',
+    '',
+    null,
+  )
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Proofs/Nested/Extra.lean'))
+      .content,
+    '',
+  )
+  assert.equal(store.get(project.id, 'alice').status, 'ready')
+  assert.equal(
+    store.configurationFingerprint(project.id, 'alice'),
+    configuration,
+  )
+  assert.equal(runtime.calls.length, calls)
+})
+
+test('folder creation preserves existing files and folders and rejects concurrent duplicates', async (t) => {
+  const { store, project } = await fixture(t)
+  const source = await store.readFile(project.id, 'alice', 'Main.lean')
+  await assert.rejects(
+    store.createFolder(project.id, 'alice', { path: 'Main.lean' }),
+    { status: 409 },
+  )
+  assert.deepEqual(
+    await store.readFile(project.id, 'alice', 'Main.lean'),
+    source,
+  )
+  const results = await Promise.allSettled([
+    store.createFolder(project.id, 'alice', { path: 'Empty' }),
+    store.createFolder(project.id, 'alice', { path: 'Empty' }),
+  ])
+  assert.equal(
+    results.filter((result) => result.status === 'fulfilled').length,
+    1,
+  )
+  assert.equal(
+    results.filter(
+      (result) => result.status === 'rejected' && result.reason.status === 409,
+    ).length,
+    1,
+  )
+  await assert.rejects(
+    store.writeFile(project.id, 'alice', 'Empty', 'overwrite', null),
+  )
+  assert.deepEqual(await fs.readdir(path.join(project.root, 'Empty')), [])
+})
+
+test('folders remain owner scoped and reject traversal, protected paths and symlink parents', async (t) => {
+  const { store, project, dataDir } = await fixture(t)
+  const outside = path.join(dataDir, 'outside')
+  await fs.mkdir(outside)
+  await fs.symlink(outside, path.join(project.root, 'escape'))
+  await fs.mkdir(path.join(project.root, '.lake/packages/mathlib/Hidden'), {
+    recursive: true,
+  })
+  await fs.mkdir(path.join(project.root, '.git/Hidden'), { recursive: true })
+  await fs.mkdir(path.join(project.root, 'unavailable\\folder'))
+  await assert.rejects(store.folders(project.id, 'bob'), { status: 404 })
+  await assert.rejects(
+    store.createFolder(project.id, 'bob', { path: 'Unauthorized' }),
+    { status: 404 },
+  )
+  for (const input of [null, [], {}, { path: 12 }, { path: '' }])
+    await assert.rejects(store.createFolder(project.id, 'alice', input), {
+      status: 400,
+    })
+  for (const filename of [
+    '../outside',
+    '/tmp/outside',
+    'a/../../outside',
+    'a\\b',
+    '.git/New',
+    '.lemex/New',
+    '.env',
+    '.env.local/New',
+    'node_modules/New',
+    '.lake/packages/mathlib/New',
+    'lean-toolchain',
+    'lakefile.toml',
+    'Main.lean/Nested',
+    'escape/New',
+  ]) {
+    await assert.rejects(
+      store.createFolder(project.id, 'alice', { path: filename }),
+      filename,
+    )
+  }
+  assert.deepEqual(await fs.readdir(outside), [])
+  assert.deepEqual(await store.folders(project.id, 'alice'), [])
+  assert.equal(
+    (await fs.stat(path.join(project.root, 'lean-toolchain'))).isFile(),
+    true,
+  )
+})
+
+test('folder listing and creation reject a workspace root replaced by a symlink', async (t) => {
+  const { store, project, dataDir } = await fixture(t)
+  const original = path.join(dataDir, 'original-root')
+  const outside = path.join(dataDir, 'outside-root')
+  await fs.mkdir(path.join(outside, 'Private'), { recursive: true })
+  await fs.rename(project.root, original)
+  await fs.symlink(outside, project.root)
+  await assert.rejects(store.folders(project.id, 'alice'), { status: 409 })
+  await assert.rejects(
+    store.createFolder(project.id, 'alice', { path: 'New' }),
+    { status: 409 },
+  )
+  assert.deepEqual(await fs.readdir(outside), ['Private'])
+})
+
+test('creating folders or files under setup file names preserves the project environment', async (t) => {
+  const { store, project } = await fixture(t)
+  const configuration = store.configurationFingerprint(project.id, 'alice')
+  for (const name of [
+    'lean-toolchain',
+    'lakefile.toml',
+    'lakefile.lean',
+    'lake-manifest.json',
+  ]) {
+    await assert.rejects(
+      store.createFolder(project.id, 'alice', { path: name }),
+      { status: 400 },
+    )
+    await assert.rejects(
+      store.createFolder(project.id, 'alice', { path: `${name}/Sub` }),
+      { status: 400 },
+    )
+    await assert.rejects(
+      store.writeFile(project.id, 'alice', `${name}/Notes.md`, '', null),
+      { status: 400 },
+    )
+  }
+  assert.equal(store.get(project.id, 'alice').status, 'ready')
+  assert.equal(
+    store.configurationFingerprint(project.id, 'alice'),
+    configuration,
+  )
+  await assert.rejects(fs.stat(path.join(project.root, 'lakefile.lean')), {
+    code: 'ENOENT',
+  })
+  assert.deepEqual(await store.folders(project.id, 'alice'), [])
+})
+
 test('proof snapshots omit repository history, hooks and nested gitdir files while retaining the source revision', async (t) => {
   const runtime = fakeRuntime()
   const run = runtime.run.bind(runtime)

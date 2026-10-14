@@ -46,14 +46,10 @@ import { MAX_PDF_FILE_BYTES, isPdfFile } from '../shared/file-previews.mjs'
 import { validatePdfBytes } from './pdf-preview.mjs'
 import { validateSetupBuildTimeout } from './capacity.mjs'
 import { validateGitBranch } from './git-branches.mjs'
+import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
 const MAX_FILES = 12000
 const PRESETS = new Set(['lean', 'mathlib', 'cslib', 'physlib'])
-const CONFIGURATION_FILES = new Set([
-  'lean-toolchain',
-  'lakefile.lean',
-  'lakefile.toml',
-  'lake-manifest.json',
-])
+const CONFIGURATION_FILES = new Set(PROJECT_CONFIGURATION_FILES)
 const SECRET_PARTS = new Set([
   '.git',
   '.lemex',
@@ -190,6 +186,10 @@ function relativeFile(value, { write = false } = {}) {
     fail('File path is not permitted')
   if (parts.includes('node_modules'))
     fail('Dependency installation directories are not accessible')
+  if (write && parts.length > 1 && CONFIGURATION_FILES.has(parts[0]))
+    fail(
+      'Project setup files cannot be used as folders. Choose another location.',
+    )
   if (
     parts.includes('.lake') &&
     (parts[0] !== '.lake' ||
@@ -2757,12 +2757,42 @@ export class WorkspaceStore {
       dependencies = false,
       dependencyRoot = root,
       includeLinks = false,
+      foldersOnly = false,
       limit = MAX_FILES,
     } = {},
   ) {
     const result = []
     const visit = async (directory, prefix = '') => {
-      const entries = await fs.readdir(directory, { withFileTypes: true })
+      let entries
+      if (foldersOnly) {
+        let handle
+        try {
+          handle = await fs.open(
+            directory,
+            constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+          )
+          if (
+            (await fs.realpath(`/proc/self/fd/${handle.fd}`)) !==
+            path.resolve(directory)
+          )
+            fail(
+              'Folder changed during access. Refresh the file tree and try again.',
+              409,
+            )
+          entries = await fs.readdir(`/proc/self/fd/${handle.fd}`, {
+            withFileTypes: true,
+          })
+        } catch (error) {
+          if (error.code === 'ENOTDIR' || error.code === 'ELOOP')
+            fail(
+              'Folder changed during access. Refresh the file tree and try again.',
+              409,
+            )
+          throw error
+        } finally {
+          await handle?.close()
+        }
+      } else entries = await fs.readdir(directory, { withFileTypes: true })
       entries.sort((a, b) => a.name.localeCompare(b.name))
       for (const entry of entries) {
         if (result.length >= limit) break
@@ -2782,8 +2812,18 @@ export class WorkspaceStore {
               size: 0,
               link: await fs.readlink(full),
             })
-        } else if (entry.isDirectory()) await visit(full, relative)
-        else if (entry.isFile()) {
+        } else if (entry.isDirectory()) {
+          if (foldersOnly) {
+            try {
+              relativeFile(relative, { write: true })
+            } catch (error) {
+              if (error instanceof WorkspaceError) continue
+              throw error
+            }
+            result.push({ path: relative })
+          }
+          await visit(full, relative)
+        } else if (!foldersOnly && entry.isFile()) {
           const stat = await fs.stat(full)
           result.push({ path: relative, size: stat.size })
         }
@@ -2824,6 +2864,54 @@ export class WorkspaceStore {
     const dependencyRoot =
       (await this.runtime.dependencyRoot?.(project.root)) || project.root
     return this.#walk(project.root, { dependencies: true, dependencyRoot })
+  }
+
+  async folders(id, owner) {
+    const project = this.get(id, owner)
+    return (await this.#walk(project.root, { foldersOnly: true })).map(
+      (folder) => folder.path,
+    )
+  }
+
+  async createFolder(id, owner, input) {
+    this.get(id, owner)
+    if (!input || typeof input !== 'object' || Array.isArray(input))
+      fail('Enter a folder name.')
+    const filename = relativeFile(input.path, { write: true })
+    if (CONFIGURATION_FILES.has(filename.split('/')[0]))
+      fail(
+        'This name is reserved for a project setup file. Choose another folder name.',
+      )
+    return this.#locked(id, async () => {
+      const project = this.get(id, owner)
+      this.#ready(project, true)
+      if (project.kind === 'single-file')
+        fail(
+          'Convert the playground to a project before creating folders.',
+          409,
+        )
+      if (this.jobs.has(id))
+        fail(
+          'Wait for project preparation to finish before creating folders.',
+          409,
+        )
+      await guarded(project.root, filename, { write: true })
+      const parent = await writeParent(project.root, filename)
+      try {
+        await fs.mkdir(`${parent.anchor}/${parent.name}`, { mode: 0o700 })
+      } catch (error) {
+        if (error.code === 'EEXIST')
+          fail(
+            'A file or folder with this name already exists. Choose another name.',
+            409,
+          )
+        throw error
+      } finally {
+        await parent.handle.close()
+      }
+      this.#event(project, 'saved', `Created folder ${filename}.\n`)
+      return { path: filename }
+    })
   }
 
   async readFile(id, owner, filename) {
