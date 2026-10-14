@@ -30,6 +30,16 @@ Setup shows its current stage, from preparing Lean and libraries to testing the 
 
 Use **Refresh setup** in an open project to recheck its environment. Valid compiled caches are reused. Choose the adjacent info icon for details about cache reuse and automatic repair. Stop active checks and chats, and close the terminal before refreshing.
 
+## Read project documents
+
+Choose a Markdown file such as `README.md` in **Files**. The editor highlights headings, emphasis, links, lists, and code fences. Choose **Preview Markdown** to read the formatted document, including tables and math written as `$x^2$`, `$$x^2$$`, `\(x^2\)`, or `\[x^2\]`. **Edit Markdown** returns to the same editor with your unsaved changes intact. Choose **Save** to save them.
+
+Formatted previews support documents up to 512 KiB. Larger Markdown files stay available in the editor.
+
+Choose a `.pdf` file to open a read-only PDF viewer. Use **Download PDF** or **Open PDF in new tab** if your browser cannot display it inline. Choose **Reload PDF** after changing a document through the terminal. PDFs can be uploaded alongside source files, up to 16 MiB per PDF and 32 MiB total per upload. PDF viewing does not compile LaTeX or attach PDF contents to Lemex chats.
+
+Drag the scrollbar inside **Files** to scroll long lists. The separate strip to its right resizes the sidebar. You can also focus a separator and use the arrow keys.
+
 ## View evaluation results and stop a check
 
 Put the cursor on a completed `#eval` command to see its output in **Goals & diagnostics**. For example:

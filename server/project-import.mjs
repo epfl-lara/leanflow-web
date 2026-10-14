@@ -4,6 +4,8 @@ import {
   sourceFileByteLimit,
   MAX_SOURCE_UPLOAD_BYTES,
 } from '../shared/source-limits.mjs'
+import { isPdfFile } from '../shared/file-previews.mjs'
+import { decodePdfUpload } from './pdf-preview.mjs'
 
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status })
@@ -101,27 +103,37 @@ export function uploadedFiles(input, validatePath) {
         typeof file.path !== 'string' ||
         typeof file.content !== 'string'
       )
-        fail('Upload files as UTF-8 text with relative paths.')
+        fail('Upload text or PDF files with relative paths.')
       const name = validatePath(file.path)
-      if (!file.content.isWellFormed())
-        fail(`Invalid UTF-8 text in ${name}`, 415)
       if (seen.has(name)) fail(`The upload contains duplicate paths: ${name}`)
-      if (file.content.includes('\0'))
-        fail(`Binary files cannot be uploaded: ${name}`, 415)
-      const size = Buffer.byteLength(file.content)
-      if (size > sourceFileByteLimit(name))
-        fail(
-          `Files must be at most ${sourceFileByteLimit(name) / (1024 * 1024)} MiB: ${name}`,
-          413,
-        )
+      let content
+      if (file.encoding === 'base64') {
+        content = decodePdfUpload(name, file.content)
+      } else {
+        if (file.encoding !== undefined)
+          fail(`Unsupported upload encoding: ${name}`, 415)
+        if (isPdfFile(name))
+          fail(`Upload ${name} as a PDF file, rather than text.`, 415)
+        if (!file.content.isWellFormed())
+          fail(`Invalid UTF-8 text in ${name}`, 415)
+        if (file.content.includes('\0'))
+          fail(`Binary files cannot be uploaded: ${name}`, 415)
+        if (Buffer.byteLength(file.content) > sourceFileByteLimit(name))
+          fail(
+            `Files must be at most ${sourceFileByteLimit(name) / (1024 * 1024)} MiB: ${name}`,
+            413,
+          )
+        content = file.content
+      }
+      const size = Buffer.byteLength(content)
       bytes += size
       if (bytes > MAX_SOURCE_UPLOAD_BYTES)
         fail(
-          'The upload exceeds 32 MiB of source files. Import the Git repository or upload fewer files.',
+          'The upload exceeds 32 MiB of project files. Import the Git repository or upload fewer files.',
           413,
         )
       seen.add(name)
-      return { path: name, content: file.content }
+      return { path: name, content }
     })
     .map((file) => {
       const parts = file.path.split('/')

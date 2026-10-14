@@ -8,6 +8,7 @@
     "build": "cross-env NODE_ENV=production vite build"
   },
   "dependencies": {
+    "@codingame/monaco-vscode-markdown-basics-default-extension": "8.0.4",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
     "@fortawesome/free-solid-svg-icons": "^7.1.0",

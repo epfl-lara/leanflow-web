@@ -25,6 +25,7 @@ import { acquireServerLease } from './lease.mjs'
 import { repairProjectSetup, withSetupRepairDeadline } from './setup-repair.mjs'
 import { GitPublisher } from './git-publish.mjs'
 import { validateGitBranch } from './git-branches.mjs'
+import { pdfDisposition } from './pdf-preview.mjs'
 import { proofTargetReference } from './proof-target.mjs'
 import { loadCapacity } from './capacity.mjs'
 import {
@@ -499,6 +500,16 @@ export async function createStudio({
       await workspaces.readFile(req.params.id, req.user.id, req.query.path),
     ),
   )
+  app.get('/api/projects/:id/file-preview', async (req, res) => {
+    const preview = await workspaces.readPdfPreview(
+      req.params.id,
+      req.user.id,
+      req.query.path,
+    )
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', pdfDisposition(preview.path))
+    res.send(preview.content)
+  })
   app.post('/api/projects/:id/library-source', async (req, res) =>
     res.json(
       await workspaces.readLibrarySource(req.params.id, req.user.id, req.body),

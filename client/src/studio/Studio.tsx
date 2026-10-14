@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -32,6 +33,10 @@ import { Icon } from './Icons'
 import { HelpTip } from './HelpTip'
 import { ToolbarAction } from './ToolbarAction'
 import { LeanWorkspace } from './LeanWorkspace'
+import { PdfFileViewer } from './PdfFileViewer'
+import { MarkdownFilePreview } from './MarkdownFilePreview'
+import { isMarkdownPath } from './fileReading'
+import { isPdfFile } from '../../../shared/file-previews.mjs'
 import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
 import { ProjectSetupDetails } from './ProjectSetupDetails'
@@ -64,6 +69,7 @@ import {
 } from './layout'
 import './studio.css'
 import './single-file.css'
+import './file-reading.css'
 
 interface DeleteTarget {
   chatId?: string
@@ -247,6 +253,7 @@ export function Studio() {
   const [projectId, setProjectId] = useState<string | null>(null)
   const [files, setFiles] = useState<FileEntry[]>([])
   const [file, setFile] = useState<OpenFile | null>(null)
+  const [markdownPreview, setMarkdownPreview] = useState(false)
   const [proofFocus, setProofFocus] = useState<ProofFocusRequest | null>(null)
   const [editorProof, setEditorProof] = useState<EditorProofState | null>(null)
   const [focusEditorRequest, setFocusEditorRequest] =
@@ -371,6 +378,20 @@ export function Studio() {
   )
   const fileTreePercent = clamp(fileTreeSize, fileTreeMinimum, fileTreeMaximum)
   const dirty = !!file && file.content !== file.savedContent
+  const pdfPreview = file?.preview === 'pdf'
+  const readingFile =
+    pdfPreview || (isMarkdownPath(file?.path) && markdownPreview)
+  const assistantFiles = useMemo(
+    () =>
+      files.filter(
+        (entry) =>
+          !isPdfFile(entry.path) &&
+          (!singleFileMode || entry.path === 'Main.lean'),
+      ),
+    [files, singleFileMode],
+  )
+
+  useEffect(() => setMarkdownPreview(false), [projectId, file?.path])
 
   const loadSession = useCallback(async () => {
     setStartupError('')
@@ -495,13 +516,16 @@ export function Studio() {
       setOpening(true)
       setError('')
       try {
-        const value = await api<{
-          content: string
-          hash: string
-          readOnly?: boolean
-        }>(
-          `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
-        )
+        const pdf = isPdfFile(path)
+        const value = pdf
+          ? { content: '', hash: '', readOnly: true }
+          : await api<{
+              content: string
+              hash: string
+              readOnly?: boolean
+            }>(
+              `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
+            )
         if (request !== openRequest.current || projectIdRef.current !== id)
           return
         setFile({
@@ -516,6 +540,7 @@ export function Studio() {
             filesRef.current.find((item) => item.path === path)?.readOnly,
           line,
           column,
+          preview: pdf ? 'pdf' : undefined,
         })
         localStorage.setItem(`lemex-file-${id}`, path)
         setSidebarOpen(false)
@@ -925,6 +950,12 @@ export function Studio() {
         setAgentPendingFile(current.path)
         return
       }
+      if (current.preview === 'pdf') {
+        // Terminal polling supplies no changed paths. Keep the reader's page
+        // and scroll position until a reported edit or an explicit reload.
+        if (paths.includes(current.path)) await openFile(id, current.path)
+        return
+      }
       const latest = await api<{ content: string; hash: string }>(
         `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(current.path)}`,
       )
@@ -960,7 +991,7 @@ export function Studio() {
           : 'Agent edits updated live',
       )
     },
-    [loadFiles, loadGit],
+    [loadFiles, loadGit, openFile],
   )
 
   useEffect(() => {
@@ -1864,6 +1895,15 @@ export function Studio() {
                 {opening && <span className="spinner" />}
               </div>
               <div className="file-actions">
+                {isMarkdownPath(file?.path) && (
+                  <button
+                    className="button small secondary"
+                    aria-pressed={markdownPreview}
+                    onClick={() => setMarkdownPreview((current) => !current)}
+                  >
+                    {markdownPreview ? 'Edit Markdown' : 'Preview Markdown'}
+                  </button>
+                )}
                 {singleFileMode && (
                   <>
                     <button
@@ -1920,60 +1960,81 @@ export function Studio() {
                 />
               </div>
             </div>
-            {project.status === 'ready' ? (
-              <LeanWorkspace
-                key={project.id}
-                projectId={project.id}
-                file={file}
-                theme={theme}
-                showInfoview={showInfoview}
-                goalsSize={goalsSize}
-                onGoalsSizeChange={setGoalsSize}
-                revealTarget={revealProof || undefined}
-                onProofStateChange={setEditorProof}
-                focusEditorRequest={focusEditorRequest}
-                onFocusEditorHandled={(id) =>
-                  setFocusEditorRequest((current) =>
-                    current?.id === id ? null : current,
-                  )
-                }
-                onFocusProof={(target, mode) => {
-                  setProofFocus({
-                    id: ++proofRequestId.current,
-                    projectId: project.id,
-                    target,
-                    mode,
-                  })
-                  setToolsOpen(true)
-                  setSidebarOpen(false)
-                }}
-                onState={setLeanState}
-                onChange={(path, content) =>
-                  setFile((current) =>
-                    current?.path === path ? { ...current, content } : current,
-                  )
-                }
-                onOpenFile={(path, line, column) =>
-                  navigate(() => openFile(project.id, path, line, column))
-                }
-                onOpenLibrary={setLibrarySource}
-              />
-            ) : (
-              <textarea
-                className="setup-file-editor"
-                aria-label="Project file content"
-                spellCheck={false}
-                readOnly={file?.readOnly || !file}
-                value={file?.content || ''}
-                onChange={(event) =>
-                  setFile((current) =>
-                    current
-                      ? { ...current, content: event.target.value }
-                      : current,
-                  )
-                }
-              />
-            )}
+            <div
+              className={`file-reading-workspace ${readingFile ? 'reading' : ''}`}
+            >
+              {project.status === 'ready' ? (
+                <LeanWorkspace
+                  key={project.id}
+                  projectId={project.id}
+                  file={pdfPreview ? null : file}
+                  theme={theme}
+                  showInfoview={showInfoview && !!file?.path.endsWith('.lean')}
+                  goalsSize={goalsSize}
+                  onGoalsSizeChange={setGoalsSize}
+                  revealTarget={revealProof || undefined}
+                  onProofStateChange={setEditorProof}
+                  focusEditorRequest={focusEditorRequest}
+                  onFocusEditorHandled={(id) =>
+                    setFocusEditorRequest((current) =>
+                      current?.id === id ? null : current,
+                    )
+                  }
+                  onFocusProof={(target, mode) => {
+                    setProofFocus({
+                      id: ++proofRequestId.current,
+                      projectId: project.id,
+                      target,
+                      mode,
+                    })
+                    setToolsOpen(true)
+                    setSidebarOpen(false)
+                  }}
+                  onState={setLeanState}
+                  onChange={(path, content) =>
+                    setFile((current) =>
+                      current?.path === path
+                        ? { ...current, content }
+                        : current,
+                    )
+                  }
+                  onOpenFile={(path, line, column) =>
+                    navigate(() => openFile(project.id, path, line, column))
+                  }
+                  onOpenLibrary={setLibrarySource}
+                />
+              ) : (
+                <textarea
+                  className="setup-file-editor"
+                  aria-label="Project file content"
+                  spellCheck={false}
+                  readOnly={file?.readOnly || !file}
+                  value={file?.content || ''}
+                  onChange={(event) =>
+                    setFile((current) =>
+                      current
+                        ? { ...current, content: event.target.value }
+                        : current,
+                    )
+                  }
+                />
+              )}
+              {pdfPreview && file ? (
+                <PdfFileViewer
+                  key={`${project.id}:${file.path}:${file.generation}`}
+                  projectId={project.id}
+                  path={file.path}
+                />
+              ) : readingFile && file ? (
+                <MarkdownFilePreview
+                  key={file.path}
+                  path={file.path}
+                  content={file.content}
+                  files={files}
+                  onOpenFile={chooseFile}
+                />
+              ) : null}
+            </div>
             {job && (
               <section className={`build-output ${jobOpen ? 'expanded' : ''}`}>
                 <button
@@ -2078,12 +2139,8 @@ export function Studio() {
               <AssistantPanel
                 key={project.id}
                 projectId={project.id}
-                file={file?.path}
-                files={
-                  singleFileMode
-                    ? files.filter((entry) => entry.path === 'Main.lean')
-                    : files
-                }
+                file={pdfPreview ? undefined : file?.path}
+                files={assistantFiles}
                 focusRequest={proofFocus || undefined}
                 editorProof={currentEditorProof || undefined}
                 onFocusEditor={(request) => {

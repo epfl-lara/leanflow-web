@@ -42,6 +42,8 @@ import {
 } from './library-sources.mjs'
 
 import { sourceFileByteLimit } from '../shared/source-limits.mjs'
+import { MAX_PDF_FILE_BYTES, isPdfFile } from '../shared/file-previews.mjs'
+import { validatePdfBytes } from './pdf-preview.mjs'
 import { validateSetupBuildTimeout } from './capacity.mjs'
 import { validateGitBranch } from './git-branches.mjs'
 const MAX_FILES = 12000
@@ -304,10 +306,20 @@ async function guarded(root, relative, options = {}) {
   return current
 }
 
-async function textFile(filename, missing = false) {
+async function workspaceFileBytes(
+  filename,
+  {
+    missing = false,
+    byteLimit = sourceFileByteLimit(filename),
+    tooLargeMessage = `Files larger than ${byteLimit / (1024 * 1024)} MiB are not editable. Reduce the file or split Lean sources into smaller modules.`,
+  } = {},
+) {
   let handle
   try {
-    handle = await fs.open(filename, constants.O_RDONLY | constants.O_NOFOLLOW)
+    handle = await fs.open(
+      filename,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    )
   } catch (error) {
     if (error.code === 'ENOENT') {
       if (missing) return null
@@ -326,29 +338,42 @@ async function textFile(filename, missing = false) {
       fail('File path changed during access', 409)
     const stat = await handle.stat()
     if (!stat.isFile()) fail('Path is not a regular file')
-    if (stat.size > sourceFileByteLimit(filename))
-      fail(
-        `Files larger than ${sourceFileByteLimit(filename) / (1024 * 1024)} MiB are not editable. Reduce the file or split Lean sources into smaller modules.`,
-        413,
+    if (stat.size > byteLimit) fail(tooLargeMessage, 413)
+    const chunks = []
+    let size = 0
+    while (true) {
+      // Read at most one byte beyond the limit, even when a worker grows the
+      // file after stat(). Never allocate an unbounded preview or source read.
+      const chunk = Buffer.allocUnsafe(
+        Math.min(64 * 1024, byteLimit + 1 - size),
       )
-    const content = await handle.readFile()
-    if (content.length > sourceFileByteLimit(filename))
-      fail(
-        `Files larger than ${sourceFileByteLimit(filename) / (1024 * 1024)} MiB are not editable. Reduce the file or split Lean sources into smaller modules.`,
-        413,
-      )
-    if (content.includes(0)) fail('Binary files are not editable', 415)
-    const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
-    let text
-    try {
-      text = decoded.decode(content)
-    } catch {
-      fail('Only UTF-8 files are editable', 415)
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null)
+      if (!bytesRead) break
+      size += bytesRead
+      if (size > byteLimit) fail(tooLargeMessage, 413)
+      chunks.push(chunk.subarray(0, bytesRead))
     }
-    return { content: text, hash: sha(content), mode: stat.mode & 0o777 }
+    return { content: Buffer.concat(chunks, size), mode: stat.mode & 0o777 }
   } finally {
     await handle.close()
   }
+}
+
+async function textFile(filename, missing = false) {
+  const file = await workspaceFileBytes(filename, { missing })
+  if (!file) return null
+  if (isPdfFile(filename))
+    fail('PDF files are read only. Open the PDF reader to view this file.', 415)
+  const { content, mode } = file
+  if (content.includes(0)) fail('Binary files are not editable', 415)
+  const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+  let text
+  try {
+    text = decoded.decode(content)
+  } catch {
+    fail('Only UTF-8 files are editable', 415)
+  }
+  return { content: text, hash: sha(content), mode }
 }
 
 async function fileHash(filename) {
@@ -2811,6 +2836,24 @@ export class WorkspaceStore {
     return { content, hash }
   }
 
+  async readPdfPreview(id, owner, filename) {
+    const project = this.get(id, owner)
+    const relative = relativeFile(filename)
+    if (!isPdfFile(relative)) fail('Choose a .pdf file to preview.', 415)
+    const root = relative.startsWith('.lake/packages/')
+      ? (await this.runtime.dependencyRoot?.(project.root)) || project.root
+      : project.root
+    const { content } = await workspaceFileBytes(
+      await guarded(root, relative),
+      {
+        byteLimit: MAX_PDF_FILE_BYTES,
+        tooLargeMessage:
+          'PDF files must be at most 16 MiB. Reduce the PDF and upload it again.',
+      },
+    )
+    return { content: validatePdfBytes(relative, content), path: relative }
+  }
+
   async readLibrarySource(id, owner, input) {
     const project = this.get(id, owner)
     if (
@@ -2936,6 +2979,11 @@ export class WorkspaceStore {
   async writeFile(id, owner, filename, content, expectedHash) {
     const project = this.get(id, owner)
     this.#ready(project, true)
+    if (isPdfFile(filename))
+      fail(
+        'PDF files are read only. Upload a new PDF with a different name.',
+        415,
+      )
     if (
       typeof content !== 'string' ||
       Buffer.byteLength(content) >
@@ -3585,7 +3633,18 @@ export class WorkspaceStore {
       this.#assertPlaygroundFile(project, filename)
       if (seen.has(filename)) fail('A change set contains duplicate paths')
       seen.add(filename)
-      if (
+      const pdfUpload =
+        reason === 'uploaded' &&
+        isPdfFile(filename) &&
+        Buffer.isBuffer(change.after) &&
+        change.beforeHash === null
+      if (pdfUpload) validatePdfBytes(filename, change.after)
+      else if (isPdfFile(filename))
+        fail(
+          'PDF files are read only. Upload a new PDF with a different name.',
+          415,
+        )
+      else if (
         change.after !== null &&
         (typeof change.after !== 'string' ||
           Buffer.byteLength(change.after) > sourceFileByteLimit(filename) ||
@@ -3599,7 +3658,12 @@ export class WorkspaceStore {
       )
         fail('Every change requires its original file hash')
       const destination = await guarded(project.root, filename, { write: true })
-      const before = await textFile(destination, true)
+      if (pdfUpload && (await exists(destination)))
+        fail(
+          `A file named ${filename} already exists. Rename the PDF before uploading.`,
+          409,
+        )
+      const before = pdfUpload ? null : await textFile(destination, true)
       if ((before?.hash ?? null) !== change.beforeHash)
         fail(
           `Cannot apply: ${filename} changed since the assistant run started.`,

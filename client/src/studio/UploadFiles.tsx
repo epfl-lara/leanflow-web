@@ -6,10 +6,15 @@ import {
   sourceFileByteLimit,
   MAX_SOURCE_UPLOAD_BYTES,
 } from '../../../shared/source-limits.mjs'
+import {
+  isPdfFile,
+  MAX_PDF_FILE_BYTES,
+} from '../../../shared/file-previews.mjs'
 
 export interface UploadFile {
   path: string
   content: string
+  encoding?: 'base64'
 }
 const excluded =
   /^(?:\.git|\.lake|node_modules|\.lemex|\.codex|\.ssh|\.aws|\.azure|\.config|\.netrc|\.npmrc|\.pypirc|__MACOSX|\.DS_Store|\.env(?:\..*)?|credentials(?:\.json)?|auth\.json|settings\.local\.json|.*\.(?:pem|key|p12|pfx))$/i
@@ -33,11 +38,23 @@ export async function readSourceFiles(files: { file: File; path: string }[]) {
   const stripFolder = usable.every((item) => item.path.startsWith(first + '/'))
   const result: UploadFile[] = []
   for (const item of usable) {
-    if (item.file.size > sourceFileByteLimit(item.path))
+    const pdf = isPdfFile(item.path)
+    const limit = pdf ? MAX_PDF_FILE_BYTES : sourceFileByteLimit(item.path)
+    if (item.file.size > limit)
       throw new Error(
-        `${item.path} is larger than ${sourceFileByteLimit(item.path) / (1024 * 1024)} MiB. Reduce the file or split Lean sources into smaller modules.`,
+        `${item.path} is larger than ${limit / (1024 * 1024)} MiB. Choose a smaller file.`,
       )
     const bytes = new Uint8Array(await item.file.arrayBuffer())
+    const path = stripFolder ? item.path.slice(first.length + 1) : item.path
+    if (pdf) {
+      const chunks: string[] = []
+      for (let offset = 0; offset < bytes.length; offset += 32768)
+        chunks.push(
+          String.fromCharCode(...bytes.subarray(offset, offset + 32768)),
+        )
+      result.push({ path, content: btoa(chunks.join('')), encoding: 'base64' })
+      continue
+    }
     let content: string
     try {
       if (bytes.includes(0)) throw new Error()
@@ -47,11 +64,11 @@ export async function readSourceFiles(files: { file: File; path: string }[]) {
       }).decode(bytes)
     } catch {
       throw new Error(
-        `${item.path} is not a UTF-8 source file. Choose source files or a folder without binary files.`,
+        `${item.path} is not a UTF-8 source file or a PDF. Choose supported files.`,
       )
     }
     result.push({
-      path: stripFolder ? item.path.slice(first.length + 1) : item.path,
+      path,
       content,
     })
   }
@@ -139,9 +156,7 @@ export function UploadFiles({
         }}
       >
         <strong>
-          {reading
-            ? 'Reading source files…'
-            : 'Drop files or a project folder here'}
+          {reading ? 'Reading files…' : 'Drop files or a project folder here'}
         </strong>
         <div className="upload-choices">
           <button
@@ -197,8 +212,9 @@ export function UploadFiles({
           }}
         />
         <p>
-          UTF-8 sources, up to 8 MiB per file and 32 MiB total. Git metadata,
-          build caches, and private settings stay on your computer.
+          UTF-8 sources up to 8 MiB per file, PDFs up to 16 MiB, and 32 MiB
+          total. Git metadata, build caches, and private settings stay on your
+          computer.
         </p>
       </div>
       {!!files.length && (

@@ -3,7 +3,11 @@ import { CloseAction, ErrorAction } from 'vscode-languageclient/browser'
 import type { WebSocketConfigOptionsUrl } from 'monaco-editor-wrapper'
 import { FileUri } from 'lean4monaco/dist/vscode-lean4/vscode-lean4/src/utils/exturi'
 import type { SourceRequest } from './LibrarySourceDialog'
-import { CancellationTokenSource } from 'monaco-editor'
+import {
+  CancellationTokenSource,
+  editor as monacoEditor,
+  languages,
+} from 'monaco-editor'
 import {
   useEffect,
   useLayoutEffect,
@@ -15,6 +19,7 @@ import type { OpenFile } from './api'
 import { connectInfoviewTheme } from './infoviewTheme'
 import { ResizeHandle } from './ResizeHandle'
 import { DEFAULT_LAYOUT, useMediaQuery } from './layout'
+import { isMarkdownPath } from './fileReading'
 import type { ChatMode } from './chatModes'
 import {
   proofDeclarations,
@@ -210,6 +215,7 @@ export function LeanWorkspace({
   const revealed = useRef<number | null>(null)
   const focusedRequest = useRef<number | null>(null)
   const [failure, setFailure] = useState('')
+  const [markdownIssue, setMarkdownIssue] = useState('')
   const [connectionIssue, setConnectionIssue] = useState('')
   const [restarting, setRestarting] = useState(false)
   const [restartIssue, setRestartIssue] = useState('')
@@ -233,6 +239,7 @@ export function LeanWorkspace({
     let cancelled = false
     let own: Runtime | null = null
     setFailure('')
+    setMarkdownIssue('')
     setConnectionIssue('')
     setRequestIssue('')
     setLoading(true)
@@ -319,6 +326,20 @@ export function LeanWorkspace({
               }),
             )
           }
+          try {
+            const markdown =
+              await import('@codingame/monaco-vscode-markdown-basics-default-extension')
+            await markdown.whenReady()
+          } catch (error) {
+            if (!cancelled)
+              setMarkdownIssue(
+                'Markdown highlighting could not load. Your file is still editable. Reload the page to try again.',
+              )
+            console.warn(
+              '[LeanFlow Web] Markdown highlighting could not load.',
+              error,
+            )
+          }
         }
       } catch (error) {
         lean.dispose()
@@ -388,6 +409,15 @@ export function LeanWorkspace({
           return
         }
         const editor = ownEditor.editor
+        if (
+          isMarkdownPath(snapshot.path) &&
+          languages
+            .getLanguages()
+            .some((language) => language.id === 'markdown')
+        ) {
+          const model = editor.getModel()
+          if (model) monacoEditor.setModelLanguage(model, 'markdown')
+        }
         // The model URI is shared by projects. Set the fetched contents explicitly
         // so a retained VS Code model cannot show a previous project's buffer.
         if (editor.getValue() !== snapshot.content)
@@ -470,6 +500,13 @@ export function LeanWorkspace({
           }
           onChangeRef.current(snapshot.path, content)
         })
+        // Document symbols and proof selections belong to Lean files. Reading
+        // another language must not send Lean requests for that document.
+        if (!snapshot.path.endsWith('.lean')) {
+          setOutlineStatus('unavailable')
+          setLoading(false)
+          return
+        }
         let outlineDisposed = false
         let timer: ReturnType<typeof setTimeout> | undefined
         let request: CancellationTokenSource | undefined
@@ -891,6 +928,9 @@ export function LeanWorkspace({
       style={{ '--goals-size': `${goalsSize}%` } as CSSProperties}
     >
       <div className="source-pane proof-source-pane">
+        {markdownIssue && isMarkdownPath(file?.path) && (
+          <output className="lean-connection-notice">{markdownIssue}</output>
+        )}
         {connectionIssue && (
           <div className="lean-connection-notice" role="alert">
             <strong>Lean checking paused</strong>

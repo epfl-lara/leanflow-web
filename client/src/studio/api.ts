@@ -183,6 +183,7 @@ export interface OpenFile {
   readOnly?: boolean
   line?: number
   column?: number
+  preview?: 'pdf'
 }
 export interface LibrarySource {
   module: string
@@ -287,10 +288,10 @@ export function markSessionRestored() {
     window.dispatchEvent(new Event(SESSION_RESTORED_EVENT))
 }
 
-export async function api<T>(
+async function request(
   path: string,
   options: RequestInit = {},
-): Promise<T> {
+): Promise<Response> {
   const requestSessionRevision = sessionRevision
   const response = await fetch(path, {
     credentials: 'same-origin',
@@ -304,6 +305,10 @@ export async function api<T>(
     typeof window !== 'undefined'
   )
     window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
+  return response
+}
+
+async function responseData(response: Response): Promise<unknown> {
   const text = await response.text()
   let data: unknown
   try {
@@ -317,13 +322,42 @@ export async function api<T>(
     )
   }
   if (!response.ok) {
-    const error = data as { error?: string; message?: string } | undefined
-    throw new ApiError(
-      error?.error || error?.message || `Request failed (${response.status}).`,
-      response.status,
-    )
+    const error =
+      data &&
+      typeof data === 'object' &&
+      'error' in data &&
+      typeof data.error === 'string'
+        ? data.error
+        : data &&
+            typeof data === 'object' &&
+            'message' in data &&
+            typeof data.message === 'string'
+          ? data.message
+          : `Request failed (${response.status}).`
+    throw new ApiError(error, response.status)
   }
+  return data
+}
+
+export async function api<T>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const data = await responseData(await request(path, options))
   return data as T
+}
+
+export async function apiPdf(path: string, signal: AbortSignal): Promise<Blob> {
+  const response = await request(path, { signal })
+  if (!response.ok) await responseData(response)
+  if (
+    response.headers.get('content-type')?.split(';')[0].trim() !==
+    'application/pdf'
+  )
+    throw new Error(
+      'This file could not be opened as a PDF. Choose a PDF document.',
+    )
+  return response.blob()
 }
 
 export const post = <T>(path: string, body: unknown = {}) =>

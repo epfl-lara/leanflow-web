@@ -29,6 +29,7 @@
   --shadow: 0 16px 70px #17223c26;
   --mono: 'JuliaMono', 'SFMono-Regular', Consolas, monospace;
   --workbench-header-height: 96px;
+  --resize-handle-size: 7px;
   color-scheme: light;
 }
 :root[data-theme='dark'] {
@@ -2272,6 +2273,10 @@ textarea {
 .infoview-pane {
   position: relative;
 }
+/* Keep the resize rail beside scrollbars instead of covering their mouse targets. */
+.sidebar:has(> .sidebar-resize-handle) {
+  padding-right: calc(var(--resize-handle-size) + 1px);
+}
 .sidebar-navigation {
   position: relative;
   display: flex;
@@ -2323,6 +2328,8 @@ textarea {
 }
 .sidebar-files-section .file-list {
   min-height: 0;
+  /* Horizontal splitters sit halfway inside the section's lower edge. */
+  margin-bottom: calc(var(--resize-handle-size) / 2 + 1px);
 }
 .sidebar-projects-details {
   flex: 1;
@@ -2371,13 +2378,13 @@ textarea {
   background: transparent;
 }
 .resize-handle.vertical {
-  width: 7px;
+  width: var(--resize-handle-size);
   top: 0;
   bottom: 0;
   cursor: col-resize;
 }
 .resize-handle.horizontal {
-  height: 7px;
+  height: var(--resize-handle-size);
   left: 0;
   right: 0;
   cursor: row-resize;

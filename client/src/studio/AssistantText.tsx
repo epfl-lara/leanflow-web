@@ -1,5 +1,5 @@
-import { memo, useDeferredValue } from 'react'
-import ReactMarkdown, { type Components } from 'react-markdown'
+import { memo, useDeferredValue, type ComponentPropsWithoutRef } from 'react'
+import ReactMarkdown, { type Components, type ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
@@ -7,25 +7,44 @@ import { remarkLatexMath } from './remarkLatexMath'
 import { Icon } from './Icons'
 import 'katex/dist/katex.min.css'
 
+function MarkdownLink({
+  node: _node,
+  href,
+  children,
+  onOpenLocalLink,
+  ...props
+}: ComponentPropsWithoutRef<'a'> &
+  ExtraProps & { onOpenLocalLink?: (href: string) => void }) {
+  const external = /^(?:https?:)?\/\//i.test(href || '')
+  return (
+    <a
+      {...props}
+      href={href}
+      target={external ? '_blank' : undefined}
+      rel={external ? 'noopener noreferrer' : undefined}
+      onClick={(event) => {
+        if (
+          href &&
+          onOpenLocalLink &&
+          !/^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(href)
+        ) {
+          event.preventDefault()
+          onOpenLocalLink(href)
+        }
+      }}
+    >
+      {children}
+    </a>
+  )
+}
+
 const markdownComponents: Components = {
   table: ({ node: _node, children, ...props }) => (
     <div className="markdown-table">
       <table {...props}>{children}</table>
     </div>
   ),
-  a: ({ node: _node, href, children, ...props }) => {
-    const external = /^(?:https?:)?\/\//i.test(href || '')
-    return (
-      <a
-        {...props}
-        href={href}
-        target={external ? '_blank' : undefined}
-        rel={external ? 'noopener noreferrer' : undefined}
-      >
-        {children}
-      </a>
-    )
-  },
+  a: MarkdownLink,
   // Keep remote images as deliberate links rather than loading third-party
   // resources automatically while a model response is streamed.
   img: ({ src, alt }) =>
@@ -44,7 +63,13 @@ const markdownComponents: Components = {
     ),
 }
 
-const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
+const MarkdownText = memo(function MarkdownText({
+  text,
+  onOpenLocalLink,
+}: {
+  text: string
+  onOpenLocalLink?: (href: string) => void
+}) {
   return (
     <ReactMarkdown
       skipHtml
@@ -55,7 +80,16 @@ const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
           { trust: false, strict: 'ignore', maxExpand: 1000, maxSize: 20 },
         ],
       ]}
-      components={markdownComponents}
+      components={
+        onOpenLocalLink
+          ? {
+              ...markdownComponents,
+              a: (props) => (
+                <MarkdownLink {...props} onOpenLocalLink={onOpenLocalLink} />
+              ),
+            }
+          : markdownComponents
+      }
     >
       {text}
     </ReactMarkdown>
@@ -65,14 +99,21 @@ const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
 export const OutputText = memo(function OutputText({
   text,
   streaming = false,
+  onOpenLocalLink,
 }: {
   text: string
   streaming?: boolean
+  onOpenLocalLink?: (href: string) => void
 }) {
   // Memoizing the parser lets editing and follow-ups take priority while the
   // deferred output catches up, without reparsing the previous text twice.
   const deferredText = useDeferredValue(text)
-  const markdown = <MarkdownText text={streaming ? deferredText : text} />
+  const markdown = (
+    <MarkdownText
+      text={streaming ? deferredText : text}
+      onOpenLocalLink={onOpenLocalLink}
+    />
+  )
   return streaming ? (
     <div className="streaming-text markdown-body">{markdown}</div>
   ) : (

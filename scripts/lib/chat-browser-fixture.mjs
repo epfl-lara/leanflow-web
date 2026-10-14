@@ -118,6 +118,7 @@ export async function chatBrowserFixture({
   definitionLocations = null,
   legacyReasoning = false,
   failReasoningHistory = false,
+  launchOptions = {},
 }) {
   for (const run of runs)
     run.reasoningBlocks ??= reasoningBlocksFromEvents(
@@ -152,13 +153,15 @@ export async function chatBrowserFixture({
     sockets: [],
     checks: [],
   }
-  const browser = await chromium.launch({ headless: true })
+  const browser = await chromium.launch({ headless: true, ...launchOptions })
   const page = await browser.newPage({ viewport })
   page.on('pageerror', (error) =>
     report.errors.push(error.stack || error.message),
   )
   await page.addInitScript(
     ({ projectId, chatId, failReasoningHistory }) => {
+      // Fixtures belong to the app, not browser-managed PDF/infoview frames.
+      if (window !== window.top) return
       if (!localStorage.getItem('lemex-project'))
         localStorage.setItem('lemex-project', projectId)
       if (!localStorage.getItem(`lemex-chat-${projectId}`))
