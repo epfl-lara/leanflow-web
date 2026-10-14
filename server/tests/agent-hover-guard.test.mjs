@@ -54,6 +54,7 @@ test('column scanning is redirected once, then stopped after six misses on one l
   assert.equal(method, 'turn/steer')
   assert.equal(params.expectedTurnId, 'turn')
   assert.equal(params.threadId, 'thread')
+  assert.equal(JSON.parse(params.input[0].text).userMessage, null)
   assert.match(params.input[0].text, /Main\.lean:14/)
   assert.match(params.input[0].text, /Stop scanning columns/)
   assert.equal(f.errors.length, 0)

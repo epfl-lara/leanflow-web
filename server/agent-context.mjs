@@ -3,6 +3,26 @@ import { isPdfFile } from '../shared/file-previews.mjs'
 
 const MAX_HISTORY = 60_000
 
+// One parseable envelope keeps source text and user-supplied labels from
+// impersonating app metadata. null means an automatic app event, not a new user task.
+export function agentMessageContext(
+  userMessage,
+  sections = [],
+  savedUserGuidance,
+) {
+  return JSON.stringify(
+    {
+      leanflowContext: {
+        sections: sections.filter(Boolean),
+        ...(savedUserGuidance?.trim() ? { savedUserGuidance } : {}),
+      },
+      userMessage,
+    },
+    null,
+    2,
+  )
+}
+
 export function currentEditorFile(input, validatePath) {
   const file = input.currentFile === undefined ? input.file : input.currentFile
   if (file === undefined || file === null) return null
@@ -26,7 +46,11 @@ export function currentEditorContext(file) {
 
 // Chat history is server-owned conversation text, never native HOME state or
 // privileged protocol roles. A new worker checks the current saved sources.
-export function agentConversationContext(job, runs = []) {
+export function agentConversationContext(
+  job,
+  runs = [],
+  { sections: additionalSections = [], savedUserGuidance } = {},
+) {
   const currentIndex = runs.findIndex((run) => run.id === job.id)
   const previous =
     currentIndex >= 0
@@ -102,8 +126,11 @@ export function agentConversationContext(job, runs = []) {
   if (editorContext) sections.push(editorContext)
   if (job.proofTarget)
     sections.push(proofTargetContext(job.proofTarget, job.mode))
-  sections.push('Current task:\n' + job.prompt)
-  return sections.join('\n\n')
+  return agentMessageContext(
+    job.prompt,
+    [...sections, ...additionalSections],
+    savedUserGuidance,
+  )
 }
 
 export function selectedContextFiles(input, validatePath) {

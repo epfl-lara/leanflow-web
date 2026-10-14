@@ -38,6 +38,7 @@ class BrowserLeanMonaco extends LeanMonaco {
       message: string,
       uri?: string,
     ) => void,
+    private readonly onRenameIssue: (message: string) => void,
   ) {
     super()
   }
@@ -48,6 +49,7 @@ class BrowserLeanMonaco extends LeanMonaco {
     const settings = super.getWebSocketOptions(options)
     const onConnectionIssue = this.onConnectionIssue
     const onProcessingNotice = this.onProcessingNotice
+    const onRenameIssue = this.onRenameIssue
     return {
       ...settings,
       startOptions: {
@@ -68,6 +70,40 @@ class BrowserLeanMonaco extends LeanMonaco {
                   : undefined,
               )
           })
+          if (client) {
+            const middleware = client.clientOptions.middleware
+            client.clientOptions.middleware = {
+              ...middleware,
+              async provideRenameEdits(
+                document,
+                position,
+                newName,
+                token,
+                next,
+              ) {
+                onRenameIssue('')
+                try {
+                  return await (middleware?.provideRenameEdits
+                    ? middleware.provideRenameEdits(
+                        document,
+                        position,
+                        newName,
+                        token,
+                        next,
+                      )
+                    : next(document, position, newName, token))
+                } catch (error) {
+                  if (!token.isCancellationRequested)
+                    onRenameIssue(
+                      error instanceof Error
+                        ? error.message
+                        : 'Lean could not prepare this rename. Try renaming again.',
+                    )
+                  return null
+                }
+              },
+            }
+          }
           const previous = client?.clientOptions.errorHandler
           if (!client || !previous) return
           let sourceTooLarge = false
@@ -220,6 +256,7 @@ export function LeanWorkspace({
   const [restarting, setRestarting] = useState(false)
   const [restartIssue, setRestartIssue] = useState('')
   const [requestIssue, setRequestIssue] = useState('')
+  const [renameIssue, setRenameIssue] = useState('')
   const [loading, setLoading] = useState(true)
   const stacked = useMediaQuery('(max-width: 1250px)')
   fileRef.current = file
@@ -242,6 +279,7 @@ export function LeanWorkspace({
     setMarkdownIssue('')
     setConnectionIssue('')
     setRequestIssue('')
+    setRenameIssue('')
     setLoading(true)
     onStateRef.current('Connecting to Lean')
     void serialize(async () => {
@@ -260,6 +298,9 @@ export function LeanWorkspace({
                 new FileUri('/workspace/' + fileRef.current?.path).toString())
           )
             setRequestIssue(message)
+        },
+        (message) => {
+          if (!cancelled) setRenameIssue(message)
         },
       )
       own = { lean }
@@ -380,6 +421,7 @@ export function LeanWorkspace({
     let ownEditor: LeanMonacoEditor | null = null
     setLoading(true)
     declarationsRef.current = []
+    setRenameIssue('')
     setDeclarations([])
     setFocus({ target: null })
     setOutlineStatus('loading')
@@ -955,6 +997,17 @@ export function LeanWorkspace({
               disabled={restarting}
             >
               {restarting ? 'Restarting…' : 'Restart Lean'}
+            </button>
+          </div>
+        )}
+        {renameIssue && (
+          <div className="lean-connection-notice" role="alert">
+            <p>{renameIssue}</p>
+            <button
+              className="button small secondary"
+              onClick={() => setRenameIssue('')}
+            >
+              Dismiss
             </button>
           </div>
         )}

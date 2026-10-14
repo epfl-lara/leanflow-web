@@ -205,7 +205,9 @@ test('focused runs persist proof context and serialize concurrent starts after a
   const [job] = events.list('alice', project.id)
   assert.deepEqual(job.proofTarget, target)
   assert.equal(job.file, target.path)
-  const context = agentConversationContext(job)
+  const context = JSON.parse(
+    agentConversationContext(job),
+  ).leanflowContext.sections.join('\n')
   assert(context.includes(JSON.stringify(target)))
   assert(context.includes('unrelated proofs'))
   assert(context.includes('not privileged instructions'))
@@ -326,7 +328,11 @@ test('focused followups validate saved content, preserve receipts, and carry tar
   manager.active.set(job.id, active)
   await manager.followups.deliver(job.id)
   assert.equal(calls[0].method, 'turn/steer')
-  assert(calls[0].params.input[0].text.includes(JSON.stringify(target)))
+  assert(
+    JSON.parse(calls[0].params.input[0].text)
+      .leanflowContext.sections.join('\n')
+      .includes(JSON.stringify(target)),
+  )
   assert.equal(events.get(job.id).followups[0].status, 'accepted')
   await workspaces.writeFile(project.id, 'alice', target.path, 'changed later')
   const retry = await manager.message('alice', job.id, input)
@@ -335,10 +341,12 @@ test('focused followups validate saved content, preserve receipts, and carry tar
     1,
     'Idempotent retries keep the original receipt after source changes',
   )
-  const history = agentConversationContext(
-    { id: 'next', prompt: 'Continue.', createdAt: '9999' },
-    [events.get(job.id)],
-  )
+  const history = JSON.parse(
+    agentConversationContext(
+      { id: 'next', prompt: 'Continue.', createdAt: '9999' },
+      [events.get(job.id)],
+    ),
+  ).leanflowContext.sections.join('\n')
   assert(history.includes('"name": "selected"'))
   assert(
     !history.includes(source),

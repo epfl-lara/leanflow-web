@@ -21,6 +21,7 @@ import { searchDeclarations } from './search.mjs'
 import { LspFrames, frame, validateClientUris } from './rpc.mjs'
 import { LeanRequests } from './lean-requests.mjs'
 import { LeanProgress } from './lean-progress.mjs'
+import { LeanRenames } from './lean-renames.mjs'
 import { ProjectActivity } from './project-activity.mjs'
 import { acquireServerLease } from './lease.mjs'
 import { repairProjectSetup, withSetupRepairDeadline } from './setup-repair.mjs'
@@ -1070,7 +1071,7 @@ export async function createStudio({
     let child,
       alive = true,
       lastActivity = Date.now()
-    let requests, progress
+    let requests, progress, renames
     try {
       child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
         network: 'none',
@@ -1084,10 +1085,19 @@ export async function createStudio({
       requests = new LeanRequests({
         sendToClient,
       })
+      const forward = (message) => {
+        if (requests.receive(message)) sendToClient(message)
+      }
+      renames = new LeanRenames({
+        readFile: async (filename) =>
+          (await workspaces.readFile(project.id, project.owner, filename))
+            .content,
+        sendToClient: forward,
+      })
       progress = new LeanProgress(sendToClient)
       const frames = new LspFrames((message) => {
         progress.server(message)
-        if (requests.receive(message)) sendToClient(message)
+        if (renames.receive(message)) forward(message)
       })
       child.stdout.on('data', (chunk) => {
         try {
@@ -1113,6 +1123,7 @@ export async function createStudio({
           const message = validateClientUris(JSON.parse(data.toString()))
           requests.track(message)
           progress.client(message)
+          renames.track(message)
           child.stdin.write(frame(message))
         } catch (error) {
           if (error.sourceTooLarge) ws.close(1009, error.message)
@@ -1135,6 +1146,7 @@ export async function createStudio({
       clearInterval(heartbeat)
       requests?.dispose()
       progress?.dispose()
+      renames?.dispose()
       child?.kill()
       sockets.delete(ws)
       socketProjects.delete(ws)

@@ -1,3 +1,5 @@
+import { agentMessageContext } from './agent-context.mjs'
+
 // Bound failed coordinate searches without limiting useful hover lookups elsewhere.
 export function createHoverLookupGuard({ active, rpc, onNotice, onFailure }) {
   const failures = new Map(),
@@ -30,7 +32,9 @@ export function createHoverLookupGuard({ active, rpc, onNotice, onFailure }) {
           input: [
             {
               type: 'text',
-              text: `Hover lookups repeatedly returned no information at ${location}. Stop scanning columns or retrying hover on this line. Read the source, locate the actual identifier, or use lean_local_search. For an explanation, answer from the available source and state any remaining uncertainty. Continue the user's task without repeating these failed lookups.`,
+              text: agentMessageContext(null, [
+                `Hover lookups repeatedly returned no information at ${location}. Stop scanning columns or retrying hover on this line. Read the source, locate the actual identifier, or use lean_local_search. For an explanation, answer from the available source and state any remaining uncertainty. Continue the user's task without repeating these failed lookups.`,
+              ]),
               textElements: [],
             },
           ],

@@ -1515,6 +1515,82 @@ test('authorized WebSocket relays Lean frames and closes on forbidden client fil
   assert.equal(child.requests.length, 0)
 })
 
+test('Lean WebSocket rename preserves qualified references in unsaved and saved project sources', async (t) => {
+  const { url, token, project, runtime, workspaces } = await fixture(t)
+  const file = await workspaces.readFile(project.id, 'owner', 'Main.lean')
+  await workspaces.writeFile(
+    project.id,
+    'owner',
+    'Main.lean',
+    '#check Saved.blank',
+    file.hash,
+  )
+  const ws = new WebSocket(
+    url.replace('http:', 'ws:') + '/websocket/' + project.id,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  )
+  t.after(() => ws.terminate())
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve)
+    ws.once('error', reject)
+  })
+  const child = runtime.spawned[0]
+  const uri = 'file:///workspace/Main.lean'
+  const client = async (message) => {
+    const received = new Promise((resolve) => child.stdin.once('data', resolve))
+    ws.send(JSON.stringify(message))
+    await received
+  }
+  await client({
+    method: 'textDocument/didOpen',
+    params: { textDocument: { uri, version: 1, text: '#check Unsaved.blank' } },
+  })
+  for (const [id, prefix] of [
+    [1, 'Unsaved'],
+    [2, 'Saved'],
+  ]) {
+    if (id === 2)
+      await client({
+        method: 'textDocument/didClose',
+        params: { textDocument: { uri } },
+      })
+    await client({
+      id,
+      method: 'textDocument/rename',
+      params: {
+        textDocument: { uri },
+        position: { line: 0, character: 15 },
+        newName: 'blankC',
+      },
+    })
+    const reply = new Promise((resolve) =>
+      ws.once('message', (data) => resolve(JSON.parse(data))),
+    )
+    child.stdout.write(
+      frame({
+        id,
+        result: {
+          changes: {
+            [uri]: [
+              {
+                range: {
+                  start: { line: 0, character: 7 },
+                  end: { line: 0, character: 7 + prefix.length + 6 },
+                },
+                newText: 'blankC',
+              },
+            ],
+          },
+        },
+      }),
+    )
+    const received = await reply
+    assert.equal(received.result.changes[uri][0].newText, `${prefix}.blankC`)
+  }
+})
+
 test('configuration saves close only that project editor and expose setup retry before new runs', async (t) => {
   const { url, token, project, runtime, workspaces, request } = await fixture(t)
   const ws = new WebSocket(

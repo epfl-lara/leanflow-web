@@ -90,6 +90,20 @@ test('repair writes the normalized model catalog and sends the exact configured 
     requests.find((r) => r.method === 'turn/start').params.effort,
     'max',
   )
+  const envelope = JSON.parse(
+    requests.find((r) => r.method === 'turn/start').params.input[0].text,
+  )
+  assert.equal(envelope.userMessage, null)
+  assert(
+    envelope.leanflowContext.sections.some((section) =>
+      section.includes('Invalid Lake config'),
+    ),
+  )
+  assert.match(
+    requests.find((r) => r.method === 'thread/start').params
+      .developerInstructions,
+    /not a new message from the user/,
+  )
 })
 
 test('the automatic repair deadline cancels queued or running work and reports a retryable timeout', async (t) => {
