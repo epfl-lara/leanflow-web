@@ -106,7 +106,7 @@ try {
       const region = await page
         .getByRole('region', { name: 'Conversation', exact: true })
         .boundingBox()
-      assert(region.height >= Math.min(160, viewport.height / 4) - 1)
+      assert(region.height >= Math.min(200, viewport.height * 0.3) - 1)
     }
     report.checks.push(
       `${viewport.width}x${viewport.height}: Stop and Send remain reachable with options open or closed`,
@@ -156,13 +156,11 @@ try {
   report.checks.push(
     'Arrow keys scroll the file suggestion list in both directions and Enter attaches the selected file',
   )
-  const desktop = await page
-    .locator('.chat-workbench')
-    .evaluate((element) => ({
-      height: element.clientHeight,
-      scrollHeight: element.scrollHeight,
-      scrollTop: element.scrollTop,
-    }))
+  const desktop = await page.locator('.chat-workbench').evaluate((element) => ({
+    height: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    scrollTop: element.scrollTop,
+  }))
   assert(desktop.scrollHeight <= desktop.height + 1, JSON.stringify(desktop))
   assert.equal(desktop.scrollTop, 0)
   report.checks.push(

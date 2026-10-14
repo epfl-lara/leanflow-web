@@ -4,7 +4,7 @@
   overscroll-behavior: contain;
 }
 .chat-workbench .assistant-output {
-  min-height: min(160px, 25dvh);
+  min-height: min(200px, 30dvh);
 }
 .chat-workbench > .chat-picker {
   padding: 12px 12px 8px;
@@ -99,7 +99,7 @@
 .chat-current-work {
   position: relative;
   flex-shrink: 0;
-  padding: 10px 85px 10px 13px;
+  padding: 8px 85px 8px 13px;
   border-bottom: 1px solid var(--border);
   background: var(--accent-soft);
 }
@@ -328,11 +328,11 @@
 }
 .chat-workbench .assistant-composer {
   position: relative;
-  padding: 10px 12px 12px;
+  padding: 8px 12px;
 }
 .chat-workbench .composer-context {
   font-size: 11px;
-  margin-bottom: 7px;
+  margin-bottom: 5px;
 }
 .composer-proof-target {
   display: flex;

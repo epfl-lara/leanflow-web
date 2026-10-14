@@ -938,13 +938,46 @@ try {
     page.getByRole('button', { name: 'Stop', exact: true }),
     'Stop at laptop size',
   )
+  await visible(
+    page.getByRole('button', { name: 'Send update', exact: true }),
+    'Send update at laptop size',
+  )
   report.laptopConversationHeight = await conversation.evaluate(
     (element) => element.clientHeight,
   )
+  report.laptopLayout = await page
+    .locator('.chat-workbench')
+    .evaluate((element) => {
+      const bounds = (node) => {
+        const box = node.getBoundingClientRect()
+        return {
+          className: node.className,
+          top: box.top,
+          height: box.height,
+          bottom: box.bottom,
+        }
+      }
+      return {
+        height: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        children: [...element.children].map(bounds),
+        composer: [
+          ...element.querySelector('.assistant-composer').children,
+        ].map(bounds),
+      }
+    })
   await page.screenshot({
     path: path.join(reportDir, 'active-chat-laptop.png'),
     fullPage: true,
   })
+  assert(
+    report.laptopConversationHeight >= 200,
+    `Laptop conversation is cramped at ${report.laptopConversationHeight}px`,
+  )
+  assert(
+    report.laptopLayout.scrollHeight <= report.laptopLayout.height + 1,
+    'Laptop chat controls should fit without scrolling the entire panel',
+  )
   await page.setViewportSize({ width: 1600, height: 1000 })
   report.checks.push(
     'Compact work status, user-controlled lazy reasoning/activity, and usable laptop layout',
@@ -1097,10 +1130,6 @@ try {
     fullPage: true,
   })
   fixture.assertClean()
-  assert(
-    report.laptopConversationHeight >= 200,
-    `Laptop conversation is cramped at ${report.laptopConversationHeight}px`,
-  )
   report.passed = true
   console.log(
     'PASS: continuous chat, active guidance, durable acknowledgement races, scoped drafts, interrupt, trace/options controls, and laptop usability; all backends mocked',
