@@ -7,6 +7,7 @@ import { OptimizationSummary } from './OptimizationSummary'
 import {
   conversationSegments,
   runChangeCount,
+  runChangePaths,
   runStatusLabel,
   finalVerificationIssue,
 } from './chatTimeline'
@@ -176,17 +177,15 @@ export const ConversationTurn = memo(function ConversationTurn({
       {run.liveEdits && !run.liveUndone && liveCount > 0 && (
         <div className="turn-saved-edits">
           <span>Saved to project:</span>
-          {(run.liveChanges || []).map((change) => (
+          {runChangePaths(run, true).map((path) => (
             <button
-              key={change.path}
+              key={path}
               type="button"
               className="turn-action"
               disabled={!onOpenTarget}
-              onClick={() =>
-                onOpenTarget?.({ path: change.path, startLine: 1, endLine: 1 })
-              }
+              onClick={() => onOpenTarget?.({ path, startLine: 1, endLine: 1 })}
             >
-              {change.path}
+              {path}
             </button>
           ))}
           {active && (

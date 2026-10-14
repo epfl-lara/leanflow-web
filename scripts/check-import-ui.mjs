@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Exercise import/upload controls without repository downloads or provider calls.
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -24,6 +25,15 @@ await fs.writeFile(
   path.join(folder, 'Uploaded.lean'),
   'example : True := by trivial\n',
 )
+const aggregateFiles = Array.from(
+  { length: 4 },
+  (_, index) => `Aggregate${index}.lean`,
+)
+for (const name of aggregateFiles)
+  await fs.writeFile(
+    path.join(folder, name),
+    '-- ' + 'a'.repeat(5_420_000) + '\n',
+  )
 const projectId = 'import-ui-existing'
 const f = await chatBrowserFixture({
   session: {
@@ -124,6 +134,100 @@ try {
   report.checks.push(
     'Local file upload adds files without replacing existing source',
   )
+  await f.page.getByRole('button', { name: 'Upload', exact: true }).click()
+  const largeSource = process.env.STUDIO_LARGE_SOURCE_FILE
+    ? await fs.readFile(process.env.STUDIO_LARGE_SOURCE_FILE, 'utf8')
+    : '-- ' + 'a'.repeat(5_400_000) + '\n'
+  report.largeSource = {
+    name: process.env.STUDIO_LARGE_SOURCE_FILE
+      ? path.basename(process.env.STUDIO_LARGE_SOURCE_FILE)
+      : 'synthetic Lean source',
+    bytes: Buffer.byteLength(largeSource),
+    sha256: createHash('sha256').update(largeSource).digest('hex'),
+  }
+  await f.page
+    .getByLabel('Upload source files', { exact: true })
+    .setInputFiles({
+      name: 'Large.lean',
+      mimeType: 'text/plain',
+      buffer: Buffer.from(largeSource),
+    })
+  await f.page.getByText('1 file ready', { exact: true }).waitFor()
+  await f.page.getByRole('button', { name: 'Add files', exact: true }).click()
+  await until(
+    async () =>
+      f.state.files[projectId]['Large.lean']?.length === largeSource.length,
+    'large Lean upload',
+  )
+  let largeSaves = 0
+  await f.page.route(
+    `**/api/projects/${projectId}/file?path=Large.lean`,
+    async (route) => {
+      if (route.request().method() !== 'PUT') return route.fallback()
+      const input = route.request().postDataJSON()
+      const before = f.state.files[projectId]['Large.lean']
+      assert.equal(
+        input.expectedHash,
+        createHash('sha256').update(before).digest('hex'),
+      )
+      f.state.files[projectId]['Large.lean'] = input.content
+      largeSaves++
+      await route.fulfill({
+        json: {
+          hash: createHash('sha256').update(input.content).digest('hex'),
+          requiresPreparation: false,
+        },
+      })
+    },
+  )
+  await f.page.getByRole('button', { name: 'Large.lean', exact: true }).click()
+  await f.page.locator('.editor-loading').waitFor({ state: 'hidden' })
+  await until(
+    async () =>
+      (await f.page.locator('.monaco-editor .view-lines').innerText())
+        .replaceAll('\u00a0', ' ')
+        .startsWith(largeSource.split(/\r?\n/, 1)[0].trim().slice(0, 24)),
+    'large source editor',
+    60000,
+  )
+  await f.page.locator('.monaco-editor textarea').focus()
+  await f.page.keyboard.press('Control+End')
+  await f.page.keyboard.insertText('-- edited large source\n')
+  const saveLarge = f.page.getByRole('button', { name: 'Save', exact: true })
+  await until(() => saveLarge.isEnabled(), 'dirty large source')
+  await saveLarge.click()
+  await until(async () => largeSaves === 1, 'large source saved')
+  assert.equal(
+    createHash('sha256')
+      .update(f.state.files[projectId]['Large.lean'])
+      .digest('hex'),
+    createHash('sha256')
+      .update(largeSource + '-- edited large source\n')
+      .digest('hex'),
+  )
+  await f.page.getByRole('button', { name: 'Main.lean', exact: true }).click()
+  report.checks.push(
+    `A ${report.largeSource.bytes}-byte source opens in the editor, accepts a manual edit and saves with its original hash`,
+  )
+  await f.page.getByRole('button', { name: 'Upload', exact: true }).click()
+  await f.page
+    .getByLabel('Upload source files', { exact: true })
+    .setInputFiles({
+      name: 'TooLarge.lean',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('a'.repeat(8 * 1024 * 1024 + 1)),
+    })
+  await f.page
+    .getByText(
+      'TooLarge.lean is larger than 8 MiB. Reduce the file or split Lean sources into smaller modules.',
+      { exact: true },
+    )
+    .waitFor()
+  await f.page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  assert.equal(f.state.files[projectId]['TooLarge.lean'], undefined)
+  report.checks.push(
+    `A ${report.largeSource.bytes}-byte Lean source uploads; files over 8 MiB receive an actionable error before any upload`,
+  )
   const open = () =>
     f.page
       .getByRole('button', { name: 'Import or create project', exact: true })
@@ -167,7 +271,7 @@ try {
   await f.page
     .getByLabel('Upload project folder', { exact: true })
     .setInputFiles(folder)
-  await f.page.getByText('3 files ready', { exact: true }).waitFor()
+  await f.page.getByText('7 files ready', { exact: true }).waitFor()
   await f.page.screenshot({
     path: path.join(reportDir, 'folder-upload.png'),
     fullPage: true,
@@ -177,19 +281,25 @@ try {
     .getByRole('button', { name: 'Open uploaded project', exact: true })
     .click()
   await until(
-    async () => requests.some((input) => input.files?.length === 3),
+    async () => requests.some((input) => input.files?.length === 7),
     'folder project upload',
   )
-  const uploaded = requests.find((input) => input.files?.length === 3)
+  const uploaded = requests.find((input) => input.files?.length === 7)
   assert.deepEqual(uploaded.files.map((file) => file.path).sort(), [
+    ...aggregateFiles,
     'Uploaded.lean',
     'lakefile.toml',
     'lean-toolchain',
   ])
   assert.equal(uploaded.autoRepair, false)
   assert(!JSON.stringify(uploaded).includes('DUMMY_PRIVATE_SETTING'))
+  report.aggregateSourceBytes = uploaded.files.reduce(
+    (bytes, file) => bytes + Buffer.byteLength(file.content),
+    0,
+  )
+  assert(report.aggregateSourceBytes >= 21_670_380)
   report.checks.push(
-    'Folder upload strips enclosing folder, excludes private/cache files, and respects repair opt-out',
+    `A ${report.aggregateSourceBytes}-byte folder uploads, strips its enclosing folder, excludes private/cache files, and respects repair opt-out`,
   )
   await open()
   await f.page.locator('.import-options > summary').click()

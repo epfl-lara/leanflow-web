@@ -19,6 +19,20 @@ Set `LEMEX_API_KEY` and `LEMEX_BASE_URL` for your Lemex provider to enable the a
 
 See [`.env.example`](../.env.example) for a ready-to-edit file. `npm start` and `npm run dev` do not load `.env` automatically. Exported environment variables override values loaded with Node's `--env-file`.
 
+## Back up before upgrading
+
+The activity database now stores proof changes separately from run metadata. Before upgrading, make a consistent SQLite backup of the configured data directory. SQLite's backup command works while the server is running:
+
+```sh
+studio_data_dir="${STUDIO_DATA_DIR:-.data}"
+mkdir -p .runtime
+sqlite3 "$studio_data_dir/activity.sqlite" ".backup '.runtime/activity-before-update.sqlite'"
+```
+
+Keep the backup private. Apply a service update during an idle restart. If you roll back to an older release that expects inline proof changes, restore its matching database backup while the service is stopped. An older release cannot read the migrated change rows. Restoring the backup also rolls back activity recorded after it was created.
+
+New shared-cache certificates use separate immutable entries. Existing active projects retain their dependency bindings. Allow disk space for both generations, and remove old entries only after confirming that no project or active worker uses them.
+
 ## Search service
 
 The Search panel uses the hosted LeanExplore HTTP API by default. It does not run `lean-explore data fetch`. Opening a result locally reads the project's installed sources; it does not require a local search index.
@@ -32,6 +46,16 @@ LeanExplore's local backend requires `lean-explore[local]`, `lean-explore data f
 Use the `STUDIO_MAX_*` settings in [`.env.example`](../.env.example) to set editor, agent, search, worker, and queue limits. Set `STUDIO_WORKER_CPUS` and `STUDIO_WORKER_MEMORY` for each worker; defaults are 2 CPUs and 4 GiB.
 
 Editors and agents share worker slots with setup and proof checks. Leave spare slots and RAM for those jobs. Apply changes during an idle restart, then check the intended workload and your provider's quotas. A larger server needs its own capacity settings and a load test.
+
+Project setup allows 30 minutes for its own Lake build. Large imported repositories can need longer. Set a bounded timeout in the private environment file, for example 90 minutes:
+
+```dotenv
+STUDIO_SETUP_BUILD_TIMEOUT_MS=5400000
+```
+
+The maximum is 6 hours. Editors, assistant runs and proof verification use their own limits. Longer builds also need enough worker RAM; measure representative repositories and leave headroom for every worker that can run together. Review `STUDIO_MAX_WORKERS`, `STUDIO_WORKER_CPUS` and `STUDIO_WORKER_MEMORY` together before an idle restart.
+
+Bulk source uploads and saves share `STUDIO_MAX_SOURCE_REQUESTS` slots (default 2, at most 1 per account by default). Known uncompressed requests up to 3 MiB have a separate bounded lane: `STUDIO_MAX_SMALL_SOURCE_REQUESTS` defaults to 8, with at most 2 per account. This keeps ordinary saves available while large uploads run. Compressed and unknown-length requests use bulk capacity. Both lanes include body parsing and queued writes, even after a parsed request disconnects. Keep bulk capacity low when worker memory is tight. A busy request returns a retryable message and preserves the editor's unsaved buffer.
 
 With the default configuration, the assistant opens with DeepSeek-V4.1-Flash at `max`, its highest supported reasoning effort. Model and effort changes apply while the assistant is open; reopening it restores the default. The server offers each model's supported levels and disables the effort selector for models without adjustable effort. The UI and isolated Lemex workers use the same corrected catalog.
 

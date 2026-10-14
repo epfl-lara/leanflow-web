@@ -630,7 +630,8 @@ test('project polling omits transcripts and chat polling omits traces and diffs 
     assert.equal(item.status, 'completed')
     assert.equal(item.liveRevision, 3)
     assert.deepEqual(item.files, ['Main.lean'])
-    assert.deepEqual(item.liveChanges, [{ path: 'Main.lean' }])
+    assert.deepEqual(item.liveChangePaths, ['Main.lean'])
+    assert.equal('liveChanges' in item, false)
     for (const field of [
       'owner',
       'snapshot',
@@ -661,13 +662,28 @@ test('project polling omits transcripts and chat polling omits traces and diffs 
   assert.deepEqual(full.changes, changes)
   assert.deepEqual(full.liveChanges, changes)
   assert(Number.isSafeInteger(full.eventCursor))
+  const nonlive = f.events.create('owner', {
+    kind: 'agent',
+    projectId: f.project.id,
+    liveEdits: false,
+  })
+  f.events.updateMetadata(nonlive.id, { status: 'completed', changes })
+  const summary = (
+    await (
+      await f.request(`/api/projects/${f.project.id}/runs?summary=1`)
+    ).json()
+  ).find((value) => value.id === nonlive.id)
+  assert.equal('liveRevision' in summary, false)
+  assert.equal(summary.liveEdits, false)
   for (const field of ['owner', 'snapshot', 'verificationRoot'])
     assert.equal(field in full, false)
   assert.equal(
     f.chats.history(chat.id, 'owner').runs[0].reasoning.length,
     20_000,
   )
-  assert.deepEqual(f.chats.history(chat.id, 'owner').runs[0].changes, changes)
+  assert.deepEqual(f.chats.history(chat.id, 'owner').runs[0].changes, [
+    { path: 'Main.lean' },
+  ])
 })
 
 test('user updates split saved and reconstructed reasoning even without a new reply', async (t) => {
@@ -752,14 +768,14 @@ test('HTTP project creation and uploads accept source bodies over 3 MiB while re
   const tooLarge = await f.request('/api/projects', {
     method: 'POST',
     body: {
-      files: Array.from({ length: 11 }, (_, index) => ({
+      files: Array.from({ length: 17 }, (_, index) => ({
         path: `Source${index}.lean`,
         content: 'x'.repeat(2_000_000),
       })),
     },
   })
   assert.equal(tooLarge.status, 413)
-  assert.match((await tooLarge.json()).error, /20 MiB/)
+  assert.match((await tooLarge.json()).error, /32 MiB/)
   const ordinary = await f.request('/api/settings', {
     method: 'PUT',
     body: { extraInstructions: large + large },
@@ -854,6 +870,138 @@ test('HTTP followups capture current saved attachments privately, remain idempot
     ).status,
     409,
   )
+})
+
+test('HTTP followup receipts preserve source previews without hydrating their rows', async (t) => {
+  const f = await httpFixture(t)
+  const job = await f.agents.start('owner', f.project.id, {
+    mode: 'proofs',
+    prompt: 'Repair Main.',
+  })
+  const change = {
+    path: 'Main.lean',
+    before: 'example : True := by\n',
+    after: 'example : True := by trivial\n',
+  }
+  f.events.updateMetadata(job.id, { changes: [change], liveChanges: [change] })
+  f.events.append(job.id, 'reasoning', 'Checking the saved proof.', 'reasoning')
+  const rows = f.events.db
+    .prepare('SELECT field,payload FROM job_changes WHERE job=?')
+    .all(job.id)
+  f.events.db
+    .prepare("UPDATE job_changes SET payload='invalid source JSON' WHERE job=?")
+    .run(job.id)
+  const input = {
+    id: '99112233-4455-4677-8899-aabbccddeeff',
+    text: 'Keep the current proof preview.',
+  }
+  const endpoint = `/api/runs/${job.id}/messages`
+  const response = await f.request(endpoint, { method: 'POST', body: input })
+  assert.equal(response.status, 200)
+  const receipt = await response.json()
+  assert.equal(receipt.followups[0].status, 'pending')
+  assert.equal(receipt.changeCount, 1)
+  assert.equal(receipt.liveChangeCount, 1)
+  assert.deepEqual(receipt.changePaths, ['Main.lean'])
+  assert.deepEqual(receipt.liveChangePaths, ['Main.lean'])
+  assert.equal('changes' in receipt, false)
+  assert.equal('liveChanges' in receipt, false)
+  assert.equal('followupContexts' in receipt, false)
+  assert.equal(receipt.eventCursor, f.events.cursor(job.id))
+  assert.equal(
+    receipt.reasoningBlocks[0].reasoningLength,
+    'Checking the saved proof.'.length,
+  )
+  const retry = await f.request(endpoint, { method: 'POST', body: input })
+  assert.equal(retry.status, 200)
+  assert.deepEqual((await retry.json()).followups, receipt.followups)
+  assert.equal(
+    (
+      await f.request(endpoint, {
+        method: 'POST',
+        access: f.bobToken,
+        body: input,
+      })
+    ).status,
+    404,
+  )
+  for (const row of rows)
+    f.events.db
+      .prepare('UPDATE job_changes SET payload=? WHERE job=? AND field=?')
+      .run(row.payload, job.id, row.field)
+  const full = await (await f.request(`/api/runs/${job.id}`)).json()
+  assert.deepEqual(full.changes, [change])
+  assert.deepEqual(full.liveChanges, [change])
+})
+
+test('owned run polling keeps large source rows lazy through file and status updates while explicit review stays complete', async (t) => {
+  const f = await httpFixture(t)
+  const job = f.events.create('owner', {
+    kind: 'agent',
+    projectId: f.project.id,
+    liveEdits: true,
+  })
+  const change = {
+    path: 'Main.lean',
+    before: 'x'.repeat(Math.floor(5.4 * 1024 * 1024)),
+    after: 'y'.repeat(Math.floor(5.4 * 1024 * 1024)),
+  }
+  f.events.updateMetadata(job.id, {
+    status: 'running',
+    liveRevision: 1,
+    changes: [change],
+    liveChanges: [change],
+  })
+  f.events.append(
+    job.id,
+    'reasoning',
+    'Checking the pinned proof.',
+    'reasoning',
+  )
+  const rows = f.events.db
+    .prepare('SELECT field,payload FROM job_changes WHERE job=?')
+    .all(job.id)
+  f.events.db
+    .prepare(
+      "UPDATE job_changes SET payload='unavailable proof source' WHERE job=?",
+    )
+    .run(job.id)
+  const endpoint = `/api/runs/${job.id}?view=metadata`
+  assert.equal((await f.request(endpoint, { access: f.bobToken })).status, 404)
+  for (const status of ['running', 'verifying', 'completed']) {
+    f.events.updateMetadata(job.id, { status, liveRevision: 2 })
+    f.events.event(job.id, 'files-updated', {
+      paths: ['Main.lean'],
+      live: true,
+    })
+    const response = await f.request(endpoint)
+    assert.equal(response.status, 200)
+    const value = await response.json()
+    assert.equal(value.status, status)
+    assert.equal(value.liveRevision, 2)
+    assert.equal(value.eventCursor, f.events.cursor(job.id))
+    assert.equal(value.changeCount, 1)
+    assert.equal(value.liveChangeCount, 1)
+    assert.deepEqual(value.changePaths, ['Main.lean'])
+    assert.deepEqual(value.liveChangePaths, ['Main.lean'])
+    assert.equal(value.reasoning, 'Checking the pinned proof.')
+    assert.equal(
+      value.reasoningBlocks[0].reasoningLength,
+      value.reasoning.length,
+    )
+    assert.equal('changes' in value, false)
+    assert.equal('liveChanges' in value, false)
+    assert.equal('owner' in value, false)
+    assert(Buffer.byteLength(JSON.stringify(value)) < 4096)
+  }
+  assert.equal((await f.request(`/api/runs/${job.id}`)).status, 500)
+  for (const row of rows)
+    f.events.db
+      .prepare('UPDATE job_changes SET payload=? WHERE job=? AND field=?')
+      .run(row.payload, job.id, row.field)
+  const review = await (await f.request(`/api/runs/${job.id}`)).json()
+  assert.deepEqual(review.changes, [change])
+  assert.deepEqual(review.liveChanges, [change])
 })
 
 test('HTTP Trash merges chat and file recovery receipts and retains conversations after restore', async (t) => {

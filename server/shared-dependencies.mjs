@@ -3,6 +3,8 @@ import {
   runPinnedLake,
   dependencyCacheCommands,
   runDependencyCache,
+  setupInfrastructureFailure,
+  setupFailureMessage,
 } from './pinned-lake.mjs'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
@@ -21,6 +23,9 @@ const configFiles = [
   'lakefile.lean',
   'lakefile.toml',
 ]
+// Version 3 certifies a complete Mathlib build, including dependency traces.
+// Earlier import-only entries remain immutable for projects already using them.
+const cacheSchema = 3
 const digest = (value) => createHash('sha256').update(value).digest('hex')
 const canonical = (value) => JSON.stringify(sort(value))
 function sort(value) {
@@ -186,7 +191,7 @@ export async function sharedDependencySpec({
   )
   const key = digest(
     canonical({
-      schema: settings.lean || settings.enableArtifactCache === true ? 2 : 1,
+      schema: cacheSchema,
       owner,
       toolchain,
       image,
@@ -199,9 +204,6 @@ export async function sharedDependencySpec({
     manifest,
     configuration,
     toolchain,
-    buildMathlib: Boolean(
-      settings.lean || settings.enableArtifactCache === true,
-    ),
   }
 }
 
@@ -330,8 +332,16 @@ export class SharedDependencyCache {
         ...options,
       })
       if (result.code !== 0)
-        throw new Error(
-          `Shared dependency check failed: ${(result.stderr || result.stdout || '').slice(-2000)}`,
+        throw Object.assign(
+          new Error(
+            [
+              setupFailureMessage(result),
+              `Shared dependency check failed: ${(result.stderr || result.stdout || '').slice(-2000)}`,
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          ),
+          { infrastructure: setupInfrastructureFailure(result) },
         )
       return result
     }
@@ -354,11 +364,13 @@ export class SharedDependencyCache {
           onOutput,
           cleanHome: true,
         })
-      if (spec.buildMathlib)
-        await run(['lake', 'build', 'mathlib'], {
-          network: 'bridge',
-          timeoutMs: 5400000,
-        })
+      // Cache downloads provide oleans, but Lake can still need to replay
+      // dependency traces (for example ProofWidgets' package-lock hash).
+      // Finish that work while the stage is writable before sharing it.
+      await run(['lake', 'build', '@mathlib'], {
+        network: 'bridge',
+        timeoutMs: 5400000,
+      })
       for (const target of dependencyBuildTargets(spec.manifest))
         await run(['lake', 'build', target], { network: 'bridge' })
       if (configurationDigest(readDependencyConfiguration(stage)) !== original)
@@ -416,8 +428,9 @@ export class SharedDependencyCache {
         path.join(stage, '.ready.json'),
         JSON.stringify({
           key: spec.key,
+          schema: cacheSchema,
           verifiedAt: new Date().toISOString(),
-          check: 'import Mathlib',
+          check: 'lake build @mathlib; import Mathlib',
         }) + '\n',
         { mode: 0o400, flag: 'wx' },
       )

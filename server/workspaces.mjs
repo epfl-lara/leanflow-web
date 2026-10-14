@@ -23,6 +23,7 @@ import {
   dependencyCacheCommands,
   runDependencyCache,
   setupInfrastructureFailure,
+  setupFailureMessage,
 } from './pinned-lake.mjs'
 import { configurationDigest } from './shared-dependencies.mjs'
 import { singleFileSource, availablePlaygroundName } from './single-files.mjs'
@@ -33,7 +34,8 @@ import {
   toolchainSourceModule,
 } from './library-sources.mjs'
 
-const MAX_FILE = 2 * 1024 * 1024
+import { sourceFileByteLimit } from '../shared/source-limits.mjs'
+import { validateSetupBuildTimeout } from './capacity.mjs'
 const MAX_FILES = 12000
 const PRESETS = new Set(['lean', 'mathlib', 'cslib', 'physlib'])
 const CONFIGURATION_FILES = new Set([
@@ -316,11 +318,17 @@ async function textFile(filename, missing = false) {
       fail('File path changed during access', 409)
     const stat = await handle.stat()
     if (!stat.isFile()) fail('Path is not a regular file')
-    if (stat.size > MAX_FILE)
-      fail('Files larger than 2 MiB are not editable', 413)
+    if (stat.size > sourceFileByteLimit(filename))
+      fail(
+        `Files larger than ${sourceFileByteLimit(filename) / (1024 * 1024)} MiB are not editable. Reduce the file or split Lean sources into smaller modules.`,
+        413,
+      )
     const content = await handle.readFile()
-    if (content.length > MAX_FILE)
-      fail('Files larger than 2 MiB are not editable', 413)
+    if (content.length > sourceFileByteLimit(filename))
+      fail(
+        `Files larger than ${sourceFileByteLimit(filename) / (1024 * 1024)} MiB are not editable. Reduce the file or split Lean sources into smaller modules.`,
+        413,
+      )
     if (content.includes(0)) fail('Binary files are not editable', 415)
     const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
     let text
@@ -501,11 +509,18 @@ async function assertTrashTree(directory, depth = 0) {
 
 /** Persistent user-scoped workspaces. The runtime owns process isolation. */
 export class WorkspaceStore {
-  constructor({ dataDir, runtime, resolveHost = lookup, setupRepair }) {
+  constructor({
+    dataDir,
+    runtime,
+    resolveHost = lookup,
+    setupRepair,
+    setupBuildTimeoutMs = 1800000,
+  }) {
     if (!dataDir || !runtime)
       throw new Error('WorkspaceStore requires dataDir and runtime')
     this.dataDir = path.resolve(dataDir)
     this.runtime = runtime
+    this.setupBuildTimeoutMs = validateSetupBuildTimeout(setupBuildTimeoutMs)
     this.resolveHost = resolveHost
     this.setupRepair = setupRepair
     this.projectsDir = path.join(this.dataDir, 'projects')
@@ -1754,7 +1769,12 @@ export class WorkspaceStore {
     if (result.code !== 0)
       throw Object.assign(
         new Error(
-          `${args[0]} failed (exit ${result.code}): ${(result.stderr || result.stdout || '').slice(-2000)}`,
+          [
+            setupFailureMessage(result),
+            `${args[0]} failed (exit ${result.code}): ${(result.stderr || result.stdout || '').slice(-2000)}`,
+          ]
+            .filter(Boolean)
+            .join('\n'),
         ),
         { infrastructure: setupInfrastructureFailure(result) },
       )
@@ -1816,8 +1836,11 @@ export class WorkspaceStore {
             )
         },
       })
-    } catch {
+    } catch (error) {
       signal?.throwIfAborted()
+      // A private retry has the same resource and repository requirements.
+      // Keep the actionable failure and avoid repeating that expensive work.
+      if (error.infrastructure) throw error
       this.#event(
         project,
         'warning',
@@ -2158,7 +2181,7 @@ export class WorkspaceStore {
       // Failed user proofs remain repairable, so they do not make an otherwise
       // usable environment unavailable in the editor.
       const build = await this.runtime.run(project.root, ['lake', 'build'], {
-        timeoutMs: 1800000,
+        timeoutMs: this.setupBuildTimeoutMs,
         network: 'none',
         signal: this.preparationControllers.get(project.id)?.signal,
         ...(project.repairedConfiguration
@@ -2176,6 +2199,7 @@ export class WorkspaceStore {
       signal?.throwIfAborted()
       if (build.code !== 0) {
         project.buildWarning =
+          setupFailureMessage(build) ||
           'Some project targets did not compile. Open their files to inspect and repair the Lean errors.'
         this.#event(project, 'warning', `${project.buildWarning}\n`)
       } else delete project.buildWarning
@@ -2414,10 +2438,14 @@ export class WorkspaceStore {
     this.#ready(project, true)
     if (
       typeof content !== 'string' ||
-      Buffer.byteLength(content) > MAX_FILE ||
+      Buffer.byteLength(content) >
+        sourceFileByteLimit(typeof filename === 'string' ? filename : '') ||
       content.includes('\0')
     )
-      fail('File content must be UTF-8 text smaller than 2 MiB', 413)
+      fail(
+        `File content must be UTF-8 text at most ${sourceFileByteLimit(typeof filename === 'string' ? filename : '') / (1024 * 1024)} MiB. Reduce the file or split Lean sources into smaller modules.`,
+        413,
+      )
     return this.#locked(id, async () => {
       const project = this.#owned(id, owner)
       if (project.archivedAt) fail('Project not found', 404)
@@ -2864,7 +2892,7 @@ export class WorkspaceStore {
       seen.add(filename)
       if (
         typeof change.after !== 'string' ||
-        Buffer.byteLength(change.after) > MAX_FILE ||
+        Buffer.byteLength(change.after) > sourceFileByteLimit(filename) ||
         change.after.includes('\0')
       )
         fail(
@@ -3053,7 +3081,7 @@ export class WorkspaceStore {
       if (
         change.after !== null &&
         (typeof change.after !== 'string' ||
-          Buffer.byteLength(change.after) > MAX_FILE ||
+          Buffer.byteLength(change.after) > sourceFileByteLimit(filename) ||
           change.after.includes('\0'))
       )
         fail('Invalid changed file content')

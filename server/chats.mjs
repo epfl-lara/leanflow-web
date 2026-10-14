@@ -151,7 +151,7 @@ export class ChatStore {
       .get(chat.id)
     let run = null
     try {
-      if (last) run = this.events.get(last.run, chat.owner)
+      if (last) run = this.events.getMetadata(last.run, chat.owner)
     } catch {
       /* Keep metadata usable if an old run is unavailable. */
     }
@@ -342,7 +342,7 @@ export class ChatStore {
     const chat = this.#owned(id, owner)
     if (!suppliedRun || typeof suppliedRun.id !== 'string')
       fail('Invalid chat run')
-    const run = this.events.get(suppliedRun.id, owner)
+    const run = this.events.getMetadata(suppliedRun.id, owner)
     if (
       run.projectId !== chat.projectId ||
       run.kind !== 'agent' ||
@@ -397,7 +397,7 @@ export class ChatStore {
       .all(id)
       .reverse()) {
       try {
-        const run = this.events.get(row.run, owner)
+        const run = this.events.getMetadata(row.run, owner)
         if (run.projectId === chat.projectId && run.kind === 'agent')
           runs.push(run)
       } catch (error) {
@@ -424,7 +424,7 @@ export class ChatStore {
       .all(chat.id)) {
       let run
       try {
-        run = this.events.get(row.run, chat.owner)
+        run = this.events.getMetadata(row.run, chat.owner)
       } catch (error) {
         if (error.status === 404) continue
         throw error

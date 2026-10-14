@@ -105,14 +105,30 @@ export function dependencyCacheCommands(
   return commands
 }
 
-export function setupInfrastructureFailure(result) {
-  return Boolean(
-    result.timedOut ||
-    result.cancelled ||
-    /(?:Could not resolve host|Failed to connect|Connection (?:refused|reset|timed out)|curl: \(\d+\)|HTTP\/\d(?:\.\d)?\s+(?:429|50[0-9])\b|requested URL returned error: (?:429|50[0-9])|rate limit|temporary failure in name resolution)/i.test(
-      result.stderr || result.stdout || '',
-    ),
+export function setupFailureMessage(result) {
+  const output = [result.stderr, result.stdout].filter(Boolean).join('\n')
+  if (result.timedOut)
+    return 'The Lean build exceeded its time limit. Retry; if it happens again, ask the administrator to review the build limits.'
+  if (result.cancelled)
+    return 'The Lean worker stopped before the check finished. Retry when a worker is available.'
+  if (
+    result.code === 137 ||
+    /(?:Lean|external command)[^\n]*\b(?:exit(?:ed)?(?: with)?(?: code)?|code)\s*[:=]?\s*137\b|\b(?:out of memory|std::bad_alloc|Cannot allocate memory)\b/i.test(
+      output,
+    )
   )
+    return 'Lean stopped unexpectedly, often because the worker memory limit was reached. Use more memory or build one module at a time, then retry.'
+  if (
+    /(?:Could not resolve host|Failed to connect|Connection (?:refused|reset|timed out)|curl: \(\d+\)|HTTP\/\d(?:\.\d)?\s+(?:429|50[0-9])\b|requested URL returned error: (?:429|50[0-9])|rate limit|temporary failure in name resolution|fatal: could not read (?:Username|Password)|fatal: expected flush after ref listing|fatal: Authentication failed)/i.test(
+      output,
+    )
+  )
+    return 'Dependency access failed. Check the network and repository permissions, then retry setup.'
+  return null
+}
+
+export function setupInfrastructureFailure(result) {
+  return setupFailureMessage(result) !== null
 }
 
 // Prebuilt Physlib artifacts are an optimization. Older revisions/releases can
@@ -150,7 +166,12 @@ export async function runDependencyCache(runtime, root, command, options = {}) {
   }
   throw Object.assign(
     new Error(
-      `Dependency cache failed: ${(result.stderr || result.stdout || '').slice(-2000)}`,
+      [
+        setupFailureMessage(result),
+        `Dependency cache failed: ${(result.stderr || result.stdout || '').slice(-2000)}`,
+      ]
+        .filter(Boolean)
+        .join('\n'),
     ),
     { infrastructure: setupInfrastructureFailure(result) },
   )

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
@@ -39,7 +39,9 @@ function load(name) {
     if (id.endsWith('.css')) return {}
     if (id.endsWith('.mjs')) return require(id)
     if (id.startsWith('.')) {
-      const suffix = id === './Icons' ? '.tsx' : '.ts'
+      const suffix = existsSync(new URL(`${id}.ts`, import.meta.url))
+        ? '.ts'
+        : '.tsx'
       return load(`${id}${suffix}`)
     }
     return modules.has(id) ? modules.get(id) : require(id)
@@ -56,6 +58,7 @@ function load(name) {
 const { mergeRunSnapshot, appendRunEvents } = load('./runStream.ts')
 const {
   runChangeCount,
+  runChangePaths,
   runStatusLabel,
   conversationSegments,
   liveEditStatus,
@@ -510,6 +513,138 @@ test('compact history preserves full verification details and search kind', () =
   assert.equal(
     runStatusLabel(run({ mode: 'search', verification: { complete: true } })),
     'Search finished',
+  )
+})
+
+test('lightweight steering receipts retain full previews and apply their durable acknowledgement', () => {
+  const change = { path: 'Main.lean', before: 'old proof', after: 'new proof' }
+  const previous = run({
+    status: 'running',
+    eventCursor: 5,
+    changes: [change],
+    liveChanges: [change],
+    verification: { compiled: true, files: ['Main.lean'] },
+  })
+  const receipt = run({
+    status: 'running',
+    eventCursor: 6,
+    changeCount: 1,
+    liveChangeCount: 1,
+    followups: [{ id: 'receipt', text: 'Keep this proof.', status: 'pending' }],
+  })
+  const merged = mergeRunSnapshot(previous, receipt)
+  assert.deepEqual(merged.changes, [change])
+  assert.deepEqual(merged.liveChanges, [change])
+  assert.deepEqual(merged.verification, previous.verification)
+  assert.deepEqual(merged.followups, receipt.followups)
+  assert.deepEqual(mergeRunSnapshot(merged, receipt), merged)
+})
+
+test('project summaries without a live revision retain a loaded nonlive proof preview', () => {
+  const change = {
+    path: 'Main.lean',
+    before: 'before',
+    after: 'reviewed proof',
+  }
+  const previous = run({
+    status: 'completed',
+    eventCursor: 5,
+    liveEdits: false,
+    changes: [change],
+  })
+  const summary = run({ status: 'completed', eventCursor: 5, liveEdits: false })
+  assert.equal(summary.liveRevision, undefined)
+  assert.deepEqual(mergeRunSnapshot(previous, summary).changes, [change])
+})
+
+test('new metadata revisions invalidate older proof previews and retain current file links until explicit review', () => {
+  const change = { path: 'Old.lean', before: 'before', after: 'old revision' }
+  const previous = run({
+    status: 'running',
+    eventCursor: 4,
+    liveEdits: true,
+    liveRevision: 1,
+    changes: [change],
+    liveChanges: [change],
+  })
+  const metadata = run({
+    status: 'running',
+    eventCursor: 5,
+    liveEdits: true,
+    liveRevision: 2,
+    changeCount: 1,
+    liveChangeCount: 1,
+    changePaths: ['Current.lean'],
+    liveChangePaths: ['Current.lean'],
+  })
+  const value = mergeRunSnapshot(previous, metadata)
+  assert.equal(value.changes, undefined)
+  assert.equal(value.liveChanges, undefined)
+  assert.deepEqual(runChangePaths(value, true), ['Current.lean'])
+  assert.equal(runChangeCount(value, true), 1)
+  assert.equal(liveEditStatus(value), 'Live edits on · 1 file updated')
+  const { ConversationTurn } = load('./ConversationTurn.tsx')
+  const html = renderToStaticMarkup(
+    React.createElement(ConversationTurn, {
+      run: value,
+      onReview: () => {},
+      onUndo: () => {},
+      onInspect: async () => {},
+      canUndo: false,
+      undoing: false,
+      onOpenTarget: () => {},
+    }),
+  )
+  assert.match(html, /Saved to project:/)
+  assert.match(html, /Current\.lean/)
+  assert(!html.includes('Old.lean'))
+  const currentChange = {
+    path: 'Current.lean',
+    before: 'before',
+    after: 'current revision',
+  }
+  const reviewed = mergeRunSnapshot(value, {
+    ...metadata,
+    liveChanges: [currentChange],
+    changes: [currentChange],
+  })
+  assert.deepEqual(reviewed.liveChanges, [currentChange])
+  assert.deepEqual(runChangePaths(reviewed, true), ['Current.lean'])
+  const undone = mergeRunSnapshot(reviewed, {
+    ...metadata,
+    eventCursor: 6,
+    liveUndone: true,
+    liveChangeCount: 0,
+    liveChangePaths: [],
+  })
+  assert.equal(undone.liveChanges, undefined)
+  assert.equal(runChangeCount(undone, true), 0)
+})
+
+test('saved-file events clear stale previews before metadata refresh and preserve replayed output', () => {
+  const change = { path: 'Main.lean', before: 'before', after: 'old revision' }
+  const previous = run({
+    status: 'running',
+    eventCursor: 2,
+    changes: [change],
+    liveChanges: [change],
+    message: 'Saved proof.',
+  })
+  const value = appendRunEvents(previous, [
+    {
+      seq: 3,
+      type: 'files-updated',
+      data: { paths: ['Main.lean'], live: true },
+    },
+    { seq: 4, type: 'message', data: { text: ' Checking it.' } },
+  ])
+  assert.equal(value.liveChanges, undefined)
+  assert.equal(value.changes, undefined)
+  assert.equal(value.message, 'Saved proof. Checking it.')
+  assert.equal(value.eventCursor, 4)
+  assert.equal(
+    appendRunEvents(value, [{ seq: 3, type: 'files-updated', data: {} }]),
+    value,
   )
 })
 

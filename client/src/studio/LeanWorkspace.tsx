@@ -1,4 +1,6 @@
 import { LeanMonaco, LeanMonacoEditor } from 'lean4monaco'
+import { CloseAction, ErrorAction } from 'vscode-languageclient/browser'
+import type { WebSocketConfigOptionsUrl } from 'monaco-editor-wrapper'
 import { FileUri } from 'lean4monaco/dist/vscode-lean4/vscode-lean4/src/utils/exturi'
 import type { SourceRequest } from './LibrarySourceDialog'
 import { CancellationTokenSource } from 'monaco-editor'
@@ -25,6 +27,65 @@ import {
 } from './proofTarget'
 
 class BrowserLeanMonaco extends LeanMonaco {
+  constructor(private readonly onConnectionIssue: (message: string) => void) {
+    super()
+  }
+
+  protected override getWebSocketOptions(
+    options: Parameters<LeanMonaco['start']>[0],
+  ): WebSocketConfigOptionsUrl {
+    const settings = super.getWebSocketOptions(options)
+    const onConnectionIssue = this.onConnectionIssue
+    return {
+      ...settings,
+      startOptions: {
+        ...settings.startOptions,
+        onCall(client) {
+          settings.startOptions?.onCall(client)
+          const previous = client?.clientOptions.errorHandler
+          if (!client || !previous) return
+          let sourceTooLarge = false
+          const stop = client.stop.bind(client)
+          client.stop = async (...args) => {
+            try {
+              await stop(...args)
+            } catch (error) {
+              // The wrapper sends shutdown after socket closure. A size rejection
+              // has already closed that transport, so its shutdown cannot reply.
+              if (!sourceTooLarge) throw error
+            }
+          }
+          // Keep the installed client's normal recovery policy. A rejected
+          // document cannot recover through repeated automatic reconnections.
+          client.clientOptions.errorHandler = {
+            error(error, message, count) {
+              if (
+                error.name === '1009' ||
+                /socket reconnect: code = 1009\b/.test(error.message)
+              ) {
+                sourceTooLarge = true
+                const reason = /reason = ([\s\S]*)$/
+                  .exec(error.message)?.[1]
+                  ?.trim()
+                onConnectionIssue(
+                  reason ||
+                    'The Lean message is too large. Reduce the source or split it into smaller modules.',
+                )
+                return { action: ErrorAction.Continue, handled: true }
+              }
+              return previous.error(error, message, count)
+            },
+            closed() {
+              return sourceTooLarge
+                ? { action: CloseAction.DoNotRestart, handled: true }
+                : previous.closed()
+            },
+          }
+        },
+      },
+    }
+  }
+
   protected override getExtensionManifest() {
     // LeanMonaco starts the Lean client, infoview, and abbreviation features
     // itself. Register the language/configuration contributions without trying
@@ -128,6 +189,7 @@ export function LeanWorkspace({
   const revealed = useRef<number | null>(null)
   const focusedRequest = useRef<number | null>(null)
   const [failure, setFailure] = useState('')
+  const [connectionIssue, setConnectionIssue] = useState('')
   const [loading, setLoading] = useState(true)
   const stacked = useMediaQuery('(max-width: 1250px)')
   fileRef.current = file
@@ -147,11 +209,16 @@ export function LeanWorkspace({
     let cancelled = false
     let own: Runtime | null = null
     setFailure('')
+    setConnectionIssue('')
     setLoading(true)
     onStateRef.current('Connecting to Lean')
     void serialize(async () => {
       if (cancelled || !editorEl.current || !infoEl.current) return
-      const lean = new BrowserLeanMonaco()
+      const lean = new BrowserLeanMonaco((message) => {
+        if (cancelled) return
+        setConnectionIssue(message)
+        onStateRef.current('Lean paused: source too large')
+      })
       own = { lean }
       runtime.current = own
       lean.setInfoviewElement(infoEl.current)
@@ -764,6 +831,16 @@ export function LeanWorkspace({
       style={{ '--goals-size': `${goalsSize}%` } as CSSProperties}
     >
       <div className="source-pane proof-source-pane">
+        {connectionIssue && (
+          <div className="lean-connection-notice" role="alert">
+            <strong>Lean checking paused</strong>
+            <p>{connectionIssue}</p>
+            <p>
+              Your unsaved edits remain in the editor. Reduce the source, then
+              reopen the project to reconnect.
+            </p>
+          </div>
+        )}
         <div
           ref={editorEl}
           className="monaco-host"

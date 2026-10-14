@@ -5,6 +5,7 @@ import {
   post,
   runIsActive,
   type Run,
+  type RunReceipt,
   type Session,
   type FileEntry,
   type RunProofTarget,
@@ -24,7 +25,12 @@ import { useConversationScroll } from './useConversationScroll'
 import { useRunStream } from './useRunStream'
 import { chatDraftKey, useChatDraft, type DraftSubmission } from './chatDrafts'
 import { chatModes } from './chatModes'
-import { runStatusLabel, liveEditStatus } from './chatTimeline'
+import {
+  runStatusLabel,
+  liveEditStatus,
+  runChangePaths,
+  runChangeCount,
+} from './chatTimeline'
 import type {
   EditorProofState,
   ProofEditorRequest,
@@ -316,19 +322,17 @@ export function AssistantPanel({
         continue
       livePending.current.add(metadata.id)
       void recoverBackground(`files:${metadata.id}`, () =>
-        api<Run>(`/api/runs/${encodeURIComponent(metadata.id)}`).then(
-          async (value) => {
-            if (!mounted.current) return
-            updateRun(value)
-            await filesUpdatedRef.current(
-              (value.liveChanges || []).map((change) => change.path),
-            )
-            liveSeen.current.set(
-              value.id,
-              `${value.liveRevision || 0}:${!!value.liveUndone}`,
-            )
-          },
-        ),
+        api<RunReceipt>(
+          `/api/runs/${encodeURIComponent(metadata.id)}?view=metadata`,
+        ).then(async (value) => {
+          if (!mounted.current) return
+          updateRun(value)
+          await filesUpdatedRef.current(runChangePaths(value, true))
+          liveSeen.current.set(
+            value.id,
+            `${value.liveRevision || 0}:${!!value.liveUndone}`,
+          )
+        }),
       )
         .catch(() => undefined)
         .finally(() => livePending.current.delete(metadata.id))
@@ -339,9 +343,7 @@ export function AssistantPanel({
           .map((value) => {
             const existing = previous.find((item) => item.id === value.id)
             // Metadata must retain transcripts fetched by the active stream or history.
-            return existing
-              ? mergeRunSnapshot(existing, { ...existing, ...value })
-              : value
+            return existing ? mergeRunSnapshot(existing, value) : value
           })
           .concat(
             previous.filter(
@@ -577,7 +579,7 @@ export function AssistantPanel({
               value.text === captured.text,
           )?.[0] || crypto.randomUUID()
         receipts.current.set(clientId, captured)
-        const value = await post<Run>(
+        const value = await post<RunReceipt>(
           `/api/runs/${encodeURIComponent(steering.id)}/messages`,
           {
             id: clientId,
@@ -717,9 +719,7 @@ export function AssistantPanel({
       await beforeApply()
       const value = await post<Run>(`/api/runs/${encodeURIComponent(id)}/undo`)
       updateRun(value)
-      await onFilesUpdated(
-        (value.liveChanges || []).map((change) => change.path),
-      )
+      await onFilesUpdated(runChangePaths(value, true))
       await loadProject()
     } catch (error) {
       if (mounted.current) setStreamError(errorText(error))
@@ -1120,6 +1120,20 @@ export function AssistantPanel({
                     </button>
                   )}
                 </div>
+              )}
+            {(dialogRun.liveEdits
+              ? dialogRun.liveChanges
+              : dialogRun.changes) === undefined &&
+              runChangeCount(dialogRun, !!dialogRun.liveEdits) > 0 && (
+                <p className="field-help">
+                  The edits changed.{' '}
+                  <button
+                    className="button small secondary"
+                    onClick={() => void review(dialogRun.id)}
+                  >
+                    Refresh review
+                  </button>
+                </p>
               )}
             {(dialogRun.liveEdits
               ? dialogRun.liveChanges

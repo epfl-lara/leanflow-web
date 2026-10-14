@@ -16,6 +16,7 @@ export const TERMINAL = new Set([
   'interrupted',
   'applied',
 ])
+const changeFields = ['changes', 'liveChanges']
 
 export class EventStore extends EventEmitter {
   constructor(dataDir) {
@@ -24,12 +25,17 @@ export class EventStore extends EventEmitter {
     this.setMaxListeners(100)
     this.db = new DatabaseSync(path.join(dataDir, 'activity.sqlite'))
     this.db.exec(
-      'PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, owner TEXT NOT NULL, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (job TEXT NOT NULL, seq INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(job,seq));',
+      'PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, owner TEXT NOT NULL, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (job TEXT NOT NULL, seq INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(job,seq)); CREATE TABLE IF NOT EXISTS job_changes (job TEXT NOT NULL, field TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(job,field));',
     )
-    for (const row of this.db.prepare('SELECT payload FROM jobs').all()) {
+    for (const row of this.db
+      .prepare('SELECT id,payload FROM jobs')
+      .iterate()) {
       const job = JSON.parse(row.payload)
+      // Migrate older inline rows once, without retaining all jobs in memory.
+      if (changeFields.some((field) => Object.hasOwn(job, field)))
+        this.#transaction(() => this.#storeJob(row.id, job))
       if (!TERMINAL.has(job.status))
-        this.update(job.id, {
+        this.updateMetadata(job.id, {
           status: 'interrupted',
           error:
             'The server restarted during this job. Start a new run to continue.',
@@ -48,13 +54,11 @@ export class EventStore extends EventEmitter {
       message: '',
       changes: [],
     }
-    this.db
-      .prepare('INSERT INTO jobs VALUES(?,?,?)')
-      .run(job.id, owner, JSON.stringify(job))
+    this.#transaction(() => this.#storeJob(job.id, job, true))
     this.event(job.id, 'status', { status: job.status })
     return job
   }
-  get(id, owner) {
+  #readMetadata(id, owner) {
     const row = this.db.prepare('SELECT payload FROM jobs WHERE id=?').get(id)
     if (!row) throw Object.assign(new Error('Job not found.'), { status: 404 })
     const job = JSON.parse(row.payload)
@@ -62,11 +66,89 @@ export class EventStore extends EventEmitter {
       throw Object.assign(new Error('Job not found.'), { status: 404 })
     return job
   }
+  #metadata(job) {
+    const { changePaths, ...metadata } = job
+    for (const field of changeFields)
+      if (Object.hasOwn(changePaths || {}, field))
+        metadata[field] = changePaths[field]
+    return metadata
+  }
+  getMetadata(id, owner) {
+    return this.#metadata(this.#readMetadata(id, owner))
+  }
+  #hydrate(job) {
+    const rows = this.db
+      .prepare('SELECT field,payload FROM job_changes WHERE job=?')
+      .all(job.id)
+    for (const row of rows) job[row.field] = JSON.parse(row.payload)
+    return job
+  }
+  get(id, owner) {
+    // Check ownership before reading the larger change history.
+    return this.#hydrate(this.getMetadata(id, owner))
+  }
+  #transaction(action) {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const result = action()
+      this.db.exec('COMMIT')
+      return result
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+  #storeJob(id, job, insert = false) {
+    const metadata = { ...job }
+    const changePaths = { ...metadata.changePaths }
+    const changes = []
+    for (const field of changeFields) {
+      if (!Object.hasOwn(metadata, field)) continue
+      const value = metadata[field]
+      changes.push([field, JSON.stringify(metadata[field])])
+      delete metadata[field]
+      if (value === undefined) delete changePaths[field]
+      else
+        changePaths[field] = Array.isArray(value)
+          ? value.map((change) => ({ path: change.path }))
+          : null
+    }
+    if (Object.keys(changePaths).length) metadata.changePaths = changePaths
+    else delete metadata.changePaths
+    if (insert)
+      this.db
+        .prepare('INSERT INTO jobs VALUES(?,?,?)')
+        .run(id, job.owner, JSON.stringify(metadata))
+    else
+      this.db
+        .prepare('UPDATE jobs SET payload=? WHERE id=?')
+        .run(JSON.stringify(metadata), id)
+    // Change text and metadata commit together. Ordinary progress updates never
+    // read or rewrite these rows; full reads retain the existing API contract.
+    for (const [field, payload] of changes) {
+      if (payload === undefined)
+        this.db
+          .prepare('DELETE FROM job_changes WHERE job=? AND field=?')
+          .run(id, field)
+      else
+        this.db
+          .prepare(
+            'INSERT INTO job_changes VALUES(?,?,?) ON CONFLICT(job,field) DO UPDATE SET payload=excluded.payload',
+          )
+          .run(id, field, payload)
+    }
+    return this.#metadata(metadata)
+  }
   snapshot(id, owner) {
+    return this.#snapshot(this.get(id, owner))
+  }
+  snapshotMetadata(id, owner) {
+    return this.#snapshot(this.getMetadata(id, owner))
+  }
+  #snapshot(job) {
     // Both reads are synchronous: no event producer can run between reading the
     // accumulated fields and the replay cursor in this server process.
-    const job = this.get(id, owner)
-    const eventCursor = this.cursor(id)
+    const eventCursor = this.cursor(job.id)
     return { ...job, reasoningBlocks: this.reasoningBlocks(job), eventCursor }
   }
   reasoningBlocks(job) {
@@ -105,13 +187,18 @@ export class EventStore extends EventEmitter {
         .get(id).cursor,
     )
   }
-  list(owner, projectId, kind = 'agent') {
+  listMetadata(owner, projectId, kind = 'agent') {
     return this.db
       .prepare(
         "SELECT payload FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.kind')=? ORDER BY rowid DESC LIMIT 100",
       )
       .all(owner, projectId, kind)
-      .map((row) => JSON.parse(row.payload))
+      .map((row) => this.#metadata(JSON.parse(row.payload)))
+  }
+  list(owner, projectId, kind = 'agent') {
+    return this.listMetadata(owner, projectId, kind).map((job) =>
+      this.#hydrate(job),
+    )
   }
   summaries(owner, projectId, kind = 'agent') {
     const fields = [
@@ -148,21 +235,25 @@ export class EventStore extends EventEmitter {
         proofTarget: row.proofTarget
           ? proofTargetReference(JSON.parse(row.proofTarget))
           : undefined,
+        liveRevision: row.liveRevision === null ? undefined : row.liveRevision,
         liveEdits: row.liveEdits === null ? undefined : !!row.liveEdits,
         liveUndone: row.liveUndone === null ? undefined : !!row.liveUndone,
       }))
   }
-  update(id, fields) {
-    const job = {
-      ...this.get(id),
-      ...fields,
-      updatedAt: new Date().toISOString(),
-    }
-    this.db
-      .prepare('UPDATE jobs SET payload=? WHERE id=?')
-      .run(JSON.stringify(job), id)
+  updateMetadata(id, fields) {
+    const job = this.#transaction(() =>
+      this.#storeJob(id, {
+        ...this.#readMetadata(id),
+        ...fields,
+        updatedAt: new Date().toISOString(),
+      }),
+    )
     if (fields.status) this.event(id, 'status', { status: fields.status })
     return job
+  }
+  update(id, fields) {
+    this.updateMetadata(id, fields)
+    return this.get(id)
   }
   event(id, type, data) {
     const seq = Number(
@@ -186,7 +277,7 @@ export class EventStore extends EventEmitter {
       .map((row) => JSON.parse(row.payload))
   }
   append(id, field, text, type) {
-    const job = this.get(id)
+    const job = this.getMetadata(id)
     const combined = (job[field] || '') + text,
       trimmed = Math.max(0, combined.length - 250_000)
     const baseOffset = (job[field + 'BaseOffset'] || 0) + trimmed
@@ -211,7 +302,7 @@ export class EventStore extends EventEmitter {
           `reasoning-${this.cursor(id) + 1}`,
         )
       : []
-    this.update(id, {
+    this.updateMetadata(id, {
       [field]: combined.slice(-250_000),
       [field + 'BaseOffset']: baseOffset,
       ...(truncated ? { [field + 'Truncated']: true } : {}),
@@ -265,7 +356,7 @@ export class JobManager {
       .then(async () => {
         try {
           if (file) await this.workspaces.readFile(projectId, owner, file)
-          this.events.update(job.id, { status: 'running' })
+          this.events.updateMetadata(job.id, { status: 'running' })
           const options = {
             network: 'none',
             timeoutMs: 600_000,
@@ -292,7 +383,7 @@ export class JobManager {
               stderr: result.stderr + checked.stderr,
             }
           }
-          this.events.update(job.id, {
+          this.events.updateMetadata(job.id, {
             status: result.code === 0 ? 'completed' : 'failed',
             result,
             error:
@@ -301,7 +392,10 @@ export class JobManager {
                 : 'Lean build failed. See the build output.',
           })
         } catch (error) {
-          this.events.update(job.id, { status: 'failed', error: error.message })
+          this.events.updateMetadata(job.id, {
+            status: 'failed',
+            error: error.message,
+          })
         }
       })
       .finally(() => this.active.delete(job.id))

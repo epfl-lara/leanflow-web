@@ -1,7 +1,14 @@
 import { startTransition, useEffect, useRef, useState } from 'react'
-import { api, runIsActive, type Run, type RunEvent } from './api'
+import {
+  api,
+  runIsActive,
+  type Run,
+  type RunEvent,
+  type RunReceipt,
+} from './api'
 import { appendRunEvents, mergeRunSnapshot } from './runStream'
 import { hydrateReasoningHistory } from './reasoningHistory'
+import { runChangePaths } from './chatTimeline'
 
 /** Follow the active project run independently of which chat or turn is open. */
 export function useRunStream(
@@ -65,9 +72,7 @@ export function useRunStream(
         !filesPending
       ) {
         filesPending = true
-        void updateFiles(
-          (current.liveChanges || []).map((change) => change.path),
-        )
+        void updateFiles(runChangePaths(current, true))
           .then((success) => {
             if (success) revision = nextRevision
           })
@@ -120,8 +125,8 @@ export function useRunStream(
       if (cancelled) return
       const request = ++snapshotRequest
       try {
-        const snapshot = await api<Run>(
-          `/api/runs/${encodeURIComponent(runId)}`,
+        const snapshot = await api<RunReceipt>(
+          `/api/runs/${encodeURIComponent(runId)}?view=metadata`,
         )
         if (!cancelled) {
           if (request === snapshotRequest) callbacksRef.current.onRecovered()
@@ -150,7 +155,7 @@ export function useRunStream(
       if (historyRequest) historyEvents.push(...batch)
       current = appendRunEvents(current, batch)
       const value = current
-      // Wait for a full final snapshot before publishing a terminal status.
+      // Wait for a final metadata snapshot before publishing a terminal status.
       // Native final output can be reconciled after the last streamed delta.
       if (runIsActive(value))
         startTransition(() => callbacksRef.current.onRun(value))

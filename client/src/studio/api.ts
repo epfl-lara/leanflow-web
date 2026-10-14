@@ -30,6 +30,22 @@ export interface Session {
   }[]
   defaultModel?: string
   runtime?: Record<string, unknown>
+  capacity?: {
+    workers: number
+    workerQueue: number
+    editors: number
+    editorsPerProject: number
+    agents: number
+    agentQueue: number
+    searches: number
+    sourceRequests: number
+    sourceRequestsPerUser: number
+    smallSourceRequests: number
+    smallSourceRequestsPerUser: number
+    setupBuildTimeoutMs: number
+    workerCpus: number
+    workerMemory: string
+  }
   lemex?: {
     revision?: string
     version?: string
@@ -126,6 +142,8 @@ export interface Run {
   followups?: RunFollowup[]
   changeCount?: number
   liveChangeCount?: number
+  changePaths?: string[]
+  liveChangePaths?: string[]
   reasoningChars?: number
   reasoningSummaryChars?: number
   logChars?: number
@@ -155,6 +173,12 @@ export interface Run {
   usage?: unknown
   appliedAt?: string
   [key: string]: unknown
+}
+
+// Polls and steering acknowledge a run without sending full proof previews.
+export interface RunReceipt extends Run {
+  changes?: never
+  liveChanges?: never
 }
 
 export interface RunFollowup {

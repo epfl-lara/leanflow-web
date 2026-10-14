@@ -245,6 +245,119 @@ test('unsupported or unpinned dependency graphs keep their private preparation p
   }
 })
 
+test('Mathlib dependency traces are complete before imported projects build with readonly packages', async (t) => {
+  const widgetLock = '.lake/packages/proofwidgets/widget/package-lock.json'
+  const { runtime, root } = await fixture(t, async (stage, args, options) => {
+    const command = args.filter((arg) => arg !== '--keep-toolchain').join(' ')
+    if (command === 'lake exe cache get') {
+      const lock = path.join(stage, widgetLock)
+      await fs.mkdir(path.dirname(lock), { recursive: true })
+      await fs.writeFile(lock, '{"lockfileVersion":3}\n')
+    }
+    if (command === 'lake build @mathlib') {
+      assert.notEqual(options.readOnlyWorkspace, true)
+      const lock = await fs.readFile(path.join(stage, widgetLock))
+      await fs.writeFile(
+        path.join(stage, widgetLock + '.hash'),
+        createHash('sha256').update(lock).digest('hex'),
+      )
+    }
+  })
+  const config = {
+    ...configuration,
+    'lake-manifest.json': JSON.stringify({
+      ...manifest,
+      packages: [
+        ...manifest.packages,
+        {
+          ...manifest.packages[0],
+          name: 'proofwidgets',
+          url: 'https://github.com/leanprover-community/ProofWidgets4',
+          inherited: true,
+        },
+      ],
+    }),
+  }
+  await writeConfig(root, config)
+  const shared = await runtime.prepareSharedDependencies(
+    root,
+    request({ configuration: config }),
+  )
+  await runtime.inheritDependencies(shared.root, root)
+  runtime.run = async (project, args) => {
+    assert.deepEqual(args, ['lake', 'build'])
+    const source = runtime.dependencyRoot(project)
+    const lock = await fs.readFile(path.join(source, widgetLock))
+    const hash = await fs
+      .readFile(path.join(source, widgetLock + '.hash'), 'utf8')
+      .catch((error) => {
+        if (error.code === 'ENOENT') return null
+        throw error
+      })
+    return hash === createHash('sha256').update(lock).digest('hex')
+      ? { code: 0, stdout: 'Build completed successfully', stderr: '' }
+      : {
+          code: 1,
+          stdout: '',
+          stderr:
+            'Replaying proofwidgets/widgetPackageLock: read-only file system',
+        }
+  }
+  const result = await runtime.run(root, ['lake', 'build'], {
+    network: 'none',
+    readOnlyWorkspace: true,
+    writeLakeCache: true,
+  })
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(
+    (await fs.stat(path.join(shared.root, widgetLock + '.hash'))).mode & 0o222,
+    0,
+  )
+  assert.equal(
+    await fs.readFile(path.join(root, 'Main.lean'), 'utf8'),
+    'PRIVATE PROOF SOURCE',
+  )
+})
+
+test('complete-build caches use new entries while existing import-only bindings stay unchanged', async (t) => {
+  const oldKey =
+    '7f37e36e8b52d43a900ecc08fa181e4e7838a0b5eaa2aecb96c79170b9e098ce'
+  const { runtime, root, dataDir, calls } = await fixture(t)
+  const oldRoot = path.join(dataDir, 'runtime/shared-dependencies', oldKey)
+  await writeConfig(oldRoot)
+  const oldArtifact = path.join(oldRoot, '.lake/packages/mathlib/Mathlib.lean')
+  await fs.mkdir(path.dirname(oldArtifact), { recursive: true })
+  await fs.writeFile(oldArtifact, 'EXISTING IMMUTABLE DEPENDENCY', {
+    mode: 0o400,
+  })
+  await fs.writeFile(
+    path.join(oldRoot, '.ready.json'),
+    JSON.stringify({ key: oldKey, check: 'import Mathlib' }),
+    { mode: 0o400 },
+  )
+  const active = path.join(dataDir, 'active-project')
+  await writeConfig(active)
+  await runtime.inheritDependencies(oldRoot, active)
+  const shared = await runtime.prepareSharedDependencies(root, request())
+  assert.notEqual(shared.root, oldRoot)
+  assert.equal(runtime.dependencyRoot(active), oldRoot)
+  assert.equal(
+    await fs.readFile(oldArtifact, 'utf8'),
+    'EXISTING IMMUTABLE DEPENDENCY',
+  )
+  assert.equal((await fs.stat(oldArtifact)).mode & 0o777, 0o400)
+  const marker = JSON.parse(
+    await fs.readFile(path.join(shared.root, '.ready.json'), 'utf8'),
+  )
+  assert.equal(marker.schema, 3)
+  assert.match(marker.check, /lake build @mathlib/)
+  const preparedCommands = calls.length
+  const hit = await runtime.prepareSharedDependencies(root, request())
+  assert.equal(hit.root, shared.root)
+  assert.equal(hit.reused, true)
+  assert.equal(calls.length, preparedCommands)
+})
+
 test('imports and snapshots reuse compiled readonly dependencies without copying private sources or project builds', async (t) => {
   const { runtime, root, dataDir, calls, run } = await fixture(t)
   await fs.mkdir(path.join(root, '.lake/build'), { recursive: true })
@@ -371,8 +484,12 @@ test('a cancelled cache waiter cannot cancel another import or publish an incomp
   )
 })
 
-test('download failures and missing compiled Mathlib never publish entries and can be retried', async (t) => {
-  for (const failing of ['lake exe cache get', 'lake env lean --stdin']) {
+test('download, dependency build and import failures never publish entries and can be retried', async (t) => {
+  for (const failing of [
+    'lake exe cache get',
+    'lake build @mathlib',
+    'lake env lean --stdin',
+  ]) {
     let fail = true
     const { runtime, root, dataDir } = await fixture(t, async (_stage, args) =>
       args.filter((arg) => arg !== '--keep-toolchain').join(' ') === failing &&
@@ -433,6 +550,28 @@ test('public repository validation happens before any worker starts', async (t) 
     /Private repository host/,
   )
   assert.equal(calls.length, 0)
+})
+
+test('shared dependency failures preserve infrastructure classification before publication', async (t) => {
+  for (const result of [
+    {
+      code: 1,
+      stderr: 'error: build failed\n',
+      stdout: 'error: Lean exited with code 137\n',
+    },
+    { code: 1, stderr: 'fatal: expected flush after ref listing', stdout: '' },
+    { code: 124, timedOut: true, stderr: '', stdout: '' },
+  ]) {
+    const { runtime, root, dataDir } = await fixture(t, async () => result)
+    await assert.rejects(
+      runtime.prepareSharedDependencies(root, request()),
+      (error) => error.infrastructure === true,
+    )
+    assert.deepEqual(
+      await fs.readdir(path.join(dataDir, 'runtime/shared-dependencies')),
+      [],
+    )
+  }
 })
 
 test('configuration symlinks cannot read another project or select a shared binding', async (t) => {

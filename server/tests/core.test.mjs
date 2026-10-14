@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import * as fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import http from 'node:http'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
@@ -95,7 +96,7 @@ class FakeRuntime {
   }
 }
 
-async function fixture(t) {
+async function fixture(t, capacity) {
   const dataDir = await temp(t),
     runtime = new FakeRuntime()
   const providerSecret = 'test-provider-secret'
@@ -106,7 +107,7 @@ async function fixture(t) {
     lemex: { configured: true, revision: 'test-revision' },
     redact: (value) => String(value).split(providerSecret).join('[redacted]'),
   }
-  const studio = await createStudio({ dataDir, runtime, config })
+  const studio = await createStudio({ dataDir, runtime, config, capacity })
   await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve))
   t.after(() => studio.close())
   const url = `http://127.0.0.1:${studio.server.address().port}`
@@ -1184,4 +1185,363 @@ test('startup migrates existing aliased project directories and retains missing 
     restarted.workspaces.get(projects[3].id, 'owner').root,
     path.join(real, 'projects', projects[3].id, 'lean'),
   )
+})
+
+test('large Lean sources open and save over HTTP while stale hashes and oversized content remain rejected', async (t) => {
+  const f = await fixture(t)
+  const original =
+    '-- ' + '\t'.repeat(5_400_000) + '\nexample : True := by trivial\n'
+  await fs.writeFile(path.join(f.project.root, 'Large.lean'), original)
+  const endpoint = `/api/projects/${f.project.id}/file?path=Large.lean`
+  const opened = await f.request(endpoint)
+  assert.equal(opened.status, 200)
+  const source = await opened.json()
+  assert.equal(hash(source.content), hash(original))
+  const savedContent = original + '-- saved\n'
+  const save = (content, expectedHash) =>
+    f.request(endpoint, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, expectedHash }),
+    })
+  const saved = await save(savedContent, source.hash)
+  assert.equal(saved.status, 200, await saved.clone().text())
+  assert.equal((await saved.json()).hash, hash(savedContent))
+  const conflicted = await save(original, source.hash)
+  assert.equal(conflicted.status, 409)
+  assert.equal(
+    hash(await fs.readFile(path.join(f.project.root, 'Large.lean'))),
+    hash(savedContent),
+  )
+  const oversized = await save(
+    'x'.repeat(8 * 1024 * 1024 + 1),
+    hash(savedContent),
+  )
+  assert.equal(oversized.status, 413)
+  assert.match((await oversized.json()).error, /8 MiB/)
+  assert.equal(
+    hash(await fs.readFile(path.join(f.project.root, 'Large.lean'))),
+    hash(savedContent),
+  )
+  await fs.writeFile(
+    path.join(f.project.root, 'Oversized.lean'),
+    'x'.repeat(8 * 1024 * 1024 + 1),
+  )
+  const unreadable = await f.request(
+    `/api/projects/${f.project.id}/file?path=Oversized.lean`,
+  )
+  assert.equal(unreadable.status, 413)
+  assert.match((await unreadable.json()).error, /8 MiB/)
+})
+
+test('folder imports accept more than 20 MiB and retain the bounded 32 MiB source total', async (t) => {
+  const f = await fixture(t)
+  const large = '-- ' + 'a'.repeat(5_400_000) + '\n'
+  const files = [
+    { path: 'lean-toolchain', content: TOOLCHAIN + '\n' },
+    { path: 'lakefile.toml', content: 'name = "large-import"\n' },
+    ...Array.from({ length: 4 }, (_, index) => ({
+      path: `Large${index}.lean`,
+      content: large,
+    })),
+  ]
+  const created = await f.request('/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files, autoRepair: false }),
+  })
+  assert.equal(created.status, 201, await created.clone().text())
+  const project = await created.json()
+  await f.workspaces.jobs.get(project.id)
+  assert.equal(f.workspaces.get(project.id, 'owner').status, 'ready')
+  for (let index = 0; index < 4; index++)
+    assert.equal(
+      (await f.workspaces.readFile(project.id, 'owner', `Large${index}.lean`))
+        .hash,
+      hash(large),
+    )
+  const overTotal = await f.request(`/api/projects/${f.project.id}/upload`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: Array.from({ length: 5 }, (_, index) => ({
+        path: `Added${index}.lean`,
+        content: 'a'.repeat(7_000_000),
+      })),
+    }),
+  })
+  assert.equal(overTotal.status, 413)
+  assert.match((await overTotal.json()).error, /32 MiB/)
+  assert.equal(
+    (await f.workspaces.files(f.project.id, 'owner')).some((file) =>
+      file.path.startsWith('Added'),
+    ),
+    false,
+  )
+})
+
+test('Lean WebSocket relays large escaped source and rejects oversized decoded updates before reaching its worker', async (t) => {
+  const { url, token, project, runtime, request } = await fixture(t)
+  const ws = new WebSocket(
+    url.replace('http:', 'ws:') + '/websocket/' + project.id,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  )
+  t.after(() => ws.terminate())
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve)
+    ws.once('error', reject)
+  })
+  const child = runtime.spawned[0]
+  const text = '-- ' + '\t'.repeat(5_400_000) + '\n'
+  const opened = {
+    jsonrpc: '2.0',
+    method: 'textDocument/didOpen',
+    params: {
+      textDocument: {
+        uri: 'file:///workspace/Large.lean',
+        languageId: 'lean4',
+        version: 1,
+        text,
+      },
+    },
+  }
+  // Escaping makes this frame larger than the previous 8 MiB WebSocket cap.
+  assert(Buffer.byteLength(JSON.stringify(opened)) > 8 * 1024 * 1024)
+  const received = new Promise((resolve) => child.stdin.once('data', resolve))
+  ws.send(JSON.stringify(opened))
+  await received
+  const relayed = JSON.parse(child.requests.join('').split('\r\n\r\n')[1])
+  assert.equal(hash(relayed.params.textDocument.text), hash(text))
+  const before = child.requests.length
+  const closed = new Promise((resolve) =>
+    ws.once('close', (code, reason) =>
+      resolve({ code, reason: reason.toString() }),
+    ),
+  )
+  ws.send(
+    JSON.stringify({
+      method: 'textDocument/didChange',
+      params: {
+        textDocument: { uri: 'file:///workspace/Large.lean', version: 2 },
+        contentChanges: [{ text: 'a'.repeat(8 * 1024 * 1024 + 1) }],
+      },
+    }),
+  )
+  assert.deepEqual(await closed, {
+    code: 1009,
+    reason:
+      'Lean source files must be at most 8 MiB. Reduce the file or split Lean sources into smaller modules.',
+  })
+  assert.equal(child.requests.length, before)
+  assert.equal((await request('/health')).status, 200)
+})
+
+test('large-source support keeps dependency configuration capped at 2 MiB', async (t) => {
+  const f = await fixture(t)
+  const original = await f.workspaces.readFile(
+    f.project.id,
+    'owner',
+    'lakefile.toml',
+  )
+  await assert.rejects(
+    f.workspaces.writeFile(
+      f.project.id,
+      'owner',
+      'lakefile.toml',
+      'a'.repeat(2 * 1024 * 1024 + 1),
+      original.hash,
+    ),
+    { status: 413 },
+  )
+  const uploaded = await f.request(`/api/projects/${f.project.id}/upload`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: [
+        {
+          path: 'Nested/lakefile.toml',
+          content: 'a'.repeat(2 * 1024 * 1024 + 1),
+        },
+      ],
+    }),
+  })
+  assert.equal(uploaded.status, 413)
+  assert.match((await uploaded.json()).error, /2 MiB/)
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, 'owner', 'lakefile.toml')).hash,
+    original.hash,
+  )
+})
+
+test('large-body routes authenticate without consuming anonymous uploads; login and settings retain their smaller limits', async (t) => {
+  const f = await fixture(t)
+  for (const [method, endpoint] of [
+    ['POST', '/api/projects'],
+    ['POST', `/api/projects/${f.project.id}/upload`],
+    ['PUT', `/api/projects/${f.project.id}/file?path=Main.lean`],
+  ]) {
+    // Send only headers. A JSON parser placed before authentication would wait
+    // for this declared body or reject its size rather than respond with 401.
+    const response = await new Promise((resolve, reject) => {
+      const request = http.request(
+        f.url + endpoint,
+        {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length':
+              method === 'PUT' ? 20 * 1024 * 1024 : 100 * 1024 * 1024,
+          },
+        },
+        (response) => {
+          response.resume()
+          resolve(response.statusCode)
+          request.destroy()
+        },
+      )
+      request.on('error', reject)
+      request.setTimeout(2000, () =>
+        request.destroy(
+          new Error('Authentication waited for the anonymous body'),
+        ),
+      )
+      request.flushHeaders()
+    })
+    assert.equal(response, 401)
+  }
+  for (const [endpoint, method, access] of [
+    ['/api/login', 'POST', null],
+    ['/api/settings', 'PUT', f.token],
+  ]) {
+    const response = await f.request(
+      endpoint,
+      {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: 'a'.repeat(3 * 1024 * 1024 + 1) }),
+      },
+      access,
+    )
+    assert.equal(response.status, 413)
+  }
+})
+
+test('an editable 8 MiB source still saves when JSON escaping expands its transport envelope sixfold', async (t) => {
+  const f = await fixture(t)
+  const content = '--' + '\u0001'.repeat(8 * 1024 * 1024 - 2)
+  const response = await f.request(
+    `/api/projects/${f.project.id}/file?path=Escaped.lean`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, expectedHash: null }),
+    },
+  )
+  assert.equal(response.status, 200, await response.clone().text())
+  assert.equal((await response.json()).hash, hash(content))
+  assert.equal(
+    hash(await fs.readFile(path.join(f.project.root, 'Escaped.lean'))),
+    hash(content),
+  )
+})
+
+test('parsed source saves retain admission while waiting for project writes', async (t) => {
+  const f = await fixture(t)
+  const writeFile = f.workspaces.writeFile.bind(f.workspaces)
+  const pending = []
+  f.workspaces.writeFile = (...args) =>
+    new Promise((resolve, reject) => {
+      pending.push(() => writeFile(...args).then(resolve, reject))
+    })
+  const save = (path) =>
+    f.request(`/api/projects/${f.project.id}/file?path=${path}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: '-- queued write', expectedHash: null }),
+    })
+  const first = save('First.lean'),
+    second = save('Second.lean')
+  t.after(() => pending.forEach((release) => release()))
+  const deadline = Date.now() + 2000
+  while (pending.length < 2 && Date.now() < deadline)
+    await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(pending.length, 2)
+  const blocked = await save('Third.lean')
+  assert.equal(blocked.status, 429)
+  assert.equal(
+    pending.length,
+    2,
+    'The rejected save never reaches the workspace writer',
+  )
+  assert.equal((await f.request('/api/session')).status, 200)
+  f.workspaces.writeFile = writeFile
+  pending.shift()()
+  assert.equal((await first).status, 200)
+  assert.equal((await save('Third.lean')).status, 200)
+  pending.shift()()
+  assert.equal((await second).status, 200)
+})
+
+test('disconnecting parsed queued saves cannot release their source admission early', async (t) => {
+  const f = await fixture(t, { sourceRequests: 2, sourceRequestsPerUser: 2 })
+  const writeFile = f.workspaces.writeFile.bind(f.workspaces)
+  const pending = []
+  f.workspaces.writeFile = (...args) =>
+    new Promise((resolve, reject) => {
+      pending.push(() => writeFile(...args).then(resolve, reject))
+    })
+  const controllers = [new AbortController(), new AbortController()]
+  const content = '-- ' + 'a'.repeat(5_400_000) + '\n'
+  const saves = controllers.map((controller, index) =>
+    fetch(
+      f.url +
+        `/api/projects/${f.project.id}/file?path=Disconnected${index}.lean`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${f.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ content, expectedHash: null }),
+        signal: controller.signal,
+      },
+    ),
+  )
+  saves.forEach((save) => save.catch(() => {}))
+  t.after(() => {
+    controllers.forEach((controller) => controller.abort())
+    pending.forEach((release) => release())
+  })
+  const deadline = Date.now() + 2000
+  while (pending.length < 2 && Date.now() < deadline)
+    await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(pending.length, 2)
+  controllers.forEach((controller) => controller.abort())
+  await Promise.allSettled(saves)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const next = () =>
+    f.request(`/api/projects/${f.project.id}/file?path=Next.lean`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        expectedHash: null,
+      }),
+    })
+  assert.equal((await next()).status, 429)
+  assert.equal(pending.length, 2)
+  assert.equal((await f.request('/api/session')).status, 200)
+  f.workspaces.writeFile = writeFile
+  pending.shift()()
+  const released = Date.now() + 2000
+  let response
+  do {
+    response = await next()
+    if (response.status !== 429) break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  } while (Date.now() < released)
+  assert.equal(response.status, 200, await response.text())
+  await pending.shift()()
 })

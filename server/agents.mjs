@@ -220,10 +220,10 @@ export class AgentManager {
       )
     if (
       this.events
-        .list(owner, projectId)
+        .listMetadata(owner, projectId)
         .some((job) => !TERMINAL.has(job.status)) ||
       [...this.active.keys()].some((activeId) => {
-        const activeJob = this.events.get(activeId)
+        const activeJob = this.events.getMetadata(activeId)
         return activeJob.owner === owner && activeJob.projectId === projectId
       })
     )
@@ -281,7 +281,7 @@ export class AgentManager {
       try {
         this.chats.appendRun(chatId, owner, job)
       } catch (error) {
-        this.events.update(job.id, {
+        this.events.updateMetadata(job.id, {
           status: 'failed',
           error: this.config.redact(error.message),
         })
@@ -309,11 +309,11 @@ export class AgentManager {
       ...(detail ? { detail: this.config.redact(detail).slice(0, 1000) } : {}),
       updatedAt: new Date().toISOString(),
     }
-    this.events.update(id, { progress })
+    this.events.updateMetadata(id, { progress })
     this.#emit(id, 'progress', progress)
   }
   async message(owner, id, input) {
-    const job = this.events.get(id, owner)
+    const job = this.events.getMetadata(id, owner)
     const files = selectedContextFiles(
       { files: input?.files },
       validateWorkspaceFilePath,
@@ -349,7 +349,7 @@ export class AgentManager {
       )
       // In review-first runs, saved editor content and the working candidate
       // can differ. Never direct a live turn at a different proof in its copy.
-      const current = this.events.get(id, owner)
+      const current = this.events.getMetadata(id, owner)
       if (current.followups?.some((entry) => entry.id === messageId))
         return this.followups.queue(owner, id, submission).job
       if (submission.proofTarget && current.snapshot) {
@@ -377,7 +377,7 @@ export class AgentManager {
       // reads yielded. Return that durable receipt, never resubmit it.
       if (
         this.events
-          .get(id, owner)
+          .getMetadata(id, owner)
           .followups?.some((entry) => entry.id === messageId)
       )
         return this.followups.queue(owner, id, submission).job
@@ -390,7 +390,7 @@ export class AgentManager {
       saved.length ? JSON.stringify(saved) : '',
     )
     if (queued.created) await this.followups.deliver(id)
-    return this.events.get(id, owner)
+    return this.events.getMetadata(id, owner)
   }
   runSetupRepair(execute, { signal } = {}) {
     if (this.stopping || signal?.aborted)
@@ -433,7 +433,7 @@ export class AgentManager {
       const id = this.queue.shift()
       if (
         typeof id === 'string' &&
-        ['cancelled', 'stopping'].includes(this.events.get(id).status)
+        ['cancelled', 'stopping'].includes(this.events.getMetadata(id).status)
       )
         continue
       this.running++
@@ -455,9 +455,13 @@ export class AgentManager {
       }
       const task = this.#execute(id)
         .catch((error) => {
-          if (!['cancelled', 'stopping'].includes(this.events.get(id).status)) {
+          if (
+            !['cancelled', 'stopping'].includes(
+              this.events.getMetadata(id).status,
+            )
+          ) {
             const message = this.config.redact(error.message)
-            this.events.update(id, { status: 'failed', error: message })
+            this.events.updateMetadata(id, { status: 'failed', error: message })
             this.#progress(id, 'Failed', message)
             this.#emit(id, 'error', { message })
           }
@@ -495,7 +499,7 @@ export class AgentManager {
         )
       }, job.maxSeconds * 1000)
     try {
-      this.events.update(id, { status: 'running' })
+      this.events.updateMetadata(id, { status: 'running' })
       this.#progress(
         id,
         'Preparing project',
@@ -516,7 +520,7 @@ export class AgentManager {
         job.owner,
         id,
       )
-      this.events.update(id, {
+      this.events.updateMetadata(id, {
         snapshot,
         sourceRevision: snapshot.sourceRevision,
       })
@@ -557,7 +561,7 @@ export class AgentManager {
         )
         if (active.controller.signal.aborted) return
         const optimization = { paths, baseline }
-        this.events.update(id, { optimization })
+        this.events.updateMetadata(id, { optimization })
         this.#emit(id, 'optimization', optimization)
         if (baseline.compiled === false)
           throw new Error(
@@ -694,7 +698,9 @@ export class AgentManager {
         } catch {}
       })
       rpc.on('notification', ({ method, params }) => {
-        if (['cancelled', 'stopping'].includes(this.events.get(id).status))
+        if (
+          ['cancelled', 'stopping'].includes(this.events.getMetadata(id).status)
+        )
           return
         if (output.handle(method, params)) return
         if (method === 'item/started') {
@@ -740,7 +746,7 @@ export class AgentManager {
           )
             this.#progress(id, 'Working')
         } else if (method === 'thread/tokenUsage/updated') {
-          this.events.update(id, { usage: params.tokenUsage })
+          this.events.updateMetadata(id, { usage: params.tokenUsage })
           this.#emit(id, 'usage', params.tokenUsage)
         } else if (method === 'turn/started') active.turnId = params.turn?.id
         else if (method === 'turn/completed') {
@@ -780,7 +786,7 @@ export class AgentManager {
         ephemeral: false,
       })
       active.threadId = thread.thread.id
-      this.events.update(id, { threadId: active.threadId })
+      this.events.updateMetadata(id, { threadId: active.threadId })
       this.#log(id, `Lemex is working in ${job.mode} mode.\n`)
       if (job.liveEdits) {
         active.mirror = new LiveMirror({
@@ -788,15 +794,15 @@ export class AgentManager {
           workspaces: this.workspaces,
           signal: active.controller.signal,
           onChanges: (liveChanges, paths) => {
-            this.events.update(id, {
+            this.events.updateMetadata(id, {
               liveChanges,
-              liveRevision: (this.events.get(id).liveRevision || 0) + 1,
+              liveRevision: (this.events.getMetadata(id).liveRevision || 0) + 1,
             })
             this.#emit(id, 'files-updated', { paths, live: true })
           },
           onConflict: (error) => {
             const reason = this.config.redact(error.message)
-            this.events.update(id, { liveEditConflict: reason })
+            this.events.updateMetadata(id, { liveEditConflict: reason })
             this.#log(id, `Live edits paused: ${reason}\n`)
             this.#emit(id, 'live-edit-conflict', { reason })
           },
@@ -848,7 +854,7 @@ export class AgentManager {
       if (active.controller.signal.aborted) return
       if (result.status !== 'completed')
         throw new Error(result.error?.message || `Lemex turn ${result.status}.`)
-      this.events.update(id, { status: 'verifying' })
+      this.events.updateMetadata(id, { status: 'verifying' })
       this.#progress(
         id,
         'Checking proof',
@@ -856,7 +862,7 @@ export class AgentManager {
       )
       const changes = await this.workspaces.changes(snapshot)
       if (active.controller.signal.aborted) return
-      this.events.update(id, { changes })
+      this.events.updateMetadata(id, { changes })
       this.#emit(id, 'changes', { changes })
       if (job.mode === 'search' && changes.length)
         throw new Error(
@@ -871,7 +877,7 @@ export class AgentManager {
           reason: 'Search completed without changing project files.',
           kind: 'search',
         }
-        this.events.update(id, { verification, status: 'completed' })
+        this.events.updateMetadata(id, { verification, status: 'completed' })
         this.#progress(
           id,
           'Completed',
@@ -894,7 +900,7 @@ export class AgentManager {
           errors: risks,
           reason: 'Candidate requires manual review.',
         }
-        this.events.update(id, { verification, status: 'completed' })
+        this.events.updateMetadata(id, { verification, status: 'completed' })
         this.#progress(id, 'Review needed', verification.reason)
         this.#emit(id, 'verification', verification)
         return
@@ -905,7 +911,7 @@ export class AgentManager {
         changes,
         job.liveEdits ? { liveChanges: live.liveChanges || [] } : {},
       )
-      this.events.update(id, { verificationRoot: clean.root })
+      this.events.updateMetadata(id, { verificationRoot: clean.root })
       let checks = changes
       if (!changes.length && job.mode !== 'search') {
         const targets = new Set(
@@ -938,7 +944,7 @@ export class AgentManager {
           'Measuring the independently verified candidate.',
         )
         this.#log(id, 'Measuring the independently verified optimized proof…\n')
-        const optimization = this.events.get(id).optimization
+        const optimization = this.events.getMetadata(id).optimization
         const candidate = await this.optimizationMeasure(
           this.runtime,
           clean.root,
@@ -954,10 +960,10 @@ export class AgentManager {
           candidate,
           reductions: optimizationReductions(optimization.baseline, candidate),
         }
-        this.events.update(id, { optimization: measured })
+        this.events.updateMetadata(id, { optimization: measured })
         this.#emit(id, 'optimization', measured)
       }
-      this.events.update(id, { verification, status: 'completed' })
+      this.events.updateMetadata(id, { verification, status: 'completed' })
       this.#progress(
         id,
         verification.complete ? 'Completed' : 'Review needed',
@@ -985,14 +991,14 @@ export class AgentManager {
     }
   }
   async stop(owner, id, reason = 'Stopped by the user.') {
-    const job = this.events.get(id, owner)
+    const job = this.events.getMetadata(id, owner)
     const active = this.active.get(id)
     if (TERMINAL.has(job.status)) {
       await active?.mirror?.stop()
       return this.events.get(id, owner)
     }
     if (active?.stopPromise) return active.stopPromise
-    this.events.update(id, { status: 'stopping', error: reason })
+    this.events.updateMetadata(id, { status: 'stopping', error: reason })
     this.#progress(
       id,
       'Stopping',
@@ -1018,7 +1024,7 @@ export class AgentManager {
         id,
         'The run stopped before this message was accepted.',
       )
-      this.events.update(id, { status: 'cancelled' })
+      this.events.updateMetadata(id, { status: 'cancelled' })
       this.#progress(id, 'Stopped', reason)
       return this.events.get(id, owner)
     })()
@@ -1068,10 +1074,10 @@ export class AgentManager {
       )
     const runningProject =
       this.events
-        .list(owner, job.projectId)
+        .listMetadata(owner, job.projectId)
         .some((run) => !TERMINAL.has(run.status)) ||
       [...this.active.keys()].some((activeId) => {
-        const activeJob = this.events.get(activeId)
+        const activeJob = this.events.getMetadata(activeId)
         return (
           activeJob.owner === owner && activeJob.projectId === job.projectId
         )
@@ -1094,7 +1100,7 @@ export class AgentManager {
           typeof file === 'string' ? file : file.path,
         )
       : job.liveChanges.map((change) => change.path)
-    this.events.update(id, {
+    this.events.updateMetadata(id, {
       liveUndone: true,
       liveRevision: (job.liveRevision || 0) + 1,
     })
@@ -1115,7 +1121,7 @@ export class AgentManager {
       }
       stops.push(
         this.stop(
-          this.events.get(id).owner,
+          this.events.getMetadata(id).owner,
           id,
           'The server is shutting down.',
         ),
@@ -1125,7 +1131,7 @@ export class AgentManager {
     for (const [id] of this.active)
       stops.push(
         this.stop(
-          this.events.get(id).owner,
+          this.events.getMetadata(id).owner,
           id,
           'The server is shutting down.',
         ),

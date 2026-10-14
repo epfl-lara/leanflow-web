@@ -17,7 +17,10 @@ const sources = [
   { path: 'lakefile.toml', content: 'name = "fixture"\n' },
   { path: 'Main.lean', content: 'example : True := by trivial\n' },
 ]
-async function fixture(t, { setupRepair, cloneFiles, broken = false } = {}) {
+async function fixture(
+  t,
+  { setupRepair, cloneFiles, broken = false, setupBuildTimeoutMs } = {},
+) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-import-'))
   const calls = []
   const runtime = {
@@ -64,6 +67,7 @@ async function fixture(t, { setupRepair, cloneFiles, broken = false } = {}) {
     runtime,
     resolveHost: async () => [{ address: '140.82.112.3' }],
     setupRepair,
+    setupBuildTimeoutMs,
   }).init()
   t.after(async () => {
     await Promise.all([...store.jobs.values()])
@@ -710,4 +714,29 @@ test('unsupported chosen Lean releases are reported without asking Lemex to subs
     await fs.readFile(path.join(project.root, 'lean-toolchain'), 'utf8'),
     chosen,
   )
+})
+
+test('import preparation uses its configured root build timeout while dependency and import checks retain their own limits', async (t) => {
+  for (const timeout of [undefined, 5400000]) {
+    const f = await fixture(t, { setupBuildTimeoutMs: timeout })
+    const project = await f.create({ files: sources })
+    assert.equal(project.status, 'ready')
+    const build = f.calls.find((call) => call.args.join(' ') === 'lake build')
+    assert(build)
+    assert.equal(build.options.timeoutMs, timeout ?? 1800000)
+    assert.equal(
+      f.calls.find((call) => call.args.at(-1) === '--stdin').options.timeoutMs,
+      180000,
+    )
+  }
+  for (const timeout of [0, -1, 1.5, 21600001, Infinity])
+    assert.throws(
+      () =>
+        new WorkspaceStore({
+          dataDir: os.tmpdir(),
+          runtime: {},
+          setupBuildTimeoutMs: timeout,
+        }),
+      /setupBuildTimeoutMs/,
+    )
 })

@@ -1,5 +1,5 @@
 import { runIsActive, type Run, type RunEvent } from './api'
-import { runReasoningBlocks } from './chatTimeline'
+import { runReasoningBlocks, runChangePaths } from './chatTimeline'
 import {
   recordReasoningBlock,
   retainedReasoningBlocks,
@@ -28,11 +28,31 @@ export function mergeRunSnapshot(previous: Run | null, value: Run): Run {
   if (!previous || previous.id !== value.id) return value
   if (cursor(value) < cursor(previous)) return previous
   if (!runIsActive(previous) && runIsActive(value)) return previous
-  return {
+  const next = {
     ...previous,
     ...value,
     verification: mergeVerification(previous.verification, value.verification),
   }
+  const revisionChanged =
+    (value.liveRevision !== undefined &&
+      value.liveRevision !== previous.liveRevision) ||
+    (value.liveUndone !== undefined && value.liveUndone !== previous.liveUndone)
+  for (const [field, pathsField] of [
+    ['changes', 'changePaths'],
+    ['liveChanges', 'liveChangePaths'],
+  ] as const) {
+    const changes = value[field]
+    if (Array.isArray(changes))
+      next[pathsField] = changes.map((change) => change.path)
+    else if (
+      revisionChanged ||
+      (value[pathsField] !== undefined &&
+        JSON.stringify(value[pathsField]) !==
+          JSON.stringify(runChangePaths(previous, field === 'liveChanges')))
+    )
+      delete next[field]
+  }
+  return next
 }
 
 export function appendRunEvents(previous: Run, events: RunEvent[]): Run {
@@ -122,8 +142,16 @@ export function appendRunEvents(previous: Run, events: RunEvent[]): Run {
           a.createdAt.localeCompare(b.createdAt),
       )
     }
-    if (event.type === 'changes' && Array.isArray(data?.changes))
+    if (event.type === 'changes' && Array.isArray(data?.changes)) {
       next.changes = data.changes as Run['changes']
+      next.changePaths = next.changes?.map((change) => change.path)
+    }
+    if (event.type === 'files-updated') {
+      // Saved edits have advanced before their metadata refresh arrives. The
+      // previous proof preview must not be shown as the current saved source.
+      delete next.liveChanges
+      delete next.changes
+    }
     if (event.type === 'usage') next.usage = data
   }
   return next

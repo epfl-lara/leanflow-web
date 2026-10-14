@@ -4,6 +4,8 @@ LeanFlow Web is developed by [EPFL LARA](https://lara.epfl.ch/) and derived from
 
 Paths under `.runtime/` and review directories identify private retained evidence and are not included in the public repository. The corresponding `scripts/check-*.mjs` commands are available for reproduction with the documented prerequisites. No live project data, logs, credentials, or machine configuration are published here.
 
+For a repeatable pinned import and shared-cache check, follow [Check a large imported project](LargeProjectChecks.md).
+
 ## Proof focus and usability follow-up
 
 The sidebar update passed **224 automated tests**, TypeScript, and focused browser regressions. Outline now appears between Files and Projects, with declaration type badges and direct chat attachment. Browser checks cover actual Lean symbols, readable light/dark labels, sidebar resizing and compact scrolling, manual line references, editor selection, exact submitted target snapshots, and independent chat drafts. The reproduced startup race that hid a newly attached target is covered by `check-proof-focus-recovery-ui.mjs`. Landscape checks hit-test the focus menu and Outline controls so they cannot pass while hidden behind another panel. The attempted Claude review for this update hit its session limit; an independent agent reviewed the changes and its two reproduced layout findings were fixed and tested.
@@ -58,9 +60,9 @@ Lean basics, Mathlib, CSLib, and Physlib all passed real default-import checks w
 
 The final native revision repaired `a + b = b + a` from the incorrect `Nat.add_assoc a b 0` proof to `Nat.add_comm a b`, preserving the statement/imports. Both runs independently reported `compiled=true`, `complete=true`, `kernelChecked=true`, with no axioms or compiler warnings:
 
-| Project | Run | Result |
-|---|---|---|
-| `670cfe5a-66a6-434b-8c31-83331cc9e827` | `29ea4b75-9524-4877-b443-a7ebb91e4741` | Applied via API; final Lean check passed |
+| Project                                | Run                                    | Result                                                                          |
+| -------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------- |
+| `670cfe5a-66a6-434b-8c31-83331cc9e827` | `29ea4b75-9524-4877-b443-a7ebb91e4741` | Applied via API; final Lean check passed                                        |
 | `d84c3097-5abe-4f43-937b-1ae627ac74cd` | `c594cc0d-39d4-408d-883e-286ecc0aa947` | Reviewed/applied in browser with dirty-edit protection; final Lean check passed |
 
 Public HTTPS Git import was tested against Batteries at `b71aaf60877e673fdb921f06f20987d12ee8a290`, including successful preparation/build and preservation of its Lean 4.35.0-rc4 toolchain. A custom Lean basics workspace at that release also passed creation, branch creation, and explicit commit (`a7bc3ae26bec993fdb7f3721270c428e33fe950c`). Loogle returned 14 matches for `Nat.add_comm`. Cancellation reached a terminal cancelled state, and runtime checks confirmed container-tree removal. Opening nested dependency files kept one `/workspace` LSP connection and successfully loaded read-only library sources.
@@ -73,10 +75,10 @@ The added measurement module passed **9 focused tests** with `node --test server
 
 `node scripts/check-optimization.mjs` then ran compiler-only isolated fixtures on the installed Lean basics and Mathlib presets. Each fixture measured `Main.lean` and its local imported `Helper.lean`, replaying source into temporary artifacts. It exercised Unicode namespace/theorem names, a doc comment, a simp attribute, a default binder, and three named theorems. Baseline and candidate compiled; source files remained unchanged by measurement. A deliberately invalid proof of `False` returned `compiled=false` and unavailable metrics.
 
-| Fixture | Toolchain | Proof tokens before → after | Raw heartbeats before → after |
-|---|---|---|---|
-| Lean basics | `leanprover/lean4:v4.34.1` | 11 → 7 | 38,220 → 38,353 |
-| Mathlib (`Mathlib.Data.Nat.Basic`) | `leanprover/lean4:v4.35.0-rc4` | 11 → 7 | 39,336 → 39,416 |
+| Fixture                            | Toolchain                      | Proof tokens before → after | Raw heartbeats before → after |
+| ---------------------------------- | ------------------------------ | --------------------------- | ----------------------------- |
+| Lean basics                        | `leanprover/lean4:v4.34.1`     | 11 → 7                      | 38,220 → 38,353               |
+| Mathlib (`Mathlib.Data.Nat.Basic`) | `leanprover/lean4:v4.35.0-rc4` | 11 → 7                      | 39,336 → 39,416               |
 
 Replacing `simp only [Nat.add_zero]` with `rfl` reduced the fixture's total proof tokens but slightly increased its measured heartbeat cost. The application retains both outcomes and negative reductions. These totals cover the three fixture theorems, not a competition cohort or the complete library. The artifact is `.runtime/optimization-compiler-check.json`; the reproducible script requests no model and gives workers no network access.
 

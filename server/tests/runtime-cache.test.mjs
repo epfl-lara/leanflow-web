@@ -33,6 +33,29 @@ const mounts = (argv) =>
   argv.flatMap((value, index) => (value === '--mount' ? [argv[index + 1]] : []))
 const cacheOptions = { readOnlyWorkspace: true, writeLakeCache: true }
 
+test('new worker task pools follow the CPU quota and retain an explicit Lean thread setting', async (t) => {
+  const { runtime, root } = await fixture(t)
+  await fs.writeFile(
+    runtime.docker,
+    `#!${process.execPath}\nif(process.argv[2]==='run') console.log(JSON.stringify({args:process.argv.slice(2),threads:process.env.LEAN_NUM_THREADS}))\n`,
+    { mode: 0o700 },
+  )
+  runtime.cpus = 2.8
+  const normal = JSON.parse((await runtime.run(root, ['true'])).stdout)
+  assert.equal(normal.threads, '2')
+  assert(normal.args.includes('LEAN_NUM_THREADS'))
+  const selected = JSON.parse(
+    (await runtime.run(root, ['true'], { env: { LEAN_NUM_THREADS: '1' } }))
+      .stdout,
+  )
+  assert.equal(selected.threads, '1')
+  runtime.cpus = 0.5
+  assert.equal(
+    JSON.parse((await runtime.run(root, ['true'])).stdout).threads,
+    '1',
+  )
+})
+
 for (const link of ['.lake/packages', '.lake']) {
   test(`dependency lookup, inheritance and persisted mounts reject a ${link} symlink into another project`, async (t) => {
     const { runtime, root, dataDir } = await fixture(t)

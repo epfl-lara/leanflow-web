@@ -1,5 +1,9 @@
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
+import {
+  sourceFileByteLimit,
+  MAX_SOURCE_UPLOAD_BYTES,
+} from '../shared/source-limits.mjs'
 
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status })
@@ -105,11 +109,17 @@ export function uploadedFiles(input, validatePath) {
       if (file.content.includes('\0'))
         fail(`Binary files cannot be uploaded: ${name}`, 415)
       const size = Buffer.byteLength(file.content)
-      if (size > 2 * 1024 * 1024)
-        fail(`Files must be at most 2 MiB: ${name}`, 413)
+      if (size > sourceFileByteLimit(name))
+        fail(
+          `Files must be at most ${sourceFileByteLimit(name) / (1024 * 1024)} MiB: ${name}`,
+          413,
+        )
       bytes += size
-      if (bytes > 20 * 1024 * 1024)
-        fail('The upload exceeds 20 MiB of source files.', 413)
+      if (bytes > MAX_SOURCE_UPLOAD_BYTES)
+        fail(
+          'The upload exceeds 32 MiB of source files. Import the Git repository or upload fewer files.',
+          413,
+        )
       seen.add(name)
       return { path: name, content: file.content }
     })

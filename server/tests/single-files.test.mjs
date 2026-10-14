@@ -545,7 +545,7 @@ test('single-file requests reject custom environments, unsafe sources and unavai
     (
       await f.request('/api/projects', {
         kind: 'single-file',
-        file: { path: 'Big.lean', content: 'x'.repeat(2 * 1024 * 1024 + 1) },
+        file: { path: 'Big.lean', content: 'x'.repeat(8 * 1024 * 1024 + 1) },
       })
     ).status,
     413,
@@ -595,4 +595,46 @@ test('delete, create and restore keep default playground names distinct', async 
     new Set(f.workspaces.list('owner').map((project) => project.name)).size,
     2,
   )
+})
+
+test('large single-file uploads retain the prepared Mathlib environment and hash-checked saves', async (t) => {
+  const f = await fixture(t)
+  const source = 'import Mathlib\n-- ' + 'a'.repeat(5_400_000) + '\n'
+  const project = await f.create({
+    file: { path: 'Large.lean', content: source },
+  })
+  assert.equal(project.status, 'ready')
+  assert.equal(project.kind, 'single-file')
+  assert.equal(project.toolchain, TOOLCHAIN)
+  const file = await f.workspaces.readFile(project.id, 'owner', 'Main.lean')
+  const hash = (content) => createHash('sha256').update(content).digest('hex')
+  assert.equal(file.hash, hash(source))
+  const saved = await f.request(
+    `/api/projects/${project.id}/file?path=Main.lean`,
+    { content: source + '-- saved\n', expectedHash: file.hash },
+    undefined,
+    'PUT',
+  )
+  assert.equal(saved.status, 200, await saved.clone().text())
+  assert.equal((await saved.json()).hash, hash(source + '-- saved\n'))
+  const conflict = await f.request(
+    `/api/projects/${project.id}/file?path=Main.lean`,
+    { content: source, expectedHash: file.hash },
+    undefined,
+    'PUT',
+  )
+  assert.equal(conflict.status, 409)
+  assert.equal(
+    (await f.workspaces.readFile(project.id, 'owner', 'Main.lean')).hash,
+    hash(source + '-- saved\n'),
+  )
+  assert.equal(
+    await fs.readFile(path.join(project.root, 'lean-toolchain'), 'utf8'),
+    TOOLCHAIN + '\n',
+  )
+  assert.equal(
+    await fs.readFile(path.join(project.root, 'lake-manifest.json'), 'utf8'),
+    f.manifest,
+  )
+  assert.equal(f.providerCalls(), 0)
 })

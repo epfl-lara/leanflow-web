@@ -50,8 +50,12 @@ export function runMetadata(run) {
     const { source: _source, ...location } = value.proofTarget
     value.proofTarget = location
   }
-  value.changeCount = run.changes?.length || 0
-  value.liveChangeCount = run.liveChanges?.length || 0
+  value.changeCount = run.changes?.length ?? run.changeCount ?? 0
+  value.liveChangeCount = run.liveChanges?.length ?? run.liveChangeCount ?? 0
+  value.changePaths =
+    run.changes?.map((change) => change.path) ?? run.changePaths ?? []
+  value.liveChangePaths =
+    run.liveChanges?.map((change) => change.path) ?? run.liveChangePaths ?? []
   value.reasoningChars = run.reasoning?.length || 0
   value.reasoningSummaryChars = run.reasoningSummary?.length || 0
   value.logChars = run.log?.length || 0
@@ -62,6 +66,32 @@ export function runMetadata(run) {
         .map((key) => [key, run.verification[key]]),
     )
   return value
+}
+export function runReceipt(run) {
+  const {
+    changes: _changes,
+    liveChanges: _liveChanges,
+    snapshot: _snapshot,
+    verificationRoot: _verificationRoot,
+    followupContexts: _followupContexts,
+    owner: _owner,
+    ...value
+  } = run
+  const {
+    changeCount,
+    liveChangeCount,
+    changePaths,
+    liveChangePaths,
+    proofTarget,
+  } = runMetadata(run)
+  return {
+    ...value,
+    changeCount,
+    liveChangeCount,
+    changePaths,
+    liveChangePaths,
+    ...(proofTarget ? { proofTarget } : {}),
+  }
 }
 export function runTranscript(run) {
   return {
@@ -199,7 +229,14 @@ export async function chatBrowserFixture({
       method = request.method()
     let body
     if (request.postData()) body = request.postDataJSON()
-    report.requests.push({ method, endpoint, ...(body ? { body } : {}) })
+    report.requests.push({
+      method,
+      endpoint,
+      ...(url.searchParams.has('view')
+        ? { view: url.searchParams.get('view') }
+        : {}),
+      ...(body ? { body } : {}),
+    })
     const respond = (value, status = 200) =>
       route.fulfill({
         status,
@@ -261,16 +298,19 @@ export async function chatBrowserFixture({
             }),
         })
       const run = state.runs.find((run) => endpoint === `/api/runs/${run.id}`)
-      if (run)
+      if (run) {
+        const snapshot =
+          url.searchParams.get('view') === 'metadata' ? runReceipt(run) : run
         return respond(
           legacyReasoning
             ? Object.fromEntries(
-                Object.entries(run).filter(
+                Object.entries(snapshot).filter(
                   ([key]) => key !== 'reasoningBlocks',
                 ),
               )
-            : run,
+            : snapshot,
         )
+      }
     }
     if (method === 'POST') {
       const project = state.projects.find(
@@ -305,7 +345,9 @@ export async function chatBrowserFixture({
     report.unexpectedRequests.push({ method, endpoint })
     return respond({ error: 'Blocked by isolated chat browser fixture.' }, 409)
   })
+  const leanSockets = []
   await page.routeWebSocket('**/websocket/**', (socket) => {
+    leanSockets.push(socket)
     report.sockets.push(socket.url())
     socket.onMessage((raw) => {
       const message = JSON.parse(String(raw))
@@ -408,5 +450,7 @@ export async function chatBrowserFixture({
     )
     assert.equal(report.errors.length, 0, JSON.stringify(report.errors))
   }
-  return { page, browser, state, report, emit, ready, assertClean }
+  const closeLean = (options) =>
+    Promise.all(leanSockets.map((socket) => socket.close(options)))
+  return { page, browser, state, report, emit, ready, assertClean, closeLean }
 }

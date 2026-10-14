@@ -13,6 +13,17 @@ function positiveNumber(env, name, fallback, integer = true) {
   return value
 }
 
+export function validateSetupBuildTimeout(
+  value,
+  label = 'setupBuildTimeoutMs',
+) {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > 6 * 60 * 60 * 1000)
+    throw new Error(
+      `${label} must be a positive integer of at most 21600000 milliseconds (6 hours).`,
+    )
+  return value
+}
+
 export function loadCapacity(env = process.env) {
   const workerMemory = env.STUDIO_WORKER_MEMORY?.trim() || '4g'
   if (!/^[1-9][0-9]*[bkmg]?$/i.test(workerMemory))
@@ -27,6 +38,26 @@ export function loadCapacity(env = process.env) {
     agents: positiveNumber(env, 'STUDIO_MAX_AGENTS', 2),
     agentQueue: positiveNumber(env, 'STUDIO_MAX_AGENT_QUEUE', 12),
     searches: positiveNumber(env, 'STUDIO_MAX_SEARCHES', 4),
+    sourceRequests: positiveNumber(env, 'STUDIO_MAX_SOURCE_REQUESTS', 2),
+    sourceRequestsPerUser: positiveNumber(
+      env,
+      'STUDIO_MAX_SOURCE_REQUESTS_PER_USER',
+      1,
+    ),
+    smallSourceRequests: positiveNumber(
+      env,
+      'STUDIO_MAX_SMALL_SOURCE_REQUESTS',
+      8,
+    ),
+    smallSourceRequestsPerUser: positiveNumber(
+      env,
+      'STUDIO_MAX_SMALL_SOURCE_REQUESTS_PER_USER',
+      2,
+    ),
+    setupBuildTimeoutMs: validateSetupBuildTimeout(
+      positiveNumber(env, 'STUDIO_SETUP_BUILD_TIMEOUT_MS', 1800000),
+      'STUDIO_SETUP_BUILD_TIMEOUT_MS',
+    ),
     workerCpus: positiveNumber(env, 'STUDIO_WORKER_CPUS', 2, false),
     workerMemory,
   }

@@ -21,6 +21,18 @@ import { repairProjectSetup } from './setup-repair.mjs'
 import { GitPublisher } from './git-publish.mjs'
 import { proofTargetReference } from './proof-target.mjs'
 import { loadCapacity } from './capacity.mjs'
+import {
+  sourceBodyKind,
+  isSmallSourceBody,
+  sourceRequestAdmission,
+  sourceRequestHandler,
+  finishSourceRequest,
+} from './source-request-admission.mjs'
+import {
+  MAX_SOURCE_JSON_BYTES,
+  SMALL_SOURCE_JSON_BYTES,
+  MAX_UPLOAD_JSON_BYTES,
+} from '../shared/source-limits.mjs'
 
 const projectDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -39,6 +51,19 @@ const publicJob = (job) => {
     ...rest
   } = job
   return rest
+}
+const publicRunReceipt = (job) => {
+  const { changes, liveChanges, ...rest } = publicJob(job)
+  return {
+    ...rest,
+    changeCount: changes?.length || 0,
+    liveChangeCount: liveChanges?.length || 0,
+    changePaths: (changes || []).map((change) => change.path),
+    liveChangePaths: (liveChanges || []).map((change) => change.path),
+    ...(job.proofTarget
+      ? { proofTarget: proofTargetReference(job.proofTarget) }
+      : {}),
+  }
 }
 const runMetadata = (job) => {
   const fields = [
@@ -68,9 +93,9 @@ const runMetadata = (job) => {
   if (job.proofTarget)
     result.proofTarget = proofTargetReference(job.proofTarget)
   if (Array.isArray(job.liveChanges))
-    result.liveChanges = job.liveChanges.map((change) => ({
-      path: change.path,
-    }))
+    result.liveChangePaths = job.liveChanges.map((change) => change.path)
+  if (Array.isArray(job.changes))
+    result.changePaths = job.changes.map((change) => change.path)
   return result
 }
 const chatTranscript = (job, eventCursor, reasoningBlocks) => ({
@@ -151,6 +176,7 @@ export async function createStudio({
   const workspaces = new WorkspaceStore({
     dataDir: workspaceDataDir,
     runtime,
+    setupBuildTimeoutMs: capacity.setupBuildTimeoutMs,
   })
   await workspaces.init()
   const events = new EventStore(dataDir),
@@ -258,15 +284,39 @@ export async function createStudio({
     }
     next()
   })
-  const ordinaryJson = express.json({ limit: '3mb' }),
-    uploadJson = express.json({ limit: '48mb' })
-  app.use((req, res, next) =>
-    (req.method === 'POST' &&
-      (req.path === '/api/projects' ||
-        /^\/api\/projects\/[^/]+\/upload$/.test(req.path))
-      ? uploadJson
-      : ordinaryJson)(req, res, next),
+  // Protected requests authenticate before allocating a source/upload body.
+  // Login and logout keep their public routes and the ordinary JSON limit.
+  app.use('/api', (req, res, next) => {
+    if (req.method === 'POST' && ['/login', '/logout'].includes(req.path))
+      return next()
+    req.user = auth.identify(req)
+    if (!req.user)
+      return res
+        .status(401)
+        .json({ error: 'Sign in with your collaborator access token.' })
+    next()
+  })
+  const ordinaryJson = express.json({ limit: SMALL_SOURCE_JSON_BYTES }),
+    sourceJson = express.json({ limit: MAX_SOURCE_JSON_BYTES }),
+    uploadJson = express.json({ limit: MAX_UPLOAD_JSON_BYTES })
+  app.use(
+    sourceRequestAdmission({
+      bulk: capacity.sourceRequests ?? 2,
+      bulkPerUser: capacity.sourceRequestsPerUser ?? 1,
+      small: capacity.smallSourceRequests ?? 8,
+      smallPerUser: capacity.smallSourceRequestsPerUser ?? 2,
+    }),
   )
+  app.use((req, res, next) => {
+    const kind = sourceBodyKind(req)
+    const parser =
+      !kind || isSmallSourceBody(req)
+        ? ordinaryJson
+        : kind === 'upload'
+          ? uploadJson
+          : sourceJson
+    parser(req, res, next)
+  })
   app.get('/health', (_req, res) =>
     res.json({ ok: true, runtime: runtime.info().ready }),
   )
@@ -297,14 +347,6 @@ export async function createStudio({
       'lemex_web=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0',
     )
     res.json({ ok: true })
-  })
-  app.use('/api', (req, res, next) => {
-    req.user = auth.identify(req)
-    if (!req.user)
-      return res
-        .status(401)
-        .json({ error: 'Sign in with your collaborator access token.' })
-    next()
   })
   app.get('/api/session', (req, res) =>
     res.json({
@@ -337,10 +379,13 @@ export async function createStudio({
   app.get('/api/projects', (req, res) =>
     res.json(workspaces.list(req.user.id).map(publicProject)),
   )
-  app.post('/api/projects', async (req, res) =>
-    res
-      .status(201)
-      .json(publicProject(await workspaces.create(req.user.id, req.body))),
+  app.post(
+    '/api/projects',
+    sourceRequestHandler(async (req, res) =>
+      res
+        .status(201)
+        .json(publicProject(await workspaces.create(req.user.id, req.body))),
+    ),
   )
   app.get('/api/projects/:id', (req, res) =>
     res.json(publicProject(workspaces.get(req.params.id, req.user.id))),
@@ -376,16 +421,19 @@ export async function createStudio({
       ),
     ),
   )
-  app.post('/api/projects/:id/upload', async (req, res) => {
-    requireNoActiveWork(req.params.id, req.user.id)
-    const result = await workspaces.upload(
-      req.params.id,
-      req.user.id,
-      req.body.files,
-    )
-    if (result.requiresPreparation) closeProjectEditors(req.params.id)
-    res.json(result)
-  })
+  app.post(
+    '/api/projects/:id/upload',
+    sourceRequestHandler(async (req, res) => {
+      requireNoActiveWork(req.params.id, req.user.id)
+      const result = await workspaces.upload(
+        req.params.id,
+        req.user.id,
+        req.body.files,
+      )
+      if (result.requiresPreparation) closeProjectEditors(req.params.id)
+      res.json(result)
+    }),
+  )
   app.get('/api/projects/:id/files', async (req, res) =>
     res.json(await workspaces.files(req.params.id, req.user.id)),
   )
@@ -399,26 +447,29 @@ export async function createStudio({
       await workspaces.readLibrarySource(req.params.id, req.user.id, req.body),
     ),
   )
-  app.put('/api/projects/:id/file', async (req, res) => {
-    if (
-      [
-        'lean-toolchain',
-        'lakefile.lean',
-        'lakefile.toml',
-        'lake-manifest.json',
-      ].includes(req.query.path)
-    )
-      requireNoRun(req.params.id, req.user.id)
-    const saved = await workspaces.writeFile(
-      req.params.id,
-      req.user.id,
-      req.query.path,
-      req.body.content,
-      req.body.expectedHash,
-    )
-    if (saved.requiresPreparation) closeProjectEditors(req.params.id)
-    res.json(saved)
-  })
+  app.put(
+    '/api/projects/:id/file',
+    sourceRequestHandler(async (req, res) => {
+      if (
+        [
+          'lean-toolchain',
+          'lakefile.lean',
+          'lakefile.toml',
+          'lake-manifest.json',
+        ].includes(req.query.path)
+      )
+        requireNoRun(req.params.id, req.user.id)
+      const saved = await workspaces.writeFile(
+        req.params.id,
+        req.user.id,
+        req.query.path,
+        req.body.content,
+        req.body.expectedHash,
+      )
+      if (saved.requiresPreparation) closeProjectEditors(req.params.id)
+      res.json(saved)
+    }),
+  )
   app.post('/api/projects/:id/trash', async (req, res) => {
     if (
       !req.body ||
@@ -712,15 +763,21 @@ export async function createStudio({
     res.json(
       req.query.summary === '1'
         ? events.summaries(req.user.id, req.params.id)
-        : events.list(req.user.id, req.params.id).map(runMetadata),
+        : events.listMetadata(req.user.id, req.params.id).map(runMetadata),
     )
   })
   app.get('/api/runs/:id', (req, res) =>
-    res.json(publicJob(events.snapshot(req.params.id, req.user.id))),
+    res.json(
+      req.query.view === 'metadata'
+        ? publicRunReceipt(events.snapshotMetadata(req.params.id, req.user.id))
+        : publicJob(events.snapshot(req.params.id, req.user.id)),
+    ),
   )
   app.post('/api/runs/:id/messages', async (req, res) => {
     await agents.message(req.user.id, req.params.id, req.body)
-    res.json(publicJob(events.snapshot(req.params.id, req.user.id)))
+    res.json(
+      publicRunReceipt(events.snapshotMetadata(req.params.id, req.user.id)),
+    )
   })
   for (const action of ['stop', 'undo', 'apply'])
     app.post(`/api/runs/:id/${action}`, async (req, res) => {
@@ -728,7 +785,7 @@ export async function createStudio({
       res.json(publicJob(events.snapshot(req.params.id, req.user.id)))
     })
   app.get('/api/runs/:id/events', (req, res) => {
-    events.get(req.params.id, req.user.id)
+    events.getMetadata(req.params.id, req.user.id)
     const after = Number(req.headers['last-event-id'] || req.query.after || 0)
     if (!Number.isSafeInteger(after) || after < 0)
       return res.status(400).json({ error: 'Invalid event cursor.' })
@@ -771,7 +828,8 @@ export async function createStudio({
       index: 'index.html',
     }),
   )
-  app.use((error, _req, res, _next) => {
+  app.use((error, req, res, _next) => {
+    finishSourceRequest(req)
     if (res.headersSent) return res.end()
     const message = config.redact(error.message || 'Unexpected server error.')
     res.status(error.status || error.statusCode || 500).json({ error: message })
@@ -779,7 +837,7 @@ export async function createStudio({
 
   const wss = new WebSocketServer({
     noServer: true,
-    maxPayload: 8 * 1024 * 1024,
+    maxPayload: MAX_SOURCE_JSON_BYTES,
   })
   server.on('upgrade', (req, socket, head) => {
     const user = auth.identify(req)
@@ -860,8 +918,9 @@ export async function createStudio({
           if (pending.size > 1000)
             throw new Error('Too many outstanding Lean requests.')
           child.stdin.write(frame(message))
-        } catch {
-          ws.close(1008, 'Invalid Lean message or workspace path.')
+        } catch (error) {
+          if (error.sourceTooLarge) ws.close(1009, error.message)
+          else ws.close(1008, 'Invalid Lean message or workspace path.')
         }
       })
     } catch (error) {

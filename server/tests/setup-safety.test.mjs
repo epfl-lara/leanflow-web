@@ -8,6 +8,8 @@ import {
   runPinnedLake,
   dependencyCacheCommands,
   runDependencyCache,
+  setupInfrastructureFailure,
+  setupFailureMessage,
 } from '../pinned-lake.mjs'
 import {
   TemporaryWorkspaces,
@@ -33,6 +35,139 @@ const runtime = () => ({
   templateRoot: () => null,
   prepareToolchain: async () => {},
   run: async () => ({ code: 0, stdout: '', stderr: '' }),
+})
+
+test('setup detects resource and Git transport failures even with a generic stderr and detailed stdout', async (t) => {
+  for (const result of [
+    { code: 137, stdout: '', stderr: '' },
+    {
+      code: 1,
+      stdout: 'error: Lean exited with code 137\n',
+      stderr: 'error: build failed\n',
+    },
+    { code: 124, timedOut: true, stdout: '', stderr: '' },
+    {
+      code: 1,
+      stdout: '',
+      stderr:
+        'fatal: could not read Username for public repository: terminal prompts disabled\nfatal: expected flush after ref listing',
+    },
+  ]) {
+    assert(setupInfrastructureFailure(result))
+    const dataDir = await fixture(t)
+    let repairs = 0
+    const worker = runtime()
+    worker.run = async () => result
+    const store = await new WorkspaceStore({
+      dataDir,
+      runtime: worker,
+      setupRepair: async () => {
+        repairs++
+      },
+    }).init()
+    t.after(() => store.close())
+    const project = await store.create('alice', { files })
+    await store.jobs.get(project.id)
+    assert.equal(store.get(project.id, 'alice').status, 'error')
+    assert(
+      store
+        .get(project.id, 'alice')
+        .error.includes(setupFailureMessage(result)),
+    )
+    assert.equal(repairs, 0)
+  }
+  assert.equal(
+    setupInfrastructureFailure({
+      code: 1,
+      stderr: 'lakefile.toml: expected closing bracket',
+    }),
+    false,
+  )
+})
+
+test('shared dependency infrastructure failures stop setup without a private retry or paid repair', async (t) => {
+  const dataDir = await fixture(t)
+  const worker = runtime()
+  let privateChecks = 0
+  let repairs = 0
+  const message =
+    'Dependency access failed. Check the network and repository permissions, then retry setup.'
+  worker.prepareSharedDependencies = async () => {
+    throw Object.assign(new Error(message), { infrastructure: true })
+  }
+  worker.run = async (_root, args) => {
+    if (args.includes('env')) privateChecks++
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const store = await new WorkspaceStore({
+    dataDir,
+    runtime: worker,
+    setupRepair: async () => {
+      repairs++
+    },
+  }).init()
+  t.after(() => store.close())
+  const project = await store.create('alice', { files })
+  await store.jobs.get(project.id)
+  const failed = store.get(project.id, 'alice')
+  assert.equal(failed.status, 'error')
+  assert.equal(failed.error, message)
+  assert.equal(failed.needsPreparation, true)
+  assert.equal(privateChecks, 0)
+  assert.equal(repairs, 0)
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Main.lean')).content,
+    files[2].content,
+  )
+})
+
+test('other shared-cache failures retain the private setup fallback', async (t) => {
+  const dataDir = await fixture(t)
+  const worker = runtime()
+  let privateChecks = 0
+  worker.prepareSharedDependencies = async () => {
+    throw new Error('Shared cache unavailable')
+  }
+  worker.run = async (_root, args) => {
+    if (args.includes('env')) privateChecks++
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const store = await new WorkspaceStore({ dataDir, runtime: worker }).init()
+  t.after(() => store.close())
+  const project = await store.create('alice', { files })
+  await store.jobs.get(project.id)
+  assert.equal(store.get(project.id, 'alice').status, 'ready')
+  assert(privateChecks > 0)
+})
+
+test('project build warnings distinguish stopped workers from unfinished user proofs', async (t) => {
+  for (const [result, warning] of [
+    [
+      {
+        code: 1,
+        stderr: 'error: build failed\n',
+        stdout: 'error: Lean exited with code 137\n',
+      },
+      /memory/,
+    ],
+    [{ code: 124, timedOut: true, stdout: '', stderr: '' }, /time limit/],
+    [
+      { code: 1, stdout: '', stderr: 'Main.lean: unsolved goals' },
+      /repair the Lean errors/,
+    ],
+  ]) {
+    const dataDir = await fixture(t)
+    const worker = runtime()
+    worker.run = async (_root, args) =>
+      args.includes('build') ? result : { code: 0, stdout: '', stderr: '' }
+    const store = await new WorkspaceStore({ dataDir, runtime: worker }).init()
+    t.after(() => store.close())
+    const project = await store.create('alice', { files })
+    await store.jobs.get(project.id)
+    const ready = store.get(project.id, 'alice')
+    assert.equal(ready.status, 'ready', ready.error)
+    assert.match(ready.buildWarning, warning)
+  }
 })
 
 test('setup retains Lean pins through implicit updates and restores an unexpected mutation even on failure', async (t) => {

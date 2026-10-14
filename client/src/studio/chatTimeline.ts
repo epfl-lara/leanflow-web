@@ -139,7 +139,16 @@ export function runChangeCount(run: Run, live = false): number {
   const changes = live ? run.liveChanges : run.changes
   return Array.isArray(changes)
     ? changes.length
-    : (live ? run.liveChangeCount : run.changeCount) || 0
+    : ((live ? run.liveChangeCount : run.changeCount) ??
+        runChangePaths(run, live).length)
+}
+
+export function runChangePaths(run: Run, live = false): string[] {
+  const paths = live ? run.liveChangePaths : run.changePaths
+  if (Array.isArray(paths)) return paths
+  return (
+    (live ? run.liveChanges : run.changes)?.map((change) => change.path) || []
+  )
 }
 
 export function liveEditStatus(run: Run): string {
@@ -150,7 +159,11 @@ export function liveEditStatus(run: Run): string {
   if (run.liveEditConflict) return 'Live edits paused · Saved files changed'
   if (run.liveUndone) return 'Live edits undone'
   if (!run.liveRevision) return 'Live edits on · No saved edits yet'
-  if (!Array.isArray(run.liveChanges) && run.liveChangeCount === undefined)
+  if (
+    !Array.isArray(run.liveChanges) &&
+    !Array.isArray(run.liveChangePaths) &&
+    run.liveChangeCount === undefined
+  )
     return 'Live edits on · Edits saved'
   const count = runChangeCount(run, true)
   return count

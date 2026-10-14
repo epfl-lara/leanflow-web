@@ -2,6 +2,10 @@ import { useRef, useState } from 'react'
 import { Dialog } from './Dialog'
 import { errorText, post } from './api'
 import './upload.css'
+import {
+  sourceFileByteLimit,
+  MAX_SOURCE_UPLOAD_BYTES,
+} from '../../../shared/source-limits.mjs'
 
 export interface UploadFile {
   path: string
@@ -18,16 +22,21 @@ export async function readSourceFiles(files: { file: File; path: string }[]) {
     throw new Error('Choose Lean source files or a project folder.')
   if (usable.length > 5000)
     throw new Error('Choose at most 5,000 source files.')
-  if (usable.reduce((sum, item) => sum + item.file.size, 0) > 20 * 1024 * 1024)
+  if (
+    usable.reduce((sum, item) => sum + item.file.size, 0) >
+    MAX_SOURCE_UPLOAD_BYTES
+  )
     throw new Error(
-      'Source files must total at most 20 MiB. Build caches are excluded automatically.',
+      'Source files must total at most 32 MiB. Build caches are excluded automatically.',
     )
   const first = usable[0].path.split('/')[0]
   const stripFolder = usable.every((item) => item.path.startsWith(first + '/'))
   const result: UploadFile[] = []
   for (const item of usable) {
-    if (item.file.size > 2 * 1024 * 1024)
-      throw new Error(`${item.path} is larger than 2 MiB.`)
+    if (item.file.size > sourceFileByteLimit(item.path))
+      throw new Error(
+        `${item.path} is larger than ${sourceFileByteLimit(item.path) / (1024 * 1024)} MiB. Reduce the file or split Lean sources into smaller modules.`,
+      )
     const bytes = new Uint8Array(await item.file.arrayBuffer())
     let content: string
     try {
@@ -188,8 +197,8 @@ export function UploadFiles({
           }}
         />
         <p>
-          UTF-8 sources, up to 20 MiB. Git metadata, build caches, and private
-          settings stay on your computer.
+          UTF-8 sources, up to 8 MiB per file and 32 MiB total. Git metadata,
+          build caches, and private settings stay on your computer.
         </p>
       </div>
       {!!files.length && (

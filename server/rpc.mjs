@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { createInterface } from 'node:readline'
+import { sourceFileByteLimit } from '../shared/source-limits.mjs'
 
 export class AgentRpc extends EventEmitter {
   constructor(child) {
@@ -120,6 +121,34 @@ export function frame(message) {
 }
 
 export function validateClientUris(message) {
+  // The JSON envelope may be larger than the source because of escaping. Keep
+  // decoded didOpen/didChange text bounded before passing it to the Lean worker.
+  const texts =
+    message?.method === 'textDocument/didOpen'
+      ? [message.params?.textDocument?.text]
+      : message?.method === 'textDocument/didChange' &&
+          Array.isArray(message.params?.contentChanges)
+        ? message.params.contentChanges.map((change) => change?.text)
+        : []
+  const uri = message?.params?.textDocument?.uri
+  const filename =
+    typeof uri === 'string' && uri.startsWith('file:')
+      ? decodeURIComponent(new URL(uri).pathname)
+      : ''
+  const byteLimit = sourceFileByteLimit(filename)
+  let sourceBytes = 0
+  for (const text of texts) {
+    if (typeof text !== 'string') continue
+    sourceBytes += Buffer.byteLength(text)
+    if (sourceBytes > byteLimit)
+      throw Object.assign(
+        new Error(
+          `Lean source files must be at most ${byteLimit / (1024 * 1024)} MiB. Reduce the file or split Lean sources into smaller modules.`,
+        ),
+        { sourceTooLarge: true },
+      )
+  }
+
   const privateNames = new Set([
     '.git',
     '.lemex',

@@ -6,6 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   chatBrowserFixture,
+  runReceipt,
   sleep,
   until,
 } from './lib/chat-browser-fixture.mjs'
@@ -130,7 +131,7 @@ async function holdUpdate() {
             messageOffset: run.message.length,
             createdAt: new Date().toISOString(),
           })
-          await respond(structuredClone(run))
+          await respond(runReceipt(run))
         } else await respond({ error: 'UPDATE_REJECTED_FIXTURE' }, 409)
         resolve()
       }
@@ -144,17 +145,20 @@ async function holdUpdate() {
 let failSnapshot = true,
   failedSnapshots = 0,
   failHistory = false
-await page.route(`**/api/runs/${active.id}`, (route) => {
-  if (failSnapshot) {
-    failedSnapshots++
-    return route.fulfill({
-      status: 503,
-      contentType: 'application/json',
-      body: JSON.stringify({ error: 'SNAPSHOT_OFFLINE_FIXTURE' }),
-    })
-  }
-  return route.fallback()
-})
+await page.route(
+  (url) => url.pathname === `/api/runs/${active.id}`,
+  (route) => {
+    if (failSnapshot) {
+      failedSnapshots++
+      return route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'SNAPSHOT_OFFLINE_FIXTURE' }),
+      })
+    }
+    return route.fallback()
+  },
+)
 await page.route(`**/api/chats/${otherChat}`, (route) =>
   failHistory
     ? route.fulfill({

@@ -924,7 +924,15 @@ export class Runtime {
       }
     }
     const childEnv = { ...process.env }
-    for (const [key, value] of Object.entries(env)) {
+    // Lean's executable task pool otherwise uses the host CPU count, even when
+    // Docker gives this worker a smaller quota. This is a scheduler setting,
+    // not a strict compiler-process limit or the Lean compiler's -j flag.
+    const workerEnv = {
+      ...env,
+      LEAN_NUM_THREADS:
+        env.LEAN_NUM_THREADS ?? String(Math.max(1, Math.floor(this.cpus))),
+    }
+    for (const [key, value] of Object.entries(workerEnv)) {
       if (!/^[A-Z][A-Z0-9_]*$/.test(key) || forbiddenEnv.has(key))
         throw new Error(`Unsupported worker environment key: ${key}`)
       if (value !== undefined && value !== null) {

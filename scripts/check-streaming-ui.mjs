@@ -7,7 +7,11 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { chromium } from '@playwright/test'
-import { runMetadata, runTranscript } from './lib/chat-browser-fixture.mjs'
+import {
+  runMetadata,
+  runReceipt,
+  runTranscript,
+} from './lib/chat-browser-fixture.mjs'
 import {
   reasoningBlocksFromEvents,
   recordReasoningBlock,
@@ -185,7 +189,13 @@ await page.route('**/api/**', async (route) => {
     url = new URL(request.url()),
     endpoint = url.pathname,
     method = request.method()
-  report.mockedRequests.push({ method, endpoint })
+  report.mockedRequests.push({
+    method,
+    endpoint,
+    ...(url.searchParams.has('view')
+      ? { view: url.searchParams.get('view') }
+      : {}),
+  })
   const json = (value, status = 200) =>
     route.fulfill({
       status,
@@ -236,14 +246,18 @@ await page.route('**/api/**', async (route) => {
       (run) => endpoint === `/api/runs/${run.id}`,
     )
     if (selectedRun) {
+      const snapshot =
+        url.searchParams.get('view') === 'metadata'
+          ? runReceipt(selectedRun)
+          : selectedRun
       if (holdNextSnapshotFor === selectedRun.id) {
         holdNextSnapshotFor = null
-        heldSnapshot = structuredClone(selectedRun)
+        heldSnapshot = structuredClone(snapshot)
         return new Promise((resolve) => {
           releaseHeldSnapshot = () => json(heldSnapshot).then(resolve)
         })
       }
-      return json(selectedRun)
+      return json(snapshot)
     }
   }
   if (method === 'POST' && endpoint === `/api/projects/${projectId}/chats`) {
@@ -417,7 +431,25 @@ try {
   )
 
   const activeTurn = page.locator(`[data-run-id="${activeId}"]`)
+  const activeGets = () =>
+    report.mockedRequests.filter(
+      (request) =>
+        request.method === 'GET' &&
+        request.endpoint === `/api/runs/${activeId}`,
+    )
+  assert(activeGets().some((request) => request.view === 'metadata'))
+  assert(
+    activeGets().every((request) => request.view === 'metadata'),
+    'Background recovery must not request full proof previews',
+  )
   await activeTurn.locator('.turn-details > summary').click()
+  await until(
+    async () => activeGets().some((request) => request.view !== 'metadata'),
+    'explicit Details to load the full run',
+  )
+  report.checks.push(
+    'Background recovery requests metadata; explicit Details loads the full run',
+  )
   const reasoning = activeTurn.locator('.reasoning-trace').first(),
     activity = activeTurn.locator('.activity-log')
   assert.equal(

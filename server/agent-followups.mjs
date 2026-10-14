@@ -21,7 +21,7 @@ export class FollowupInbox {
     this.deliveries = new Map()
   }
   queue(owner, id, input, savedContext = '') {
-    let job = this.events.get(id, owner)
+    let job = this.events.getMetadata(id, owner)
     if (job.kind !== 'agent')
       fail('Only assistant runs can receive messages.', 409)
     if (
@@ -81,7 +81,7 @@ export class FollowupInbox {
         'This run has reached its message limit. Continue with a new task in this chat.',
       )
     active?.output?.flushBuffered?.()
-    job = this.events.get(id, owner)
+    job = this.events.getMetadata(id, owner)
     const entry = {
       id: messageId,
       text,
@@ -91,7 +91,7 @@ export class FollowupInbox {
       createdAt: new Date().toISOString(),
       messageOffset: (job.messageBaseOffset || 0) + (job.message || '').length,
     }
-    job = this.events.update(id, {
+    job = this.events.updateMetadata(id, {
       followups: [...entries, entry],
       ...(savedContext
         ? {
@@ -106,11 +106,11 @@ export class FollowupInbox {
     return { job, created: true }
   }
   #update(id, messageId, fields) {
-    const job = this.events.get(id)
+    const job = this.events.getMetadata(id)
     const entry = (job.followups || []).find((value) => value.id === messageId)
     if (!entry || entry.status !== 'pending') return
     const updated = { ...entry, ...fields }
-    this.events.update(id, {
+    this.events.updateMetadata(id, {
       followups: job.followups.map((value) =>
         value.id === messageId ? updated : value,
       ),
@@ -129,7 +129,7 @@ export class FollowupInbox {
   }
   async #deliver(id, active) {
     while (active.accepting && !active.controller.signal.aborted) {
-      const job = this.events.get(id)
+      const job = this.events.getMetadata(id)
       if (job.status !== 'running') return
       const entry = (job.followups || []).find(
         (value) => value.status === 'pending',
@@ -161,7 +161,7 @@ export class FollowupInbox {
           },
           10_000,
         )
-        const current = this.events.get(id)
+        const current = this.events.getMetadata(id)
         if (result.turnId !== expectedTurnId)
           throw new Error(
             'Lemex returned an unexpected turn id; delivery could not be confirmed.',
@@ -188,11 +188,11 @@ export class FollowupInbox {
   }
   async finish(id, reason = 'This run ended before the message was accepted.') {
     await this.deliveries.get(id)
-    const job = this.events.get(id)
+    const job = this.events.getMetadata(id)
     for (const entry of job.followups || [])
       if (entry.status === 'pending')
         this.#update(id, entry.id, { status: 'failed', error: reason })
-    return this.events.get(id)
+    return this.events.getMetadata(id)
   }
   recover() {
     if (!this.events.db) return
