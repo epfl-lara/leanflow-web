@@ -1532,6 +1532,7 @@ export function Studio() {
                   else setTerminalOpen(true)
                 }}
               >
+                <Icon name="terminal" size={15} />
                 Terminal
               </button>
             )}

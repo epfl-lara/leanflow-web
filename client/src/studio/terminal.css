@@ -7,6 +7,8 @@
   flex-direction: column;
   overflow: hidden;
   background: #fff;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, var(--muted));
+  box-shadow: 0 -3px 10px #17223c0a;
 }
 .project-terminal.dark {
   background: #12141b;
@@ -15,28 +17,107 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 5px 12px;
-  background: var(--bg);
+  padding: 8px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
   font-size: 12px;
   flex-shrink: 0;
 }
+.terminal-title,
+.terminal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.terminal-title > svg {
+  color: var(--accent);
+}
+.terminal-location {
+  font-family: var(--mono);
+  color: var(--muted);
+  font-size: 11px;
+}
 .terminal-status {
-  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 11px;
   min-width: 0;
   color: var(--muted);
+  background: var(--bg);
+}
+.terminal-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+.terminal-status[data-connected='true'] .terminal-status-dot {
+  background: var(--success);
 }
 .terminal-help {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   margin: 0;
-  padding: 2px 12px 6px;
+  padding: 7px 12px;
   font-size: 11px;
   color: var(--muted);
   background: var(--bg);
+}
+.terminal-help > svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.terminal-help kbd {
+  font: inherit;
+  font-family: var(--mono);
 }
 .terminal-screen {
   flex: 1;
   min-height: 0;
   min-width: 0;
-  padding: 0 8px 6px;
+  padding: 4px 12px 8px;
+}
+.resize-handle.horizontal.terminal-resize-handle {
+  position: relative;
+  height: 10px;
+  flex: 0 0 10px;
+  margin: 0;
+  background: var(--surface);
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, var(--muted));
+}
+.terminal-resize-handle::after {
+  content: '';
+  position: absolute;
+  width: 40px;
+  height: 3px;
+  left: calc(50% - 20px);
+  top: 3px;
+  border-radius: 3px;
+  background: var(--muted);
+  opacity: 0.6;
+}
+.terminal-resize-handle:hover::after,
+.terminal-resize-handle:focus-visible::after,
+.terminal-resize-handle[data-dragging]::after {
+  background: var(--accent);
+  opacity: 1;
+}
+@media (max-width: 600px) {
+  .terminal-location {
+    display: none;
+  }
+  .terminal-toolbar {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
 }
 .terminal-screen .xterm {
   height: 100%;

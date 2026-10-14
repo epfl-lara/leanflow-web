@@ -163,6 +163,7 @@ export function TerminalPanel({
   return (
     <>
       <ResizeHandle
+        className="terminal-resize-handle"
         label="Resize terminal"
         orientation="horizontal"
         value={height}
@@ -178,28 +179,42 @@ export function TerminalPanel({
         style={{ height }}
       >
         <div className="terminal-toolbar">
-          <strong>Terminal</strong>
-          <output className="terminal-status">{status}</output>
-          {!connected && (
+          <div className="terminal-title">
+            <Icon name="terminal" size={17} />
+            <strong>Terminal</strong>
+            <span className="terminal-location">/workspace</span>
+          </div>
+          <output className="terminal-status" data-connected={connected}>
+            <span className="terminal-status-dot" aria-hidden="true" />
+            <span>{status}</span>
+          </output>
+          <div className="terminal-actions">
+            {!connected && (
+              <button
+                className="button small subtle"
+                onClick={() => setAttempt((value) => value + 1)}
+              >
+                <Icon name="refresh" size={14} />
+                Reconnect terminal
+              </button>
+            )}
             <button
               className="button small subtle"
-              onClick={() => setAttempt((value) => value + 1)}
+              aria-label="Close terminal"
+              title="Close terminal and stop its processes"
+              onClick={onClose}
             >
-              Reconnect terminal
+              <Icon name="close" size={14} />
+              Close
             </button>
-          )}
-          <button
-            className="icon-button"
-            aria-label="Close terminal"
-            title="Close terminal and stop its processes"
-            onClick={onClose}
-          >
-            <Icon name="close" size={14} />
-          </button>
+          </div>
         </div>
         <p className="terminal-help">
-          Commands edit saved project files. Save editor changes first. Ctrl+C
-          stops a command.
+          <Icon name="info" size={13} />
+          <span>
+            Commands edit saved project files. Save editor changes first.{' '}
+            <kbd>Ctrl+C</kbd> stops a command.
+          </span>
         </p>
         <div className="terminal-screen" ref={host} />
       </section>

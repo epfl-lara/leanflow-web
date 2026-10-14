@@ -23,6 +23,7 @@ const paths = {
   chevron: 'm9 5 7 7-7 7',
   bot: 'M8 4h8M12 4V1M5 8h14v12H5ZM2 12h3M19 12h3M8 13h1M15 13h1M9 17h6',
   log: 'M4 5h16M4 10h16M4 15h10M4 20h10',
+  terminal: 'M4 4h16v16H4ZM7 8l4 4-4 4M13 16h4',
   external:
     'M15 3h6v6M21 3 10 14M11 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6',
   settings:

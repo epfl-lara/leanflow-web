@@ -106,6 +106,71 @@ try {
     'Terminal renders ANSI and Unicode output, sends commands and Ctrl+C, acknowledges output, and resizes.',
   )
 
+  const divider = f.page.getByRole('separator', {
+    name: 'Resize terminal',
+    exact: true,
+  })
+  const boundary = await divider.boundingBox()
+  const terminalBounds = await panel.boundingBox()
+  assert(boundary && terminalBounds && boundary.height >= 10)
+  assert(
+    Math.abs(boundary.y + boundary.height - terminalBounds.y) < 2,
+    'Divider sits at the top of the terminal',
+  )
+  await f.page.mouse.move(
+    boundary.x + boundary.width / 2,
+    boundary.y + boundary.height / 2,
+  )
+  await f.page.mouse.down()
+  await f.page.mouse.move(boundary.x + boundary.width / 2, boundary.y - 24)
+  await f.page.mouse.up()
+  await until(
+    async () => (await panel.boundingBox()).height > terminalBounds.height + 10,
+    'visible terminal divider drag',
+  )
+  await f.page.screenshot({ path: path.join(directory, 'terminal-dark.png') })
+  await f.page
+    .getByRole('button', { name: 'Use light theme', exact: true })
+    .click()
+  await until(
+    async () => (await panel.getAttribute('class')).includes('light'),
+    'light terminal theme',
+  )
+  await f.page.screenshot({ path: path.join(directory, 'terminal-light.png') })
+  const lightPanel = await panel.boundingBox()
+  await f.page.screenshot({
+    path: path.join(directory, 'terminal-detail-light.png'),
+    clip: {
+      x: lightPanel.x,
+      y: lightPanel.y - 35,
+      width: lightPanel.width,
+      height: 185,
+    },
+  })
+  await f.page.getByRole('button', { name: 'Lemex', exact: true }).click()
+  await f.page.setViewportSize({ width: 580, height: 850 })
+  const narrow = await panel.boundingBox()
+  const closeBounds = await panel
+    .getByRole('button', { name: 'Close terminal', exact: true })
+    .boundingBox()
+  assert(
+    narrow &&
+      closeBounds &&
+      closeBounds.x + closeBounds.width <= narrow.x + narrow.width,
+    'Close control remains within the narrow panel',
+  )
+  await panel
+    .getByRole('button', { name: 'Close terminal', exact: true })
+    .click({ trial: true })
+  await f.page.screenshot({ path: path.join(directory, 'terminal-narrow.png') })
+  await f.page.setViewportSize({ width: 1600, height: 1000 })
+  await f.page
+    .getByRole('button', { name: 'Use dark theme', exact: true })
+    .click()
+  f.report.checks.push(
+    'The terminal has a visible, draggable boundary in both themes and labelled controls that fit narrow layouts.',
+  )
+
   f.state.files[id]['Main.lean'] = source + '-- saved from the terminal\n'
   await until(
     async () =>
