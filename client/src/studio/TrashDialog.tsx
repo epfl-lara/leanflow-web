@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { errorText, type TrashItem } from './api'
+import { errorText, type TrashDeleteResult, type TrashItem } from './api'
 import { Dialog } from './Dialog'
 import { Icon } from './Icons'
 
@@ -20,6 +20,7 @@ export function TrashDialog({
   restoring,
   onRestore,
   onDeleteForever,
+  onDeleteAll,
   onClose,
 }: {
   items: TrashItem[]
@@ -27,20 +28,59 @@ export function TrashDialog({
   restoring: string | null
   onRestore: (item: TrashItem) => Promise<void>
   onDeleteForever: (item: TrashItem) => Promise<void>
+  onDeleteAll: (items: TrashItem[]) => Promise<TrashDeleteResult>
   onClose: () => void
 }) {
   const [selected, setSelected] = useState<TrashItem | null>(null)
+  const [selectedAll, setSelectedAll] = useState<TrashItem[] | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
   const busy = !!restoring || deleting
+  const confirming = !!selected || !!selectedAll
+  const archivedProjects = new Set(
+    selectedAll
+      ?.filter((item) => item.kind === 'project')
+      .map((item) => item.projectId),
+  )
+  const sizedItems =
+    selectedAll?.filter(
+      (item) =>
+        item.kind === 'project' ||
+        item.kind === 'chat' ||
+        !archivedProjects.has(item.projectId),
+    ) || []
+  const totalBytes = sizedItems.reduce(
+    (sum, item) => sum + (item.sizeBytes || 0),
+    0,
+  )
+  const unknownSizes = sizedItems.filter(
+    (item) => item.sizeBytes == null,
+  ).length
 
   async function deleteForever() {
-    if (!selected || busy) return
+    if (!confirming || busy) return
     setDeleting(true)
     setDeleteError('')
     try {
-      await onDeleteForever(selected)
-      setSelected(null)
+      if (selected) {
+        await onDeleteForever(selected)
+        setSelected(null)
+      } else if (selectedAll) {
+        const result = await onDeleteAll(selectedAll)
+        if (result.failures.length) {
+          const remaining = new Set(
+            result.failures.map((failure) => failure.trashId),
+          )
+          setSelectedAll(
+            selectedAll.filter((item) => remaining.has(item.trashId)),
+          )
+          setDeleteError(
+            result.failures
+              .map((failure) => `${failure.name}: ${failure.error}`)
+              .join('\n'),
+          )
+        } else setSelectedAll(null)
+      }
     } catch (error) {
       setDeleteError(errorText(error))
     } finally {
@@ -50,44 +90,84 @@ export function TrashDialog({
 
   return (
     <Dialog
-      title={selected ? 'Permanently delete item?' : 'Trash'}
+      title={
+        selectedAll
+          ? 'Delete all trash?'
+          : selected
+            ? 'Permanently delete item?'
+            : 'Trash'
+      }
       subtitle={
-        selected
+        confirming
           ? 'Permanent deletion cannot be undone.'
           : 'Restore deleted files, folders, projects, or chats, or delete them forever.'
       }
       busy={busy}
       onClose={onClose}
     >
-      {selected ? (
+      {confirming ? (
         <>
           <div className="delete-confirmation">
-            <p>
-              Permanently delete <strong>{itemName(selected)}</strong>?
-            </p>
-            <dl className="trash-details">
-              <dt>Type</dt>
-              <dd>{itemKind(selected)}</dd>
-              <dt>Project</dt>
-              <dd>{selected.projectName || selected.projectId}</dd>
-              {selected.path && (
-                <>
-                  <dt>Path</dt>
-                  <dd>{selected.path}</dd>
-                </>
-              )}
-              <dt>
-                {selected.kind === 'chat' ? 'Stored size' : 'Size on disk'}
-              </dt>
-              <dd>{itemSize(selected)}</dd>
-              <dt>Deleted</dt>
-              <dd>{new Date(selected.createdAt).toLocaleString()}</dd>
-            </dl>
-            {selected.kind === 'project' && (
-              <p>This also deletes the project's saved chats and runs.</p>
+            {selected && (
+              <>
+                <p>
+                  Permanently delete <strong>{itemName(selected)}</strong>?
+                </p>
+                <dl className="trash-details">
+                  <dt>Type</dt>
+                  <dd>{itemKind(selected)}</dd>
+                  <dt>Project</dt>
+                  <dd>{selected.projectName || selected.projectId}</dd>
+                  {selected.path && (
+                    <>
+                      <dt>Path</dt>
+                      <dd>{selected.path}</dd>
+                    </>
+                  )}
+                  <dt>
+                    {selected.kind === 'chat' ? 'Stored size' : 'Size on disk'}
+                  </dt>
+                  <dd>{itemSize(selected)}</dd>
+                  <dt>Deleted</dt>
+                  <dd>{new Date(selected.createdAt).toLocaleString()}</dd>
+                </dl>
+                {selected.kind === 'project' && (
+                  <p>This also deletes the project's saved chats and runs.</p>
+                )}
+              </>
+            )}
+            {selectedAll && (
+              <>
+                <p>
+                  Permanently delete{' '}
+                  <strong>
+                    {selectedAll.length}{' '}
+                    {selectedAll.length === 1 ? 'item' : 'items'}
+                  </strong>{' '}
+                  from Trash?
+                </p>
+                <dl className="trash-details">
+                  <dt>{unknownSizes ? 'Known size' : 'Total size'}</dt>
+                  <dd>{(totalBytes / 1_000_000).toFixed(2)} MB</dd>
+                </dl>
+                {unknownSizes > 0 && (
+                  <p>
+                    Size is unavailable for {unknownSizes}{' '}
+                    {unknownSizes === 1 ? 'item' : 'items'}.
+                  </p>
+                )}
+                <p>
+                  This includes saved chats and runs for trashed projects. It
+                  cannot be undone.
+                </p>
+              </>
             )}
             {deleteError && (
-              <p className="error-message" role="alert">
+              <p
+                className="error-message"
+                role="alert"
+                style={{ whiteSpace: 'pre-line' }}
+              >
                 {deleteError}
               </p>
             )}
@@ -96,7 +176,10 @@ export function TrashDialog({
             <button
               className="button secondary"
               disabled={busy}
-              onClick={() => setSelected(null)}
+              onClick={() => {
+                setSelected(null)
+                setSelectedAll(null)
+              }}
             >
               Do Nothing
             </button>
@@ -170,6 +253,17 @@ export function TrashDialog({
             ))}
           </div>
           <footer className="dialog-actions">
+            <button
+              className="button danger"
+              disabled={busy || !items.length || !!error}
+              onClick={() => {
+                setDeleteError('')
+                setSelectedAll([...items])
+              }}
+            >
+              <Icon name="trash" size={16} />
+              Delete All
+            </button>
             <button
               className="button secondary"
               disabled={busy}

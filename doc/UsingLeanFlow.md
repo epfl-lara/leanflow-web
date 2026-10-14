@@ -120,6 +120,8 @@ Deleted files, folders, projects, and chats go to **Trash**. Use **Restore** or 
 
 In **Trash**, each item shows its size in MB. Files, folders, and projects show allocated disk space; chats show their stored content size. Shared dependency targets are excluded from project sizes. Click the red **X** to review the name, project, size, and deletion date. Choose **Delete Forever** to permanently remove it, or **Do Nothing** to keep it in Trash. Permanently deleting a project also removes its saved chats and runs.
 
+To empty Trash, choose **Delete All**, review the item count and total size, then choose **Delete Forever**. **Do Nothing** keeps the items. If an item cannot be deleted, the dialog explains why and lets you retry the remaining items. Items added to Trash after the confirmation opened are kept.
+
 Drag separators to resize panels; double-click to reset. If sign-in expires, use the recovery dialog with the same token to keep your edits and drafts.
 
 For installation and hosting, see [Install and run](LemexWeb.md#install-and-run) and [Configuration](Configuration.md).

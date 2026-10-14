@@ -99,6 +99,11 @@ export interface Project {
   }
 }
 
+export interface TrashDeleteResult {
+  deletedTrashIds: string[]
+  failures: { trashId: string; name: string; error: string }[]
+}
+
 export interface TrashItem {
   workspaceKind?: 'single-file' | 'project'
   chatId?: string

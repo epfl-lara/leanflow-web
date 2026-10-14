@@ -479,7 +479,7 @@ export class ChatStore {
     ownerId(owner)
     return this.db
       .prepare(
-        "SELECT data FROM chats WHERE owner=? AND json_extract(data,'$.archivedAt') IS NOT NULL ORDER BY json_extract(data,'$.archivedAt') DESC LIMIT 100",
+        "SELECT data FROM chats WHERE owner=? AND json_extract(data,'$.archivedAt') IS NOT NULL ORDER BY json_extract(data,'$.archivedAt') DESC",
       )
       .all(owner)
       .map((row) => this.#receipt(JSON.parse(row.data)))

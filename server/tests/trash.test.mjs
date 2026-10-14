@@ -885,3 +885,195 @@ test('trusted run IDs never override a candidate manifest or ownership marker fo
     (await store.readFile(other.id, 'owner', 'Main.lean')).content,
   )
 })
+
+test('Delete All deletes confirmed projects, files, folders and chats while preserving live and newly trashed data', async (t) => {
+  const f = await fixture(t)
+  const archivedProject = await f.store.create('owner', {
+    name: 'Archived batch project',
+    preset: 'lean',
+  })
+  await f.store.jobs.get(archivedProject.id)
+  const child = await f.store.trash(archivedProject.id, 'owner', 'Main.lean')
+  const childChat = f.chats.trash(
+    'owner',
+    f.chats.create('owner', archivedProject.id).id,
+  )
+  const project = await f.store.trash(archivedProject.id, 'owner')
+  await fs.mkdir(path.join(f.project.root, 'Old'))
+  await fs.writeFile(
+    path.join(f.project.root, 'Old', 'old.bin'),
+    Buffer.from([1, 2, 3]),
+  )
+  const folder = await f.store.trash(f.project.id, 'owner', 'Old')
+  const file = await f.store.trash(f.project.id, 'owner', 'Main.lean')
+  const chat = f.chats.trash('owner', f.chats.create('owner', f.project.id).id)
+  const selected = [child, childChat, folder, file, chat, project]
+  await f.store.writeFile(
+    f.project.id,
+    'owner',
+    'New.lean',
+    '-- Preserve new trash\n',
+    null,
+  )
+  const newer = await f.store.trash(f.project.id, 'owner', 'New.lean')
+  await f.store.writeFile(
+    f.project.id,
+    'owner',
+    'Main.lean',
+    '-- Preserve live replacement\n',
+    null,
+  )
+  const response = await f.request('/api/trash/delete-all', {
+    trashIds: selected.map((item) => item.trashId),
+  })
+  assert.equal(response.status, 200)
+  const result = await response.json()
+  assert.deepEqual(
+    new Set(result.deletedTrashIds),
+    new Set(selected.map((item) => item.trashId)),
+  )
+  assert.deepEqual(result.failures, [])
+  assert.throws(() => f.store.get(archivedProject.id, 'owner'), { status: 404 })
+  assert.throws(() => f.chats.getTrash(chat.trashId, 'owner'), { status: 404 })
+  assert.deepEqual(
+    f.store.listTrash('owner').map((item) => item.trashId),
+    [newer.trashId],
+  )
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'Main.lean')).content,
+    '-- Preserve live replacement\n',
+  )
+  await f.store.restore(newer.trashId, 'owner')
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'New.lean')).content,
+    '-- Preserve new trash\n',
+  )
+})
+
+test('Delete All authenticates and validates every receipt before deleting any item', async (t) => {
+  const f = await fixture(t)
+  const original = await f.store.readFile(f.project.id, 'owner', 'Main.lean')
+  const owned = await f.store.trash(f.project.id, 'owner', 'Main.lean')
+  const other = await f.store.create('bob', {
+    name: 'Other owner',
+    preset: 'lean',
+  })
+  await f.store.jobs.get(other.id)
+  const foreign = await f.store.trash(other.id, 'bob', 'Main.lean')
+  assert.equal(
+    (
+      await f.request(
+        '/api/trash/delete-all',
+        { trashIds: [owned.trashId] },
+        null,
+      )
+    ).status,
+    401,
+  )
+  assert.equal(
+    (
+      await f.request('/api/trash/delete-all', {
+        trashIds: [owned.trashId, foreign.trashId],
+      })
+    ).status,
+    404,
+  )
+  for (const input of [
+    {},
+    { trashIds: 'all' },
+    { trashIds: [null] },
+    { trashIds: [owned.trashId, owned.trashId] },
+    { trashIds: [owned.trashId], extra: true },
+  ])
+    assert.equal((await f.request('/api/trash/delete-all', input)).status, 400)
+  assert.equal(f.store.getTrash(owned.trashId, 'owner').recoverable, true)
+  assert.equal(f.store.getTrash(foreign.trashId, 'bob').recoverable, true)
+  await f.store.restore(owned.trashId, 'owner')
+  assert.equal(
+    (
+      await f.request(
+        '/api/trash/delete-all',
+        { trashIds: [foreign.trashId] },
+        f.otherToken,
+      )
+    ).status,
+    200,
+  )
+  assert.equal(
+    (await f.request('/api/trash/delete-all', { trashIds: [owned.trashId] }))
+      .status,
+    409,
+  )
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'Main.lean')).hash,
+    original.hash,
+  )
+})
+
+test('Delete All reports blocked items, continues independent deletions and supports retry', async (t) => {
+  const f = await fixture(t)
+  const blocked = await f.store.trash(f.project.id, 'owner', 'Main.lean')
+  const active = f.events.create('owner', {
+    kind: 'check',
+    projectId: f.project.id,
+  })
+  const other = await f.store.create('owner', {
+    name: 'Independent deletion',
+    preset: 'lean',
+  })
+  await f.store.jobs.get(other.id)
+  const allowed = await f.store.trash(other.id, 'owner')
+  const response = await f.request('/api/trash/delete-all', {
+    trashIds: [blocked.trashId, allowed.trashId],
+  })
+  assert.equal(response.status, 200)
+  const result = await response.json()
+  assert.deepEqual(result.deletedTrashIds, [allowed.trashId])
+  assert.equal(result.failures.length, 1)
+  assert.equal(result.failures[0].trashId, blocked.trashId)
+  assert.match(result.failures[0].error, /Stop active/)
+  assert.equal(f.store.getTrash(blocked.trashId, 'owner').recoverable, true)
+  assert.equal(f.events.getMetadata(active.id, 'owner').status, 'queued')
+  f.events.updateMetadata(active.id, { status: 'cancelled' })
+  const retried = await f.request('/api/trash/delete-all', {
+    trashIds: [blocked.trashId],
+  })
+  assert.equal(retried.status, 200)
+  assert.deepEqual(await retried.json(), {
+    deletedTrashIds: [blocked.trashId],
+    failures: [],
+  })
+})
+
+test('Delete All includes more than 100 file and chat receipts in its confirmation list', async (t) => {
+  const f = await fixture(t)
+  const original = await f.store.readFile(f.project.id, 'owner', 'Main.lean')
+  for (let i = 0; i < 102; i++) {
+    const filename = `Batch${i}.lean`
+    await fs.writeFile(path.join(f.project.root, filename), '-- Old proof\n')
+    await f.store.trash(f.project.id, 'owner', filename)
+    f.chats.trash('owner', f.chats.create('owner', f.project.id).id)
+  }
+  const listed = await fetch(f.url + '/api/trash', {
+    headers: { Authorization: `Bearer ${f.token}` },
+  })
+  assert.equal(listed.status, 200)
+  const items = await listed.json()
+  assert.equal(items.length, 204)
+  assert.equal(items.filter((item) => item.kind === 'file').length, 102)
+  assert.equal(items.filter((item) => item.kind === 'chat').length, 102)
+  const response = await f.request('/api/trash/delete-all', {
+    trashIds: items.map((item) => item.trashId),
+  })
+  assert.equal(response.status, 200)
+  const result = await response.json()
+  assert.equal(result.deletedTrashIds.length, 204)
+  assert.deepEqual(result.failures, [])
+  assert.deepEqual(f.store.listTrash('owner'), [])
+  assert.deepEqual(f.chats.listTrash('owner'), [])
+  assert.equal(f.store.get(f.project.id, 'owner').status, 'ready')
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'Main.lean')).hash,
+    original.hash,
+  )
+})

@@ -850,7 +850,7 @@ export class WorkspaceStore {
     validateOwner(owner)
     return this.db
       .prepare(
-        "SELECT data FROM trash WHERE owner=? AND json_extract(data,'$.state') IN ('trashed','deleting') ORDER BY rowid DESC LIMIT 100",
+        "SELECT data FROM trash WHERE owner=? AND json_extract(data,'$.state') IN ('trashed','deleting') ORDER BY rowid DESC",
       )
       .all(owner)
       .map((row) => this.#trashReceipt(JSON.parse(row.data)))

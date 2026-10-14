@@ -21,6 +21,7 @@ import {
   type Project,
   type Session,
   type TrashItem,
+  type TrashDeleteResult,
 } from './api'
 import { AssistantPanel } from './AssistantPanel'
 import { TerminalPanel } from './TerminalPanel'
@@ -1100,22 +1101,51 @@ export function Studio() {
   }
   async function deleteForever(item: TrashItem) {
     await post(`/api/trash/${encodeURIComponent(item.trashId)}/delete-forever`)
-    setTrashItems((previous) =>
-      previous.filter((entry) =>
-        item.kind === 'project'
-          ? entry.projectId !== item.projectId
-          : entry.trashId !== item.trashId,
-      ),
-    )
-    setLastTrash((previous) =>
-      previous?.trashId === item.trashId ||
-      (item.kind === 'project' && previous?.projectId === item.projectId)
-        ? null
-        : previous,
+    forgetTrash(
+      new Set([item.trashId]),
+      new Set(item.kind === 'project' ? [item.projectId] : []),
     )
     if (item.kind === 'chat' || item.kind === 'project')
       window.dispatchEvent(new Event('lemex-chats-changed'))
     setNotice('Permanently deleted')
+  }
+  function forgetTrash(ids: Set<string>, projectIds: Set<string>) {
+    setTrashItems((previous) =>
+      previous.filter(
+        (entry) => !ids.has(entry.trashId) && !projectIds.has(entry.projectId),
+      ),
+    )
+    setLastTrash((previous) =>
+      previous &&
+      (ids.has(previous.trashId) || projectIds.has(previous.projectId))
+        ? null
+        : previous,
+    )
+  }
+  async function deleteAll(items: TrashItem[]) {
+    const result = await post<TrashDeleteResult>('/api/trash/delete-all', {
+      trashIds: items.map((item) => item.trashId),
+    })
+    const ids = new Set(result.deletedTrashIds)
+    const projects = new Set(
+      items
+        .filter((item) => item.kind === 'project' && ids.has(item.trashId))
+        .map((item) => item.projectId),
+    )
+    forgetTrash(ids, projects)
+    try {
+      setTrashItems(await api<TrashItem[]>('/api/trash'))
+    } catch (error) {
+      setTrashError(errorText(error))
+    }
+    if (result.deletedTrashIds.length)
+      window.dispatchEvent(new Event('lemex-chats-changed'))
+    setNotice(
+      result.failures.length
+        ? `Deleted ${ids.size} items from Trash`
+        : 'Deleted all confirmed items from Trash',
+    )
+    return result
   }
   async function restoreItem(item: TrashItem) {
     if (restoring) return
@@ -2215,6 +2245,7 @@ export function Studio() {
           restoring={restoring}
           onRestore={restoreItem}
           onDeleteForever={deleteForever}
+          onDeleteAll={deleteAll}
           onClose={() => setTrashOpen(false)}
         />
       )}

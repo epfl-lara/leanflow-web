@@ -14,6 +14,7 @@ import { EventStore, JobManager } from './events.mjs'
 import { AgentManager } from './agents.mjs'
 import { Settings } from './settings.mjs'
 import { ChatStore } from './chats.mjs'
+import { TrashManager } from './trash.mjs'
 import { createChatTitleGenerator } from './chat-titles.mjs'
 import { searchDeclarations } from './search.mjs'
 import { LspFrames, frame, validateClientUris } from './rpc.mjs'
@@ -310,6 +311,13 @@ export async function createStudio({
         { status: 409 },
       )
   }
+  const trash = new TrashManager({
+    workspaces,
+    chats,
+    events,
+    assertIdle: requireNoActiveWork,
+    redact: config.redact,
+  })
   app.disable('x-powered-by')
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff')
@@ -578,10 +586,11 @@ export async function createStudio({
             events.projectMetadata(req.user.id, id).map((job) => job.id),
         })),
         ...chats.listTrash(req.user.id),
-      ]
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-        .slice(0, 100),
+      ].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     ),
+  )
+  app.post('/api/trash/delete-all', async (req, res) =>
+    res.json(await trash.deleteAll(req.user.id, req.body)),
   )
   app.post('/api/trash/:id/delete-forever', async (req, res) => {
     if (
@@ -596,27 +605,7 @@ export async function createStudio({
           status: 400,
         },
       )
-    let entry
-    try {
-      entry = workspaces.getTrash(req.params.id, req.user.id)
-    } catch (error) {
-      if (error.status !== 404) throw error
-      return res.json(chats.deleteForever(req.user.id, req.params.id))
-    }
-    const assertIdle = () => requireNoActiveWork(entry.projectId, req.user.id)
-    assertIdle()
-    const result = await workspaces.deleteForever(req.params.id, req.user.id, {
-      assertIdle,
-      candidateRunIds:
-        entry.kind === 'project'
-          ? events
-              .projectMetadata(req.user.id, entry.projectId)
-              .map((job) => job.id)
-          : [],
-    })
-    if (entry.kind === 'project')
-      chats.deleteProject(req.user.id, entry.projectId)
-    res.json(result)
+    res.json(await trash.deleteForever(req.user.id, req.params.id))
   })
   app.post('/api/trash/:id/restore', async (req, res) => {
     let entry
