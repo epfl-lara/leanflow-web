@@ -47,12 +47,30 @@ export function projectDirectory(value = '') {
   return parts.join('/')
 }
 
+function folderLocation(parts, revision, provider) {
+  const tail = parts.map((part) => {
+    try {
+      return decodeURIComponent(part)
+    } catch {
+      fail(`Invalid encoded ${provider} path.`)
+    }
+  })
+  // An explicit branch disambiguates links to branches containing '/'.
+  const explicit = revision?.split('/')
+  const length = explicit?.every((part, index) => part === tail[index])
+    ? explicit.length
+    : 1
+  return [tail.slice(0, length).join('/'), tail.slice(length).join('/')]
+}
+
 export function repositoryLocation(value, { revision, subdirectory } = {}) {
+  if (revision !== undefined && typeof revision !== 'string')
+    fail('Enter a valid repository revision.')
   let url
   try {
     url = new URL(value)
   } catch {
-    fail('Enter an HTTPS Git repository or GitHub project link.')
+    fail('Enter an HTTPS Git repository, GitHub or GitLab project link.')
   }
   let inferredRevision,
     inferredDirectory = ''
@@ -63,22 +81,34 @@ export function repositoryLocation(value, { revision, subdirectory } = {}) {
         fail(
           'Use a GitHub repository or folder link, not a file or pull request link.',
         )
-      const tail = parts.slice(3).map((part) => {
-        try {
-          return decodeURIComponent(part)
-        } catch {
-          fail('Invalid encoded GitHub path.')
-        }
-      })
-      // An explicit branch disambiguates GitHub links to branches containing '/'.
-      const explicit = revision?.split('/')
-      const length = explicit?.every((part, index) => part === tail[index])
-        ? explicit.length
-        : 1
-      inferredRevision = tail.slice(0, length).join('/')
-      inferredDirectory = tail.slice(length).join('/')
+      ;[inferredRevision, inferredDirectory] = folderLocation(
+        parts.slice(3),
+        revision,
+        'GitHub',
+      )
       url.pathname = '/' + parts.slice(0, 2).join('/')
     }
+  }
+  // GitLab's /-/ separator distinguishes the project (including nested
+  // namespaces) from a branch or folder on hosted and self-hosted instances.
+  const gitlabTree = url.pathname.indexOf('/-/')
+  if (gitlabTree !== -1) {
+    const tail = url.pathname
+      .slice(gitlabTree + 3)
+      .replace(/\/+$/, '')
+      .split('/')
+    if (tail.shift() !== 'tree' || !tail[0])
+      fail(
+        'Use a GitLab repository or folder link, not a file or merge request link.',
+      )
+    ;[inferredRevision, inferredDirectory] = folderLocation(
+      tail,
+      revision,
+      'GitLab',
+    )
+    url.pathname = url.pathname.slice(0, gitlabTree)
+    url.search = ''
+    url.hash = ''
   }
   if (url.hostname.toLowerCase() === 'github.com') {
     url.search = ''
@@ -103,15 +133,16 @@ export function repositoryAccessError(error) {
     /requested URL returned error: (?:401|403)\b|could not read (?:Username|Password)|Authentication failed/i.test(
       message,
     )
-      ? 'Access to this repository was denied. Use a public HTTPS clone URL or upload the project files.'
+      ? 'Access to this repository was denied. Retry setup with a repository token that has read access. Check the HTTPS clone URL and token permissions.'
       : /requested URL returned error: 404\b|repository[^\n]*not found/i.test(
             message,
           )
-        ? 'The repository was not found. Check the HTTPS clone URL and whether the repository is publicly accessible, or upload the project files.'
+        ? 'The repository was not found or requires authentication. Check the HTTPS clone URL, then retry setup with a repository token for a private project.'
         : null
   return reason
     ? Object.assign(new Error(`${reason}\n${message}`, { cause: error }), {
         infrastructure: true,
+        repositoryAuthenticationRequired: true,
       })
     : error
 }

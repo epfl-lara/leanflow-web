@@ -263,6 +263,39 @@
   justify-content: flex-start;
   margin-top: 7px;
 }
+.git-connection-status {
+  overflow-wrap: anywhere;
+}
+.studio-dialog:has(.git-connections) {
+  width: 560px;
+}
+.git-connections h3 {
+  font-size: 14px;
+}
+.git-connections form > .button {
+  margin-top: 8px;
+}
+.git-connection-list {
+  margin: 16px 0;
+  padding: 0;
+  list-style: none;
+}
+.git-connection-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 0;
+}
+.git-connection-list span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.git-connection-list small {
+  display: block;
+  color: var(--muted);
+}
 @media (max-width: 600px) {
   .git-author-fields {
     grid-template-columns: minmax(0, 1fr);

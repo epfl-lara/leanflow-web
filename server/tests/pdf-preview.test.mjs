@@ -164,6 +164,98 @@ test('HTTP PDF preview rejects traversal, secrets, symlinks, wrong types and ove
   assert.equal((await f.request('/file-preview')).status, 400)
 })
 
+test('automatic editor references use metadata only and snapshots retain invalid or oversized PDFs safely', async (t) => {
+  const f = await fixture(t)
+  const pointer = Buffer.from(
+    'version https://git-lfs.github.com/spec/v1\noid sha256:fixture\nsize 20000000\n',
+  )
+  await fs.writeFile(path.join(f.project.root, 'Pointer.PDF'), pointer)
+  const large = path.join(f.project.root, 'Large.pdf')
+  await fs.writeFile(large, pdf)
+  await fs.truncate(large, MAX_PDF_FILE_BYTES + 1)
+  await fs.writeFile(path.join(f.project.root, 'Unreadable.pdf'), pointer, {
+    mode: 0o000,
+  })
+  for (const filename of ['Pointer.PDF', 'Large.pdf', 'Unreadable.pdf'])
+    assert.equal(
+      await f.workspaces.validateEditorContextFile(
+        f.project.id,
+        'owner',
+        filename,
+      ),
+      filename,
+    )
+  assert.equal(
+    await f.workspaces.validateEditorContextFile(
+      f.project.id,
+      'owner',
+      'Deleted.lean',
+    ),
+    null,
+  )
+  await fs.mkdir(path.join(f.project.root, 'Folder.pdf'))
+  assert.equal(
+    await f.workspaces.validateEditorContextFile(
+      f.project.id,
+      'owner',
+      'Folder.pdf',
+    ),
+    null,
+  )
+  await fs.writeFile(
+    path.join(f.project.root, 'Replaced'),
+    'parent is now a file',
+  )
+  assert.equal(
+    await f.workspaces.validateEditorContextFile(
+      f.project.id,
+      'owner',
+      'Replaced/Old.lean',
+    ),
+    null,
+  )
+  await assert.rejects(
+    f.workspaces.validateEditorContextFile(
+      f.project.id,
+      'other',
+      'Pointer.PDF',
+    ),
+    { status: 404 },
+  )
+  await assert.rejects(
+    f.workspaces.validateEditorContextFile(
+      f.project.id,
+      'owner',
+      '../outside.pdf',
+    ),
+    { status: 400 },
+  )
+  await fs.symlink('/etc/passwd', path.join(f.project.root, 'Unsafe.pdf'))
+  await assert.rejects(
+    f.workspaces.validateEditorContextFile(f.project.id, 'owner', 'Unsafe.pdf'),
+    { status: 403 },
+  )
+  await fs.rm(path.join(f.project.root, 'Unsafe.pdf'))
+  // Snapshots still enforce readable project sources; the optional reference
+  // itself did not read this file. Restore permission before snapshotting.
+  await fs.chmod(path.join(f.project.root, 'Unreadable.pdf'), 0o600)
+  f.runtime.run = async () => ({ code: 1, stdout: '', stderr: '' })
+  const snapshot = await f.workspaces.snapshot(
+    f.project.id,
+    'owner',
+    'pdf-context',
+  )
+  assert.deepEqual(
+    await fs.readFile(path.join(snapshot.root, 'Pointer.PDF')),
+    pointer,
+  )
+  assert.equal(
+    (await fs.stat(path.join(snapshot.root, 'Large.pdf'))).size,
+    MAX_PDF_FILE_BYTES + 1,
+  )
+  assert.deepEqual(await f.workspaces.changes(snapshot), [])
+})
+
 test('PDFs cannot enter text reads, saves, or reviewed text changes, including ASCII PDFs', async (t) => {
   const f = await fixture(t)
   const ascii = Buffer.from('%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n')

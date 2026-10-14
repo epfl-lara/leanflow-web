@@ -3,6 +3,9 @@ import { Dialog } from './Dialog'
 import { UploadFiles, type UploadFile } from './UploadFiles'
 import { Icon } from './Icons'
 import { HelpTip } from './HelpTip'
+import { RepositoryCredentialsFields } from './RepositoryCredentialsFields'
+import { GitConnectionStatus } from './GitConnectionStatus'
+import { repositoryHost, useGitConnections } from './gitConnections'
 import { errorText, post, type Preset, type Project } from './api'
 
 export function ProjectModal({
@@ -11,18 +14,22 @@ export function ProjectModal({
   initialPreset,
   onClose,
   onCreated,
+  onOpenConnections,
 }: {
   templates: Preset[]
   repairAvailable: boolean
   initialPreset?: string
   onClose: () => void
   onCreated: (project: Project) => void
+  onOpenConnections?: () => void
 }) {
   const [kind, setKind] = useState<'create' | 'import' | 'upload'>(
     initialPreset ? 'create' : 'import',
   )
   const [name, setName] = useState('')
   const [repository, setRepository] = useState('')
+  const [repositoryToken, setRepositoryToken] = useState('')
+  const [repositoryUsername, setRepositoryUsername] = useState('')
   const [revision, setRevision] = useState('')
   const [subdirectory, setSubdirectory] = useState('')
   const [autoRepair, setAutoRepair] = useState(repairAvailable)
@@ -54,13 +61,38 @@ export function ProjectModal({
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const { data: gitConnections } = useGitConnections()
+  const connection = gitConnections?.connections.find(
+    (entry) => entry.host === repositoryHost(repository),
+  )
   const selected = templates.find((template) => template.id === preset)
   const unavailableLibrary = libraries.some(
     (id) => !templates.some((template) => template.id === id && template.ready),
   )
 
+  function clearRepositoryCredentials() {
+    setRepositoryToken('')
+    setRepositoryUsername('')
+  }
+
+  function selectSource(source: typeof kind) {
+    if (source !== kind) clearRepositoryCredentials()
+    setKind(source)
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (busy) return
+    if (
+      kind === 'import' &&
+      repositoryUsername.trim() &&
+      !repositoryToken.trim()
+    ) {
+      setError(
+        'Enter a repository token for this username, or clear the username for a public import.',
+      )
+      return
+    }
     let toolchain: string | undefined
     if (kind === 'create' && preset === 'lean') {
       let version = leanVersion.trim().replace(/^leanprover\/lean4:/, '')
@@ -75,6 +107,9 @@ export function ProjectModal({
     }
     setBusy(true)
     setError('')
+    const credential = repositoryToken.trim()
+    const login = repositoryUsername.trim()
+    clearRepositoryCredentials()
     try {
       const project = await post<Project>('/api/projects', {
         name: name.trim() || undefined,
@@ -85,6 +120,12 @@ export function ProjectModal({
         ...(kind === 'import'
           ? {
               repository: repository.trim(),
+              ...(credential
+                ? {
+                    repositoryToken: credential,
+                    ...(login ? { repositoryUsername: login } : {}),
+                  }
+                : {}),
               revision: revision.trim() || undefined,
               publishingEnabled,
               ...(publishingEnabled && workingBranch.trim()
@@ -95,6 +136,7 @@ export function ProjectModal({
             ? { files }
             : { libraries, ...(toolchain ? { toolchain } : {}) }),
       })
+      clearRepositoryCredentials()
       onCreated(project)
     } catch (error) {
       setError(errorText(error))
@@ -109,13 +151,13 @@ export function ProjectModal({
       onClose={onClose}
       busy={busy}
     >
-      <form onSubmit={submit}>
+      <form onSubmit={submit} autoComplete="off">
         <div className="segmented-control" aria-label="Project source">
           <button
             type="button"
             aria-pressed={kind === 'import'}
             className={kind === 'import' ? 'selected' : ''}
-            onClick={() => setKind('import')}
+            onClick={() => selectSource('import')}
             disabled={busy}
           >
             <Icon name="git" />
@@ -125,7 +167,7 @@ export function ProjectModal({
             type="button"
             aria-pressed={kind === 'upload'}
             className={kind === 'upload' ? 'selected' : ''}
-            onClick={() => setKind('upload')}
+            onClick={() => selectSource('upload')}
             disabled={busy}
           >
             <Icon name="folder" />
@@ -135,7 +177,7 @@ export function ProjectModal({
             type="button"
             aria-pressed={kind === 'create'}
             className={kind === 'create' ? 'selected' : ''}
-            onClick={() => setKind('create')}
+            onClick={() => selectSource('create')}
             disabled={busy}
           >
             <Icon name="plus" />
@@ -145,23 +187,46 @@ export function ProjectModal({
         {kind === 'import' ? (
           <>
             <label className="field-label" htmlFor="repository-url">
-              Repository or GitHub folder link
+              Repository or GitHub / GitLab folder link
             </label>
             <input
               id="repository-url"
               autoFocus
               placeholder="https://github.com/owner/project"
               value={repository}
-              onChange={(event) => setRepository(event.target.value)}
+              onChange={(event) => {
+                clearRepositoryCredentials()
+                setRepository(event.target.value)
+              }}
               required
               disabled={busy}
               autoComplete="off"
             />
             <p className="field-help">
-              Public HTTPS repositories on GitHub, GitLab and other Git hosts
-              work. GitHub folder links work too. Lean versions and dependencies
-              are detected automatically.
+              HTTPS repositories on GitHub, GitLab and other Git hosts work.
+              GitHub and GitLab folder links work too. Lean versions and
+              dependencies are detected automatically.
             </p>
+            <GitConnectionStatus
+              connection={connection}
+              onOpenConnections={onOpenConnections}
+              disabled={busy}
+            />
+            <details className="repository-access-options">
+              <summary>
+                {connection
+                  ? 'Use a different token once'
+                  : 'Private repository access'}
+              </summary>
+              <RepositoryCredentialsFields
+                idPrefix="import-repository"
+                token={repositoryToken}
+                username={repositoryUsername}
+                onTokenChange={setRepositoryToken}
+                onUsernameChange={setRepositoryUsername}
+                disabled={busy}
+              />
+            </details>
             <div className="help-label">
               <label className="setup-repair-choice">
                 <input
@@ -176,10 +241,10 @@ export function ProjectModal({
               </label>
               <HelpTip label="Publishing changes">
                 Prepare a working branch, then save, commit and review changes
-                before pushing. Provide your repository token only when you
-                publish; it is used once and never sent to Lemex. After a GitHub
-                or GitLab push, open the pull request or merge request form to
-                finish submitting your changes.
+                before pushing. Import and publishing use your saved Git
+                connection, or a token you provide for one operation. After a
+                GitHub or GitLab push, open the pull request or merge request
+                form to finish submitting your changes.
               </HelpTip>
             </div>
             {publishingEnabled && (

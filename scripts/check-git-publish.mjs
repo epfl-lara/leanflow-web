@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { Runtime } from '../server/runtime.mjs'
 import { GitPublisher } from '../server/git-publish.mjs'
+import { gitCredentialsRunner } from '../server/git-credentials.mjs'
 
 const exec = promisify(execFile)
 const output = path.resolve('.runtime/git-publish-check')
@@ -105,7 +106,9 @@ const workspaces = {
 const transportScript = String.raw`
 import http.server, json, os, pathlib, shutil, ssl, subprocess, sys, threading
 credentials = json.loads(sys.stdin.buffer.read(32769))
-assert 'GIT_PUBLISH_TOKEN' not in os.environ
+credential_input = json.dumps(credentials)
+runner = CREDENTIALS_RUNNER
+assert 'GIT_REPOSITORY_TOKEN' not in os.environ
 assert 'GIT_SSL_NO_VERIFY' not in os.environ
 argv = sys.argv[1:]
 assert 'http.sslVerify=true' in argv
@@ -127,8 +130,6 @@ except OSError:
     pass
 env = dict(os.environ)
 env.pop('GIT_SSL_NO_VERIFY', None)
-env['GIT_PUBLISH_TOKEN'] = credentials['token']
-env['GIT_PUBLISH_USERNAME'] = credentials['username']
 if os.path.exists('/workspace/test-tls/cert.pem'):
     requests = []
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -141,7 +142,7 @@ if os.path.exists('/workspace/test-tls/cert.pem'):
     server.socket = context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
     prefix = argv[:argv.index('--git-dir=/workspace/repository.git')]
-    tls = subprocess.run(prefix + ['ls-remote', 'https://127.0.0.1:%d/repo.git' % server.server_port], env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    tls = subprocess.run(['python3', '-c', runner] + prefix + ['ls-remote', 'https://127.0.0.1:%d/repo.git' % server.server_port], env=env, input=credential_input, capture_output=True, text=True)
     server.shutdown(); server.server_close()
     assert tls.returncode != 0 and ('certificate' in tls.stderr.lower() or 'ssl' in tls.stderr.lower()), tls.stderr
     assert requests == [], 'Git sent an HTTP request despite the untrusted certificate'
@@ -150,11 +151,13 @@ shutil.copytree('/workspace/test-remote.git', '/tmp/remote.git')
 remote_index = argv.index('--', argv.index('push')) + 1
 argv[remote_index] = '/tmp/remote.git'
 argv[1:1] = ['-c', 'protocol.file.allow=always']
-result = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL)
+result = subprocess.run(['python3', '-c', runner] + argv, env=env, input=credential_input, text=True)
 if result.returncode == 0:
     subprocess.run(['git', '--git-dir=/tmp/remote.git', 'bundle', 'create', '/home/worker/remote.bundle', '--all'], check=True, stdin=subprocess.DEVNULL)
 sys.exit(result.returncode)
-`.replace('SOURCE_PATH', JSON.stringify(source))
+`
+  .replace('CREDENTIALS_RUNNER', JSON.stringify(gitCredentialsRunner))
+  .replace('SOURCE_PATH', JSON.stringify(source))
   .replace('HOST_SSH_PATH', JSON.stringify(path.join(os.homedir(), '.ssh')))
 
 async function publishTransport({ root, args, env, credentials }) {
@@ -180,6 +183,7 @@ async function publishTransport({ root, args, env, credentials }) {
     {
       env,
       freshHome: true,
+      cleanHome: true,
       readOnlyWorkspace: true,
       network: 'none',
       timeoutMs: 60000,
@@ -326,6 +330,7 @@ try {
     ['python3', '-c', 'import sys; sys.stdin.readline()'],
     {
       freshHome: true,
+      cleanHome: true,
       readOnlyWorkspace: true,
       network: 'none',
       timeoutMs: 10000,

@@ -34,10 +34,12 @@
   line-height: 1.7;
   overflow-wrap: anywhere;
 }
-.import-options {
+.import-options,
+.repository-access-options {
   margin: 15px 0;
 }
-.import-options > summary {
+.import-options > summary,
+.repository-access-options > summary {
   cursor: pointer;
   font-size: 12px;
   color: var(--muted);

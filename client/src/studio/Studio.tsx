@@ -39,6 +39,8 @@ import { isMarkdownPath } from './fileReading'
 import { isPdfFile } from '../../../shared/file-previews.mjs'
 import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
+import { RepositoryCredentialsDialog } from './RepositoryCredentialsDialog'
+import type { RepositoryCredentials } from './RepositoryCredentialsFields'
 import { ProjectSetupDetails } from './ProjectSetupDetails'
 import { UploadModal, type UploadFile } from './UploadFiles'
 import { SingleFileActions } from './SingleFileActions'
@@ -54,6 +56,7 @@ import { FileBrowser } from './FileBrowser'
 import { CreateEntryDialog, type EntryKind } from './CreateEntryDialog'
 import { parentFolders } from './projectPaths'
 import { GitModal } from './GitModal'
+import { GitConnectionsDialog } from './GitConnectionsDialog'
 import { ResizeHandle } from './ResizeHandle'
 import { SessionRecovery } from './SessionRecovery'
 import type {
@@ -276,6 +279,9 @@ export function Studio() {
     null,
   )
   const [uploadModal, setUploadModal] = useState(false)
+  const [repositoryAccessId, setRepositoryAccessId] = useState<string | null>(
+    null,
+  )
   const [renameTarget, setRenameTarget] = useState<Project | null>(null)
   const [creatingSingleFile, setCreatingSingleFile] = useState(false)
   const [creatingPlaygroundSource, setCreatingPlaygroundSource] = useState<
@@ -285,6 +291,7 @@ export function Studio() {
   const [stoppingSetup, setStoppingSetup] = useState(false)
   const [setupDetails, setSetupDetails] = useState(false)
   const [settingsModal, setSettingsModal] = useState(false)
+  const [gitConnectionsOpen, setGitConnectionsOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [deleteError, setDeleteError] = useState('')
@@ -1107,17 +1114,29 @@ export function Studio() {
 
   async function retryPrepare() {
     if (!projectId) return
+    if (project?.repositoryAuthenticationRequired) {
+      setRepositoryAccessId(projectId)
+      return
+    }
     try {
-      await saveCompletely()
-      const value = await post<Project>(
-        `/api/projects/${encodeURIComponent(projectId)}/prepare`,
-      )
-      setProjects((previous) =>
-        previous.map((item) => (item.id === value.id ? value : item)),
-      )
+      await prepareProject(projectId)
     } catch (error) {
       setError(errorText(error))
     }
+  }
+
+  async function prepareProject(
+    id: string,
+    credentials?: RepositoryCredentials,
+  ) {
+    if (projectIdRef.current === id) await saveCompletely()
+    const value = await post<Project>(
+      `/api/projects/${encodeURIComponent(id)}/prepare`,
+      credentials,
+    )
+    setProjects((previous) =>
+      previous.map((item) => (item.id === value.id ? value : item)),
+    )
   }
 
   function requestDelete(target: DeleteTarget) {
@@ -1747,6 +1766,14 @@ export function Studio() {
             )}
             <button
               className="icon-button"
+              aria-label="Git connections"
+              title="Git connections"
+              onClick={() => setGitConnectionsOpen(true)}
+            >
+              <Icon name="git" size={17} />
+            </button>
+            <button
+              className="icon-button"
               aria-label="Assistant settings"
               title="Assistant settings"
               onClick={() => setSettingsModal(true)}
@@ -2241,6 +2268,7 @@ export function Studio() {
                 key={project.id}
                 projectId={project.id}
                 file={pdfPreview ? undefined : file?.path}
+                currentFile={file?.path}
                 files={assistantFiles}
                 focusRequest={proofFocus || undefined}
                 editorProof={currentEditorProof || undefined}
@@ -2411,11 +2439,24 @@ export function Studio() {
           templates={session.templates}
           repairAvailable={session.lemex?.configured === true}
           initialPreset={projectModal.preset}
+          onOpenConnections={() => setGitConnectionsOpen(true)}
           onClose={() => setProjectModal(null)}
           onCreated={(created) => {
             setProjectModal(null)
             navigate(async () => acceptCreatedProject(created))
           }}
+        />
+      )}
+      {repositoryAccessId && (
+        <RepositoryCredentialsDialog
+          repository={
+            projects.find((item) => item.id === repositoryAccessId)?.repository
+          }
+          onClose={() => setRepositoryAccessId(null)}
+          onOpenConnections={() => setGitConnectionsOpen(true)}
+          onSubmit={(credentials) =>
+            prepareProject(repositoryAccessId, credentials)
+          }
         />
       )}
       {renameTarget && (
@@ -2469,6 +2510,9 @@ export function Studio() {
           onSaved={() => setNotice('Assistant settings saved')}
         />
       )}
+      {gitConnectionsOpen && (
+        <GitConnectionsDialog onClose={() => setGitConnectionsOpen(false)} />
+      )}
       {gitOpen && project && (
         <GitModal
           key={project.id}
@@ -2484,6 +2528,7 @@ export function Studio() {
           onSave={saveCompletely}
           onUpdated={acceptGit}
           onClose={() => setGitOpen(null)}
+          onOpenConnections={() => setGitConnectionsOpen(true)}
         />
       )}
       {pendingAction && (

@@ -67,6 +67,7 @@ export interface Project {
   preset?: string
   libraries?: string[]
   repository?: string
+  repositoryAuthenticationRequired?: boolean
   revision?: string
   publishingEnabled?: boolean
   workingBranch?: string
@@ -146,6 +147,23 @@ export interface GitInfo {
 
 export type GitProvider = 'github' | 'gitlab' | 'other'
 
+export interface GitConnection {
+  host: string
+  provider: GitProvider
+  username: string
+  updatedAt: string
+}
+
+export interface GitIdentity {
+  name: string
+  email: string
+}
+
+export interface GitConnections {
+  connections: GitConnection[]
+  identity: GitIdentity
+}
+
 export interface GitPushPreview {
   previewId: string
   head: string
@@ -219,6 +237,7 @@ export interface Run {
   createdAt?: string
   chatId?: string | null
   files?: string[]
+  currentFile?: string | null
   proofTarget?: RunProofTarget
   followups?: RunFollowup[]
   changeCount?: number
@@ -270,6 +289,8 @@ export interface RunFollowup {
   messageOffset: number
   error?: string
   files?: string[]
+  currentFile?: string | null
+  currentFileUnavailable?: boolean
   proofTarget?: RunProofTarget
 }
 

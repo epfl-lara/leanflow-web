@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import * as fs from 'node:fs/promises'
+import { mkdtempSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
@@ -36,7 +37,15 @@ function childProcess() {
   child.stderr = new PassThrough()
   child.requests = []
   child.killed = false
-  child.stdin.on('data', (chunk) => child.requests.push(chunk.toString()))
+  let ready
+  child.setupReady = new Promise((resolve) => (ready = resolve))
+  child.stdin.on('data', (chunk) => {
+    const text = chunk.toString()
+    if (text.startsWith('{"type":"setup"')) {
+      child.gitSetup = JSON.parse(text)
+      ready()
+    } else child.requests.push(text)
+  })
   child.kill = () => {
     if (child.killed) return
     child.killed = true
@@ -88,6 +97,10 @@ class FakeRuntime {
   spawn(root, args, options) {
     const child = childProcess()
     Object.assign(child, { root, args, options })
+    if (args[0] === 'python3' && args[1] === '-u')
+      child.workerHome = mkdtempSync(
+        path.join(path.dirname(root), 'terminal-home-'),
+      )
     this.spawned.push(child)
     return child
   }
@@ -1154,6 +1167,29 @@ async function connectTerminal(t, f) {
     ws.once('open', resolve)
     ws.once('error', reject)
   })
+  await new Promise((resolve, reject) => {
+    const child = f.runtime.spawned.at(-1)
+    const timer = setTimeout(
+      () => reject(new Error('Terminal setup timed out')),
+      2000,
+    )
+    const closed = () => {
+      clearTimeout(timer)
+      reject(new Error('Terminal closed before setup completed'))
+    }
+    ws.once('close', closed)
+    child.setupReady
+      .then(() => {
+        clearTimeout(timer)
+        ws.off('close', closed)
+        assert.deepEqual(child.gitSetup, {
+          type: 'setup',
+          identity: { name: 'Owner', email: 'owner@lemex-web.local' },
+        })
+        resolve()
+      })
+      .catch(reject)
+  })
   return ws
 }
 
@@ -1338,7 +1374,19 @@ test('a disconnected terminal holds its project guard and capacity until worker 
     409,
   )
   finishCleanup()
-  await new Promise((resolve) => setImmediate(resolve))
+  // Worker completion also closes its credential socket and disposable home.
+  // Wait for that observable cleanup rather than assuming one event-loop turn.
+  const previousHome = f.runtime.spawned[0].workerHome
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      await fs.stat(previousHome)
+    } catch (error) {
+      if (error.code === 'ENOENT') break
+      throw error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  await assert.rejects(fs.stat(previousHome), { code: 'ENOENT' })
   const next = await connectTerminal(t, f)
   assert.equal(next.readyState, WebSocket.OPEN)
   finishCleanup()

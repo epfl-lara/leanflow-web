@@ -3,9 +3,18 @@ import { constants } from 'node:fs'
 import path from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
-import { isIP } from 'node:net'
 import { validateRepository } from './workspaces.mjs'
 import { validateGitBranch } from './git-branches.mjs'
+import {
+  cleanupGitWorkerHome,
+  clearGitCredentials,
+  gitCredentialsRunner,
+  gitHttpsDestination,
+  gitHttpsArgs as gitArgs,
+  gitHttpsEnv as gitEnv,
+  redactGitCredentials,
+  validateGitCredentials,
+} from './git-credentials.mjs'
 import {
   gitReviewLink,
   gitReviewProvider,
@@ -19,53 +28,6 @@ const MAX_BUNDLE = 512 * 1024 * 1024
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status })
 }
-const gitEnv = {
-  GIT_CONFIG_NOSYSTEM: '1',
-  GIT_CONFIG_GLOBAL: '/dev/null',
-  GIT_CONFIG_SYSTEM: '/dev/null',
-  GIT_NO_REPLACE_OBJECTS: '1',
-  GIT_TERMINAL_PROMPT: '0',
-  GIT_ATTR_NOSYSTEM: '1',
-  GIT_CONFIG_COUNT: '0',
-  GIT_TRACE: '0',
-  GIT_TRACE_PACKET: '0',
-  GIT_TRACE_CURL: '0',
-  HTTP_PROXY: '',
-  HTTPS_PROXY: '',
-  ALL_PROXY: '',
-  NO_PROXY: '*',
-}
-const gitArgs = [
-  'git',
-  '-c',
-  'core.hooksPath=/dev/null',
-  '-c',
-  'core.fsmonitor=false',
-  '-c',
-  'credential.helper=',
-  '-c',
-  'http.followRedirects=false',
-  '-c',
-  'http.proxy=',
-  '-c',
-  'http.sslVerify=true',
-  '-c',
-  'protocol.allow=never',
-  '-c',
-  'protocol.https.allow=always',
-]
-const ASKPASS = `#!/usr/bin/python3
-import os, sys
-print(os.environ.get('GIT_PUBLISH_USERNAME', 'x-access-token') if len(sys.argv) > 1 and sys.argv[1].lower().startswith('username') else os.environ.get('GIT_PUBLISH_TOKEN', ''))
-`
-const PUSH = `import json, os, subprocess, sys
-data = json.loads(sys.stdin.buffer.read(32769))
-env = dict(os.environ)
-env.pop('GIT_SSL_NO_VERIFY', None)
-env['GIT_PUBLISH_USERNAME'] = data.get('username') or 'x-access-token'
-env['GIT_PUBLISH_TOKEN'] = data.get('token') or ''
-sys.exit(subprocess.run(sys.argv[1:], env=env, stdin=subprocess.DEVNULL).returncode)
-`
 const NETWORK_GIT = `import os, sys
 env = dict(os.environ)
 env.pop('GIT_SSL_NO_VERIFY', None)
@@ -208,6 +170,7 @@ export class GitPublisher {
     assertIdle = () => {},
     resolveHost = lookup,
     publishTransport,
+    gitCredentials = async () => null,
     redact = String,
     now = Date.now,
     ttlMs = 10 * 60_000,
@@ -219,6 +182,7 @@ export class GitPublisher {
       assertIdle,
       resolveHost,
       publishTransport,
+      gitCredentials,
       redact,
       now,
       ttlMs,
@@ -334,6 +298,7 @@ export class GitPublisher {
         timeoutMs: 300_000,
         network: 'none',
         freshHome: true,
+        cleanHome: true,
         ...options,
       },
     )
@@ -382,14 +347,7 @@ export class GitPublisher {
     return { result, child }
   }
   async #cleanupHome(child) {
-    const home = child?.workerHome
-    if (
-      home &&
-      path.dirname(home) === path.join(this.dataDir, 'runtime', 'homes') &&
-      /^[a-f0-9]{64}$/.test(path.basename(home)) &&
-      (await fs.realpath(home)) === path.resolve(home)
-    )
-      await fs.rm(home, { recursive: true, force: true })
+    await cleanupGitWorkerHome(child, this.dataDir)
   }
   async #head(root) {
     const result = await this.#run(
@@ -511,23 +469,10 @@ export class GitPublisher {
     }
   }
   async #destination(value) {
-    let addresses = []
-    const remoteUrl = await validateRepository(value, async (...args) => {
-      const resolved = await this.resolveHost(...args)
-      addresses = resolved.map((item) => item.address)
-      return resolved
+    return gitHttpsDestination(value, {
+      validateRepository,
+      resolveHost: this.resolveHost,
     })
-    const hostname = new URL(remoteUrl).hostname
-    if (!addresses.length) addresses = [hostname.replace(/^\[|\]$/g, '')]
-    const selected =
-      addresses.find((address) => isIP(address) === 4) || addresses[0]
-    const pin = isIP(hostname.replace(/^\[|\]$/g, ''))
-      ? []
-      : [
-          '-c',
-          `http.curloptResolve=${hostname}:443:${isIP(selected) === 6 ? '[' + selected + ']' : selected}`,
-        ]
-    return { remoteUrl, pin }
   }
   async metadata(owner, projectId, status) {
     const project = this.workspaces.get(projectId, owner)
@@ -675,6 +620,7 @@ export class GitPublisher {
                   network: 'none',
                   readOnlyWorkspace: true,
                   freshHome: true,
+                  cleanHome: true,
                   timeoutMs: 300_000,
                 },
                 { keepHome: true },
@@ -856,10 +802,6 @@ export class GitPublisher {
               )
           })
           const history = await this.#history(root, true)
-          await fs.writeFile(path.join(root, 'askpass.py'), ASKPASS, {
-            mode: 0o700,
-            flag: 'wx',
-          })
           const preview = {
             previewId,
             head,
@@ -927,65 +869,44 @@ export class GitPublisher {
           fail('Push preview not found. Create a new preview.', 404)
         if (preview.expiresAt <= this.now())
           fail('This push preview expired. Preview it again.', 409)
-        if (
-          input.token !== undefined &&
-          (typeof input.token !== 'string' ||
-            input.token.length > 16_000 ||
-            /[^\x21-\x7e]/.test(input.token))
-        )
-          fail('Enter a valid one-use repository token.')
-        if (
-          input.username !== undefined &&
-          (typeof input.username !== 'string' ||
-            !/^[A-Za-z0-9._@-]{1,200}$/.test(input.username))
-        )
-          fail('Enter a valid repository username.')
-        const source = await this.#source(project)
-        await this.#locked(projectId, async () => {
-          this.assertIdle(projectId, owner)
-          if ((await this.#head(source)) !== preview.head)
-            fail(
-              'The branch HEAD changed after this preview. Preview the new commits before publishing.',
-              409,
-            )
-        })
-        const destination = await this.#destination(preview.remoteUrl)
-        this.assertIdle(projectId, owner)
-        this.previews.delete(input.previewId)
-        const credentials = {
-          token: input.token || '',
-          username: input.username || 'x-access-token',
+        const credentials = validateGitCredentials(input)
+        if (!credentials.token) {
+          const saved = await this.gitCredentials(owner, preview.remoteUrl)
+          if (saved) Object.assign(credentials, validateGitCredentials(saved))
         }
-        const redactCredentials = (value) => {
-          let text = this.redact(String(value))
-          if (credentials.token)
-            for (const secret of [
-              credentials.token,
-              encodeURIComponent(credentials.token),
-              Buffer.from(
-                credentials.username + ':' + credentials.token,
-              ).toString('base64'),
-            ])
-              text = text.split(secret).join('[redacted]')
-          return text
-        }
-        const env = { ...gitEnv, GIT_ASKPASS: '/workspace/askpass.py' }
-        const args = [
-          ...gitArgs,
-          ...destination.pin,
-          '--git-dir=/workspace/repository.git',
-          '-c',
-          'http.extraHeader=',
-          '-c',
-          'push.followTags=false',
-          'push',
-          '--porcelain',
-          '--no-verify',
-          '--',
-          preview.remoteUrl,
-          `${preview.head}:refs/heads/${preview.branch}`,
-        ]
+        const redactCredentials = (value) =>
+          redactGitCredentials(value, credentials, this.redact)
+        let attempted = false
         try {
+          const source = await this.#source(project)
+          await this.#locked(projectId, async () => {
+            this.assertIdle(projectId, owner)
+            if ((await this.#head(source)) !== preview.head)
+              fail(
+                'The branch HEAD changed after this preview. Preview the new commits before publishing.',
+                409,
+              )
+          })
+          const destination = await this.#destination(preview.remoteUrl)
+          this.assertIdle(projectId, owner)
+          this.previews.delete(input.previewId)
+          attempted = true
+          const env = { ...gitEnv }
+          const args = [
+            ...gitArgs,
+            ...destination.pin,
+            '--git-dir=/workspace/repository.git',
+            '-c',
+            'http.extraHeader=',
+            '-c',
+            'push.followTags=false',
+            'push',
+            '--porcelain',
+            '--no-verify',
+            '--',
+            preview.remoteUrl,
+            `${preview.head}:refs/heads/${preview.branch}`,
+          ]
           const result = this.publishTransport
             ? await this.publishTransport({
                 root: preview.root,
@@ -997,11 +918,12 @@ export class GitPublisher {
             : await (async () => {
                 const queued = await this.#queued(
                   preview.root,
-                  ['python3', '-c', PUSH, ...args],
+                  ['python3', '-c', gitCredentialsRunner, ...args],
                   {
                     env,
                     network: 'bridge',
                     freshHome: true,
+                    cleanHome: true,
                     readOnlyWorkspace: true,
                     timeoutMs: 300_000,
                     input: JSON.stringify(credentials),
@@ -1010,9 +932,11 @@ export class GitPublisher {
                 return queued.result
               })()
           if (result.code !== 0) {
-            const detail = redactCredentials(
-              result.stderr || result.stdout || 'Push failed.',
-            )
+            const detail = result.truncated
+              ? 'Git output exceeded the publishing limit. Check the repository and retry.'
+              : redactCredentials(
+                  result.stderr || result.stdout || 'Push failed.',
+                )
             fail(
               `The repository rejected this push. ${detail.slice(-4000)}`,
               409,
@@ -1047,8 +971,9 @@ export class GitPublisher {
           error.message = redactCredentials(error.message)
           throw error
         } finally {
-          credentials.token = ''
-          await fs.rm(preview.root, { recursive: true, force: true })
+          clearGitCredentials(credentials)
+          if (attempted)
+            await fs.rm(preview.root, { recursive: true, force: true })
         }
       },
       { workspaceLock: false },

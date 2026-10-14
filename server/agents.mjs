@@ -10,6 +10,7 @@ import { LiveMirror } from './agent-live.mjs'
 import { FollowupInbox } from './agent-followups.mjs'
 import {
   agentConversationContext,
+  currentEditorFile,
   selectedContextFiles,
 } from './agent-context.mjs'
 import { validateWorkspaceFilePath } from './workspaces.mjs'
@@ -140,6 +141,7 @@ export class AgentManager {
     if (input.file !== undefined && typeof input.file !== 'string')
       throw Object.assign(new Error('Invalid selected file.'), { status: 400 })
     if (input.file) validateWorkspaceFilePath(input.file)
+    const currentFile = currentEditorFile(input, validateWorkspaceFilePath)
     const files = selectedContextFiles(input, validateWorkspaceFilePath)
     const requestedTarget = normalizeProofTarget(input.proofTarget)
     if (
@@ -259,6 +261,7 @@ export class AgentManager {
       projectId,
       mode: ['repair', 'prove'].includes(input.mode) ? 'proofs' : input.mode,
       prompt: input.prompt.trim(),
+      currentFile,
       ...(proofTarget ? { proofTarget } : {}),
       file:
         proofTarget?.path ||
@@ -318,12 +321,29 @@ export class AgentManager {
       { files: input?.files },
       validateWorkspaceFilePath,
     )
+    const currentFile = currentEditorFile(
+      input || {},
+      validateWorkspaceFilePath,
+    )
     const requestedTarget = normalizeProofTarget(input?.proofTarget)
-    const submission = { ...input, files, proofTarget: requestedTarget }
+    const submission = {
+      ...input,
+      currentFile,
+      currentFileUnavailable: false,
+      files,
+      proofTarget: requestedTarget,
+    }
     const messageId =
       typeof input?.id === 'string' ? input.id.toLowerCase() : null
     const existing = job.followups?.some((entry) => entry.id === messageId)
     if (existing) return this.followups.queue(owner, id, submission).job
+    if (currentFile && !files.includes(currentFile))
+      submission.currentFileUnavailable =
+        !(await this.workspaces.validateEditorContextFile(
+          job.projectId,
+          owner,
+          currentFile,
+        ))
     const saved = []
     let size = 0
     for (const file of files) {
@@ -509,10 +529,32 @@ export class AgentManager {
         'Preparing project',
         'Checking selected files and capturing saved sources.',
       )
-      for (const file of new Set(
-        [job.file, ...(job.files || [])].filter(Boolean),
-      ))
+      const automaticSearchFile =
+        job.mode === 'search' &&
+        !job.proofTarget &&
+        job.file === job.currentFile
+      const requiredFiles = new Set(
+        [automaticSearchFile ? null : job.file, ...(job.files || [])].filter(
+          Boolean,
+        ),
+      )
+      for (const file of requiredFiles)
         await this.workspaces.readFile(job.projectId, job.owner, file)
+      if (job.currentFile && !requiredFiles.has(job.currentFile))
+        if (
+          !(await this.workspaces.validateEditorContextFile(
+            job.projectId,
+            job.owner,
+            job.currentFile,
+          ))
+        ) {
+          job.currentFile = null
+          if (automaticSearchFile) job.file = null
+          this.events.updateMetadata(id, {
+            currentFile: null,
+            ...(automaticSearchFile ? { file: null } : {}),
+          })
+        }
       const priorRuns = job.chatId
         ? (await this.chats.history(job.chatId, job.owner)).runs
         : []

@@ -8,7 +8,8 @@ import { WebSocketServer } from 'ws'
 import { Auth, sameOrigin } from './auth.mjs'
 import { Runtime } from './runtime.mjs'
 import { Terminals } from './terminals.mjs'
-import { WorkspaceStore } from './workspaces.mjs'
+import { WorkspaceStore, validateRepository } from './workspaces.mjs'
+import { GitConnections } from './git-connections.mjs'
 import { loadConfig } from './config.mjs'
 import { EventStore, JobManager } from './events.mjs'
 import { AgentManager } from './agents.mjs'
@@ -79,6 +80,7 @@ const runMetadata = (job) => {
     'projectId',
     'chatId',
     'file',
+    'currentFile',
     'files',
     'mode',
     'model',
@@ -141,6 +143,7 @@ export async function createStudio({
   dataDir = process.env.STUDIO_DATA_DIR || path.join(projectDir, '.data'),
   runtime: suppliedRuntime,
   config: suppliedConfig,
+  gitConnections: suppliedGitConnections,
   titleGenerator: suppliedTitleGenerator,
   capacity = loadCapacity(),
 } = {}) {
@@ -180,10 +183,25 @@ export async function createStudio({
         ?.playgroundState || 'unavailable',
   })
   preparePlayground()
+  const gitConnections =
+    suppliedGitConnections ||
+    (await new GitConnections({ dataDir, validateRepository }).init())
+  const gitIdentity = async (owner) => {
+    const { identity } = await gitConnections.get(owner)
+    return {
+      name:
+        identity.name ||
+        auth.users.find((user) => user.id === owner)?.name ||
+        owner,
+      email: identity.email || `${owner}@lemex-web.local`,
+    }
+  }
   const workspaces = new WorkspaceStore({
     dataDir: workspaceDataDir,
     runtime,
     setupBuildTimeoutMs: capacity.setupBuildTimeoutMs,
+    gitCredentials: (owner, repository) =>
+      gitConnections.credentials(owner, repository),
   })
   await workspaces.init()
   const events = new EventStore(dataDir),
@@ -249,6 +267,8 @@ export async function createStudio({
     runtime,
     capacity,
     workspaces,
+    gitConnections,
+    gitIdentity,
     redact: config.redact,
   })
   let publisher
@@ -432,6 +452,28 @@ export async function createStudio({
   app.get('/api/projects', (req, res) =>
     res.json(workspaces.list(req.user.id).map(publicProject)),
   )
+  app.get('/api/git-connections', async (req, res) =>
+    res.json(await gitConnections.get(req.user.id)),
+  )
+  app.put('/api/git-connections', async (req, res) => {
+    const input = req.body
+    if (!input || typeof input !== 'object' || Array.isArray(input))
+      throw Object.assign(
+        new Error('Choose a Git connection or commit identity to save.'),
+        { status: 400 },
+      )
+    if (input.action === 'connect')
+      return res.json(await gitConnections.connect(req.user.id, input))
+    if (input.action === 'identity')
+      return res.json(await gitConnections.setIdentity(req.user.id, input))
+    throw Object.assign(
+      new Error('Choose a Git connection or commit identity to save.'),
+      { status: 400 },
+    )
+  })
+  app.delete('/api/git-connections', async (req, res) =>
+    res.json(await gitConnections.disconnect(req.user.id, req.query.host)),
+  )
   app.post(
     '/api/projects',
     sourceRequestHandler(async (req, res) =>
@@ -468,6 +510,8 @@ export async function createStudio({
       publicProject(
         await workspaces.prepare(req.params.id, req.user.id, {
           assertIdle: () => requireNoRun(req.params.id, req.user.id),
+          repositoryToken: req.body?.repositoryToken,
+          repositoryUsername: req.body?.repositoryUsername,
         }),
       ),
     )
@@ -654,10 +698,12 @@ export async function createStudio({
     workspaces,
     assertIdle: (id, owner) => requireNoRun(id, owner, { ignoreGit: true }),
     redact: config.redact,
+    gitCredentials: (owner, repository) =>
+      gitConnections.credentials(owner, repository),
   }).init()
   const gitInfo = async (id, user) => ({
     ...(await publisher.metadata(user.id, id)),
-    author: { name: user.name, email: `${user.id}@lemex-web.local` },
+    author: await gitIdentity(user.id),
   })
   app.get('/api/projects/:id/git', async (req, res) => {
     workspaces.get(req.params.id, req.user.id)
@@ -804,13 +850,14 @@ export async function createStudio({
             child.stdin.end(files.map((filename) => filename + '\0').join(''))
           })
         await withPaths(['add', '-A'])
+        const identity = await gitIdentity(req.user.id)
         // A checkout may already have staged sibling or private files. Commit only
         // the admitted project paths, leaving unrelated staged work untouched.
         await withPaths([
           '-c',
-          `user.name=${authorName?.trim() || req.user.name}`,
+          `user.name=${authorName?.trim() || identity.name}`,
           '-c',
-          `user.email=${authorEmail || `${req.user.id}@lemex-web.local`}`,
+          `user.email=${authorEmail || identity.email}`,
           'commit',
           '--only',
           '-m',
@@ -1129,6 +1176,7 @@ export async function createStudio({
     chats,
     config,
     settings,
+    gitConnections,
     publisher,
     close,
   }

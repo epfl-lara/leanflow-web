@@ -163,7 +163,7 @@ export function FileContextPicker({
       >
         <summary
           aria-label="Select files"
-          title="Select project files, or type @ in your message"
+          title="The open file is included automatically. Select extra files, or type @ in your message."
           aria-controls={`${id}-panel`}
           aria-disabled={disabled}
           tabIndex={disabled ? -1 : 0}
@@ -205,7 +205,7 @@ export function FileContextPicker({
           <p className="file-context-help" role="status">
             {atLimit
               ? `${selectedPaths.length} files selected. ${selectedPaths.length === MAX_FILES ? 'Remove one to attach another.' : 'Choose no more than 12 files.'}`
-              : 'Choose up to 12 files to include as context.'}
+              : 'The open file is included automatically. Choose up to 12 extra files.'}
           </p>
           <div className="file-context-results">
             {selectedFiles.length > 0 && (

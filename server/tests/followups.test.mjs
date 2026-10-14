@@ -278,6 +278,135 @@ test('accepted active guidance survives in bounded future chat context and resta
   assert(!context.includes(pending.text))
 })
 
+test('switching editor files reaches native guidance without manual attachments and binds durable retries', async (t) => {
+  const { events, job: previous } = await fixture(t)
+  events.updateMetadata(previous.id, { status: 'completed' })
+  const reads = [],
+    calls = []
+  let currentFileExists = true
+  const manager = new AgentManager({
+    events,
+    maxConcurrent: 0,
+    runtime: {},
+    settings: {},
+    workspaces: {
+      get: (id) => ({ id, status: 'ready' }),
+      async readFile() {
+        assert.fail('Automatic context must not read file contents')
+      },
+      async validateEditorContextFile(_project, _owner, file) {
+        reads.push(file)
+        if (
+          file === 'Missing.lean' ||
+          (file === 'Notes.md' && !currentFileExists)
+        )
+          return null
+        return file
+      },
+      async readPdfPreview() {
+        assert.fail('Automatic context must not parse PDF contents')
+      },
+    },
+    config: {
+      provider: { LEMEX_API_KEY: 'fake' },
+      defaultModel: 'model',
+      models: [{ id: 'model' }],
+      redact: String,
+    },
+  })
+  const job = await manager.start('alice', 'p', {
+    mode: 'search',
+    prompt: 'Explain this file.',
+    file: 'Main.lean',
+    currentFile: 'Main.lean',
+    files: [],
+  })
+  events.updateMetadata(job.id, { status: 'running' })
+  manager.active.set(job.id, {
+    accepting: true,
+    threadId: 'thread',
+    turnId: 'turn',
+    controller: new AbortController(),
+    rpc: {
+      async call(method, params) {
+        calls.push({ method, params })
+        return { turnId: 'turn' }
+      },
+    },
+  })
+  const input = {
+    id: randomUUID(),
+    text: 'Now explain the file I opened.',
+    currentFile: 'Notes.md',
+    files: [],
+  }
+  const result = await manager.message('alice', job.id, input)
+  assert.deepEqual(reads, ['Notes.md'])
+  assert.equal(result.followups[0].currentFile, 'Notes.md')
+  assert.equal(result.followups[0].status, 'accepted')
+  assert.equal(result.followupContexts, undefined)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].method, 'turn/steer')
+  assert.match(calls[0].params.input[0].text, /Open file in the user’s editor/)
+  assert.match(calls[0].params.input[0].text, /"Notes.md"/)
+  assert.match(
+    calls[0].params.input[0].text,
+    /may contain newer saved or unsaved changes/,
+  )
+  assert(
+    agentConversationContext(
+      { id: 'next', prompt: 'Continue.', createdAt: '9999' },
+      [events.get(job.id)],
+    ).includes('"currentFile": "Notes.md"'),
+  )
+  currentFileExists = false
+  const retry = await manager.message('alice', job.id, input)
+  assert.equal(retry.followups.length, 1)
+  assert.deepEqual(reads, ['Notes.md'])
+  assert.equal(calls.length, 1)
+  await assert.rejects(
+    manager.message('alice', job.id, { ...input, currentFile: 'Main.lean' }),
+    { status: 409 },
+  )
+  for (const currentFile of ['../host', '/etc/passwd', '.env', 7])
+    await assert.rejects(
+      manager.message('alice', job.id, {
+        ...input,
+        id: randomUUID(),
+        currentFile,
+      }),
+      { status: 400 },
+    )
+  const missingInput = {
+    ...input,
+    id: randomUUID(),
+    currentFile: 'Missing.lean',
+  }
+  const missing = await manager.message('alice', job.id, missingInput)
+  assert.equal(missing.followups.at(-1).status, 'accepted')
+  assert.equal(missing.followups.at(-1).currentFileUnavailable, true)
+  assert(!calls[1].params.input[0].text.includes('Missing.lean'))
+  assert.equal(calls.length, 2)
+  const missingRetry = await manager.message('alice', job.id, missingInput)
+  assert.equal(missingRetry.followups.length, 2)
+  assert.equal(calls.length, 2)
+  const pdfInput = {
+    ...input,
+    id: randomUUID(),
+    currentFile: 'Lecture.PDF',
+  }
+  const withPdf = await manager.message('alice', job.id, pdfInput)
+  assert.equal(withPdf.followups.at(-1).currentFile, 'Lecture.PDF')
+  assert.equal(withPdf.followups.at(-1).status, 'accepted')
+  assert.equal(calls.length, 3)
+  assert.match(calls[2].params.input[0].text, /"Lecture.PDF"/)
+  assert(!calls[2].params.input[0].text.includes('%PDF-1.7'))
+  assert.equal(reads.at(-1), 'Lecture.PDF')
+  manager.active.delete(job.id)
+  events.updateMetadata(job.id, { status: 'completed' })
+  await manager.shutdown()
+})
+
 test('catalog reasoning efforts come only from native metadata and explicit unsupported effort is rejected', async (t) => {
   const { events } = await fixture(t)
   const models = catalogModels(
@@ -317,24 +446,29 @@ test('catalog reasoning efforts come only from native metadata and explicit unsu
     },
   })
   assert.equal(
-    (await manager.start('alice', 'one', { mode: 'repair', prompt: 'Fix it.' })).mode,
+    (await manager.start('alice', 'one', { mode: 'repair', prompt: 'Fix it.' }))
+      .mode,
     'proofs',
   )
   assert.equal(events.list('alice', 'one')[0].effort, 'medium')
   assert.equal(
-    (await manager.start('alice', 'two', {
-      mode: 'proofs',
-      prompt: 'Prove it.',
-      effort: 'low',
-    })).effort,
+    (
+      await manager.start('alice', 'two', {
+        mode: 'proofs',
+        prompt: 'Prove it.',
+        effort: 'low',
+      })
+    ).effort,
     'low',
   )
   assert.equal(
-    (await manager.start('alice', 'three', {
-      mode: 'prove',
-      prompt: 'Prove it.',
-      model: 'plain',
-    })).effort,
+    (
+      await manager.start('alice', 'three', {
+        mode: 'prove',
+        prompt: 'Prove it.',
+        model: 'plain',
+      })
+    ).effort,
     null,
   )
   for (const effort of ['high', 'unlisted', 1, false])

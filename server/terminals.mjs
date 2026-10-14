@@ -1,6 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { WebSocketServer } from 'ws'
 import { removeDisposableTree } from './temporary-workspaces.mjs'
+import {
+  createTerminalGitBroker,
+  terminalGitEnvironment,
+} from './terminal-git.mjs'
 
 const workerScript = readFileSync(
   new URL('./terminal-worker.py', import.meta.url),
@@ -10,8 +14,22 @@ const maxInput = 16 * 1024
 const outputWindow = 256 * 1024
 
 export class Terminals {
-  constructor({ runtime, capacity, workspaces, redact = String }) {
-    Object.assign(this, { runtime, capacity, workspaces, redact })
+  constructor({
+    runtime,
+    capacity,
+    workspaces,
+    gitConnections,
+    gitIdentity,
+    redact = String,
+  }) {
+    Object.assign(this, {
+      runtime,
+      capacity,
+      workspaces,
+      gitConnections,
+      gitIdentity,
+      redact,
+    })
     this.sessions = new Set()
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 })
   }
@@ -48,6 +66,10 @@ export class Terminals {
     const session = { ws, projectId: project.id }
     this.sessions.add(session)
     let child
+    let broker
+    let setup = Promise.resolve()
+    let initialized = false
+    const pendingInput = []
     let outstanding = 0
     let lastActivity = Date.now()
     let alive = true
@@ -79,6 +101,7 @@ export class Terminals {
         project.id,
         project.owner,
       )
+      const checkout = this.workspaces?.repositoryRoot?.(project)
       child = this.runtime.spawn(
         project.root,
         ['python3', '-u', '-c', workerScript],
@@ -86,10 +109,14 @@ export class Terminals {
           network: 'bridge',
           freshHome: true,
           cleanHome: true,
+          ...(checkout && checkout !== project.root
+            ? { repositoryRoot: checkout }
+            : {}),
           env: {
             TERM: 'xterm-256color',
             COLORTERM: 'truecolor',
             PS1: '\\w \\$ ',
+            ...(this.gitConnections ? terminalGitEnvironment() : {}),
           },
         },
       )
@@ -124,6 +151,8 @@ export class Terminals {
         }
       })
       session.finalize = async () => {
+        await setup.catch(() => {})
+        await broker?.close()
         if (configuration !== undefined) {
           try {
             await this.workspaces.refreshExternalConfiguration(
@@ -198,11 +227,44 @@ export class Terminals {
             message.type === 'input'
               ? { type: 'input', data: message.data }
               : { type: 'resize', cols: message.cols, rows: message.rows }
-          child.stdin.write(JSON.stringify(input) + '\n')
+          if (initialized) child.stdin.write(JSON.stringify(input) + '\n')
+          else {
+            if (pendingInput.length >= 8)
+              return fail(
+                'Too much terminal input arrived before startup.',
+                1008,
+              )
+            pendingInput.push(input)
+          }
         } catch {
           fail('Invalid terminal input. Reopen the terminal to continue.', 1008)
         }
       })
+      setup = (async () => {
+        if (this.gitConnections) {
+          if (!child.workerHome)
+            throw new Error(
+              'The terminal worker has no private credential home.',
+            )
+          broker = await createTerminalGitBroker({
+            home: child.workerHome,
+            owner: project.owner,
+            connections: this.gitConnections,
+          })
+        }
+        const identity = this.gitIdentity
+          ? await this.gitIdentity(project.owner)
+          : (await this.gitConnections?.get(project.owner))?.identity
+        if (ws.readyState !== 1 || child.killed) return
+        child.stdin.write(JSON.stringify({ type: 'setup', identity }) + '\n')
+        initialized = true
+        for (const input of pendingInput)
+          child.stdin.write(JSON.stringify(input) + '\n')
+        pendingInput.length = 0
+      })()
+      setup.catch(() =>
+        fail('Git setup could not start. Reopen the terminal to try again.'),
+      )
     } catch (error) {
       console.error(
         `[LeanFlow terminal] ${this.redact(error.message).slice(0, 2000)}`,

@@ -236,7 +236,9 @@ try {
   await open()
   const link =
     'https://github.com/epfl-lara/jordan-curve-theorem/tree/main/HOLLight-Lean'
-  await f.page.getByLabel('Repository or GitHub folder link').fill(link)
+  await f.page
+    .getByLabel('Repository or GitHub / GitLab folder link')
+    .fill(link)
   assert.equal(
     await f.page.locator('.import-options').getAttribute('open'),
     null,

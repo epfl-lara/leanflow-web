@@ -55,6 +55,7 @@ const mergeRun = (values: Run[], value: Run) =>
 export function AssistantPanel({
   projectId,
   file,
+  currentFile = file,
   files,
   onDeleteChat,
   session,
@@ -73,6 +74,7 @@ export function AssistantPanel({
 }: {
   projectId: string
   file?: string
+  currentFile?: string
   files: FileEntry[]
   onDeleteChat: (chat: { id: string; title: string }) => void
   session: Session
@@ -125,7 +127,9 @@ export function AssistantPanel({
   runsRef.current = runs
   const draft = useChatDraft(session.user.id, projectId, chatId)
   const draftRef = useRef(draft),
-    receipts = useRef(new Map<string, DraftSubmission>())
+    receipts = useRef(
+      new Map<string, DraftSubmission & { currentFile: string | null }>(),
+    )
   const handledFocus = useRef<number | null>(null)
   draftRef.current = draft
   const liveSeen = useRef(new Map<string, string>()),
@@ -555,6 +559,7 @@ export function AssistantPanel({
       effort: effort || null,
       liveEdits,
       file: mode === 'search' ? file : target,
+      currentFile: currentFile || null,
       mode,
       files: [...captured.files],
       ...(captured.proofTarget ? { proofTarget: captured.proofTarget } : {}),
@@ -572,19 +577,23 @@ export function AssistantPanel({
           throw new Error(
             'Stop the run or discard your unsaved edits before sending a focused update.',
           )
-        const clientId =
-          [...receipts.current.entries()].find(
-            ([, value]) =>
-              value.key === captured.key &&
-              value.revision === captured.revision &&
-              value.text === captured.text,
-          )?.[0] || crypto.randomUUID()
-        receipts.current.set(clientId, captured)
+        const previousSubmission = [...receipts.current.entries()].find(
+          ([, value]) =>
+            value.key === captured.key &&
+            value.revision === captured.revision &&
+            value.text === captured.text,
+        )
+        const clientId = previousSubmission?.[0] || crypto.randomUUID()
+        const currentFile = previousSubmission
+          ? previousSubmission[1].currentFile
+          : settings.currentFile
+        receipts.current.set(clientId, { ...captured, currentFile })
         const value = await post<RunReceipt>(
           `/api/runs/${encodeURIComponent(steering.id)}/messages`,
           {
             id: clientId,
             text: captured.text.trim(),
+            currentFile,
             files: captured.files,
             ...(captured.proofTarget
               ? { proofTarget: captured.proofTarget }
@@ -984,8 +993,21 @@ export function AssistantPanel({
         )}
         <div className="composer-context">
           <Icon name="file" size={13} />
-          <span title={mode === 'search' ? file : target}>
-            {(mode === 'search' ? file : target) || 'Project context'}
+          <span
+            title={
+              currentFile
+                ? `${currentFile} is included automatically. You can add other files below.`
+                : undefined
+            }
+            aria-label={
+              currentFile
+                ? `Current file included automatically: ${currentFile}`
+                : undefined
+            }
+          >
+            {currentFile
+              ? `Current file: ${currentFile}`
+              : target || 'Project context'}
           </span>
           {dirty && !hasActive && (
             <span className="tag">Saves before sending</span>

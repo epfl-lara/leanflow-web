@@ -199,7 +199,7 @@ async function openImport() {
 async function finishImport(repository) {
   const count = imports.length
   await importDialog()
-    .getByLabel('Repository or GitHub folder link', { exact: true })
+    .getByLabel('Repository or GitHub / GitLab folder link', { exact: true })
     .fill(repository)
   await importDialog()
     .getByRole('button', { name: 'Import project', exact: true })
@@ -390,7 +390,7 @@ try {
   )
   const githubRepository = 'https://github.com/fixture/publishing.git'
   await importDialog()
-    .getByLabel('Repository or GitHub folder link', { exact: true })
+    .getByLabel('Repository or GitHub / GitLab folder link', { exact: true })
     .fill(githubRepository)
   await importDialog()
     .getByRole('button', { name: 'About Publishing changes', exact: true })
@@ -408,7 +408,7 @@ try {
   )
   assert.equal(
     await importDialog()
-      .getByLabel('Repository or GitHub folder link', { exact: true })
+      .getByLabel('Repository or GitHub / GitLab folder link', { exact: true })
       .inputValue(),
     githubRepository,
     'Dismissing publishing help discarded the typed repository',

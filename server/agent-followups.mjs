@@ -1,5 +1,6 @@
 import { TERMINAL } from './events.mjs'
 import { proofTargetContext, proofTargetReference } from './proof-target.mjs'
+import { currentEditorContext } from './agent-context.mjs'
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -43,6 +44,7 @@ export class FollowupInbox {
     if (existing) {
       if (
         existing.text !== text ||
+        (existing.currentFile || null) !== (input.currentFile || null) ||
         JSON.stringify(existing.files || []) !== JSON.stringify(files) ||
         JSON.stringify(existing.proofTarget || null) !==
           JSON.stringify(input.proofTarget || null)
@@ -85,6 +87,8 @@ export class FollowupInbox {
     const entry = {
       id: messageId,
       text,
+      ...(input.currentFile ? { currentFile: input.currentFile } : {}),
+      ...(input.currentFileUnavailable ? { currentFileUnavailable: true } : {}),
       ...(files.length ? { files } : {}),
       ...(input.proofTarget ? { proofTarget: input.proofTarget } : {}),
       status: 'pending',
@@ -148,6 +152,9 @@ export class FollowupInbox {
                 type: 'text',
                 text:
                   entry.text +
+                  (entry.currentFile && !entry.currentFileUnavailable
+                    ? '\n\n' + currentEditorContext(entry.currentFile)
+                    : '') +
                   (entry.proofTarget
                     ? '\n\n' + proofTargetContext(entry.proofTarget, job.mode)
                     : '') +

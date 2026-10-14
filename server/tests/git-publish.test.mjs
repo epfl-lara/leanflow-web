@@ -9,6 +9,7 @@ import { promisify } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
 import { createStudio } from '../studio.mjs'
 import { GitPublisher } from '../git-publish.mjs'
+import { gitCredentialsRunner } from '../git-credentials.mjs'
 import { gitReviewLink, gitReviewProvider } from '../git-review.mjs'
 
 const execute = promisify(execFile)
@@ -37,7 +38,7 @@ async function fixture(t) {
         )
         .map((value) => remotes.get(value) || value)
       if (
-        mapped.includes('fetch') &&
+        (mapped.includes('fetch') || mapped.includes('push')) &&
         mapped.some((value) => value.startsWith('file://'))
       )
         mapped.splice(
@@ -105,6 +106,7 @@ async function fixture(t) {
     },
   })
   studio.publisher.resolveHost = async () => [{ address: '93.184.216.34' }]
+  studio.gitConnections.resolveHost = studio.publisher.resolveHost
   const project = await studio.workspaces.create('owner', {
     name: 'Publishing fixture',
     preset: 'lean',
@@ -300,6 +302,54 @@ test('preview exports committed objects only and publishes the exact reviewed HE
     (await f.request({ action: 'push', previewId: preview.previewId })).status,
     404,
   )
+})
+
+test('the publishing worker receives its one-use token only over stdin and starts with a clean home', async (t) => {
+  const f = await fixture(t)
+  const preview = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: DEST,
+  })
+  const root = f.publisher.previews.get(preview.previewId).root
+  await assert.rejects(fs.stat(path.join(root, 'askpass.py')), {
+    code: 'ENOENT',
+  })
+  const homes = path.join(f.dataDir, 'runtime', 'homes')
+  const priorHomes = await fs.readdir(homes)
+  f.remotes.set(DEST, 'file://' + f.target)
+  f.publisher.publishTransport = undefined
+  const token = 'fixture-stdin-only-token'
+  const published = await f.publisher.push('owner', f.project.id, {
+    previewId: preview.previewId,
+    username: 'gitlab+deploy-token-123',
+    token,
+  })
+  assert.equal(published.head, preview.head)
+  const call = f.calls.find((entry) =>
+    entry.args.includes(gitCredentialsRunner),
+  )
+  assert(call)
+  assert.equal(call.options.cleanHome, true)
+  assert.equal(call.options.freshHome, true)
+  assert.equal(JSON.parse(call.options.input).token, token)
+  assert(!JSON.stringify(call.args).includes(token))
+  assert(!JSON.stringify(call.env).includes(token))
+  assert.equal(
+    (
+      await execute('git', [
+        '--git-dir=' + f.target,
+        'rev-parse',
+        'refs/heads/main',
+      ])
+    ).stdout.trim(),
+    preview.head,
+  )
+  assert.deepEqual(await fs.readdir(homes), priorHomes)
+  await assert.rejects(fs.stat(root), { code: 'ENOENT' })
+  const stored = await fs.readFile(
+    path.join(f.dataDir, 'git-publish/destinations.json'),
+    'utf8',
+  )
+  assert(!stored.includes(token))
 })
 
 test('review forms preserve the reviewed repository and safely encode branch names for GitHub, nested GitLab, and explicit self-hosted providers', () => {
@@ -1033,5 +1083,104 @@ test('startup reclaims only orphan UUID preview directories and repeated init pr
       'utf8',
     ),
     '{}',
+  )
+})
+
+test('saved Git connection and author are reused by UI commit and reviewed push without resubmitting credentials', async (t) => {
+  const f = await fixture(t)
+  const shared = 'fixture-shared-publish-token'
+  await f.gitConnections.connect('owner', {
+    host: 'git.example.invalid',
+    provider: 'other',
+    username: 'shared-user',
+    token: shared,
+  })
+  await f.gitConnections.setIdentity('owner', {
+    name: 'Shared Author',
+    email: 'shared@example.invalid',
+  })
+  let response = await f.request(undefined, 'GET')
+  assert.deepEqual((await response.json()).author, {
+    name: 'Shared Author',
+    email: 'shared@example.invalid',
+  })
+  await fs.writeFile(
+    path.join(f.root, 'Main.lean'),
+    'example : True := by\n  trivial\n',
+  )
+  response = await f.request({
+    action: 'commit',
+    message: 'Use shared commit identity',
+  })
+  assert.equal(response.status, 200, await response.clone().text())
+  assert.equal(
+    (await f.git('log', '-1', '--format=%an%n%ae')).stdout.trim(),
+    'Shared Author\nshared@example.invalid',
+  )
+  const preview = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: DEST,
+    branch: 'proof/shared-connection',
+  })
+  const result = await f.publisher.push('owner', f.project.id, {
+    previewId: preview.previewId,
+  })
+  assert.equal(result.pushed, true)
+  assert.deepEqual(f.sent.at(-1).credentials, {
+    username: 'shared-user',
+    token: shared,
+  })
+  assert.equal(
+    (await f.gitConnections.credentials('owner', DEST)).token,
+    shared,
+  )
+  const override = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: DEST,
+    branch: 'proof/override',
+  })
+  await f.publisher.push('owner', f.project.id, {
+    previewId: override.previewId,
+    token: 'fixture-one-use-override',
+  })
+  assert.equal(f.sent.at(-1).credentials.token, 'fixture-one-use-override')
+  assert.equal(
+    (await f.gitConnections.credentials('owner', DEST)).token,
+    shared,
+  )
+  const metadata = JSON.stringify(
+    await f.publisher.metadata('owner', f.project.id),
+  )
+  assert.equal(metadata.includes(shared), false)
+  assert(
+    !f.calls.some((call) =>
+      JSON.stringify({ args: call.args, env: call.env }).includes(shared),
+    ),
+  )
+})
+
+test('truncated rejected pushes cannot expose a saved token prefix', async (t) => {
+  const f = await fixture(t)
+  const shared = 'fixture-truncated-shared-token'
+  await f.gitConnections.connect('owner', {
+    host: 'git.example.invalid',
+    provider: 'other',
+    token: shared,
+  })
+  const preview = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: DEST,
+    branch: 'proof/truncated',
+  })
+  f.publisher.publishTransport = async () => ({
+    code: 128,
+    truncated: true,
+    stdout: '',
+    stderr: shared.slice(0, 17),
+  })
+  await assert.rejects(
+    f.publisher.push('owner', f.project.id, { previewId: preview.previewId }),
+    (error) => {
+      assert.match(error.message, /output exceeded/)
+      assert.equal(error.message.includes(shared.slice(0, 17)), false)
+      return true
+    },
   )
 })

@@ -124,6 +124,7 @@ test('hover recovery keeps answering, while a persistent loop stops without veri
             toolchain: 'leanprover/lean4:v4.34.1',
           }),
           readFile: async () => ({ content: 'def size := 1' }),
+          validateEditorContextFile: async (_project, _owner, file) => file,
           snapshot: async () => ({ root, sourceRevision: 'fixture' }),
           changes: async () => {
             changes++

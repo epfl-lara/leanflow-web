@@ -13,6 +13,8 @@ import { Dialog } from './Dialog'
 import { Icon } from './Icons'
 import { GitDiff } from './GitDiff'
 import { HelpTip } from './HelpTip'
+import { GitConnectionStatus } from './GitConnectionStatus'
+import { repositoryHost, useGitConnections } from './gitConnections'
 import './git.css'
 
 const headOf = (info: GitInfo | null) => info?.revision || info?.head || null
@@ -44,6 +46,7 @@ export function GitModal({
   onSave,
   onUpdated,
   onClose,
+  onOpenConnections,
 }: {
   project: Project
   initialInfo: GitInfo | null
@@ -53,6 +56,7 @@ export function GitModal({
   onSave: () => Promise<void>
   onUpdated: (info: GitInfo) => void
   onClose: () => void
+  onOpenConnections?: () => void
 }) {
   const [info, setInfo] = useState(initialInfo)
   const [loaded, setLoaded] = useState(false)
@@ -84,6 +88,10 @@ export function GitModal({
   const previewSourceBranch = useRef<string | null>(null)
   const [token, setToken] = useState('')
   const [username, setUsername] = useState('')
+  const { data: gitConnections } = useGitConnections()
+  const connection = gitConnections?.connections.find(
+    (entry) => entry.host === repositoryHost(preview?.remoteUrl || remoteUrl),
+  )
   const mounted = useRef(true)
   const busyRef = useRef(busy)
   const refreshing = useRef(false)
@@ -312,9 +320,15 @@ export function GitModal({
       locked ||
       info?.publishingEnabled === false ||
       !preview ||
-      !token.trim()
+      (!token.trim() && !connection)
     )
       return
+    if (username.trim() && !token.trim()) {
+      setError(
+        'Enter a token for this username, or clear the username to use your saved connection.',
+      )
+      return
+    }
     const reviewed = preview
     const credential = token.trim(),
       login = username.trim()
@@ -328,7 +342,7 @@ export function GitModal({
       const value = await post<GitPushResult>(endpoint, {
         action: 'push',
         previewId: reviewed.previewId,
-        token: credential,
+        ...(credential ? { token: credential } : {}),
         ...(login ? { username: login } : {}),
       })
       if (!mounted.current) return
@@ -379,6 +393,16 @@ export function GitModal({
             <Icon name="refresh" size={14} />
             Refresh
           </button>
+          {onOpenConnections && (
+            <button
+              type="button"
+              className="button subtle small"
+              disabled={!!busy}
+              onClick={onOpenConnections}
+            >
+              Git connections
+            </button>
+          )}
         </div>
         <div
           className="git-tabs"
@@ -797,10 +821,10 @@ export function GitModal({
                 </>
               )}
               <p className="field-help">
-                Use a public HTTPS repository address. You need permission to
-                push to its target branch. You can use your existing fork if you
-                cannot push to the imported repository; choose the upstream
-                repository in the request form when contributing back.
+                Use an HTTPS repository address. You need permission to push to
+                its target branch. You can use your existing fork if you cannot
+                push to the imported repository; choose the upstream repository
+                in the request form when contributing back.
               </p>
               <button
                 className="button secondary"
@@ -874,38 +898,59 @@ export function GitModal({
                   ))}
                 </ul>
                 <form onSubmit={publish} autoComplete="off">
-                  <label className="field-label" htmlFor="git-repository-token">
-                    Repository token
-                  </label>
-                  <input
-                    id="git-repository-token"
-                    name="repository-publish-token"
-                    type="password"
-                    value={token}
-                    autoComplete="new-password"
-                    spellCheck={false}
+                  <GitConnectionStatus
+                    connection={connection}
+                    onOpenConnections={onOpenConnections}
                     disabled={locked}
-                    onChange={(event) => setToken(event.target.value)}
                   />
-                  <label className="field-label" htmlFor="git-publish-username">
-                    Username <span className="git-optional">optional</span>
-                  </label>
-                  <input
-                    id="git-publish-username"
-                    value={username}
-                    autoComplete="off"
-                    disabled={locked}
-                    onChange={(event) => setUsername(event.target.value)}
-                    placeholder="Repository account username"
-                  />
-                  <p className="field-help">
-                    The token is used once for this push, then cleared. It is
-                    not saved or sent to Lemex. The server checks the reviewed
-                    commit again before publishing.
-                  </p>
+                  <details
+                    className="repository-access-options"
+                    open={!connection}
+                  >
+                    <summary>
+                      {connection
+                        ? 'Use a different token once'
+                        : 'Repository access'}
+                    </summary>
+                    <label
+                      className="field-label"
+                      htmlFor="git-repository-token"
+                    >
+                      Repository token
+                    </label>
+                    <input
+                      id="git-repository-token"
+                      name="repository-publish-token"
+                      type="password"
+                      value={token}
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      disabled={locked}
+                      onChange={(event) => setToken(event.target.value)}
+                    />
+                    <label
+                      className="field-label"
+                      htmlFor="git-publish-username"
+                    >
+                      Username <span className="git-optional">optional</span>
+                    </label>
+                    <input
+                      id="git-publish-username"
+                      value={username}
+                      autoComplete="off"
+                      disabled={locked}
+                      onChange={(event) => setUsername(event.target.value)}
+                      placeholder="Repository account username"
+                    />
+                    <p className="field-help">
+                      The token is used once for this push, then cleared. It is
+                      not saved as a connection. The server checks the reviewed
+                      commit again before publishing.
+                    </p>
+                  </details>
                   <button
                     className="button primary"
-                    disabled={locked || !token.trim()}
+                    disabled={locked || (!token.trim() && !connection)}
                   >
                     Publish reviewed commit
                   </button>

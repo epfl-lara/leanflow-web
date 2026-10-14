@@ -27,6 +27,7 @@ export function runMetadata(run) {
     'projectId',
     'chatId',
     'file',
+    'currentFile',
     'files',
     'proofTarget',
     'mode',
@@ -248,6 +249,8 @@ export async function chatBrowserFixture({
       })
     if (method === 'GET') {
       if (endpoint === '/api/session') return respond(state.session)
+      if (endpoint === '/api/git-connections')
+        return respond({ connections: [], identity: { name: '', email: '' } })
       if (endpoint === '/api/projects') return respond(state.projects)
       for (const project of state.projects) {
         const prefix = `/api/projects/${project.id}`

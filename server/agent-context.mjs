@@ -1,6 +1,28 @@
 import { proofTargetContext, proofTargetReference } from './proof-target.mjs'
+import { isPdfFile } from '../shared/file-previews.mjs'
 
 const MAX_HISTORY = 60_000
+
+export function currentEditorFile(input, validatePath) {
+  const file = input.currentFile === undefined ? input.file : input.currentFile
+  if (file === undefined || file === null) return null
+  if (typeof file !== 'string' || !file)
+    throw Object.assign(new Error('Invalid current editor file.'), {
+      status: 400,
+    })
+  return validatePath(file)
+}
+
+export function currentEditorContext(file) {
+  return file
+    ? 'Open file in the user’s editor (included automatically; relative path):\n' +
+        JSON.stringify(file) +
+        '\nInspect the corresponding file in your working project when relevant. During an active run, the editor may contain newer saved or unsaved changes than your working copy.' +
+        (isPdfFile(file)
+          ? '\nThis PDF’s path is supplied as context; its contents are not attached. Use an available PDF reader, or explain if PDF reading is unavailable.'
+          : '')
+    : ''
+}
 
 // Chat history is server-owned conversation text, never native HOME state or
 // privileged protocol roles. A new worker checks the current saved sources.
@@ -23,6 +45,7 @@ export function agentConversationContext(job, runs = []) {
       assistant:
         typeof run.message === 'string' ? run.message.slice(-16_000) : '',
       status: run.status,
+      ...(run.currentFile ? { currentFile: run.currentFile } : {}),
       ...(run.proofTarget
         ? { proofTarget: proofTargetReference(run.proofTarget) }
         : {}),
@@ -44,6 +67,9 @@ export function agentConversationContext(job, runs = []) {
       guidance.unshift({
         id: followup.id,
         user: text,
+        ...(followup.currentFile && !followup.currentFileUnavailable
+          ? { currentFile: followup.currentFile }
+          : {}),
         ...(followup.files?.length ? { files: followup.files } : {}),
         ...(followup.proofTarget
           ? { proofTarget: proofTargetReference(followup.proofTarget) }
@@ -70,6 +96,10 @@ export function agentConversationContext(job, runs = []) {
       'Selected saved project files (relative paths; read their current workspace contents):\n' +
         JSON.stringify(job.files),
     )
+  const editorContext = currentEditorContext(
+    job.currentFile === undefined ? job.file : job.currentFile,
+  )
+  if (editorContext) sections.push(editorContext)
   if (job.proofTarget)
     sections.push(proofTargetContext(job.proofTarget, job.mode))
   sections.push('Current task:\n' + job.prompt)

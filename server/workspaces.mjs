@@ -19,6 +19,12 @@ import {
   cloneRepository,
   repositoryAccessError,
 } from './project-import.mjs'
+import {
+  validateGitCredentials,
+  clearGitCredentials,
+  gitHttpsDestination,
+} from './git-credentials.mjs'
+import { runAuthenticatedRepositoryGit } from './repository-git.mjs'
 import { runSetupStep, setupCommandLabel } from './setup-output.mjs'
 import {
   projectLibraries,
@@ -563,6 +569,7 @@ export class WorkspaceStore {
     dataDir,
     runtime,
     resolveHost = lookup,
+    gitCredentials = async () => null,
     setupRepair,
     setupBuildTimeoutMs = 1800000,
   }) {
@@ -572,6 +579,7 @@ export class WorkspaceStore {
     this.runtime = runtime
     this.setupBuildTimeoutMs = validateSetupBuildTimeout(setupBuildTimeoutMs)
     this.resolveHost = resolveHost
+    this.gitCredentials = gitCredentials
     this.setupRepair = setupRepair
     this.projectsDir = path.join(this.dataDir, 'projects')
     this.snapshotsDir = path.join(this.dataDir, 'candidates')
@@ -1537,6 +1545,7 @@ export class WorkspaceStore {
     const repository = location.repository
       ? await validateRepository(location.repository, this.resolveHost)
       : null
+    const credentials = await this.#importCredentials(owner, input, repository)
     if (revision && !repository) fail('A revision requires a Git repository')
     if (
       !repository &&
@@ -1653,7 +1662,7 @@ export class WorkspaceStore {
       )
     this.#save(project)
     this.#event(project, 'created', `Creating ${project.name}.\n`)
-    this.#beginPrepare(project)
+    this.#beginPrepare(project, credentials)
     if (singleFile) await this.jobs.get(project.id)
     return clone(this.#owned(project.id, owner))
   }
@@ -1705,8 +1714,26 @@ export class WorkspaceStore {
     })
   }
 
-  #beginPrepare(project) {
+  async #importCredentials(owner, input, repository, loadSaved = true) {
+    if (
+      !repository &&
+      (input.repositoryToken !== undefined ||
+        input.repositoryUsername !== undefined)
+    )
+      fail('Repository credentials require a Git repository import.')
+    const explicit = validateGitCredentials({
+      token: input.repositoryToken,
+      username: input.repositoryUsername,
+    })
+    if (explicit.token || !repository || !loadSaved) return explicit
+    const saved = await this.gitCredentials(owner, repository)
+    return saved ? validateGitCredentials(saved) : explicit
+  }
+
+  #beginPrepare(project, credentials = validateGitCredentials({})) {
     if (this.jobs.has(project.id)) return
+    if (credentials.token && !project.imported)
+      project.repositoryAuthenticationRequired = true
     project.setupStartedAt = new Date().toISOString()
     project.setupPhase = 'reading-project'
     project.setupEventAfter = this.db
@@ -1720,7 +1747,7 @@ export class WorkspaceStore {
       .then(() =>
         this.#locked(project.id, async () => {
           try {
-            await this.#prepareProject(project)
+            await this.#prepareProject(project, credentials)
           } catch (error) {
             if (
               !project.autoRepair ||
@@ -1767,11 +1794,13 @@ export class WorkspaceStore {
                 { cause: repairError },
               )
             }
-            await this.#prepareProject(project)
+            await this.#prepareProject(project, credentials)
           }
         }),
       )
       .catch(async (error) => {
+        if (error.repositoryAuthenticationRequired && !project.imported)
+          project.repositoryAuthenticationRequired = true
         project.status = 'error'
         project.needsPreparation = Boolean(
           project.kind === 'single-file' ||
@@ -1800,16 +1829,23 @@ export class WorkspaceStore {
         this.#event(project, 'error', `${project.error}\n`)
       })
       .finally(() => {
+        clearGitCredentials(credentials)
         this.jobs.delete(project.id)
         this.preparationControllers.delete(project.id)
       })
     this.jobs.set(project.id, job)
   }
 
-  async prepare(id, owner, { assertIdle = () => {} } = {}) {
+  async prepare(id, owner, { assertIdle = () => {}, ...input } = {}) {
     this.get(id, owner)
     return this.#locked(id, async () => {
       const project = this.#owned(id, owner)
+      const credentials = await this.#importCredentials(
+        owner,
+        input,
+        project.repository,
+        !project.imported,
+      )
       if (project.archivedAt) fail('Project not found', 404)
       if (project.setupCleanupFailed) await this.#cleanupSetupWorkers(project)
       assertIdle()
@@ -1827,7 +1863,7 @@ export class WorkspaceStore {
         delete project.setupRepair
       }
       this.#save(project)
-      this.#beginPrepare(project)
+      this.#beginPrepare(project, credentials)
       return clone(project)
     })
   }
@@ -2354,7 +2390,7 @@ export class WorkspaceStore {
     )
   }
 
-  async #importRepository(project, checkout, entries) {
+  async #importRepository(project, checkout, entries, credentials) {
     if (project.imported) return
     if (entries.length && !project.repositoryCloned)
       fail(
@@ -2371,19 +2407,17 @@ export class WorkspaceStore {
         isEmpty: async () => (await fs.readdir(checkout)).length === 0,
         onOutput: (message) => this.#event(project, 'output', message),
         run: (url) =>
-          this.#command(
+          this.#repositoryCommand(
             project,
             [
-              ...GIT_ARGS,
               'clone',
-              '--depth=1',
+              ...(credentials.token ? [] : ['--depth=1']),
               '--no-recurse-submodules',
               '--',
               url,
               '.',
             ],
-            900000,
-            'bridge',
+            credentials,
           ),
       })
       // A completed clone survives a failed or stopped revision fetch. Retry
@@ -2395,11 +2429,16 @@ export class WorkspaceStore {
       this.#setupPhase(project, 'selecting-revision')
       await validateRepository(project.repository, this.resolveHost)
       try {
-        await this.#command(
+        await this.#repositoryCommand(
           project,
-          [...GIT_ARGS, 'fetch', '--depth=1', 'origin', project.revision],
-          900000,
-          'bridge',
+          [
+            'fetch',
+            ...(credentials.token ? [] : ['--depth=1']),
+            '--',
+            project.repository,
+            project.revision,
+          ],
+          credentials,
         )
       } catch (error) {
         if (
@@ -2420,7 +2459,8 @@ export class WorkspaceStore {
       ])
     }
     project.imported = true
-
+    delete project.repositoryAuthenticationRequired
+    clearGitCredentials(credentials)
     this.#save(project)
   }
 
@@ -2463,6 +2503,48 @@ export class WorkspaceStore {
         `Removed interrupted Git lock ${name} before resuming the import.\n`,
       )
     }
+  }
+
+  async #repositoryCommand(project, args, credentials) {
+    if (!credentials.token)
+      return this.#command(project, [...GIT_ARGS, ...args], 900000, 'bridge')
+    const { pin } = await gitHttpsDestination(project.repository, {
+      validateRepository,
+      resolveHost: this.resolveHost,
+    })
+    const onOutput = (message) => this.#event(project, 'output', message)
+    const signal = this.preparationControllers.get(project.id)?.signal
+    const result = await runSetupStep(
+      setupCommandLabel([...GIT_ARGS, ...args], { gitCommand: args[0] }),
+      () =>
+        runAuthenticatedRepositoryGit({
+          runtime: this.runtime,
+          dataDir: this.dataDir,
+          root: this.repositoryRoot(project),
+          args: [...pin, ...args],
+          credentials,
+          signal,
+        }),
+      { onOutput, signal },
+    )
+    if (result.timedOut || result.cancelled)
+      throw Object.assign(
+        new Error(
+          `Repository ${args[0] === 'clone' ? 'clone' : 'revision fetch'} ${result.timedOut ? 'reached its 15-minute time limit' : 'was cancelled'}. ` +
+            (args[0] === 'clone'
+              ? 'Any partial files were preserved. Create a new import or upload the project files.'
+              : 'Retry setup with a fresh token to resume the completed clone.'),
+        ),
+        { infrastructure: true },
+      )
+    if (result.code !== 0)
+      throw Object.assign(
+        new Error(
+          `Git repository access failed: ${(result.stderr || result.stdout || '').slice(-4000)}`,
+        ),
+        { infrastructure: true },
+      )
+    return result
   }
 
   async #initializeRepository(project) {
@@ -2687,7 +2769,7 @@ export class WorkspaceStore {
       )
   }
 
-  async #prepareProject(project) {
+  async #prepareProject(project, credentials) {
     this.preparationControllers.get(project.id)?.signal.throwIfAborted()
     this.#setupPhase(project, 'reading-project')
     this.#event(project, 'preparing', 'Preparing the project environment.\n')
@@ -2723,7 +2805,11 @@ export class WorkspaceStore {
       )
     const entries = await fs.readdir(checkout)
     if (project.repository)
-      await this.#importRepository(project, checkout, entries)
+      try {
+        await this.#importRepository(project, checkout, entries, credentials)
+      } finally {
+        clearGitCredentials(credentials)
+      }
     else if (
       !project.repository &&
       (!entries.length ||
@@ -3204,6 +3290,32 @@ export class WorkspaceStore {
       this.#event(project, 'saved', `Created folder ${filename}.\n`)
       return { path: filename }
     })
+  }
+
+  async validateEditorContextFile(id, owner, filename) {
+    const project = this.get(id, owner)
+    const relative = relativeFile(filename)
+    const root = relative.startsWith('.lake/packages/')
+      ? (await this.runtime.dependencyRoot?.(project.root)) || project.root
+      : project.root
+    try {
+      const absolute = await guarded(root, relative)
+      const stat = await fs.lstat(absolute)
+      if (stat.isSymbolicLink()) fail('Symbolic links are not accessible', 403)
+      if (!stat.isFile()) return null
+      if ((await fs.realpath(absolute)) !== path.resolve(absolute))
+        fail('File path changed during access', 409)
+      return relative
+    } catch (error) {
+      // Normalization above still rejects unsafe paths. Optional context can
+      // disappear or become inaccessible without blocking the rest of a task.
+      if (
+        ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM'].includes(error.code) ||
+        (error instanceof WorkspaceError && error.status === 400)
+      )
+        return null
+      throw error
+    }
   }
 
   async readFile(id, owner, filename) {

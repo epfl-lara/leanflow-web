@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import * as fs from 'node:fs/promises'
+import { mkdtempSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -669,9 +670,20 @@ test('playground terminals select their own root and Main.lean after a different
       root,
       args,
       options,
+      workerHome: mkdtempSync(path.join(f.dataDir, 'terminal-home-')),
       stdin: new PassThrough(),
       stdout: new PassThrough(),
       stderr: new PassThrough(),
+    })
+    let ready
+    child.setupReady = new Promise((resolve) => (ready = resolve))
+    child.stdin.on('data', (chunk) => {
+      const setup = JSON.parse(chunk.toString())
+      assert.deepEqual(setup, {
+        type: 'setup',
+        identity: { name: 'Owner', email: 'owner@lemex-web.local' },
+      })
+      ready()
     })
     child.kill = () => {
       if (child.killed) return
@@ -704,6 +716,24 @@ test('playground terminals select their own root and Main.lean after a different
       socket.once('error', reject)
     })
     const child = spawned.at(-1)
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Terminal setup timed out')),
+        2000,
+      )
+      const closed = () => {
+        clearTimeout(timer)
+        reject(new Error('Terminal closed before setup completed'))
+      }
+      socket.once('close', closed)
+      child.setupReady
+        .then(() => {
+          clearTimeout(timer)
+          socket.off('close', closed)
+          resolve()
+        })
+        .catch(reject)
+    })
     assert.equal(child.root, project.root)
     assert.equal(
       await fs.readFile(path.join(child.root, 'Main.lean'), 'utf8'),

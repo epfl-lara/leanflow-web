@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   agentConversationContext,
+  currentEditorFile,
   selectedContextFiles,
 } from '../agent-context.mjs'
 import { AgentManager } from '../agents.mjs'
@@ -113,6 +114,69 @@ test('selected files share source guards, preserve explicit empty selection, and
     ['.lake/build/Main.olean'],
   ])
     assert.throws(() => selectedContextFiles({ files }, guard), { status: 400 })
+})
+
+test('every workflow receives the open file independently of optional attachments and proof targets', () => {
+  for (const mode of ['proofs', 'formalize', 'optimize', 'search']) {
+    const context = agentConversationContext({
+      id: 'current',
+      mode,
+      prompt: 'Help with this file.',
+      file: 'ProofTarget.lean',
+      currentFile: 'Open/Current.lean',
+      files: [],
+    })
+    assert.match(context, /Open file in the user’s editor/)
+    assert(context.includes('"Open/Current.lean"'))
+    assert(!context.includes('ProofTarget.lean'))
+    assert(!context.includes('Selected saved project files'))
+  }
+  assert(
+    agentConversationContext({
+      file: 'Main.lean',
+      files: [],
+      prompt: 'Legacy client.',
+    }).includes('"Main.lean"'),
+  )
+  assert(
+    !agentConversationContext({
+      file: 'Target.lean',
+      currentFile: null,
+      prompt: 'No editor open.',
+    }).includes('Open file in the user’s editor'),
+  )
+})
+
+test('automatic editor file uses source containment guards and permits an explicit closed editor', () => {
+  const guard = validateWorkspaceFilePath
+  assert.equal(
+    currentEditorFile({ currentFile: 'Notes.md' }, guard),
+    'Notes.md',
+  )
+  assert.equal(
+    currentEditorFile({ currentFile: 'Lecture.PDF' }, guard),
+    'Lecture.PDF',
+  )
+  assert.equal(currentEditorFile({ file: 'Main.lean' }, guard), 'Main.lean')
+  assert.equal(
+    currentEditorFile({ currentFile: null, file: 'Main.lean' }, guard),
+    null,
+  )
+  assert.equal(currentEditorFile({}, guard), null)
+  for (const currentFile of [
+    '',
+    false,
+    7,
+    [],
+    '../host',
+    '/etc/passwd',
+    '.env',
+    '.lemex/config.toml',
+    '.lake/build/Main.olean',
+  ])
+    assert.throws(() => currentEditorFile({ currentFile }, guard), {
+      status: 400,
+    })
 })
 
 test('agent chat selection is scoped to owner and project before a run is created', async (t) => {
@@ -273,191 +337,229 @@ test('a chat append failure never launches an orphaned run', async (t) => {
   await manager.shutdown()
 })
 
-test('real chat history reaches a fresh native RPC thread as current user context with selected files', async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-chat-rpc-'))
-  const candidate = path.join(root, 'candidate'),
-    home = path.join(root, 'home')
-  await fs.mkdir(candidate, { recursive: true })
-  await fs.mkdir(path.join(home, '.lemex'), { recursive: true })
-  const events = new EventStore(root),
-    requests = [],
-    reads = []
-  const workspaces = {
-    get: (id) => ({
-      id,
-      status: 'ready',
-      name: 'Fixture',
-      toolchain: 'leanprover/lean4:v4.34.1',
-    }),
-    readFile: async (_id, _owner, file) => {
-      reads.push(file)
-      return { content: 'example : True := by trivial' }
-    },
-    snapshot: async () => ({
-      root: candidate,
-      projectId: 'p',
-      owner: 'alice',
-      sourceRevision: 'fixture-revision',
-    }),
-    changes: async () => [],
-  }
-  const chats = new ChatStore({ dataDir: root, workspaces, events }).init()
-  const chat = chats.create('alice', 'p')
-  const old = events.create('alice', {
-    kind: 'agent',
-    projectId: 'p',
-    chatId: chat.id,
-    mode: 'prove',
-    prompt: 'Remember the lemma named fixture_lemma.',
-  })
-  events.update(old.id, {
-    status: 'completed',
-    message: 'Use fixture_lemma for the next question.',
-    verification: { complete: true },
-  })
-  chats.appendRun(chat.id, 'alice', old)
-  const runtime = {
-    home: async () => home,
-    spawn: (cwd) => {
-      assert.equal(cwd, candidate)
-      const child = new EventEmitter()
-      child.stdout = new PassThrough()
-      child.stderr = new PassThrough()
-      const send = (value) => child.stdout.write(JSON.stringify(value) + '\n')
-      child.stdin = new Writable({
-        write(chunk, _encoding, callback) {
-          for (const line of chunk.toString().trim().split('\n')) {
-            const request = JSON.parse(line)
-            requests.push(request)
-            if (request.id !== undefined)
-              queueMicrotask(() => {
-                send({
-                  id: request.id,
-                  result:
-                    request.method === 'thread/start'
-                      ? { thread: { id: 'fresh-native-thread' } }
-                      : request.method === 'turn/start'
-                        ? { turn: { id: 'turn' } }
-                        : {},
-                })
-                if (request.method === 'turn/start')
+test('fresh native RPC context keeps chat history while optional current files remain path-only and may disappear', async (t) => {
+  for (const currentFile of ['Lecture.PDF', 'Missing.lean'])
+    await t.test(currentFile, async (t) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-chat-rpc-'))
+      const candidate = path.join(root, 'candidate'),
+        home = path.join(root, 'home')
+      await fs.mkdir(candidate, { recursive: true })
+      await fs.mkdir(path.join(home, '.lemex'), { recursive: true })
+      const events = new EventStore(root),
+        requests = [],
+        reads = [],
+        contextChecks = []
+      const workspaces = {
+        get: (id) => ({
+          id,
+          status: 'ready',
+          name: 'Fixture',
+          toolchain: 'leanprover/lean4:v4.34.1',
+        }),
+        readFile: async (_id, _owner, file) => {
+          assert(!/\.pdf$/i.test(file), 'PDF awareness must not use text reads')
+          reads.push(file)
+          return { content: 'example : True := by trivial' }
+        },
+        readPdfPreview: async () =>
+          assert.fail('Automatic context must not parse PDF contents'),
+        validateEditorContextFile: async (_id, _owner, file) => {
+          contextChecks.push(file)
+          return file === 'Missing.lean' ? null : file
+        },
+        snapshot: async () => ({
+          root: candidate,
+          projectId: 'p',
+          owner: 'alice',
+          sourceRevision: 'fixture-revision',
+        }),
+        changes: async () => [],
+      }
+      const chats = new ChatStore({ dataDir: root, workspaces, events }).init()
+      const chat = chats.create('alice', 'p')
+      const old = events.create('alice', {
+        kind: 'agent',
+        projectId: 'p',
+        chatId: chat.id,
+        mode: 'prove',
+        prompt: 'Remember the lemma named fixture_lemma.',
+      })
+      events.update(old.id, {
+        status: 'completed',
+        message: 'Use fixture_lemma for the next question.',
+        verification: { complete: true },
+      })
+      chats.appendRun(chat.id, 'alice', old)
+      const runtime = {
+        home: async () => home,
+        spawn: (cwd) => {
+          assert.equal(cwd, candidate)
+          const child = new EventEmitter()
+          child.stdout = new PassThrough()
+          child.stderr = new PassThrough()
+          const send = (value) =>
+            child.stdout.write(JSON.stringify(value) + '\n')
+          child.stdin = new Writable({
+            write(chunk, _encoding, callback) {
+              for (const line of chunk.toString().trim().split('\n')) {
+                const request = JSON.parse(line)
+                requests.push(request)
+                if (request.id !== undefined)
                   queueMicrotask(() => {
                     send({
-                      method: 'item/reasoning/textDelta',
-                      params: {
-                        itemId: 'r',
-                        contentIndex: 0,
-                        delta: 'Check the prior lemma against current files.',
-                      },
+                      id: request.id,
+                      result:
+                        request.method === 'thread/start'
+                          ? { thread: { id: 'fresh-native-thread' } }
+                          : request.method === 'turn/start'
+                            ? { turn: { id: 'turn' } }
+                            : {},
                     })
-                    send({
-                      method: 'item/agentMessage/delta',
-                      params: {
-                        itemId: 'm',
-                        delta: 'The selected files contain the needed context.',
-                      },
-                    })
-                    send({
-                      method: 'turn/completed',
-                      params: { turn: { id: 'turn', status: 'completed' } },
-                    })
+                    if (request.method === 'turn/start')
+                      queueMicrotask(() => {
+                        send({
+                          method: 'item/reasoning/textDelta',
+                          params: {
+                            itemId: 'r',
+                            contentIndex: 0,
+                            delta:
+                              'Check the prior lemma against current files.',
+                          },
+                        })
+                        send({
+                          method: 'item/agentMessage/delta',
+                          params: {
+                            itemId: 'm',
+                            delta:
+                              'The selected files contain the needed context.',
+                          },
+                        })
+                        send({
+                          method: 'turn/completed',
+                          params: { turn: { id: 'turn', status: 'completed' } },
+                        })
+                      })
                   })
-              })
+              }
+              callback()
+            },
+          })
+          child.kill = () => {
+            child.stdout.end()
+            child.stderr.end()
+            child.emit('close', 0)
+            return true
           }
-          callback()
+          return child
+        },
+      }
+      const modelCatalog = rcpModelCatalog({
+        models: [{ slug: DEFAULT_MODEL }],
+      })
+      const manager = new AgentManager({
+        runtime,
+        workspaces,
+        events,
+        chats,
+        settings: {
+          get: async () => ({
+            showReasoning: true,
+            extraInstructions: '',
+            tools: { lean: true, lean_explore: false, exa: false },
+          }),
+        },
+        config: {
+          provider: { LEMEX_API_KEY: 'fake-provider-secret' },
+          defaultModel: DEFAULT_MODEL,
+          models: catalogModels(modelCatalog, DEFAULT_MODEL),
+          modelCatalog,
+          redact: String,
         },
       })
-      child.kill = () => {
-        child.stdout.end()
-        child.stderr.end()
-        child.emit('close', 0)
-        return true
-      }
-      return child
-    },
-  }
-  const modelCatalog = rcpModelCatalog({ models: [{ slug: DEFAULT_MODEL }] })
-  const manager = new AgentManager({
-    runtime,
-    workspaces,
-    events,
-    chats,
-    settings: {
-      get: async () => ({
-        showReasoning: true,
-        extraInstructions: '',
-        tools: { lean: true, lean_explore: false, exa: false },
-      }),
-    },
-    config: {
-      provider: { LEMEX_API_KEY: 'fake-provider-secret' },
-      defaultModel: DEFAULT_MODEL,
-      models: catalogModels(modelCatalog, DEFAULT_MODEL),
-      modelCatalog,
-      redact: String,
-    },
-  })
-  t.after(async () => {
-    await manager.shutdown()
-    chats.close()
-    events.close()
-    await fs.rm(root, { recursive: true, force: true })
-  })
-  const job = await manager.start('alice', 'p', {
-    chatId: chat.id,
-    mode: 'search',
-    prompt: 'Which lemma did we discuss?',
-    files: ['Main.lean', 'Notes.md'],
-  })
-  await new Promise((resolve) =>
-    events.on(job.id, (event) => {
-      if (
-        event.type === 'status' &&
-        ['completed', 'failed'].includes(event.data.status)
+      t.after(async () => {
+        await manager.shutdown()
+        chats.close()
+        events.close()
+        await fs.rm(root, { recursive: true, force: true })
+      })
+      const job = await manager.start('alice', 'p', {
+        chatId: chat.id,
+        mode: 'search',
+        prompt: 'Which lemma did we discuss?',
+        file: currentFile === 'Missing.lean' ? currentFile : undefined,
+        currentFile,
+        files: ['Main.lean', 'Notes.md'],
+      })
+      await new Promise((resolve) =>
+        events.on(job.id, (event) => {
+          if (
+            event.type === 'status' &&
+            ['completed', 'failed'].includes(event.data.status)
+          )
+            resolve()
+        }),
       )
-        resolve()
-    }),
-  )
-  await manager.shutdown()
-  assert.equal(events.get(job.id).status, 'completed', events.get(job.id).error)
-  assert.equal(
-    requests.find((request) => request.method === 'turn/start').params.effort,
-    'max',
-  )
-  assert.deepEqual(
-    JSON.parse(
-      await fs.readFile(path.join(home, '.lemex/models.json'), 'utf8'),
-    ),
-    modelCatalog,
-  )
-  assert.equal(
-    requests.filter((request) => request.method === 'thread/start').length,
-    1,
-  )
-  assert.equal(
-    requests.filter((request) => request.method === 'thread/resume').length,
-    0,
-  )
-  const userText = requests.find((request) => request.method === 'turn/start')
-    .params.input[0].text
-  const developerText = requests.find(
-    (request) => request.method === 'thread/start',
-  ).params.developerInstructions
-  assert(userText.includes(old.prompt))
-  assert(userText.includes('Use fixture_lemma for the next question.'))
-  assert(userText.includes('["Main.lean","Notes.md"]'))
-  assert(userText.endsWith('Current task:\nWhich lemma did we discuss?'))
-  assert(!developerText.includes(old.prompt))
-  assert(!JSON.stringify(requests).includes('fake-provider-secret'))
-  assert.deepEqual(reads, ['Main.lean', 'Notes.md'])
-  assert.equal(
-    events.get(job.id).reasoning,
-    'Check the prior lemma against current files.',
-  )
-  assert.deepEqual(
-    chats.history(chat.id, 'alice').runs.map((run) => run.id),
-    [old.id, job.id],
-  )
+      await manager.shutdown()
+      assert.equal(
+        events.get(job.id).status,
+        'completed',
+        events.get(job.id).error,
+      )
+      assert.equal(
+        requests.find((request) => request.method === 'turn/start').params
+          .effort,
+        'max',
+      )
+      assert.deepEqual(
+        JSON.parse(
+          await fs.readFile(path.join(home, '.lemex/models.json'), 'utf8'),
+        ),
+        modelCatalog,
+      )
+      assert.equal(
+        requests.filter((request) => request.method === 'thread/start').length,
+        1,
+      )
+      assert.equal(
+        requests.filter((request) => request.method === 'thread/resume').length,
+        0,
+      )
+      const userText = requests.find(
+        (request) => request.method === 'turn/start',
+      ).params.input[0].text
+      const developerText = requests.find(
+        (request) => request.method === 'thread/start',
+      ).params.developerInstructions
+      assert(userText.includes(old.prompt))
+      assert(userText.includes('Use fixture_lemma for the next question.'))
+      assert(userText.includes('["Main.lean","Notes.md"]'))
+      assert.equal(
+        userText.includes('Open file in the user’s editor'),
+        currentFile !== 'Missing.lean',
+      )
+      assert.equal(
+        userText.includes(JSON.stringify(currentFile)),
+        currentFile !== 'Missing.lean',
+      )
+      assert(!userText.includes('%PDF-1.7'))
+      assert(userText.endsWith('Current task:\nWhich lemma did we discuss?'))
+      assert(!developerText.includes(old.prompt))
+      assert(!JSON.stringify(requests).includes('fake-provider-secret'))
+      assert.deepEqual(reads, ['Main.lean', 'Notes.md'])
+      assert.deepEqual(contextChecks, [currentFile])
+      if (currentFile === 'Missing.lean') {
+        assert.equal(events.get(job.id).currentFile, null)
+        assert.equal(events.get(job.id).file, null)
+      }
+      assert.equal(
+        events.get(job.id).reasoning,
+        'Check the prior lemma against current files.',
+      )
+      assert.deepEqual(
+        chats.history(chat.id, 'alice').runs.map((run) => run.id),
+        [old.id, job.id],
+      )
+    })
 })
 
 test('failed and interrupted native turns never verify an unchanged baseline or become completed tasks', async (t) => {

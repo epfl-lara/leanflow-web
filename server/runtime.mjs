@@ -700,6 +700,50 @@ export class Runtime {
     return actual
   }
 
+  #repositoryMount(root, value) {
+    if (value === undefined) return null
+    if (typeof value !== 'string')
+      throw new Error('The terminal checkout must be an owned Git repository')
+    const checkout = this.#root(value)
+    if (
+      checkout !== path.resolve(value) ||
+      checkout === fs.realpathSync(this.dataDir) ||
+      (root !== checkout && !root.startsWith(checkout + path.sep))
+    )
+      throw new Error('The terminal checkout must contain the selected project')
+    // Do not let an ancestor such as the shared projects directory widen a
+    // terminal mount. Select the nearest real Git checkout containing root.
+    let candidate = root
+    while (true) {
+      const git = path.join(candidate, '.git')
+      try {
+        const stat = fs.lstatSync(git)
+        if (
+          candidate !== checkout ||
+          !stat.isDirectory() ||
+          stat.isSymbolicLink() ||
+          fs.realpathSync(git) !== git
+        )
+          throw new Error(
+            'The terminal checkout must be the selected Git repository',
+          )
+        break
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error
+        if (candidate === checkout)
+          throw new Error('The terminal checkout has no Git repository')
+      }
+      candidate = path.dirname(candidate)
+    }
+    return {
+      root: checkout,
+      selected: path.posix.join(
+        '/repository',
+        path.relative(checkout, root).split(path.sep).join('/'),
+      ),
+    }
+  }
+
   #prepareHome(root, { fresh = false, clean = false } = {}) {
     const actual = this.#root(root)
     const key = createHash('sha256')
@@ -834,6 +878,7 @@ export class Runtime {
       freshHome = false,
       readOnlyHome = false,
       cleanHome = false,
+      repositoryRoot,
     } = {},
   ) {
     this.#assertReady()
@@ -866,6 +911,7 @@ export class Runtime {
       )
     this.#reloadDependencies()
     const actual = this.#root(root)
+    const repository = this.#repositoryMount(actual, repositoryRoot)
     const dependencySource = this.#dependencySource(actual)
     this.#checkSharedBinding(actual, dependencySource)
     const lakeCache = writeLakeCache
@@ -911,7 +957,7 @@ export class Runtime {
       '--tmpfs',
       '/tmp:rw,nosuid,size=1g',
       '--workdir',
-      '/workspace',
+      repository?.selected || '/workspace',
       '--mount',
       `type=bind,src=${actual},dst=/workspace${readOnlyWorkspace ? ',readonly' : ''}`,
       '--mount',
@@ -923,17 +969,28 @@ export class Runtime {
       '--env',
       'ELAN_HOME=/home/worker/.elan',
       '--env',
-      'LEAN_PROJECT_PATH=/workspace',
+      `LEAN_PROJECT_PATH=${repository?.selected || '/workspace'}`,
       '--env',
       'LAKE_CACHE_DIR=/home/worker/.cache/lake',
     ]
+    if (repository)
+      dockerArgs.push(
+        '--mount',
+        `type=bind,src=${repository.root},dst=/repository${readOnlyWorkspace ? ',readonly' : ''}`,
+      )
     // Place this after the read-only workspace and before the read-only
     // dependency overlay so only project-local build artifacts are writable.
-    if (lakeCache)
+    if (lakeCache) {
       dockerArgs.push(
         '--mount',
         `type=bind,src=${lakeCache},dst=/workspace/.lake`,
       )
+      if (repository)
+        dockerArgs.push(
+          '--mount',
+          `type=bind,src=${lakeCache},dst=${repository.selected}/.lake`,
+        )
+    }
     for (const [toolchain, source] of this.toolchains) {
       dockerArgs.push(
         '--mount',
@@ -948,6 +1005,11 @@ export class Runtime {
         '--mount',
         `type=bind,src=${directory},dst=/workspace/.lake/packages,readonly`,
       )
+      if (repository)
+        dockerArgs.push(
+          '--mount',
+          `type=bind,src=${directory},dst=${repository.selected}/.lake/packages,readonly`,
+        )
       if (dependencySource !== actual) {
         const cache = this.#dependencyArtifactCache(dependencySource)
         if (fs.existsSync(path.join(cache, 'artifacts')))
