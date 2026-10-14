@@ -99,14 +99,16 @@ Finish a terminal build before starting a Lean check, and finish a check before 
 
 Targets belong to their chat. **Ask Lemex** uses the current proof or selection; **Optimize** also selects optimization mode. Save changed lines before sending a focused update during a run.
 
-| Task             | Use it for                                               |
-| ---------------- | -------------------------------------------------------- |
-| **Proofs**       | Complete or repair a proof while keeping its statement.  |
-| **Formalize**    | Turn mathematical prose into Lean statements and proofs. |
-| **Optimize**     | Shorten a valid proof or reduce its elaboration work.    |
-| **Ask & Search** | Find declarations or ask Lemex for explanations.         |
+| Task             | Use it for                                                 |
+| ---------------- | ---------------------------------------------------------- |
+| **Ask & Search** | Ask questions, find lemmas, or work on project text files. |
+| **Proofs**       | Complete or repair a proof while keeping its statement.    |
+| **Formalize**    | Turn mathematical prose into Lean statements and proofs.   |
+| **Optimize**     | Shorten a valid proof or reduce its elaboration work.      |
 
 Compare optimization's token and heartbeat measurements: a shorter proof can take more elaboration work. Repair invalid proofs first.
+
+**Ask & Search** primarily helps with Lean, but also welcomes general questions, writing, planning, and open-ended tasks. Ask it to create or edit project text files and organize, rename, or delete non-Lean notes and documents. Use the file browser for Lean source renames and deletions. Questions and explanations leave files unchanged. Requested edits always use review first: inspect the diff, then choose **Apply changes**. Lean source edits still receive independent Lean verification; ordinary conversation and non-Lean file tasks do not. Project setup files and dependencies stay protected.
 
 ## Follow and steer a chat
 

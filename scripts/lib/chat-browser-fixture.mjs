@@ -62,7 +62,7 @@ export function runMetadata(run) {
   value.logChars = run.log?.length || 0
   if (run.verification)
     value.verification = Object.fromEntries(
-      ['compiled', 'complete', 'kernelChecked', 'reason']
+      ['kind', 'compiled', 'complete', 'kernelChecked', 'reason']
         .filter((key) => run.verification[key] !== undefined)
         .map((key) => [key, run.verification[key]]),
     )

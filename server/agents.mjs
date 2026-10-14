@@ -778,7 +778,7 @@ export class AgentManager {
           }
           if (item.type === 'fileChange') {
             this.#log(id, 'Preparing a candidate edit…\n')
-            this.#progress(id, 'Editing Lean files')
+            this.#progress(id, 'Editing project files')
           }
         } else if (method === 'item/completed') {
           const item = params.item || {}
@@ -910,31 +910,26 @@ export class AgentManager {
       this.events.updateMetadata(id, { status: 'verifying' })
       this.#progress(
         id,
-        'Checking proof',
-        'Independent Lean verification of current saved context and candidate proofs.',
+        'Checking changes',
+        'Inspecting candidate changes before final checks.',
       )
       const changes = await this.workspaces.changes(snapshot)
       if (active.controller.signal.aborted) return
       this.events.updateMetadata(id, { changes })
       this.#emit(id, 'changes', { changes })
-      if (job.mode === 'search' && changes.length)
-        throw new Error(
-          'Search mode modified files. Those changes will not be applied.',
-        )
-      if (job.mode === 'search') {
+      if (job.mode === 'search' && !changes.length) {
         const verification = {
-          compiled: true,
           complete: true,
           files: [],
-          axioms: [],
-          reason: 'Search completed without changing project files.',
-          kind: 'search',
+          reason:
+            'Task completed without changing project files. No Lean verification was run.',
+          kind: 'chat',
         }
         this.events.updateMetadata(id, { verification, status: 'completed' })
         this.#progress(
           id,
           'Completed',
-          'Search finished without changing project files.',
+          'Task finished without changing project files.',
         )
         this.#emit(id, 'verification', verification)
         return
@@ -958,12 +953,21 @@ export class AgentManager {
         this.#emit(id, 'verification', verification)
         return
       }
-      this.#log(id, 'Checking the candidate independently with Lean…\n')
-      const clean = await this.workspaces.verificationCopy(
-        snapshot,
-        changes,
-        job.liveEdits ? { liveChanges: live.liveChanges || [] } : {},
+      const hasLeanChanges = changes.some((change) =>
+        change.path.endsWith('.lean'),
       )
+      if (job.mode !== 'search' || hasLeanChanges) {
+        this.#progress(
+          id,
+          'Checking proof',
+          'Independent Lean verification of candidate proofs.',
+        )
+        this.#log(id, 'Checking the candidate independently with Lean…\n')
+      }
+      const clean = await this.workspaces.verificationCopy(snapshot, changes, {
+        ...(job.liveEdits ? { liveChanges: live.liveChanges || [] } : {}),
+        ...(job.mode === 'search' ? { allowProjectFiles: true } : {}),
+      })
       this.events.updateMetadata(id, { verificationRoot: clean.root })
       let checks = changes
       if (!changes.length && job.mode !== 'search') {
@@ -1123,7 +1127,7 @@ export class AgentManager {
     if (job.status !== 'completed' || !job.verification?.complete)
       throw Object.assign(
         new Error(
-          'Only a completed candidate that passed independent Lean verification can be applied.',
+          'Only a completed candidate that passed the required checks can be applied.',
         ),
         { status: 409 },
       )

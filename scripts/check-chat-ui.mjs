@@ -286,6 +286,11 @@ try {
       page.locator('.mode-tabs').getByRole('button', { name, exact: true }),
       name,
     )
+  assert.deepEqual(
+    await page.locator('.mode-tabs button').allTextContents(),
+    ['Ask & Search', 'Proofs', 'Formalize', 'Optimize'],
+    'Ask & Search should be the first assistant mode',
+  )
   assert.equal(
     await page
       .getByRole('button', { name: /Repair a proof|Find a proof/ })

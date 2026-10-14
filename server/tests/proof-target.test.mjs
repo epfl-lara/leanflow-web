@@ -418,7 +418,7 @@ test('a concurrent duplicate keeps its durable receipt if candidate validation b
   )
 })
 
-test('Search proof focus is read-only in initial context and native followup steering', async (t) => {
+test('Ask & Search proof focus stays reference context and permits requested file work in followup steering', async (t) => {
   const { manager, project, events } = await fixture(t)
   const job = await manager.start('alice', project.id, {
     mode: 'search',
@@ -427,11 +427,16 @@ test('Search proof focus is read-only in initial context and native followup ste
   })
   assert.equal(job.liveEdits, false)
   const initial = agentConversationContext(job)
-  assert.match(initial, /read-only context: do not edit any project files/)
+  assert.match(initial, /Proof focus does not authorize edits/)
+  assert.match(
+    initial,
+    /Questions, explanations, and searches leave files unchanged/,
+  )
+  assert.doesNotMatch(initial, /do not edit any project files/)
   assert(!initial.includes('before editing'))
   await manager.message('alice', job.id, {
     id: randomUUID(),
-    text: 'Explain this proof.',
+    text: 'Create Notes.md explaining this proof.',
     proofTarget: target,
   })
   const calls = []
@@ -452,7 +457,12 @@ test('Search proof focus is read-only in initial context and native followup ste
   await manager.followups.deliver(job.id)
   assert.match(
     calls[0].params.input[0].text,
-    /read-only context: do not edit any project files/,
+    /edit project files only when the user requests file work, for review before applying/,
+  )
+  assert(
+    calls[0].params.input[0].text.includes(
+      'Create Notes.md explaining this proof.',
+    ),
   )
   const receipt = events
     .events(job.id)

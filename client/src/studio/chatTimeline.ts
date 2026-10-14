@@ -89,13 +89,13 @@ export function runStatusLabel(run: Run) {
     const verification = run.verification as
       | { complete?: boolean; kind?: string }
       | undefined
-    return verification?.kind === 'search' || run.mode === 'search'
-      ? 'Search finished'
-      : verification?.complete
-        ? 'Verified'
-        : verification?.complete === false
-          ? 'Finished · checks need attention'
-          : 'Finished · review checks'
+    if (verification?.complete === false)
+      return 'Finished · checks need attention'
+    if (['chat', 'search'].includes(verification?.kind || '')) return 'Finished'
+    if (verification?.kind === 'workspace') return 'Ready to review'
+    if (run.mode === 'search' && verification?.complete === undefined)
+      return 'Finished'
+    return verification?.complete ? 'Verified' : 'Finished · review checks'
   }
   return (
     (
@@ -152,7 +152,8 @@ export function runChangePaths(run: Run, live = false): string[] {
 }
 
 export function liveEditStatus(run: Run): string {
-  if (run.mode === 'search') return 'Read-only · Files will not change'
+  if (run.mode === 'search')
+    return 'Review first · Requested edits need your approval'
   if (run.liveEdits === false)
     return 'Review first · Files update after you accept changes'
   if (!run.liveEdits) return ''

@@ -4,12 +4,14 @@ import { Icon } from './Icons'
 export function Verification({ value }: { value: unknown }) {
   if (!value || typeof value !== 'object') return null
   const v = value as Record<string, unknown>
-  if (v.kind === 'search')
+  if (['chat', 'search', 'workspace'].includes(String(v.kind)))
     return (
-      <div className="verification-card verified">
+      <div
+        className={`verification-card ${v.complete === true ? 'verified' : 'unverified'}`}
+      >
         <strong>
           <Icon name="search" size={16} />
-          Search complete
+          {v.kind === 'workspace' ? 'Project file review' : 'Task complete'}
         </strong>
         <p>{String(v.reason || 'No project files changed.')}</p>
       </div>

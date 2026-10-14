@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
 
 // These checks are independent of the agent's own statements and diagnostics.
 // Lean checks dependencies of every named declaration in the changed modules.
@@ -31,7 +32,10 @@ export function maskLean(source, preserveStrings = false) {
       }
     } else if (a === "'" && !/[\p{L}\p{N}_'.]/u.test(source[i - 1] || '')) {
       // A double quote inside a character literal must not mask later code.
-      const literal = /^'(?:\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)|[^'\\\r\n])'/u.exec(source.slice(i))?.[0]
+      const literal =
+        /^'(?:\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)|[^'\\\r\n])'/u.exec(
+          source.slice(i),
+        )?.[0]
       if (literal) {
         output += preserveStrings ? literal : ' '.repeat(literal.length)
         i += literal.length - 1
@@ -75,16 +79,19 @@ export function proofRisks(changes, mode) {
   const problems = []
   for (const change of changes) {
     if (
-      !change.path.endsWith('.lean') ||
-      /(?:^|\/)(?:lakefile\.lean|\.git|\.lake|lean-toolchain|lake-manifest\.json)(?:\/|$)/.test(
-        change.path,
-      )
+      change.path
+        .split('/')
+        .some((part) =>
+          ['.git', '.lake', ...PROJECT_CONFIGURATION_FILES].includes(part),
+        ) ||
+      (mode !== 'search' && !change.path.endsWith('.lean'))
     ) {
       problems.push(
         `Changes to ${change.path} require a separate project configuration edit.`,
       )
       continue
     }
+    if (mode === 'search' && !change.path.endsWith('.lean')) continue
     if (change.after === null) {
       problems.push(`Deleting ${change.path} requires a separate manual edit.`)
       continue
@@ -123,9 +130,17 @@ export function proofRisks(changes, mode) {
       /\b(?:sorry|admit)\b/.test(code)
     )
       problems.push(`${change.path} still contains an unfinished proof.`)
-    if (['proofs', 'repair', 'prove', 'optimize'].includes(mode) && change.before) {
-      if (ambiguousTheoremStatement(change.before) || ambiguousTheoremStatement(change.after)) {
-        problems.push(`${change.path} contains unsupported theorem statement syntax. Review it manually before changing its proof.`)
+    if (
+      ['proofs', 'repair', 'prove', 'optimize'].includes(mode) &&
+      change.before
+    ) {
+      if (
+        ambiguousTheoremStatement(change.before) ||
+        ambiguousTheoremStatement(change.after)
+      ) {
+        problems.push(
+          `${change.path} contains unsupported theorem statement syntax. Review it manually before changing its proof.`,
+        )
         continue
       }
       const before = theoremHeaders(change.before),
@@ -167,14 +182,20 @@ export function proofRisks(changes, mode) {
 // treating part of the statement as an editable proof body.
 function ambiguousTheoremStatement(source) {
   const masked = maskLean(source)
-  const declarations = /^[ \t]*(?:@\[[^\n]*?\][ \t]*)*(?:(?:private|protected|noncomputable)\s+)*(?:theorem|lemma)\b/gm
+  const declarations =
+    /^[ \t]*(?:@\[[^\n]*?\][ \t]*)*(?:(?:private|protected|noncomputable)\s+)*(?:theorem|lemma)\b/gm
   for (const match of masked.matchAll(declarations)) {
     let depth = 0
     for (let i = match.index + match[0].length; i < masked.length; i++) {
       if ('([{'.includes(masked[i])) depth++
       else if (')]}'.includes(masked[i])) depth--
       else if (depth === 0 && masked.startsWith(':=', i)) break
-      else if (depth === 0 && !/[\p{L}\p{N}_'.]/u.test(masked[i - 1] || '') && /^(?:let|have|fun|match|do|by)\b/.test(masked.slice(i))) return true
+      else if (
+        depth === 0 &&
+        !/[\p{L}\p{N}_'.]/u.test(masked[i - 1] || '') &&
+        /^(?:let|have|fun|match|do|by)\b/.test(masked.slice(i))
+      )
+        return true
       if (depth < 0) break
     }
   }
@@ -239,7 +260,11 @@ export function proofSkeleton(source) {
   outside += source.slice(previous)
   const stripped = maskLean(outside, true)
   // String literals remain exact; formatting and comments elsewhere are ignored.
-  return (stripped.match(/"(?:\\.|[^"\\])*"|'(?:\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)|[^'\\\r\n])'|[^\s]/gu) || []).join('')
+  return (
+    stripped.match(
+      /"(?:\\.|[^"\\])*"|'(?:\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)|[^'\\\r\n])'|[^\s]/gu,
+    ) || []
+  ).join('')
 }
 
 export function theoremHeaders(source) {
@@ -428,6 +453,14 @@ export async function verifyCandidate(
       path: change.path,
       names: declarationNames(change.after),
     }))
+  if (!entries.length && mode === 'search')
+    return {
+      complete: true,
+      kind: 'workspace',
+      files: [],
+      reason:
+        'Project file changes are ready to review. No Lean source changes to check.',
+    }
   if (!entries.length)
     return {
       compiled: true,

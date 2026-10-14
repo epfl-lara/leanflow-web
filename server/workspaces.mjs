@@ -3918,9 +3918,14 @@ export class WorkspaceStore {
     )
   }
 
-  async #leanChanges(manifest, container, changes) {
+  async #candidateChanges(
+    manifest,
+    container,
+    changes,
+    { allowProjectFiles = false } = {},
+  ) {
     if (!Array.isArray(changes) || changes.length > 1000)
-      fail('Invalid live Lean change set')
+      fail('Invalid assistant change set')
     const original = new Map(
       manifest.files.map((file) => [file.path, file.hash]),
     )
@@ -3928,22 +3933,32 @@ export class WorkspaceStore {
       result = []
     for (const change of changes) {
       if (!change || typeof change !== 'object')
-        fail('Invalid live Lean change')
+        fail('Invalid assistant change')
       const filename = relativeFile(change.path, { write: true })
       if (
-        !filename.endsWith('.lean') ||
-        path.posix.basename(filename) === 'lakefile.lean'
+        allowProjectFiles &&
+        filename.split('/').some((part) => CONFIGURATION_FILES.has(part))
+      )
+        fail('Assistant edits cannot change project configuration', 409)
+      if (
+        !allowProjectFiles &&
+        (!filename.endsWith('.lean') ||
+          path.posix.basename(filename) === 'lakefile.lean')
       )
         fail('Live assistant edits may change Lean source files only', 409)
-      if (seen.has(filename)) fail('A live change set contains duplicate paths')
+      if (seen.has(filename))
+        fail('An assistant change set contains duplicate paths')
       seen.add(filename)
       if (
-        typeof change.after !== 'string' ||
-        Buffer.byteLength(change.after) > sourceFileByteLimit(filename) ||
-        change.after.includes('\0')
+        !(allowProjectFiles && change.after === null) &&
+        (typeof change.after !== 'string' ||
+          Buffer.byteLength(change.after) > sourceFileByteLimit(filename) ||
+          change.after.includes('\0'))
       )
         fail(
-          'Live assistant edits require editable Lean text and cannot delete files',
+          allowProjectFiles
+            ? 'Assistant edits require editable project text'
+            : 'Live assistant edits require editable Lean text and cannot delete files',
           409,
         )
       const beforeHash = original.get(filename) ?? null
@@ -3997,12 +4012,12 @@ export class WorkspaceStore {
     return this.#locked(initial.id, async () => {
       const project = this.get(initial.id, initial.owner)
       this.#ready(project)
-      const previous = await this.#leanChanges(
+      const previous = await this.#candidateChanges(
         manifest,
         container,
         previousChanges,
       )
-      const next = await this.#leanChanges(manifest, container, changes)
+      const next = await this.#candidateChanges(manifest, container, changes)
       await this.#assertLiveCurrent(manifest, project, previous, next)
       await this.#applyLocked(
         project,
@@ -4019,7 +4034,11 @@ export class WorkspaceStore {
     return this.#locked(initial.id, async () => {
       const project = this.get(initial.id, initial.owner)
       this.#ready(project)
-      const live = await this.#leanChanges(manifest, container, liveChanges)
+      const live = await this.#candidateChanges(
+        manifest,
+        container,
+        liveChanges,
+      )
       return this.#assertLiveCurrent(manifest, project, live)
     })
   }
@@ -4030,7 +4049,11 @@ export class WorkspaceStore {
     return this.#locked(initial.id, async () => {
       const project = this.get(initial.id, initial.owner)
       this.#ready(project, true)
-      const live = await this.#leanChanges(manifest, container, liveChanges)
+      const live = await this.#candidateChanges(
+        manifest,
+        container,
+        liveChanges,
+      )
       await this.#assertTouched(manifest, project, live)
       return this.#applyLocked(project, this.#liveTransition(live, []), 'undo')
     })
@@ -4047,8 +4070,19 @@ export class WorkspaceStore {
     return this.#locked(project.id, async () => {
       const currentProject = this.get(project.id, project.owner)
       this.#ready(currentProject)
-      const previous = await this.#leanChanges(manifest, container, liveChanges)
-      const proposed = await this.#leanChanges(manifest, container, changes)
+      const previous = await this.#candidateChanges(
+        manifest,
+        container,
+        liveChanges,
+      )
+      const proposed = await this.#candidateChanges(
+        manifest,
+        container,
+        changes,
+        {
+          allowProjectFiles: options.allowProjectFiles === true,
+        },
+      )
       if (Object.hasOwn(options, 'liveChanges'))
         await this.#assertLiveCurrent(
           manifest,

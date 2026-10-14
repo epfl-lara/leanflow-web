@@ -77,6 +77,47 @@ const {
   reasoningBlocksFromEvents,
 } = require('../../../shared/reasoning-timeline.mjs')
 const { UsageSummary } = load('./UsageSummary.tsx')
+const { Verification } = load('./RunReview.tsx')
+
+test('Ask & Search reports conversation and file review separately from Lean verification', () => {
+  for (const kind of ['chat', 'workspace']) {
+    const value = {
+      kind,
+      complete: true,
+      reason: 'No Lean source changes to check.',
+    }
+    const html = renderToStaticMarkup(
+      React.createElement(Verification, { value }),
+    )
+    assert.doesNotMatch(html, /Lean verification passed|Axiom audit/)
+    assert.match(html, /No Lean source changes to check/)
+    assert.equal(
+      runStatusLabel(run({ mode: 'search', verification: value })),
+      kind === 'chat' ? 'Finished' : 'Ready to review',
+    )
+  }
+  const failed = run({
+    mode: 'search',
+    verification: {
+      complete: false,
+      errors: ['The candidate project does not build.'],
+    },
+  })
+  assert.equal(runStatusLabel(failed), 'Finished · checks need attention')
+  assert.equal(
+    finalVerificationIssue(failed),
+    'The candidate project does not build.',
+  )
+  assert.equal(
+    runStatusLabel(
+      run({
+        mode: 'search',
+        verification: { complete: true, kernelChecked: true },
+      }),
+    ),
+    'Verified',
+  )
+})
 
 test('usage shows current context first and keeps cumulative request totals collapsed', () => {
   const html = renderToStaticMarkup(
@@ -216,7 +257,7 @@ test('live edit status distinguishes work without writes, saved edits, review mo
   )
   assert.equal(
     liveEditStatus(run({ mode: 'search' })),
-    'Read-only · Files will not change',
+    'Review first · Requested edits need your approval',
   )
   assert.equal(
     liveEditStatus(
@@ -509,10 +550,10 @@ test('compact history preserves full verification details and search kind', () =
     run({ eventCursor: 13, verification: { compiled: true, complete: true } }),
   )
   assert.deepEqual(merged.verification, full.verification)
-  assert.equal(runStatusLabel(merged), 'Search finished')
+  assert.equal(runStatusLabel(merged), 'Finished')
   assert.equal(
     runStatusLabel(run({ mode: 'search', verification: { complete: true } })),
-    'Search finished',
+    'Verified',
   )
 })
 

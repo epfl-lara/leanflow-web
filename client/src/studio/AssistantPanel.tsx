@@ -585,7 +585,7 @@ export function AssistantPanel({
     const settings = {
       model,
       effort: effort || null,
-      liveEdits,
+      liveEdits: mode !== 'search' && liveEdits,
       file: mode === 'search' ? file : target,
       currentFile: currentFile || null,
       mode,
@@ -843,7 +843,8 @@ export function AssistantPanel({
         onEffort={(value) =>
           setEfforts((previous) => ({ ...previous, [model]: value }))
         }
-        liveEdits={liveEdits}
+        liveEdits={mode !== 'search' && liveEdits}
+        reviewFirst={mode === 'search'}
         onLiveEdits={setLiveEdits}
         active={hasActive}
       />
@@ -1125,7 +1126,7 @@ export function AssistantPanel({
               ? 'Review saved edits'
               : 'Review candidate changes'
           }
-          subtitle="Lean verification and conflict checks protect saved work."
+          subtitle="Review requested edits before applying. Lean edits also require proof verification."
           onClose={() => setDialogId(null)}
           busy={applying || discarding}
         >

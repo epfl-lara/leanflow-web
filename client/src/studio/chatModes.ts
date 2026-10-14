@@ -8,6 +8,34 @@ export const chatModes: {
   suggestions: { label: string; prompt: string }[]
 }[] = [
   {
+    id: 'search',
+    name: 'Ask & Search',
+    hint: 'Ask questions, understand proofs and definitions, find lemmas, or work on project files. Requested edits are reviewed before applying.',
+    placeholder: 'Ask a question or describe a task for your project…',
+    suggestions: [
+      {
+        label: 'Explain this proof',
+        prompt:
+          'Explain the selected proof and its main steps. Do not edit files.',
+      },
+      {
+        label: 'Explain a definition',
+        prompt:
+          'Explain the selected definition, its meaning, and how it is used. Include a simple example. Do not edit files.',
+      },
+      {
+        label: 'Find useful lemmas',
+        prompt:
+          'Find library lemmas relevant to the selected theorem or goal. Explain how they could help without editing files.',
+      },
+      {
+        label: 'Organize project notes',
+        prompt:
+          'Organize the project notes into a clear Markdown summary. Preserve the information and prepare the file changes for review.',
+      },
+    ],
+  },
+  {
     id: 'proofs',
     name: 'Proofs',
     hint: 'Find, complete, or repair a proof while preserving its statement.',
@@ -57,30 +85,6 @@ export const chatModes: {
         label: 'Reduce heartbeats',
         prompt:
           'Reduce elaboration heartbeats using focused tactics and existing lemmas. Preserve the exact statement, verify the proof, and compare heartbeats and tokens.',
-      },
-    ],
-  },
-  {
-    id: 'search',
-    name: 'Ask & Search',
-    hint: 'Ask about Lean, understand proofs and definitions, or find useful lemmas. No files are changed.',
-    placeholder:
-      'Ask a Lean question, explain a proof or definition, or find lemmas…',
-    suggestions: [
-      {
-        label: 'Explain this proof',
-        prompt:
-          'Explain the selected proof and its main steps. Do not edit files.',
-      },
-      {
-        label: 'Explain a definition',
-        prompt:
-          'Explain the selected definition, its meaning, and how it is used. Include a simple example. Do not edit files.',
-      },
-      {
-        label: 'Find useful lemmas',
-        prompt:
-          'Find library lemmas relevant to the selected theorem or goal. Explain how they could help without editing files.',
       },
     ],
   },
