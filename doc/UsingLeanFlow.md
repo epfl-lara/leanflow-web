@@ -48,7 +48,7 @@ Choose **Lean docs** beside the search bar to read local copies of _Functional P
 
 Choose a book, follow its chapter links, or use **Search this book** to find matching chapters. **Contents** returns to the start. The displayed Lean version belongs to the downloaded book; your project's pinned Lean version stays unchanged.
 
-With a prepared project open, choose **Ask Lemex** to add the current chapter to your draft. Select a passage first to include it. Your existing draft is preserved, and nothing is sent until you send the message. Lemex can search and read the downloaded books with its file tools. Chapter links in its replies open in Lean docs.
+With a prepared project open, choose **Ask Lemex** to add the current chapter to your draft. Select a passage first to include it. Your existing draft is preserved, and nothing is sent until you send the message. Lemex knows which books are installed and can search and read them directly. For Lean explanations, it is instructed to consult relevant chapters and include clickable book and chapter references when it uses them. These links open the cited page in Lean docs.
 
 If a book is missing, ask the server administrator to [install the local books](Configuration.md#local-lean-books).
 

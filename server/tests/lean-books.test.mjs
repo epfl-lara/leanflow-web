@@ -173,12 +173,13 @@ test('book serving rejects symlinks, encoded traversal, secrets, scripts and unk
 })
 
 test('Lemex receives readable private copies and local chapter citations without changing shared originals', async (t) => {
-  const { directory, books, booksDir } = await fixture(t)
+  const { directory, books, booksDir, request } = await fixture(t)
   const home = path.join(directory, 'worker-home')
   await fs.mkdir(home)
   const instructions = await books.prepareAgent(home)
   assert.match(instructions, /\/home\/worker\/lean-books/)
   assert.match(instructions, /pinned Lean version/)
+  for (const book of LEAN_BOOKS) assert(instructions.includes(book.title))
   const catalog = JSON.parse(
     await fs.readFile(path.join(home, 'lean-books/catalog.json'), 'utf8'),
   )
@@ -189,7 +190,18 @@ test('Lemex receives readable private copies and local chapter citations without
   )
   assert.equal(chapter.url, '/api/books/reference/content/Tactics/')
   const copy = path.join(home, chapter.file.replace('/home/worker/', ''))
-  assert.match(await fs.readFile(copy, 'utf8'), /example : True := by trivial/)
+  const text = await fs.readFile(copy, 'utf8')
+  assert.match(text, /example : True := by trivial/)
+  const reference = /^Reference: \[([^\]]+)\]\(([^)]+)\)/.exec(text)
+  assert(reference, 'A chapter can be cited directly from its readable text')
+  assert.equal(reference[1], 'Lean Language Reference — Tactics')
+  assert.equal(reference[2], chapter.url)
+  const linkedPage = await request(reference[2])
+  assert.equal(linkedPage.status, 200)
+  assert.match(
+    await linkedPage.text(),
+    /Induction proves recursive propositions/,
+  )
   await fs.writeFile(copy, 'Changed private worker copy')
   const original = (await books.catalog())
     .find((book) => book.id === 'reference')
