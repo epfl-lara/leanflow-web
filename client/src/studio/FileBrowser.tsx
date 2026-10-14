@@ -4,6 +4,7 @@ import { Icon } from './Icons'
 import { parentFolders } from './projectPaths'
 
 const MAX_VISIBLE = 200
+const TREE_INDENT = 16
 
 interface FolderNode {
   path: string
@@ -162,7 +163,7 @@ export const FileBrowser = memo(function FileBrowser({
     <div
       key={file.path}
       className={`file-row ${selectedPath === file.path ? 'selected' : ''}`}
-      style={depth ? { paddingLeft: depth * 12 } : undefined}
+      style={depth ? { paddingLeft: depth * TREE_INDENT } : undefined}
     >
       <button
         className={`file-item ${selectedPath === file.path ? 'selected' : ''}`}
@@ -220,7 +221,7 @@ export const FileBrowser = memo(function FileBrowser({
             <div key={folder.path} className="folder-group">
               <div
                 className="folder-row"
-                style={depth ? { paddingLeft: depth * 12 } : undefined}
+                style={depth ? { paddingLeft: depth * TREE_INDENT } : undefined}
               >
                 <button
                   className="folder-toggle"
@@ -253,7 +254,7 @@ export const FileBrowser = memo(function FileBrowser({
                 ) : (
                   <p
                     className="sidebar-empty empty-folder"
-                    style={{ paddingLeft: (depth + 1) * 12 + 9 }}
+                    style={{ marginLeft: (depth + 1) * TREE_INDENT }}
                   >
                     {files.some((file) =>
                       file.path.startsWith(folder.path + '/'),

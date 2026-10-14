@@ -484,7 +484,7 @@ textarea {
 .file-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
   border: 0;
   background: transparent;
@@ -494,6 +494,15 @@ textarea {
   margin: 1px 0;
   text-align: left;
   min-height: 33px;
+}
+.file-item::before {
+  /* Match the folder arrow column so sibling icons and labels line up. */
+  content: '';
+  flex: 0 0 11px;
+}
+.file-item > svg,
+.folder-toggle > svg {
+  flex-shrink: 0;
 }
 .file-item > span:not(.dirty-dot) {
   flex: 1;
@@ -2553,6 +2562,7 @@ body.panel-resizing iframe {
 }
 .empty-folder {
   margin: 0;
+  padding-left: 47px;
   padding-top: 4px;
   padding-bottom: 8px;
 }
