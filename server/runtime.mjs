@@ -7,6 +7,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
+import { PreparedPresetCache } from './prepared-presets.mjs'
 import { fileURLToPath } from 'node:url'
 import {
   SharedDependencyCache,
@@ -155,6 +156,9 @@ export class Runtime {
     this.dependencies = new Map()
     this.sharedCache = new SharedDependencyCache(this, (relative) =>
       ensurePrivateDirectory(this.runtimeDir, relative),
+    )
+    this.preparedPresets = new PreparedPresetCache(this, () =>
+      ensurePrivateDirectory(this.runtimeDir, 'prepared-presets'),
     )
     this.dependencyWrites = Promise.resolve()
     this.installing = new Map()
@@ -604,11 +608,26 @@ export class Runtime {
     return presetDefinitions.map((preset) => ({
       ...preset,
       ready: Boolean(this.templateRoot(preset.id)),
+      ...(preset.id === 'mathlib'
+        ? {
+            playgroundReady: Boolean(this.preparedPresetEnvironment(preset.id)),
+            playgroundState: this.preparedPresets.state(preset.id),
+          }
+        : {}),
     }))
   }
 
   presetDefinition(id) {
     return presetDefinitions.find((preset) => preset.id === id)
+  }
+
+  preparedPresetEnvironment(id) {
+    return this.preparedPresets.get(id)
+  }
+
+  async preparePresetEnvironment(id) {
+    this.#assertReady()
+    return this.preparedPresets.prepare(id)
   }
 
   templateRoot(id) {

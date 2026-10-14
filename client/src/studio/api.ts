@@ -9,7 +9,15 @@ export interface Preset {
   description: string
   toolchain?: string
   ready?: boolean
+  playgroundReady?: boolean
+  playgroundState?: PlaygroundPreparationState
 }
+
+export type PlaygroundPreparationState =
+  | 'ready'
+  | 'verifying'
+  | 'failed'
+  | 'unavailable'
 
 export interface Session {
   user: { id: string; name: string }
@@ -32,6 +40,8 @@ export interface Session {
 
 export interface Project {
   id: string
+  kind?: 'project' | 'single-file'
+  protected?: boolean
   name: string
   status: 'preparing' | 'ready' | 'error'
   needsPreparation?: boolean

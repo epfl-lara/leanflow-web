@@ -1,0 +1,69 @@
+.single-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.playground-create {
+  margin: 2px 12px 8px;
+}
+.single-file-actions .field-help {
+  flex-basis: 100%;
+  margin: 0;
+}
+.welcome-state > .single-file-actions {
+  margin-bottom: 12px;
+}
+.workspace-lists {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.workspace-lists > .sidebar-projects-details {
+  flex: none;
+  overflow: visible;
+}
+.single-file-mode .sidebar-source-sections {
+  flex: 0 1 35%;
+}
+.single-file-mode .sidebar-source-sections:not(:has(.proof-outline-sidebar)) {
+  display: none;
+}
+.single-file-mode .proof-outline-sidebar {
+  flex: 1;
+}
+.single-file-mode .file-toolbar {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.single-file-mode .file-actions {
+  flex-wrap: wrap;
+}
+
+.project-actions {
+  z-index: 1;
+  position: absolute;
+  right: 4px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+}
+.project-row:has(.playground-actions) .project-item {
+  padding-right: 66px;
+}
+.project-actions .project-delete {
+  position: static;
+  opacity: 1;
+}
+.project-row:hover .project-actions,
+.project-row:focus-within .project-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .project-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}

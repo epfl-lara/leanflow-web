@@ -23,12 +23,18 @@ import {
 } from './api'
 import { AssistantPanel } from './AssistantPanel'
 import { Dialog } from './Dialog'
-import { ProjectSetupDetails } from './ProjectSetupDetails'
 import { Icon } from './Icons'
 import { LeanWorkspace } from './LeanWorkspace'
 import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
-import { UploadModal } from './UploadFiles'
+import { ProjectSetupDetails } from './ProjectSetupDetails'
+import { UploadModal, type UploadFile } from './UploadFiles'
+import { SingleFileActions } from './SingleFileActions'
+import { WorkspaceList } from './WorkspaceList'
+import { RenameWorkspaceDialog } from './RenameWorkspaceDialog'
+import { usePlaygroundPreparation } from './usePlaygroundPreparation'
+import { playgroundDownloadName } from './playgroundNames'
+import { saveAs } from 'file-saver'
 import { SearchPanel } from './SearchPanel'
 import { LibrarySourceDialog, type SourceRequest } from './LibrarySourceDialog'
 import { SettingsModal } from './SettingsModal'
@@ -50,8 +56,10 @@ import {
   useStoredSize,
 } from './layout'
 import './studio.css'
+import './single-file.css'
 
 interface TrashItem {
+  workspaceKind?: 'single-file' | 'project'
   chatId?: string
   trashId: string
   projectId: string
@@ -244,6 +252,12 @@ export function Studio() {
     null,
   )
   const [uploadModal, setUploadModal] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<Project | null>(null)
+  const [creatingSingleFile, setCreatingSingleFile] = useState(false)
+  const [creatingPlaygroundSource, setCreatingPlaygroundSource] = useState<
+    'blank' | 'upload'
+  >('blank')
+  const [convertingSingleFile, setConvertingSingleFile] = useState(false)
   const [stoppingSetup, setStoppingSetup] = useState(false)
   const [setupDetails, setSetupDetails] = useState(false)
   const [settingsModal, setSettingsModal] = useState(false)
@@ -290,9 +304,19 @@ export function Studio() {
   filesRef.current = files
   projectIdRef.current = projectId
   const project = projects.find((item) => item.id === projectId)
+  const projectKindRef = useRef(project?.kind)
+  projectKindRef.current = project?.kind
+  const singleFileMode = project?.kind === 'single-file'
+  const singleFileView = singleFileMode
+  const playgroundPreparation = usePlaygroundPreparation(
+    session?.templates.find((preset) => preset.id === 'mathlib'),
+    session?.user.id,
+  )
+  const mathlibAvailable = playgroundPreparation.state === 'ready'
   const workspaceEditable =
     project?.status === 'ready' ||
-    (project?.status === 'error' && project.needsPreparation === true)
+    (project?.status === 'error' &&
+      (singleFileMode || project.needsPreparation === true))
   const loadedProjectId = useRef<string | null>(null)
   const currentEditorProof =
     editorProof?.path === file?.path ? editorProof : null
@@ -423,6 +447,8 @@ export function Studio() {
   }, [])
 
   const loadGit = useCallback(async (id: string) => {
+    if (projectIdRef.current === id && projectKindRef.current === 'single-file')
+      return
     try {
       const value = await api<GitInfo>(
         `/api/projects/${encodeURIComponent(id)}/git`,
@@ -432,6 +458,10 @@ export function Studio() {
       if (projectIdRef.current === id) setGit(null)
     }
   }, [])
+  useEffect(() => {
+    if (project?.status === 'ready' && project.kind !== 'single-file')
+      void loadGit(project.id)
+  }, [project?.id, project?.status, project?.kind, loadGit])
   const acceptGit = useCallback(
     (value: GitInfo) => {
       if (projectIdRef.current === projectId) setGit(value)
@@ -514,7 +544,6 @@ export function Studio() {
       .catch((error) => {
         if (!cancelled) setError(errorText(error))
       })
-    if (project?.status === 'ready') void loadGit(projectId)
     return () => {
       cancelled = true
     }
@@ -670,6 +699,55 @@ export function Studio() {
     },
     [navigate, openFile],
   )
+
+  function acceptCreatedProject(created: Project) {
+    if (created.kind === 'single-file')
+      localStorage.setItem(`lemex-file-${created.id}`, 'Main.lean')
+    setProjects((previous) => [
+      created,
+      ...previous.filter((item) => item.id !== created.id),
+    ])
+    setProjectId(created.id)
+    setSidebarOpen(false)
+  }
+
+  function startSingleFile(source?: UploadFile) {
+    navigate(async () => {
+      setCreatingSingleFile(true)
+      setCreatingPlaygroundSource(source ? 'upload' : 'blank')
+      try {
+        const created = await post<Project>('/api/projects', {
+          kind: 'single-file',
+          ...(source ? { file: source } : {}),
+        })
+        acceptCreatedProject(created)
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 503)
+          void playgroundPreparation.refresh().catch(() => {})
+        throw error
+      } finally {
+        setCreatingSingleFile(false)
+      }
+    })
+  }
+
+  async function convertSingleFile() {
+    if (!projectId) return
+    setConvertingSingleFile(true)
+    try {
+      const updated = await post<Project>(
+        `/api/projects/${encodeURIComponent(projectId)}/convert`,
+      )
+      setProjects((previous) =>
+        previous.map((item) => (item.id === updated.id ? updated : item)),
+      )
+      setNotice('Converted to a project. Your file and chats are preserved.')
+    } catch (error) {
+      setError(errorText(error))
+    } finally {
+      setConvertingSingleFile(false)
+    }
+  }
 
   async function continueNavigation(save: boolean) {
     if (!pendingAction) return
@@ -978,7 +1056,7 @@ export function Studio() {
   return (
     <div
       ref={setStudioElement}
-      className={`studio ${toolsOpen ? '' : 'tools-hidden'}`}
+      className={`studio ${toolsOpen ? '' : 'tools-hidden'} ${singleFileView ? 'single-file-mode' : ''}`}
       style={
         {
           '--sidebar-width': `${sidebarWidth}px`,
@@ -1008,86 +1086,90 @@ export function Studio() {
             ref={setSourceSectionsElement}
             className="sidebar-source-sections"
           >
-            <section className="sidebar-files-section" aria-label="Files">
-              <div className="sidebar-section-title">
-                <span>Files</span>
-                <div>
-                  <button
-                    className="button small subtle"
-                    onClick={() => setUploadModal(true)}
-                    disabled={project?.status !== 'ready'}
-                    title="Upload local files or a folder"
-                  >
-                    Upload
-                  </button>
-                  <button
-                    className="icon-button"
-                    onClick={() => {
-                      setNewFileName('')
-                      setNewFileError('')
-                      setNewFileModal(true)
-                    }}
-                    disabled={!workspaceEditable}
-                    title="New file"
-                    aria-label="New file"
-                  >
-                    <Icon name="plus" size={16} />
-                  </button>
-                  <button
-                    className="icon-button"
-                    onClick={() =>
-                      projectId &&
-                      void loadFiles(projectId).catch((error) =>
-                        setError(errorText(error)),
-                      )
-                    }
-                    disabled={!workspaceEditable}
-                    title="Refresh files"
-                    aria-label="Refresh files"
-                  >
-                    <Icon name="refresh" size={14} />
-                  </button>
+            {!singleFileView && (
+              <section className="sidebar-files-section" aria-label="Files">
+                <div className="sidebar-section-title">
+                  <span>Files</span>
+                  <div>
+                    <button
+                      className="button small subtle"
+                      onClick={() => setUploadModal(true)}
+                      disabled={project?.status !== 'ready'}
+                      title="Upload local files or a folder"
+                    >
+                      Upload
+                    </button>
+                    <button
+                      className="icon-button"
+                      onClick={() => {
+                        setNewFileName('')
+                        setNewFileError('')
+                        setNewFileModal(true)
+                      }}
+                      disabled={!workspaceEditable}
+                      title="New file"
+                      aria-label="New file"
+                    >
+                      <Icon name="plus" size={16} />
+                    </button>
+                    <button
+                      className="icon-button"
+                      onClick={() =>
+                        projectId &&
+                        void loadFiles(projectId).catch((error) =>
+                          setError(errorText(error)),
+                        )
+                      }
+                      disabled={!workspaceEditable}
+                      title="Refresh files"
+                      aria-label="Refresh files"
+                    >
+                      <Icon name="refresh" size={14} />
+                    </button>
+                  </div>
                 </div>
-              </div>
-              {files.length > 8 && (
-                <div className="file-filter">
-                  <Icon name="search" size={13} />
-                  <input
-                    aria-label="Filter files"
-                    value={fileFilter}
-                    onChange={(event) => setFileFilter(event.target.value)}
-                    placeholder="Find a file…"
-                  />
-                </div>
-              )}
-              <FileBrowser
-                files={files}
-                selectedPath={file?.path}
-                dirty={dirty}
-                disabled={opening || saving}
-                filter={fileFilter}
-                ready={workspaceEditable}
-                onSelect={chooseFile}
-                onDelete={(path, kind) =>
-                  projectId &&
-                  requestDelete({ projectId, path, name: path, kind })
-                }
-              />
-            </section>
+                {files.length > 8 && (
+                  <div className="file-filter">
+                    <Icon name="search" size={13} />
+                    <input
+                      aria-label="Filter files"
+                      value={fileFilter}
+                      onChange={(event) => setFileFilter(event.target.value)}
+                      placeholder="Find a file…"
+                    />
+                  </div>
+                )}
+                <FileBrowser
+                  files={files}
+                  selectedPath={file?.path}
+                  dirty={dirty}
+                  disabled={opening || saving}
+                  filter={fileFilter}
+                  ready={workspaceEditable}
+                  onSelect={chooseFile}
+                  onDelete={(path, kind) =>
+                    projectId &&
+                    requestDelete({ projectId, path, name: path, kind })
+                  }
+                />
+              </section>
+            )}
             {file?.path.endsWith('.lean') && project?.status === 'ready' && (
               <>
-                <ResizeHandle
-                  label="Resize files and outline"
-                  orientation="horizontal"
-                  value={fileTreePercent}
-                  min={fileTreeMinimum}
-                  max={fileTreeMaximum}
-                  onChange={setFileTreeSize}
-                  onReset={() => setFileTreeSize(45)}
-                  pixelsPerUnit={() => sourceSectionsSize.height / 100}
-                  unit="percent"
-                  className="outline-resize-handle"
-                />
+                {!singleFileView && (
+                  <ResizeHandle
+                    label="Resize files and outline"
+                    orientation="horizontal"
+                    value={fileTreePercent}
+                    min={fileTreeMinimum}
+                    max={fileTreeMaximum}
+                    onChange={setFileTreeSize}
+                    onReset={() => setFileTreeSize(45)}
+                    pixelsPerUnit={() => sourceSectionsSize.height / 100}
+                    unit="percent"
+                    className="outline-resize-handle"
+                  />
+                )}
                 <ProofOutline
                   key={file.path}
                   declarations={currentEditorProof?.declarations || []}
@@ -1127,91 +1209,55 @@ export function Studio() {
               </>
             )}
           </div>
-          <ResizeHandle
-            label="Resize files and projects"
-            orientation="horizontal"
-            value={filesPercent}
-            min={filesMinimum}
-            max={filesMaximum}
-            onChange={setFilesSize}
-            onReset={() => setFilesSize(DEFAULT_LAYOUT.files)}
-            pixelsPerUnit={() => navigationSize.height / 100}
-            unit="percent"
-            className="navigation-resize-handle"
-          />
+          {!singleFileView && (
+            <ResizeHandle
+              label="Resize files and projects"
+              orientation="horizontal"
+              value={filesPercent}
+              min={filesMinimum}
+              max={filesMaximum}
+              onChange={setFilesSize}
+              onReset={() => setFilesSize(DEFAULT_LAYOUT.files)}
+              pixelsPerUnit={() => navigationSize.height / 100}
+              unit="percent"
+              className="navigation-resize-handle"
+            />
+          )}
           <section className="sidebar-projects-section" aria-label="Projects">
-            <details className="sidebar-projects-details" open>
-              <summary className="sidebar-section-title">
-                <Icon name="chevron" size={13} />
-                <span>Projects</span>
-              </summary>
-              <div className="project-list">
-                {projects.map((item) => (
-                  <div className="project-row" key={item.id}>
-                    <button
-                      className={`project-item ${item.id === projectId ? 'selected' : ''}`}
-                      aria-current={item.id === projectId ? 'page' : undefined}
-                      onClick={() =>
-                        navigate(async () => {
-                          setProjectId(item.id)
-                          setSidebarOpen(false)
-                        })
-                      }
-                      title={item.name}
-                      disabled={opening || saving}
-                    >
-                      <span className={`project-icon ${item.status}`}>
-                        <Icon name="folder" size={17} />
-                      </span>
-                      <span className="project-label">
-                        <strong>{item.name}</strong>
-                        <span>
-                          {item.status === 'preparing'
-                            ? 'Preparing dependencies…'
-                            : item.status === 'error'
-                              ? 'Needs attention'
-                              : item.toolchain?.replace(
-                                  'leanprover/lean4:',
-                                  '',
-                                ) || 'Lean project'}
-                        </span>
-                      </span>
-                      {item.status === 'preparing' && (
-                        <span className="spinner" />
-                      )}
-                    </button>
-                    <button
-                      className="icon-button project-delete"
-                      aria-label={`Move project ${item.name} to trash`}
-                      title={`Delete project ${item.name}`}
-                      disabled={
-                        opening || saving || item.status === 'preparing'
-                      }
-                      onClick={() =>
-                        requestDelete({
-                          projectId: item.id,
-                          name: item.name,
-                          kind: 'project',
-                        })
-                      }
-                    >
-                      <Icon name="trash" size={14} />
-                    </button>
-                  </div>
-                ))}
-                {!projects.length && (
-                  <p className="sidebar-empty">Your projects appear here.</p>
-                )}
-              </div>
-            </details>
-            <button
-              className="icon-button sidebar-projects-create"
-              onClick={() => setProjectModal({})}
-              title="Import or create project"
-              aria-label="Import or create project"
-            >
-              <Icon name="plus" size={17} />
-            </button>
+            <WorkspaceList
+              projects={projects}
+              selectedId={projectId}
+              disabled={opening || saving}
+              onSelect={(id) =>
+                navigate(async () => {
+                  setProjectId(id)
+                  setSidebarOpen(false)
+                })
+              }
+              onDelete={(item) =>
+                requestDelete({
+                  projectId: item.id,
+                  name: item.name,
+                  kind: 'project',
+                })
+              }
+              onRename={setRenameTarget}
+              playgroundActions={
+                <SingleFileActions
+                  available={mathlibAvailable}
+                  busy={creatingSingleFile}
+                  busySource={creatingPlaygroundSource}
+                  preparationState={playgroundPreparation.state}
+                  onRetry={() =>
+                    void playgroundPreparation
+                      .retry()
+                      .catch((error) => setError(errorText(error)))
+                  }
+                  onCreate={startSingleFile}
+                  onError={setError}
+                />
+              }
+            />
             <button
               className="import-button"
               onClick={() => setProjectModal({})}
@@ -1233,32 +1279,35 @@ export function Studio() {
             className="sidebar-resize-handle"
           />
         )}
-        {git && git.repository !== false && project?.status === 'ready' && (
-          <div className="git-sidebar">
-            <div className="git-sidebar-caption">
-              <Icon name="git" size={14} />
-              <span title={git.branch || undefined}>
-                {git.branch || 'Detached HEAD'}
-              </span>
+        {!singleFileMode &&
+          git &&
+          git.repository !== false &&
+          project?.status === 'ready' && (
+            <div className="git-sidebar">
+              <div className="git-sidebar-caption">
+                <Icon name="git" size={14} />
+                <span title={git.branch || undefined}>
+                  {git.branch || 'Detached HEAD'}
+                </span>
+                <button
+                  className="icon-button"
+                  aria-label="Refresh Git status"
+                  title="Refresh Git status"
+                  onClick={() => projectId && void loadGit(projectId)}
+                >
+                  <Icon name="refresh" size={13} />
+                </button>
+              </div>
               <button
-                className="icon-button"
-                aria-label="Refresh Git status"
-                title="Refresh Git status"
-                onClick={() => projectId && void loadGit(projectId)}
+                className="button secondary small git-source-entry"
+                onClick={() => setGitOpen(true)}
               >
-                <Icon name="refresh" size={13} />
+                <Icon name="git" size={14} />
+                Source control
+                <span>{git.changes?.length || 0}</span>
               </button>
             </div>
-            <button
-              className="button secondary small git-source-entry"
-              onClick={() => setGitOpen(true)}
-            >
-              <Icon name="git" size={14} />
-              Source control
-              <span>{git.changes?.length || 0}</span>
-            </button>
-          </div>
-        )}
+          )}
         <div className="sidebar-footer">
           <span className="user-avatar">
             {session.user.name?.[0]?.toUpperCase() || 'U'}
@@ -1298,7 +1347,7 @@ export function Studio() {
           </button>
         </div>
       </aside>
-      {sidebarOpen && (
+      {sidebarOpen && mobileLayout && (
         <button
           className="sidebar-backdrop"
           aria-label="Close project sidebar"
@@ -1316,9 +1365,9 @@ export function Studio() {
             <Icon name="menu" />
           </button>
           <div className="workspace-title">
-            <Icon name="folder" size={18} />
+            <Icon name={singleFileMode ? 'file' : 'folder'} size={18} />
             <strong>{project?.name || 'Welcome'}</strong>
-            {git?.branch && (
+            {!singleFileMode && git?.branch && (
               <span className="branch-label">
                 <Icon name="git" size={13} />
                 {git.branch}
@@ -1454,12 +1503,26 @@ export function Studio() {
             <div className="eyebrow">A place to work on proofs</div>
             <h1>Start with your project.</h1>
             <p>
-              Bring a Lean repository, or create a workspace with Mathlib,
-              CSLib, or Physlib. Your files and assistant sessions stay with the
-              project.
+              Start a Mathlib Playground, bring a Lean repository, or create a
+              workspace with Mathlib, CSLib, or Physlib. Your files and
+              assistant sessions are saved in your workspace.
             </p>
+            <SingleFileActions
+              available={mathlibAvailable}
+              busy={creatingSingleFile}
+              busySource={creatingPlaygroundSource}
+              preparationState={playgroundPreparation.state}
+              onRetry={() =>
+                void playgroundPreparation
+                  .retry()
+                  .catch((error) => setError(errorText(error)))
+              }
+              primary
+              onCreate={startSingleFile}
+              onError={setError}
+            />
             <button
-              className="button primary"
+              className="button secondary"
               onClick={() => setProjectModal({})}
             >
               <Icon name="plus" size={17} />
@@ -1487,10 +1550,15 @@ export function Studio() {
             {project.status === 'preparing' ? (
               <>
                 <span className="spinner large" />
-                <h1>Preparing {project.name}</h1>
+                <h1>
+                  {singleFileMode
+                    ? `Opening ${project.name}`
+                    : `Preparing ${project.name}`}
+                </h1>
                 <p>
-                  Setting up the Lean toolchain and project dependencies. You
-                  can return to another project while this runs.
+                  {singleFileMode
+                    ? 'Opening your private copy of the prepared Mathlib environment.'
+                    : 'Setting up the Lean toolchain and project dependencies. You can return to another project while this runs.'}
                 </p>
                 <button
                   className="button secondary"
@@ -1514,35 +1582,42 @@ export function Studio() {
               </>
             ) : (
               <>
-                <h1>Project setup needs attention</h1>
+                <h1>
+                  {singleFileMode
+                    ? 'Playground could not open'
+                    : 'Project setup needs attention'}
+                </h1>
                 <p className="error-message">
                   {project.error || 'The environment could not be prepared.'}
                 </p>
                 <button className="button primary" onClick={retryPrepare}>
                   <Icon name="refresh" size={16} />
-                  Retry setup
+                  {singleFileMode ? 'Retry opening' : 'Retry setup'}
                 </button>
               </>
             )}
-            <ProjectSetupDetails project={project} />
+            {!singleFileMode && <ProjectSetupDetails project={project} />}
           </div>
         ) : (
           <>
-            {project.needsPreparation && project.status === 'error' && (
+            {project.status === 'error' && (
               <div className="workspace-alert" role="status">
                 <span>
-                  {project.error} You can edit the setup files or retry.
+                  {project.error}{' '}
+                  {singleFileMode
+                    ? 'Your file is preserved. Retry opening after Mathlib preparation is ready.'
+                    : 'You can edit the setup files or retry.'}
                 </span>
                 <button
                   className="button small secondary"
                   disabled={saving}
                   onClick={retryPrepare}
                 >
-                  Retry setup
+                  {singleFileMode ? 'Retry opening' : 'Retry setup'}
                 </button>
               </div>
             )}
-            {project.needsPreparation && (
+            {project.needsPreparation && !singleFileMode && (
               <div className="setup-editor-details">
                 <ProjectSetupDetails project={project} />
               </div>
@@ -1550,7 +1625,11 @@ export function Studio() {
             <div className="file-toolbar">
               <div className="file-tab">
                 <Icon name="file" size={15} />
-                <span title={file?.path}>{file?.path || 'Choose a file'}</span>
+                <span title={file?.path}>
+                  {singleFileMode && file?.path === 'Main.lean'
+                    ? playgroundDownloadName(project.name)
+                    : file?.path || 'Choose a file'}
+                </span>
                 {file?.readOnly && <span className="tag">Read only</span>}
                 {dirty && (
                   <span className="dirty-dot" aria-label="Unsaved changes" />
@@ -1558,6 +1637,36 @@ export function Studio() {
                 {opening && <span className="spinner" />}
               </div>
               <div className="file-actions">
+                {singleFileMode && (
+                  <>
+                    <button
+                      className="button small subtle"
+                      disabled={!file || opening}
+                      onClick={() =>
+                        file &&
+                        saveAs(
+                          new Blob([file.content], {
+                            type: 'text/plain;charset=utf-8',
+                          }),
+                          playgroundDownloadName(project.name),
+                        )
+                      }
+                    >
+                      Download .lean
+                    </button>
+                    <button
+                      className="button small subtle"
+                      disabled={
+                        project.status === 'preparing' || convertingSingleFile
+                      }
+                      onClick={() => void convertSingleFile()}
+                    >
+                      {convertingSingleFile
+                        ? 'Converting…'
+                        : 'Convert to project'}
+                    </button>
+                  </>
+                )}
                 <button
                   className="button small secondary"
                   onClick={() =>
@@ -1579,7 +1688,11 @@ export function Studio() {
                   }
                 >
                   <Icon name="check" size={14} />
-                  {job && !terminalJob(job) ? 'Checking…' : 'Check Project'}
+                  {job && !terminalJob(job)
+                    ? 'Checking…'
+                    : singleFileMode
+                      ? 'Check File'
+                      : 'Check Project'}
                 </button>
               </div>
             </div>
@@ -1726,7 +1839,11 @@ export function Studio() {
                 key={project.id}
                 projectId={project.id}
                 file={file?.path}
-                files={files}
+                files={
+                  singleFileMode
+                    ? files.filter((entry) => entry.path === 'Main.lean')
+                    : files
+                }
                 focusRequest={proofFocus || undefined}
                 editorProof={currentEditorProof || undefined}
                 onFocusEditor={(request) => {
@@ -1804,7 +1921,7 @@ export function Studio() {
       )}
       {deleteTarget && (
         <Dialog
-          title={`Delete ${deleteTarget.kind}?`}
+          title={`Delete ${deleteTarget.kind === 'project' && projects.find((item) => item.id === deleteTarget.projectId)?.kind === 'single-file' ? 'playground' : deleteTarget.kind}?`}
           subtitle="Deleted items remain recoverable in Trash."
           busy={deleteBusy}
           onClose={() => setDeleteTarget(null)}
@@ -1881,7 +1998,11 @@ export function Studio() {
             {trashItems.map((item) => (
               <div className="trash-item" key={item.trashId}>
                 <Icon
-                  name={item.kind === 'file' ? 'file' : 'folder'}
+                  name={
+                    item.kind === 'file' || item.workspaceKind === 'single-file'
+                      ? 'file'
+                      : 'folder'
+                  }
                   size={18}
                 />
                 <div>
@@ -1892,7 +2013,11 @@ export function Studio() {
                       'Deleted project'}
                   </strong>
                   <span>
-                    {item.kind} · {item.projectName || item.projectId} ·{' '}
+                    {item.kind === 'project' &&
+                    item.workspaceKind === 'single-file'
+                      ? 'playground'
+                      : item.kind}{' '}
+                    · {item.projectName || item.projectId} ·{' '}
                     {new Date(item.createdAt).toLocaleString()}
                   </span>
                 </div>
@@ -1924,11 +2049,20 @@ export function Studio() {
           onClose={() => setProjectModal(null)}
           onCreated={(created) => {
             setProjectModal(null)
-            setProjects((previous) => [
-              created,
-              ...previous.filter((item) => item.id !== created.id),
-            ])
-            navigate(async () => setProjectId(created.id))
+            navigate(async () => acceptCreatedProject(created))
+          }}
+        />
+      )}
+      {renameTarget && (
+        <RenameWorkspaceDialog
+          project={renameTarget}
+          onClose={() => setRenameTarget(null)}
+          onRenamed={(updated) => {
+            setProjects((previous) =>
+              previous.map((item) => (item.id === updated.id ? updated : item)),
+            )
+            setRenameTarget(null)
+            setNotice('Playground renamed')
           }}
         />
       )}

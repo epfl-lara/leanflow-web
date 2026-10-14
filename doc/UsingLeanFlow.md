@@ -1,5 +1,17 @@
 # Use LeanFlow Web
 
+## Start in Mathlib Playground
+
+Choose **Mathlib Playground** on the welcome screen, or expand **Playgrounds** in the sidebar and choose **New playground**. It opens a private scratch file with `import Mathlib`, using the prepared Lean and Mathlib versions. New playgrounds have distinct names such as `Scratch.lean` and `Scratch2.lean`. Paste your code and choose **Save**, or press **Ctrl+S** (**Cmd+S** on macOS).
+
+Choose **Open .lean file** to upload one UTF-8 Lean file of at most 2 MiB. Its contents open as `Main.lean` in a new workspace. Files importing other modules from your own project need the full project instead.
+
+Saved files appear under **Playgrounds** and can be reopened with their chats. Hover over a playground or focus it with the keyboard to show **Rename playground** and **Delete playground**. Rename changes its displayed name and download name, keeping its code and chats. Deleted playgrounds can be restored with **Undo** or **Trash**. Finish or stop active proof work before deleting a playground.
+
+Use **Check File** to run a Lean check or **Download .lean** to download the current editor contents, including unsaved edits. File trees and source control appear after **Convert to project**; conversion keeps the file, chats, and pinned environment. Internally, the scratch module stays `Main.lean`, so renaming the playground does not change Lean imports.
+
+The shared Mathlib template stays protected; your own playgrounds can be deleted. The server verifies the prepared environment once and reuses that check when opening new playgrounds. If you see **Checking the prepared Mathlib environment…**, other projects remain available while the check runs. Use **Retry Mathlib preparation** after a failed check. If Mathlib is not installed, ask the server administrator to prepare it. Opening a playground does not call Lemex automatically.
+
 ## Open a project
 
 Choose **Import or create project**. Create a project with compatible library presets, paste a public repository URL, or upload a local folder.

@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react'
 
 const paths = {
+  edit: 'm16 3 5 5M4 20l4-1L21 6a2 2 0 0 0-5-5L3 14l-1 5Z',
   plus: 'M12 5v14M5 12h14',
   folder:
     'M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z',

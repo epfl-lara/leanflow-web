@@ -130,6 +130,24 @@ export async function createStudio({
       memory: capacity.workerMemory,
     })
   await runtime.init()
+  let playgroundPreparation = Promise.resolve()
+  const preparePlayground = () => {
+    if (runtime.preparePresetEnvironment && runtime.templateRoot('mathlib'))
+      playgroundPreparation = runtime
+        .preparePresetEnvironment('mathlib')
+        .catch((error) => {
+          console.warn(
+            'Mathlib Playground preparation failed:',
+            config.redact(error.message),
+          )
+        })
+  }
+  const playgroundState = () => ({
+    state:
+      runtime.templates().find((preset) => preset.id === 'mathlib')
+        ?.playgroundState || 'unavailable',
+  })
+  preparePlayground()
   const workspaces = new WorkspaceStore({
     dataDir: workspaceDataDir,
     runtime,
@@ -299,6 +317,11 @@ export async function createStudio({
       lemex: config.lemex,
     }),
   )
+  app.get('/api/playground', (_req, res) => res.json(playgroundState()))
+  app.post('/api/playground/prepare', (_req, res) => {
+    preparePlayground()
+    res.status(202).json(playgroundState())
+  })
   app.get('/api/settings', async (req, res) =>
     res.json({
       ...(await settings.get(req.user.id)),
@@ -321,6 +344,20 @@ export async function createStudio({
   )
   app.get('/api/projects/:id', (req, res) =>
     res.json(publicProject(workspaces.get(req.params.id, req.user.id))),
+  )
+  app.post('/api/projects/:id/convert', async (req, res) =>
+    res.json(
+      publicProject(
+        await workspaces.convertSingleFile(req.params.id, req.user.id),
+      ),
+    ),
+  )
+  app.post('/api/projects/:id/rename', async (req, res) =>
+    res.json(
+      publicProject(
+        await workspaces.rename(req.params.id, req.user.id, req.body),
+      ),
+    ),
   )
   app.post('/api/projects/:id/prepare', async (req, res) => {
     requireNoRun(req.params.id, req.user.id)
@@ -865,6 +902,7 @@ export async function createStudio({
       await Promise.allSettled([
         checksStopped,
         agentsStopped,
+        playgroundPreparation,
         ...workspaces.jobs.values(),
       ])
       await stopped

@@ -10,7 +10,7 @@ export interface UploadFile {
 const excluded =
   /^(?:\.git|\.lake|node_modules|\.lemex|\.codex|\.ssh|\.aws|\.azure|\.config|\.netrc|\.npmrc|\.pypirc|__MACOSX|\.DS_Store|\.env(?:\..*)?|credentials(?:\.json)?|auth\.json|settings\.local\.json|.*\.(?:pem|key|p12|pfx))$/i
 
-async function readFiles(files: { file: File; path: string }[]) {
+export async function readSourceFiles(files: { file: File; path: string }[]) {
   const usable = files.filter(
     (item) => !item.path.split('/').some((part) => excluded.test(part)),
   )
@@ -106,7 +106,7 @@ export function UploadFiles({
     setReading(true)
     setError('')
     try {
-      const value = await readFiles(await input)
+      const value = await readSourceFiles(await input)
       onChange(value.files, value.folder)
       setSkipped(value.skipped)
     } catch (error) {

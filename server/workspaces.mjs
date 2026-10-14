@@ -24,10 +24,9 @@ import {
   runDependencyCache,
   setupInfrastructureFailure,
 } from './pinned-lake.mjs'
-import {
-  configurationDigest,
-  readDependencyConfiguration,
-} from './shared-dependencies.mjs'
+import { configurationDigest } from './shared-dependencies.mjs'
+import { singleFileSource, availablePlaygroundName } from './single-files.mjs'
+import { readDependencyConfiguration } from './shared-dependencies.mjs'
 import {
   libraryModulePath,
   sourceSelection,
@@ -37,6 +36,12 @@ import {
 const MAX_FILE = 2 * 1024 * 1024
 const MAX_FILES = 12000
 const PRESETS = new Set(['lean', 'mathlib', 'cslib', 'physlib'])
+const CONFIGURATION_FILES = new Set([
+  'lean-toolchain',
+  'lakefile.lean',
+  'lakefile.toml',
+  'lake-manifest.json',
+])
 const SECRET_PARTS = new Set([
   '.git',
   '.lemex',
@@ -95,6 +100,17 @@ function validateId(value, label = 'project') {
   )
     fail(`Invalid ${label} identifier`)
   return value
+}
+
+function projectName(value) {
+  if (
+    typeof value !== 'string' ||
+    !value.trim() ||
+    value.length > 120 ||
+    /[\x00-\x1f]/.test(value)
+  )
+    fail('Names must contain 1–120 printable characters')
+  return value.trim()
 }
 
 function validateToolchain(value) {
@@ -343,7 +359,7 @@ async function fileHash(filename) {
 async function copyWorkspace(
   source,
   target,
-  { omitDependencies = false } = {},
+  { omitDependencies = false, omitFiles = [] } = {},
 ) {
   const visit = async (from, to, prefix = '', depth = 0) => {
     if (depth > 64) fail('Project directory nesting exceeds 64 levels', 413)
@@ -365,6 +381,7 @@ async function copyWorkspace(
           entry.name === 'node_modules' ||
           entry.name === '.ready.json' ||
           isSecret(entry.name) ||
+          omitFiles.includes(relative) ||
           (omitDependencies && relative === '.lake/packages')
         )
           continue
@@ -556,10 +573,47 @@ export class WorkspaceStore {
       }
       if (project.root !== checkout && project.root !== selected)
         throw new Error('Invalid persisted workspace directory')
+      if (
+        project.kind === 'project' &&
+        project.protected &&
+        project.preset === 'mathlib' &&
+        project.autoRepair === false
+      ) {
+        // Earlier playground copies retained protection when converted.
+        delete project.protected
+        this.#save(project)
+      }
+      if (project.kind === 'single-file') {
+        let changed = false
+        if (
+          project.status === 'error' &&
+          !project.needsPreparation &&
+          (await exists(project.root))
+        ) {
+          project.needsPreparation = true
+          changed = true
+        }
+        if (project.protected) {
+          delete project.protected
+          changed = true
+        }
+        if (project.name === 'Untitled.lean') {
+          project.name = availablePlaygroundName(
+            'Scratch.lean',
+            this.#namedWorkspaces(project.owner),
+            project.id,
+          )
+          changed = true
+        }
+        if (changed) this.#save(project)
+      }
       if (project.status === 'preparing') {
         project.status = 'error'
+        if (project.kind === 'single-file') project.needsPreparation = true
         project.error =
-          'Preparation was interrupted by a server restart. Retry preparation to continue.'
+          project.kind === 'single-file'
+            ? 'Opening was interrupted by a server restart. Retry opening to continue.'
+            : 'Preparation was interrupted by a server restart. Retry preparation to continue.'
         if (project.setupRepair?.status === 'running')
           project.setupRepair = {
             ...project.setupRepair,
@@ -681,6 +735,14 @@ export class WorkspaceStore {
       .filter((project) => !project.archivedAt)
   }
 
+  #namedWorkspaces(owner) {
+    return this.db
+      .prepare(
+        "SELECT id, json_extract(data, '$.name') AS name FROM projects WHERE owner=?",
+      )
+      .all(owner)
+  }
+
   #owned(id, owner) {
     validateId(id)
     validateOwner(owner)
@@ -716,16 +778,16 @@ export class WorkspaceStore {
   }
 
   #trashReceipt(entry) {
+    const project = this.#owned(entry.projectId, entry.owner)
     return {
       trashId: entry.trashId,
       projectId: entry.projectId,
-      projectName:
-        entry.projectName || this.#owned(entry.projectId, entry.owner).name,
+      projectName: project.name,
+      workspaceKind: project.kind === 'single-file' ? 'single-file' : 'project',
       name:
-        entry.name ||
-        (entry.path === null
-          ? entry.projectName || this.#owned(entry.projectId, entry.owner).name
-          : path.posix.basename(entry.path)),
+        entry.path === null
+          ? project.name
+          : entry.name || path.posix.basename(entry.path),
       path: entry.path,
       kind: entry.kind,
       recoverable: entry.state === 'trashed',
@@ -759,6 +821,12 @@ export class WorkspaceStore {
     if (filename !== undefined) relativeFile(filename, { write: true })
     return this.#locked(id, async () => {
       const project = this.get(id, owner)
+      this.#assertPlaygroundFile(project, filename)
+      if (project.protected && filename === undefined)
+        fail(
+          'This Mathlib workspace is protected and cannot be deleted. You can manage its individual files.',
+          403,
+        )
       if (project.status === 'preparing' || this.jobs.has(id))
         fail(
           'Wait for project preparation to finish before deleting files or archiving the project.',
@@ -932,6 +1000,7 @@ export class WorkspaceStore {
       }
       if (project.archivedAt)
         fail('Restore the archived project before restoring its files', 409)
+      this.#assertPlaygroundFile(project, entry.path)
       const destination = await guarded(project.root, entry.path, {
         write: true,
       })
@@ -1043,6 +1112,9 @@ export class WorkspaceStore {
     validateOwner(owner)
     if (!input || typeof input !== 'object' || Array.isArray(input))
       fail('Invalid project configuration')
+    const singleFile = singleFileSource(input, (value) =>
+      relativeFile(value, { write: true }),
+    )
     const files =
       input.files === undefined
         ? null
@@ -1058,7 +1130,10 @@ export class WorkspaceStore {
       fail(
         'Imported projects keep their own dependency configuration. Select libraries when creating a new project.',
       )
-    const selection = projectLibraries(input.libraries, definitions)
+    const selection = projectLibraries(
+      singleFile ? ['mathlib'] : input.libraries,
+      definitions,
+    )
     const preset =
       selection?.preset || input.preset || (files ? 'lean' : 'mathlib')
     if (!PRESETS.has(preset)) fail('Unknown project preset')
@@ -1073,6 +1148,20 @@ export class WorkspaceStore {
     const definition = Array.isArray(definitions)
       ? definitions.find((p) => (p.id || p.preset) === preset)
       : definitions[preset]
+    if (
+      singleFile &&
+      (!definition?.ready ||
+        definition.playgroundReady === false ||
+        !(await this.runtime.templateRoot('mathlib')))
+    )
+      fail(
+        definition?.playgroundState === 'verifying'
+          ? 'Mathlib Playground is being checked. Try again shortly.'
+          : definition?.playgroundState === 'failed'
+            ? 'Mathlib Playground needs a new check. Use Retry Mathlib preparation, then try again.'
+            : 'Mathlib Playground is not prepared on this server. Ask the administrator to prepare Mathlib, then try again.',
+        503,
+      )
     const toolchain = input.toolchain
       ? validateToolchain(input.toolchain)
       : definition?.toolchain || null
@@ -1090,6 +1179,7 @@ export class WorkspaceStore {
       fail('The selected preset is not configured', 503)
     const name =
       input.name ||
+      singleFile?.path ||
       (location.subdirectory
         ? path.posix.basename(location.subdirectory)
         : repository
@@ -1101,13 +1191,7 @@ export class WorkspaceStore {
           : files
             ? 'Uploaded project'
             : `${preset} project`)
-    if (
-      typeof name !== 'string' ||
-      !name.trim() ||
-      name.length > 120 ||
-      /[\x00-\x1f]/.test(name)
-    )
-      fail('Project names must contain 1–120 printable characters')
+    projectName(name)
     const id = randomUUID()
     const root = path.join(this.projectsDir, id)
     await fs.mkdir(root, { recursive: false, mode: 0o700 })
@@ -1118,15 +1202,21 @@ export class WorkspaceStore {
       status: 'preparing',
       toolchain,
       preset,
+      ...(singleFile ? { kind: 'single-file', presetInitialized: false } : {}),
       ...(selection ? { libraries: selection.libraries } : {}),
       repository,
       revision,
       root,
       subdirectory: location.subdirectory || '',
       uploaded: !!files,
-      autoRepair: input.autoRepair !== false,
+      autoRepair: singleFile ? false : input.autoRepair !== false,
       createdAt: new Date().toISOString(),
     }
+    if (singleFile)
+      await fs.writeFile(path.join(root, 'Main.lean'), singleFile.content, {
+        mode: 0o600,
+        flag: 'wx',
+      })
     if (files)
       for (const file of files) {
         const destination = await guarded(root, file.path, { write: true })
@@ -1139,10 +1229,63 @@ export class WorkspaceStore {
           flag: 'wx',
         })
       }
+    if (singleFile && input.name === undefined)
+      project.name = availablePlaygroundName(
+        singleFile.path,
+        this.#namedWorkspaces(owner),
+      )
     this.#save(project)
     this.#event(project, 'created', `Creating ${project.name}.\n`)
     this.#beginPrepare(project)
-    return clone(project)
+    if (singleFile) await this.jobs.get(project.id)
+    return clone(this.#owned(project.id, owner))
+  }
+
+  async rename(id, owner, input) {
+    this.get(id, owner)
+    if (!input || typeof input !== 'object' || Array.isArray(input))
+      fail('Enter a name for this workspace.')
+    const name = projectName(input.name)
+    return this.#locked(id, async () => {
+      const project = this.get(id, owner)
+      if (
+        this.#namedWorkspaces(owner).some(
+          (item) => item.id !== id && item.name === name,
+        )
+      )
+        fail(
+          'A workspace, including an item in Trash, already uses that name. Choose a different name.',
+          409,
+        )
+      project.name = name
+      this.#save(project)
+      this.#event(project, 'renamed', `Renamed workspace to ${name}.\n`)
+      return clone(project)
+    })
+  }
+
+  async convertSingleFile(id, owner) {
+    this.get(id, owner)
+    return this.#locked(id, async () => {
+      const project = this.get(id, owner)
+      if (project.status === 'preparing' || this.jobs.has(id))
+        fail(
+          'Wait for playground preparation to finish before converting.',
+          409,
+        )
+      if (project.kind === 'single-file') {
+        project.kind = 'project'
+        if (project.status === 'error') project.needsPreparation = true
+        delete project.presetInitialized
+        this.#save(project)
+        this.#event(
+          project,
+          'converted',
+          'Playground converted to a project. Files and chats are preserved.\n',
+        )
+      }
+      return clone(project)
+    })
   }
 
   #beginPrepare(project) {
@@ -1182,6 +1325,7 @@ export class WorkspaceStore {
       .catch(async (error) => {
         project.status = 'error'
         project.needsPreparation = Boolean(
+          project.kind === 'single-file' ||
           project.uploaded ||
           project.imported ||
           (!project.repository &&
@@ -1560,6 +1704,19 @@ export class WorkspaceStore {
     )
   }
 
+  async #initializeRepository(project) {
+    if (
+      !project.repository &&
+      !(await exists(path.join(this.repositoryRoot(project), '.git')))
+    ) {
+      if (!(await exists(path.join(project.root, '.gitignore'))))
+        await fs.writeFile(path.join(project.root, '.gitignore'), '.lake/\n', {
+          mode: 0o600,
+        })
+      await this.#command(project, [...GIT_ARGS, 'init', '-b', 'main'], 30000)
+    }
+  }
+
   async #command(
     project,
     args,
@@ -1752,6 +1909,20 @@ export class WorkspaceStore {
         force: project.customEnvironment === true,
       })
     const checkout = this.repositoryRoot(project)
+    const prepared =
+      project.kind === 'single-file' && !project.customEnvironment
+        ? this.runtime.preparedPresetEnvironment?.(project.preset)
+        : null
+    if (
+      project.kind === 'single-file' &&
+      !project.customEnvironment &&
+      this.runtime.preparedPresetEnvironment &&
+      !prepared
+    )
+      fail(
+        'Mathlib Playground is being prepared or needs a new check. Retry Mathlib preparation, then open this playground again.',
+        503,
+      )
     const entries = await fs.readdir(checkout)
     if (project.repository && !project.imported && entries.length)
       fail(
@@ -1791,7 +1962,11 @@ export class WorkspaceStore {
       }
       project.imported = true
       this.#save(project)
-    } else if (!project.repository && !entries.length) {
+    } else if (
+      !project.repository &&
+      (!entries.length ||
+        (project.kind === 'single-file' && !project.presetInitialized))
+    ) {
       let template = await this.runtime.templateRoot(project.preset)
       if (template && project.preset === 'lean') {
         const cachedToolchain = (
@@ -1803,10 +1978,11 @@ export class WorkspaceStore {
         const inherit = typeof this.runtime.inheritDependencies === 'function'
         await copyWorkspace(template, project.root, {
           omitDependencies: inherit,
+          omitFiles: project.kind === 'single-file' ? ['Main.lean'] : [],
         })
         if (inherit)
           await this.runtime.inheritDependencies(template, project.root)
-        if (project.libraries?.length) {
+        if (project.libraries?.length && project.kind !== 'single-file') {
           const selection = projectLibraries(
             project.libraries,
             await this.runtime.templates(),
@@ -1839,6 +2015,10 @@ export class WorkspaceStore {
           { mode: 0o600 },
         )
       }
+      if (project.kind === 'single-file') {
+        project.presetInitialized = true
+        this.#save(project)
+      }
     }
     if (project.repository || project.uploaded) {
       if (!project.subdirectory)
@@ -1857,6 +2037,29 @@ export class WorkspaceStore {
       project.root = selected
       this.#save(project)
     }
+    if (
+      prepared &&
+      configurationDigest(readDependencyConfiguration(project.root)) ===
+        prepared.configuration
+    ) {
+      await this.#initializeRepository(project)
+      this.preparationControllers.get(project.id)?.signal.throwIfAborted()
+      project.status = 'ready'
+      delete project.needsPreparation
+      delete project.error
+      this.#save(project)
+      this.#event(
+        project,
+        'ready',
+        'Mathlib Playground ready. Reused the verified, prepared Mathlib environment.\n',
+      )
+      return
+    }
+    if (prepared)
+      fail(
+        'The prepared Mathlib environment changed. Retry Mathlib preparation, then retry this playground.',
+        503,
+      )
     const toolchainFile = await guarded(project.root, 'lean-toolchain')
     const pinned = await textFile(toolchainFile, true)
     if (!pinned)
@@ -1980,13 +2183,7 @@ export class WorkspaceStore {
         await this.runtime.inheritDependencies?.(project.root, project.root)
     }
     await this.#checkProjectEnvironment(project, signal)
-    if (!project.repository && !(await exists(path.join(checkout, '.git')))) {
-      if (!(await exists(path.join(project.root, '.gitignore'))))
-        await fs.writeFile(path.join(project.root, '.gitignore'), '.lake/\n', {
-          mode: 0o600,
-        })
-      await this.#command(project, [...GIT_ARGS, 'init', '-b', 'main'], 30000)
-    }
+    await this.#initializeRepository(project)
     if (await exists(path.join(checkout, '.git'))) {
       try {
         const result = await this.#command(
@@ -2195,17 +2392,13 @@ export class WorkspaceStore {
     }
   }
 
+  #assertPlaygroundFile(project, filename) {
+    if (project.kind === 'single-file' && CONFIGURATION_FILES.has(filename))
+      fail('Convert it to a project before editing setup files.', 409)
+  }
+
   #invalidateConfiguration(project, filename, changed = true) {
-    if (
-      !changed ||
-      ![
-        'lean-toolchain',
-        'lakefile.lean',
-        'lakefile.toml',
-        'lake-manifest.json',
-      ].includes(filename)
-    )
-      return false
+    if (!changed || !CONFIGURATION_FILES.has(filename)) return false
     delete project.log
     project.status = 'error'
     project.needsPreparation = true
@@ -2231,6 +2424,7 @@ export class WorkspaceStore {
       this.#ready(project, true)
       if (this.jobs.has(id))
         fail('Wait for project preparation to finish before saving.', 409)
+      this.#assertPlaygroundFile(project, filename)
       const destination = await guarded(project.root, filename, { write: true })
       const before = await textFile(destination, true)
       if (expectedHash !== undefined && expectedHash !== (before?.hash ?? null))
@@ -2853,6 +3047,7 @@ export class WorkspaceStore {
     for (const change of changes) {
       if (!change || typeof change !== 'object') fail('Invalid file change')
       const filename = relativeFile(change.path, { write: true })
+      this.#assertPlaygroundFile(project, filename)
       if (seen.has(filename)) fail('A change set contains duplicate paths')
       seen.add(filename)
       if (
