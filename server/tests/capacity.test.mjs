@@ -409,6 +409,17 @@ test('source body capacity fails fast, leaves ordinary APIs responsive and relea
 
 test('setup build timeouts retain the 30 minute default and validate bounded overrides', () => {
   assert.equal(loadCapacity({}).setupBuildTimeoutMs, 1800000)
+  assert.equal(loadCapacity({}).checkTimeoutMs, 1800000)
+  assert.equal(loadCapacity({}).setupRepairTimeoutMs, 900000)
+  assert.equal(
+    loadCapacity({ STUDIO_SETUP_BUILD_TIMEOUT_MS: '5400000' }).checkTimeoutMs,
+    5400000,
+  )
+  assert.equal(
+    loadCapacity({ STUDIO_CHECK_TIMEOUT_MS: '2700000' }).checkTimeoutMs,
+    2700000,
+  )
+  assert.throws(() => loadCapacity({ STUDIO_SETUP_REPAIR_TIMEOUT_MS: '0' }))
   assert.equal(
     loadCapacity({ STUDIO_SETUP_BUILD_TIMEOUT_MS: '5400000' })
       .setupBuildTimeoutMs,

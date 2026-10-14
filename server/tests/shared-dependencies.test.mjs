@@ -247,22 +247,29 @@ test('unsupported or unpinned dependency graphs keep their private preparation p
 
 test('Mathlib dependency traces are complete before imported projects build with readonly packages', async (t) => {
   const widgetLock = '.lake/packages/proofwidgets/widget/package-lock.json'
-  const { runtime, root } = await fixture(t, async (stage, args, options) => {
-    const command = args.filter((arg) => arg !== '--keep-toolchain').join(' ')
-    if (command === 'lake exe cache get') {
-      const lock = path.join(stage, widgetLock)
-      await fs.mkdir(path.dirname(lock), { recursive: true })
-      await fs.writeFile(lock, '{"lockfileVersion":3}\n')
-    }
-    if (command === 'lake build @mathlib') {
-      assert.notEqual(options.readOnlyWorkspace, true)
-      const lock = await fs.readFile(path.join(stage, widgetLock))
-      await fs.writeFile(
-        path.join(stage, widgetLock + '.hash'),
-        createHash('sha256').update(lock).digest('hex'),
-      )
-    }
-  })
+  const { runtime, root, calls } = await fixture(
+    t,
+    async (stage, args, options) => {
+      const command = args.filter((arg) => arg !== '--keep-toolchain').join(' ')
+      if (command === 'lake exe cache get') {
+        const lock = path.join(stage, widgetLock)
+        await fs.mkdir(path.dirname(lock), { recursive: true })
+        await fs.writeFile(lock, '{"lockfileVersion":3}\n')
+      }
+      if (command === 'lake build @mathlib') {
+        const lock = await fs.readFile(path.join(stage, widgetLock))
+        const expected = createHash('sha256').update(lock).digest('hex')
+        if (options.readOnlyWorkspace) {
+          assert.equal(options.network, 'none')
+          assert.equal(
+            await fs.readFile(path.join(stage, widgetLock + '.hash'), 'utf8'),
+            expected,
+          )
+        } else
+          await fs.writeFile(path.join(stage, widgetLock + '.hash'), expected)
+      }
+    },
+  )
   const config = {
     ...configuration,
     'lake-manifest.json': JSON.stringify({
@@ -283,6 +290,16 @@ test('Mathlib dependency traces are complete before imported projects build with
     root,
     request({ configuration: config }),
   )
+  const widgetBuilds = calls.filter(
+    (call) => call.args.includes('build') && call.args.includes('proofwidgets'),
+  )
+  assert.equal(
+    widgetBuilds.length,
+    2,
+    'Inherited packages must build before publication and replay read only',
+  )
+  assert.notEqual(widgetBuilds[0].options.readOnlyWorkspace, true)
+  assert.equal(widgetBuilds[1].options.readOnlyWorkspace, true)
   await runtime.inheritDependencies(shared.root, root)
   runtime.run = async (project, args) => {
     assert.deepEqual(args, ['lake', 'build'])
@@ -349,13 +366,36 @@ test('complete-build caches use new entries while existing import-only bindings 
   const marker = JSON.parse(
     await fs.readFile(path.join(shared.root, '.ready.json'), 'utf8'),
   )
-  assert.equal(marker.schema, 3)
+  assert.equal(marker.schema, 4)
   assert.match(marker.check, /lake build @mathlib/)
   const preparedCommands = calls.length
   const hit = await runtime.prepareSharedDependencies(root, request())
   assert.equal(hit.root, shared.root)
   assert.equal(hit.reused, true)
   assert.equal(calls.length, preparedCommands)
+})
+
+test('a dependency cache is not published when build replay needs a write under the readonly mounts', async (t) => {
+  const { runtime, root, dataDir } = await fixture(
+    t,
+    async (_stage, args, options) => {
+      if (args.includes('@mathlib') && options.readOnlyWorkspace)
+        return {
+          code: 1,
+          stdout: '',
+          stderr:
+            'read-only file system: proofwidgets/widget/package-lock.json.hash',
+        }
+    },
+  )
+  await assert.rejects(
+    runtime.prepareSharedDependencies(root, request()),
+    /read-only file system/,
+  )
+  assert.deepEqual(
+    await fs.readdir(path.join(dataDir, 'runtime/shared-dependencies')),
+    [],
+  )
 })
 
 test('imports and snapshots reuse compiled readonly dependencies without copying private sources or project builds', async (t) => {
@@ -439,41 +479,61 @@ test('imports and snapshots reuse compiled readonly dependencies without copying
   assert.equal(restored.dependencyRoot(second), shared.root)
 })
 
-test('a cancelled cache waiter cannot cancel another import or publish an incomplete entry', async (t) => {
-  let started, resume
+test('a cancelled cache waiter cannot cancel another import and remaining waiters receive build progress', async (t) => {
+  let started, resume, joined
   const reached = new Promise((resolve) => {
     started = resolve
   })
   const waiting = new Promise((resolve) => {
     resume = resolve
   })
+  const secondValidated = new Promise((resolve) => {
+    joined = resolve
+  })
+  const firstOutput = [],
+    secondOutput = []
   const { runtime, root, dataDir, calls } = await fixture(
     t,
-    async (_stage, args) => {
+    async (_stage, args, options) => {
       if (
         args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
         'lake exe cache get'
       ) {
+        options.onOutput('Downloading pinned libraries')
         started()
         await waiting
+        options.onOutput('Replaying dependency builds')
       }
     },
   )
   const controller = new AbortController()
   const first = runtime.prepareSharedDependencies(
     root,
-    request({ signal: controller.signal }),
+    request({
+      signal: controller.signal,
+      onOutput: (message) => firstOutput.push(message),
+    }),
   )
   await reached
   assert.deepEqual(
     await fs.readdir(path.join(dataDir, 'runtime/shared-dependencies')),
     [],
   )
-  const second = runtime.prepareSharedDependencies(root, request())
+  const second = runtime.prepareSharedDependencies(
+    root,
+    request({
+      validateRepository: async () => joined(),
+      onOutput: (message) => secondOutput.push(message),
+    }),
+  )
+  await secondValidated
+  await new Promise(setImmediate)
   controller.abort(new Error('Stopped fixture'))
   await assert.rejects(first, /Stopped fixture/)
   resume()
   assert(await second)
+  assert.deepEqual(firstOutput, ['Downloading pinned libraries'])
+  assert.deepEqual(secondOutput, ['Replaying dependency builds'])
   assert.equal(
     calls.filter(
       (call) =>

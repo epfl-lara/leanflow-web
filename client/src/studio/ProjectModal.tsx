@@ -2,15 +2,18 @@ import { useState, type FormEvent } from 'react'
 import { Dialog } from './Dialog'
 import { UploadFiles, type UploadFile } from './UploadFiles'
 import { Icon } from './Icons'
+import { HelpTip } from './HelpTip'
 import { errorText, post, type Preset, type Project } from './api'
 
 export function ProjectModal({
   templates,
+  repairAvailable,
   initialPreset,
   onClose,
   onCreated,
 }: {
   templates: Preset[]
+  repairAvailable: boolean
   initialPreset?: string
   onClose: () => void
   onCreated: (project: Project) => void
@@ -22,7 +25,9 @@ export function ProjectModal({
   const [repository, setRepository] = useState('')
   const [revision, setRevision] = useState('')
   const [subdirectory, setSubdirectory] = useState('')
-  const [autoRepair, setAutoRepair] = useState(true)
+  const [autoRepair, setAutoRepair] = useState(repairAvailable)
+  const [publishingEnabled, setPublishingEnabled] = useState(true)
+  const [workingBranch, setWorkingBranch] = useState('')
   const [files, setFiles] = useState<UploadFile[]>([])
   const [libraries, setLibraries] = useState<string[]>(() =>
     initialPreset
@@ -81,6 +86,10 @@ export function ProjectModal({
           ? {
               repository: repository.trim(),
               revision: revision.trim() || undefined,
+              publishingEnabled,
+              ...(publishingEnabled && workingBranch.trim()
+                ? { workingBranch: workingBranch.trim() }
+                : {}),
             }
           : kind === 'upload'
             ? { files }
@@ -149,9 +158,52 @@ export function ProjectModal({
               autoComplete="off"
             />
             <p className="field-help">
-              Repository and GitHub folder links work. Lean versions and
-              dependencies are detected automatically.
+              Public HTTPS repositories on GitHub, GitLab and other Git hosts
+              work. GitHub folder links work too. Lean versions and dependencies
+              are detected automatically.
             </p>
+            <div className="help-label">
+              <label className="setup-repair-choice">
+                <input
+                  type="checkbox"
+                  checked={publishingEnabled}
+                  disabled={busy}
+                  onChange={(event) =>
+                    setPublishingEnabled(event.target.checked)
+                  }
+                />
+                Enable publishing changes back
+              </label>
+              <HelpTip label="Publishing changes">
+                Prepare a working branch, then save, commit and review changes
+                before pushing. Provide your repository token only when you
+                publish; it is used once and never sent to Lemex. After a GitHub
+                or GitLab push, open the pull request or merge request form to
+                finish submitting your changes.
+              </HelpTip>
+            </div>
+            {publishingEnabled && (
+              <>
+                <label className="field-label" htmlFor="import-working-branch">
+                  Working branch <span>optional</span>
+                </label>
+                <input
+                  id="import-working-branch"
+                  value={workingBranch}
+                  onChange={(event) => setWorkingBranch(event.target.value)}
+                  placeholder="Generate a new leanflow/… branch"
+                  disabled={busy}
+                  autoComplete="off"
+                />
+                <p className="field-help">
+                  Leave blank to create a unique branch at the imported
+                  revision. Nothing is pushed during import. You can publish to
+                  this repository or an existing fork where you have write
+                  access. If the name conflicts, existing branches are kept and
+                  a unique working branch is chosen.
+                </p>
+              </>
+            )}
           </>
         ) : kind === 'upload' ? (
           <UploadFiles
@@ -333,14 +385,15 @@ export function ProjectModal({
               type="checkbox"
               checked={autoRepair}
               onChange={(event) => setAutoRepair(event.target.checked)}
-              disabled={busy}
+              disabled={busy || !repairAvailable}
             />
             <span>
               Let Lemex repair setup if needed.
               <br />
               <span className="field-help">
-                We'll show when it starts, keep the original configuration, and
-                check the result.
+                {repairAvailable
+                  ? "We'll show when it starts, keep the original configuration, and check the result."
+                  : 'Lemex setup repair is unavailable on this server. Automatic Lean and library setup still runs. You can edit setup files and retry if needed.'}
               </span>
             </span>
           </label>

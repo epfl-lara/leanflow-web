@@ -67,6 +67,7 @@ const f = await chatBrowserFixture({
     models: [{ id: 'fixture', name: 'Fixture' }],
     defaultModel: 'fixture',
     runtime: { ready: true },
+    lemex: { configured: true },
   },
   projects: [{ id: projectId, name: 'Upload target', status: 'ready' }],
   files: { [projectId]: { 'Main.lean': 'example : True := by trivial\n' } },
@@ -185,7 +186,7 @@ try {
   await until(
     async () =>
       (await f.page.locator('.monaco-editor .view-lines').innerText())
-        .replaceAll('\u00a0', ' ')
+        .replace(/\s+/g, ' ')
         .startsWith(largeSource.split(/\r?\n/, 1)[0].trim().slice(0, 24)),
     'large source editor',
     60000,

@@ -608,6 +608,9 @@ textarea {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.workspace-publish {
+  flex-shrink: 0;
+}
 .branch-label {
   display: flex;
   gap: 5px;

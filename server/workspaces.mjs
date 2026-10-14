@@ -29,6 +29,8 @@ import {
   runDependencyCache,
   setupInfrastructureFailure,
   setupFailureMessage,
+  dependencyFailureMessage,
+  certifyDependencyBuilds,
 } from './pinned-lake.mjs'
 import { configurationDigest } from './shared-dependencies.mjs'
 import { singleFileSource, availablePlaygroundName } from './single-files.mjs'
@@ -41,6 +43,7 @@ import {
 
 import { sourceFileByteLimit } from '../shared/source-limits.mjs'
 import { validateSetupBuildTimeout } from './capacity.mjs'
+import { validateGitBranch } from './git-branches.mjs'
 const MAX_FILES = 12000
 const PRESETS = new Set(['lean', 'mathlib', 'cslib', 'physlib'])
 const CONFIGURATION_FILES = new Set([
@@ -736,6 +739,19 @@ export class WorkspaceStore {
       )
   }
 
+  #setupPhase(project, phase) {
+    project.setupPhase = phase
+    this.#save(project)
+  }
+
+  markDependencyPreparation(id, owner, reason) {
+    const project = this.get(id, owner)
+    project.needsPreparation = true
+    project.dependencyWarning = reason
+    this.#save(project)
+    this.#event(project, 'warning', reason + '\n')
+  }
+
   events(id, owner, after = 0) {
     this.get(id, owner)
     return this.db
@@ -753,6 +769,17 @@ export class WorkspaceStore {
       .all(owner)
       .map((r) => JSON.parse(r.data))
       .filter((project) => !project.archivedAt)
+      .map((project) => this.#dependencyStatus(project))
+  }
+
+  #dependencyStatus(project) {
+    if (project.status !== 'ready') return project
+    const reason = this.runtime.dependencyPreparationReason?.(project.root)
+    if (reason) {
+      project.needsPreparation = true
+      project.dependencyWarning = reason
+    }
+    return project
   }
 
   #namedWorkspaces(owner) {
@@ -776,6 +803,7 @@ export class WorkspaceStore {
   get(id, owner) {
     const project = this.#owned(id, owner)
     if (project.archivedAt) fail('Project not found', 404)
+    this.#dependencyStatus(project)
     const events = this.db
       .prepare(
         'SELECT data FROM events WHERE project=? ORDER BY id DESC LIMIT 60',
@@ -1385,6 +1413,11 @@ export class WorkspaceStore {
       fail('Choose a repository or local files, not both.')
     if (input.autoRepair !== undefined && typeof input.autoRepair !== 'boolean')
       fail('Choose whether Lemex may repair project setup.')
+    if (
+      input.publishingEnabled !== undefined &&
+      typeof input.publishingEnabled !== 'boolean'
+    )
+      fail('Choose whether to enable repository publishing.')
     const definitions = await this.runtime.templates()
     if (input.libraries !== undefined && (files || input.repository))
       fail(
@@ -1405,6 +1438,19 @@ export class WorkspaceStore {
       ? await validateRepository(location.repository, this.resolveHost)
       : null
     if (revision && !repository) fail('A revision requires a Git repository')
+    if (
+      !repository &&
+      (input.publishingEnabled !== undefined ||
+        input.workingBranch !== undefined)
+    )
+      fail('Publishing settings require a Git repository import.')
+    if (input.workingBranch !== undefined && input.publishingEnabled !== true)
+      fail('Enable publishing before choosing a working branch.')
+    if (
+      input.workingBranch !== undefined &&
+      typeof input.workingBranch !== 'string'
+    )
+      fail('Enter a valid working branch name.')
     const definition = Array.isArray(definitions)
       ? definitions.find((p) => (p.id || p.preset) === preset)
       : definitions[preset]
@@ -1453,6 +1499,13 @@ export class WorkspaceStore {
             : `${preset} project`)
     projectName(name)
     const id = randomUUID()
+    const workingBranch =
+      input.publishingEnabled === true
+        ? validateGitBranch(
+            input.workingBranch?.trim() || `leanflow/${id.slice(0, 8)}`,
+            { message: 'Enter a valid working branch name.' },
+          )
+        : undefined
     const root = path.join(this.projectsDir, id)
     await fs.mkdir(root, { recursive: false, mode: 0o700 })
     const project = {
@@ -1466,6 +1519,10 @@ export class WorkspaceStore {
       ...(selection ? { libraries: selection.libraries } : {}),
       repository,
       revision,
+      ...(input.publishingEnabled !== undefined
+        ? { publishingEnabled: input.publishingEnabled }
+        : {}),
+      ...(workingBranch ? { workingBranch } : {}),
       root,
       subdirectory: location.subdirectory || '',
       uploaded: !!files,
@@ -1550,6 +1607,9 @@ export class WorkspaceStore {
 
   #beginPrepare(project) {
     if (this.jobs.has(project.id)) return
+    project.setupStartedAt = new Date().toISOString()
+    project.setupPhase = 'reading-project'
+    this.#save(project)
     const controller = new AbortController()
     this.preparationControllers.set(project.id, controller)
     const job = Promise.resolve()
@@ -1568,8 +1628,19 @@ export class WorkspaceStore {
                 !error.setupEnvironment) ||
               [403, 404, 409, 413, 429, 503].includes(error.status) ||
               error.infrastructure
-            )
+            ) {
+              if (!controller.signal.aborted)
+                this.#event(
+                  project,
+                  'warning',
+                  !this.setupRepair
+                    ? 'Lemex setup repair is unavailable on this server. You can edit setup files and retry.\n'
+                    : !project.autoRepair
+                      ? 'Automatic setup repair is disabled for this project. You can edit setup files and retry.\n'
+                      : 'Automatic repair was skipped because this failure needs a supported Lean version, network access or available worker capacity. Inspect the setup error and retry.\n',
+                )
               throw error
+            }
             try {
               await this.#repairPreparation(project, error, controller.signal)
             } catch (repairError) {
@@ -1620,6 +1691,7 @@ export class WorkspaceStore {
       project.status = 'preparing'
       delete project.needsPreparation
       delete project.error
+      delete project.dependencyWarning
       delete project.log
       if (project.setupRepair) {
         project.setupRepairHistory = [
@@ -1645,6 +1717,139 @@ export class WorkspaceStore {
 
   repositoryRoot(project) {
     return path.join(this.projectsDir, validateId(project.id))
+  }
+
+  async enablePublishing(id, owner, { assertIdle = () => {} } = {}) {
+    return this.#locked(id, async () => {
+      const project = this.#owned(id, owner)
+      if (project.archivedAt) fail('Project not found', 404)
+      this.#ready(project)
+      assertIdle()
+      project.publishingEnabled = true
+      this.#save(project)
+      return clone(project)
+    })
+  }
+
+  async #preparePublishingBranch(project) {
+    if (!project.workingBranch || project.publishingBranchPrepared) return
+    const root = this.repositoryRoot(project)
+    const run = (args) =>
+      this.runtime.run(root, [...GIT_ARGS, ...args], {
+        network: 'none',
+        timeoutMs: 30000,
+        signal: this.preparationControllers.get(project.id)?.signal,
+      })
+    const current = await run(['symbolic-ref', '--quiet', '--short', 'HEAD'])
+    const currentBranch = current.code === 0 ? current.stdout.trim() : null
+    if (!project.publishingBaseBranch)
+      project.publishingBaseBranch = await this.#publishingBaseBranch(
+        project,
+        currentBranch,
+        run,
+      )
+    if (currentBranch !== project.workingBranch) {
+      const head = await run(['rev-parse', '--verify', 'HEAD'])
+      const refs = await run([
+        'for-each-ref',
+        '--format=%(refname:strip=2)%00%(objectname)',
+        'refs/heads',
+      ])
+      if (head.code !== 0 || refs.code !== 0)
+        fail(
+          'The imported Git revision is unavailable. Retry project setup.',
+          409,
+        )
+      const branches = new Map(
+        refs.stdout
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => line.split('\0')),
+      )
+      const existing = branches.get(project.workingBranch)
+      const reused = existing === head.stdout.trim()
+      const collision =
+        existing ||
+        [...branches.keys()].some(
+          (name) =>
+            name.startsWith(project.workingBranch + '/') ||
+            project.workingBranch.startsWith(name + '/'),
+        )
+      if (collision && !reused) {
+        const requested = project.workingBranch
+        let replacement = `leanflow-${project.id.slice(0, 8)}`
+        while (
+          [...branches.keys()].some(
+            (name) =>
+              name === replacement || name.startsWith(replacement + '/'),
+          )
+        )
+          replacement = `leanflow-${randomUUID()}`
+        project.workingBranch = replacement
+        project.publishingWarning = `The working branch ${requested} conflicts with an existing branch. Using ${replacement} at the imported revision; existing branches are preserved.`
+        this.#save(project)
+        this.#event(project, 'warning', project.publishingWarning + '\n')
+      }
+      try {
+        await this.#command(
+          project,
+          [
+            ...GIT_ARGS,
+            'switch',
+            ...(reused ? [] : ['-c']),
+            project.workingBranch,
+          ],
+          30000,
+        )
+      } catch (error) {
+        error.status = 409
+        throw error
+      }
+    }
+    project.publishingBranchPrepared = true
+    this.#save(project)
+    this.#event(
+      project,
+      'output',
+      `Working branch ${project.workingBranch} is ready. No changes have been pushed.\n`,
+    )
+  }
+
+  async #publishingBaseBranch(project, currentBranch, run) {
+    if (project.revision) {
+      const fetched = await textFile(
+        path.join(this.repositoryRoot(project), '.git', 'FETCH_HEAD'),
+        true,
+      )
+      const requested = project.revision.replace(/^refs\/heads\//, '')
+      for (const line of fetched?.content.split('\n') || []) {
+        const branch = line.match(
+          /^[a-f0-9]{40,64}\t[^\t]*\tbranch '([^']+)' of /,
+        )?.[1]
+        if (branch === requested) {
+          try {
+            return validateGitBranch(branch)
+          } catch {
+            break
+          }
+        }
+      }
+    }
+    const origin = await run([
+      'symbolic-ref',
+      '--quiet',
+      '--short',
+      'refs/remotes/origin/HEAD',
+    ])
+    const candidate =
+      (currentBranch !== project.workingBranch ? currentBranch : null) ||
+      (origin.code === 0 ? origin.stdout.trim().replace(/^origin\//, '') : null)
+    try {
+      return validateGitBranch(candidate)
+    } catch {
+      return undefined
+    }
   }
 
   async upload(id, owner, input) {
@@ -1698,6 +1903,7 @@ export class WorkspaceStore {
       message:
         'Automatic setup failed. Lemex is repairing the project configuration.',
     }
+    this.#setupPhase(project, 'repairing-setup')
     this.#save(project)
     this.#event(
       project,
@@ -1749,11 +1955,17 @@ export class WorkspaceStore {
       error: cause.message,
       signal,
       onOutput: (message) => this.#event(project, 'setup-repair', message),
+      onProgress: (phase) => this.#setupPhase(project, phase),
+      onActivity: (activity) => {
+        project.setupRepair.activity = activity
+        this.#save(project)
+      },
     })
     signal.throwIfAborted()
     // Evaluate repaired configuration in the disposable copy before admitting
     // it. Lake files are executable; include any evaluation-time source edits
     // in the integrity comparison below, and create the lockfile here.
+    this.#setupPhase(project, 'validating-repair')
     const repairedToolchain = validateToolchain(
       (
         await textFile(await guarded(candidate, 'lean-toolchain'))
@@ -2089,7 +2301,7 @@ export class WorkspaceStore {
       this.#event(
         project,
         'warning',
-        'Shared dependency preparation was unavailable. Continuing with a private environment.\n',
+        `Shared dependency preparation failed: ${error.message}\nContinuing with a private environment.\n`,
       )
       return null
     }
@@ -2160,6 +2372,7 @@ export class WorkspaceStore {
 
   async #prepareProject(project) {
     this.preparationControllers.get(project.id)?.signal.throwIfAborted()
+    this.#setupPhase(project, 'reading-project')
     this.#event(project, 'preparing', 'Preparing the project environment.\n')
     if (project.customEnvironment && !project.repository && !project.uploaded) {
       const template = await this.runtime.templateRoot(project.preset)
@@ -2305,6 +2518,7 @@ export class WorkspaceStore {
       project.root = selected
       this.#save(project)
     }
+    await this.#preparePublishingBranch(project)
     if (
       prepared &&
       configurationDigest(readDependencyConfiguration(project.root)) ===
@@ -2346,7 +2560,7 @@ export class WorkspaceStore {
         'The selected toolchain does not match the cached preset. Use a custom Lean project for another version.',
       )
     project.toolchain = toolchain
-    this.#save(project)
+    this.#setupPhase(project, 'preparing-lean')
     const signal = this.preparationControllers.get(project.id)?.signal
     // A shared toolchain download may serve another project. Stop this wait
     // immediately without killing that shared download or changing its cache.
@@ -2370,6 +2584,7 @@ export class WorkspaceStore {
     this.preparationControllers.get(project.id)?.signal.throwIfAborted()
     // Existing lockfiles are authoritative. Lake fetches missing packages using
     // the pinned manifest when evaluating its environment.
+    this.#setupPhase(project, 'preparing-dependencies')
     if (
       !(await exists(path.join(project.root, 'lake-manifest.json'))) &&
       !(await exists(path.join(project.root, '.lake')))
@@ -2416,7 +2631,9 @@ export class WorkspaceStore {
           })
       // Imported projects need their own compiled modules for cross-file imports.
       if (!shared)
-        for (const target of dependencyBuildTargets(manifest))
+        for (const target of dependencyBuildTargets(manifest, {
+          includeInherited: true,
+        }))
           await this.#command(
             project,
             ['lake', 'build', target],
@@ -2425,6 +2642,7 @@ export class WorkspaceStore {
           )
       // Failed user proofs remain repairable, so they do not make an otherwise
       // usable environment unavailable in the editor.
+      this.#setupPhase(project, 'building-project')
       const build = await this.runtime.run(project.root, ['lake', 'build'], {
         timeoutMs: this.setupBuildTimeoutMs,
         network: 'none',
@@ -2443,14 +2661,26 @@ export class WorkspaceStore {
       })
       signal?.throwIfAborted()
       if (build.code !== 0) {
+        const dependency = dependencyFailureMessage(build)
+        if (dependency)
+          throw Object.assign(new Error(dependency), {
+            setupEnvironment: true,
+            infrastructure: setupInfrastructureFailure(build),
+          })
         project.buildWarning =
           setupFailureMessage(build) ||
           'Some project targets did not compile. Open their files to inspect and repair the Lean errors.'
         this.#event(project, 'warning', `${project.buildWarning}\n`)
       } else delete project.buildWarning
-      if (!shared)
+      if (!shared) {
         await this.runtime.inheritDependencies?.(project.root, project.root)
+        await certifyDependencyBuilds(this.runtime, project.root, manifest, {
+          signal,
+          onOutput: (message) => this.#event(project, 'output', message),
+        })
+      }
     }
+    this.#setupPhase(project, 'checking-environment')
     await this.#checkProjectEnvironment(project, signal)
     await this.#initializeRepository(project)
     if (await exists(path.join(checkout, '.git'))) {

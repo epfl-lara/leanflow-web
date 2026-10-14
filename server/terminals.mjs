@@ -209,7 +209,7 @@ export class Terminals {
       )
       fail(
         error.status === 409
-          ? 'The project environment changed. Close the terminal and use Prepare again before reopening it.'
+          ? 'The project environment changed. Close the terminal and use Refresh setup before reopening it.'
           : 'The terminal could not start. Close an unused terminal or editor and try again. If it still fails, ask the administrator to check the worker service.',
       )
     }

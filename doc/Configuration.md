@@ -55,6 +55,8 @@ Project setup allows 30 minutes for its own Lake build. Large imported repositor
 STUDIO_SETUP_BUILD_TIMEOUT_MS=5400000
 ```
 
+Lean checks use the setup build timeout by default. Set `STUDIO_CHECK_TIMEOUT_MS` to override it. Specialized Lemex setup repair has a separate 15-minute deadline, including queue time. Set `STUDIO_SETUP_REPAIR_TIMEOUT_MS` to adjust it. These deadlines are bounded to six hours, and Stop remains available while work is queued or running.
+
 The maximum is 6 hours. Editors, assistant runs and proof verification use their own limits. Longer builds also need enough worker RAM; measure representative repositories and leave headroom for every worker that can run together. Review `STUDIO_MAX_WORKERS`, `STUDIO_WORKER_CPUS` and `STUDIO_WORKER_MEMORY` together before an idle restart.
 
 Bulk source uploads and saves share `STUDIO_MAX_SOURCE_REQUESTS` slots (default 2, at most 1 per account by default). Known uncompressed requests up to 3 MiB have a separate bounded lane: `STUDIO_MAX_SMALL_SOURCE_REQUESTS` defaults to 8, with at most 2 per account. This keeps ordinary saves available while large uploads run. Compressed and unknown-length requests use bulk capacity. Both lanes include body parsing and queued writes, even after a parsed request disconnects. Keep bulk capacity low when worker memory is tight. A busy request returns a retryable message and preserves the editor's unsaved buffer.
@@ -123,10 +125,12 @@ Git dependency revision, the worker image, and Lake build settings. TOML project
 names and root target names can differ. Executable `lakefile.lean` configurations
 must match exactly.
 
-Setup runs `lake exe cache get` in a separate workspace and checks `import Mathlib`
-with dependencies mounted read-only before making an entry available. Projects
-and assistant runs mount the shared packages and downloaded artifacts read-only.
-Proof sources, project builds, and new cache artifacts stay private.
+Setup downloads available compiled files in a separate workspace and finishes
+the dependency builds while that workspace is writable. It then repeats the
+builds and checks library imports with dependencies mounted read-only before
+making an entry available. Private dependency setup passes the same build replay
+check. Projects and assistant runs mount shared packages and downloaded artifacts
+read-only. Proof sources, project builds, and new cache artifacts stay private.
 
 Local dependencies, custom package directories, and configurations that need
 other project files keep their private setup path. Failed shared preparation also

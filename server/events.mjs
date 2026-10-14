@@ -4,6 +4,10 @@ import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { proofTargetReference } from './proof-target.mjs'
 import {
+  setupFailureMessage,
+  dependencyFailureMessage,
+} from './pinned-lake.mjs'
+import {
   recordReasoningBlock,
   retainedReasoningBlocks,
   reasoningBlocksFromEvents,
@@ -209,9 +213,13 @@ export class EventStore extends EventEmitter {
       .map((row) => this.#metadata(JSON.parse(row.payload)))
   }
   activeMetadata(owner, projectId, kind) {
-    return this.projectMetadata(owner, projectId).filter(
-      (job) => (!kind || job.kind === kind) && !TERMINAL.has(job.status),
-    )
+    const terminal = [...TERMINAL]
+    return this.db
+      .prepare(
+        `SELECT payload FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.status') NOT IN (${terminal.map(() => '?').join(',')}) ${kind ? "AND json_extract(payload,'$.kind')=?" : ''}`,
+      )
+      .all(owner, projectId, ...terminal, ...(kind ? [kind] : []))
+      .map((row) => this.#metadata(JSON.parse(row.payload)))
   }
   deleteRuns(owner, ids) {
     const jobs = [...new Set(ids)].map((id) => this.getMetadata(id, owner))
@@ -372,8 +380,9 @@ export class EventStore extends EventEmitter {
 }
 
 export class JobManager {
-  constructor({ events, runtime, workspaces }) {
+  constructor({ events, runtime, workspaces, checkTimeoutMs = 1800000 }) {
     Object.assign(this, { events, runtime, workspaces })
+    this.checkTimeoutMs = checkTimeoutMs
     this.active = new Map()
     this.controllers = new Map()
     this.stopping = false
@@ -387,7 +396,7 @@ export class JobManager {
         { status: 503 },
       )
     const project = this.workspaces.get(projectId, owner)
-    if (project.status !== 'ready')
+    if (project.status !== 'ready' || project.needsPreparation)
       throw Object.assign(
         new Error('Prepare this project before checking it.'),
         { status: 409 },
@@ -404,7 +413,7 @@ export class JobManager {
           this.events.updateMetadata(job.id, { status: 'running' })
           const options = {
             network: 'none',
-            timeoutMs: 600_000,
+            timeoutMs: this.checkTimeoutMs,
             signal: controller.signal,
             ...(project.repairedConfiguration
               ? { readOnlyWorkspace: true, writeLakeCache: true }
@@ -438,9 +447,17 @@ export class JobManager {
               result.code === 0
                 ? undefined
                 : result.timedOut
-                  ? 'Lean checking reached its time limit. If a #eval command waits for input or runs an event loop, remove it and run the program in a terminal. Otherwise, check the build output and try a smaller target.'
-                  : 'Lean build failed. See the build output.',
+                  ? 'Lean checking reached its time limit. Inspect the last module in the build output, then retry or ask the administrator to review the check limits.'
+                  : setupFailureMessage(result) ||
+                    'Lean build failed. See the build output.',
           })
+          const dependency = dependencyFailureMessage(result)
+          if (dependency)
+            this.workspaces.markDependencyPreparation?.(
+              projectId,
+              owner,
+              dependency,
+            )
         } catch (error) {
           const cancelled = controller.signal.aborted && !error.workerCleanup
           this.events.updateMetadata(job.id, {

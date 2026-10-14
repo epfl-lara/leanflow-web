@@ -1,9 +1,37 @@
 import type { Project } from './api'
+import { ProjectSetupProgress } from './ProjectSetupProgress'
 
 export function ProjectSetupDetails({ project }: { project: Project }) {
   return (
     <>
-      {project.setupRepair && (
+      {project.status === 'preparing' && (
+        <ProjectSetupProgress project={project} />
+      )}
+      {project.publishingWarning && (
+        <div className="setup-repair-notice" role="status">
+          <strong>Working branch adjusted</strong>
+          <p>{project.publishingWarning}</p>
+        </div>
+      )}
+      {project.dependencyWarning && (
+        <div className="setup-repair-notice" role="status">
+          <strong>Dependencies need preparation</strong>
+          <p>{project.dependencyWarning}</p>
+        </div>
+      )}
+      {project.status === 'ready' &&
+        project.buildWarning &&
+        !project.dependencyWarning && (
+          <div className="setup-repair-notice" role="status">
+            <strong>Project opened with build errors</strong>
+            <p>{project.buildWarning}</p>
+            <p>
+              Open the affected files to inspect Lean's messages, then use Check
+              Project after fixing them.
+            </p>
+          </div>
+        )}
+      {project.setupRepair && project.status !== 'preparing' && (
         <div className="setup-repair-notice" role="status">
           <strong>
             {project.setupRepair.status === 'running'

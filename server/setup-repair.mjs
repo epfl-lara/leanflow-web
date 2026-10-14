@@ -4,6 +4,36 @@ import path from 'node:path'
 import { AgentRpc } from './rpc.mjs'
 import { createAgentOutputHandler } from './agent-output.mjs'
 
+export async function withSetupRepairDeadline(
+  execute,
+  { signal, timeoutMs = 900000 } = {},
+) {
+  const controller = new AbortController()
+  const combined = signal
+    ? AbortSignal.any([signal, controller.signal])
+    : controller.signal
+  const timer = setTimeout(
+    () =>
+      controller.abort(
+        new Error(
+          'Lemex setup repair reached its time limit. Your source files are preserved. Retry setup or inspect the setup output.',
+        ),
+      ),
+    timeoutMs,
+  )
+  try {
+    combined.throwIfAborted()
+    const result = await execute(combined)
+    combined.throwIfAborted()
+    return result
+  } catch (error) {
+    if (combined.aborted && !error?.workerCleanup) throw combined.reason
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 // A setup turn works only on a disposable project copy. WorkspaceStore admits
 // configuration changes and retries normal environment checks afterwards.
 export async function repairProjectSetup({
@@ -14,6 +44,7 @@ export async function repairProjectSetup({
   error,
   signal,
   onOutput = () => {},
+  onActivity = () => {},
 }) {
   if (!config.provider.LEMEX_API_KEY)
     throw new Error(
@@ -89,10 +120,21 @@ export async function repairProjectSetup({
   })
   rpc.on('notification', ({ method, params }) => {
     if (output.handle(method, params)) return
-    if (method === 'item/started' && params.item?.type === 'commandExecution')
+    if (method === 'item/started' && params.item?.type === 'commandExecution') {
+      const command = String(params.item.command || '')
+      onActivity(
+        /cache.*get/.test(command)
+          ? 'Fetching compiled library files'
+          : /lake.*(?:build|lean)/.test(command)
+            ? 'Testing the Lean environment'
+            : /git/.test(command)
+              ? 'Checking pinned dependency revisions'
+              : 'Inspecting project configuration',
+      )
       log(
         `Setup repair: ${String(params.item.command || 'checking project configuration').slice(0, 500)}\n`,
       )
+    }
     if (method === 'turn/completed') {
       output.flush()
       resolveFinished(params.turn)

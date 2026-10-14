@@ -51,7 +51,7 @@ export interface Session {
   lemex?: {
     revision?: string
     version?: string
-    available?: boolean
+    configured?: boolean
     [key: string]: unknown
   }
 }
@@ -68,15 +68,33 @@ export interface Project {
   libraries?: string[]
   repository?: string
   revision?: string
+  publishingEnabled?: boolean
+  workingBranch?: string
+  publishingBaseBranch?: string
+  publishingWarning?: string
   error?: string
+  buildWarning?: string
+  dependencyWarning?: string
+  setupStartedAt?: string
   log?: string
   subdirectory?: string
   uploaded?: boolean
   autoRepair?: boolean
+  setupPhase?:
+    | 'reading-project'
+    | 'preparing-lean'
+    | 'preparing-dependencies'
+    | 'building-project'
+    | 'checking-environment'
+    | 'repairing-setup'
+    | 'waiting-for-repair'
+    | 'validating-repair'
   setupRepair?: {
     id: string
     status: 'running' | 'completed' | 'failed'
     message: string
+    startedAt?: string
+    activity?: string
     changes?: string[]
   }
 }
@@ -102,6 +120,11 @@ export interface GitInfo {
   revision?: string | null
   head?: string | null
   remoteUrl?: string | null
+  publishingEnabled?: boolean
+  provider?: GitProvider
+  suggestedBranch?: string
+  baseBranch?: string | null
+  lastPublished?: GitPushResult
   changes?: { status: string; path: string; from?: string }[]
   diff?: string
   commits?: { sha: string; message: string }[]
@@ -109,6 +132,36 @@ export interface GitInfo {
   blockedReason?: string
   reviewToken?: string
   author?: { name: string; email: string }
+}
+
+export type GitProvider = 'github' | 'gitlab' | 'other'
+
+export interface GitPushPreview {
+  previewId: string
+  head: string
+  branch: string
+  remoteUrl: string
+  provider: GitProvider
+  baseBranch?: string | null
+  commits: { sha: string; message: string }[]
+  historyCount: number
+  uncommittedCount: number
+  review?: GitPushResult['review']
+}
+
+export interface GitPushResult {
+  pushed: boolean
+  head: string
+  branch: string
+  remoteUrl: string
+  provider?: GitProvider
+  baseBranch?: string | null
+  warning?: string
+  review?: {
+    kind: 'pull-request' | 'merge-request'
+    label: string
+    url: string
+  }
 }
 
 export interface FileEntry {

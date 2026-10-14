@@ -92,14 +92,15 @@ try {
   assert.equal((await runtime.init()).ready, true, runtime.error)
   await runtime.prepareToolchain(toolchain)
   runtime.run = async (root, args, options) => {
+    const command = args.filter((arg) => arg !== '--keep-toolchain').join(' ')
     if (root.includes('/shared-dependency-stages/')) {
-      if (args.join(' ') === 'lake env lean --version') {
+      if (command === 'lake env lean --version') {
         await fs.mkdir(path.join(root, '.lake/packages'), { recursive: true })
         await fs.cp(source, path.join(root, '.lake/packages/mathlib'), {
           recursive: true,
         })
       }
-      if (args.join(' ') === 'lake exe cache get') {
+      if (command === 'lake exe cache get') {
         downloads++
         // Compile the fixture instead of downloading real Mathlib artifacts.
         return realRun(root, ['lake', 'build', 'mathlib'], {

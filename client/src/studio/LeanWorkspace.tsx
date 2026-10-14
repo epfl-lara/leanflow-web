@@ -27,7 +27,13 @@ import {
 } from './proofTarget'
 
 class BrowserLeanMonaco extends LeanMonaco {
-  constructor(private readonly onConnectionIssue: (message: string) => void) {
+  constructor(
+    private readonly onConnectionIssue: (message: string) => void,
+    private readonly onProcessingNotice: (
+      message: string,
+      uri?: string,
+    ) => void,
+  ) {
     super()
   }
 
@@ -36,12 +42,27 @@ class BrowserLeanMonaco extends LeanMonaco {
   ): WebSocketConfigOptionsUrl {
     const settings = super.getWebSocketOptions(options)
     const onConnectionIssue = this.onConnectionIssue
+    const onProcessingNotice = this.onProcessingNotice
     return {
       ...settings,
       startOptions: {
         ...settings.startOptions,
         onCall(client) {
           settings.startOptions?.onCall(client)
+          client?.onNotification('$/leanflow/processing', (params: unknown) => {
+            if (
+              params &&
+              typeof params === 'object' &&
+              'message' in params &&
+              typeof params.message === 'string'
+            )
+              onProcessingNotice(
+                params.message,
+                'uri' in params && typeof params.uri === 'string'
+                  ? params.uri
+                  : undefined,
+              )
+          })
           const previous = client?.clientOptions.errorHandler
           if (!client || !previous) return
           let sourceTooLarge = false
@@ -190,6 +211,9 @@ export function LeanWorkspace({
   const focusedRequest = useRef<number | null>(null)
   const [failure, setFailure] = useState('')
   const [connectionIssue, setConnectionIssue] = useState('')
+  const [restarting, setRestarting] = useState(false)
+  const [restartIssue, setRestartIssue] = useState('')
+  const [requestIssue, setRequestIssue] = useState('')
   const [loading, setLoading] = useState(true)
   const stacked = useMediaQuery('(max-width: 1250px)')
   fileRef.current = file
@@ -210,15 +234,27 @@ export function LeanWorkspace({
     let own: Runtime | null = null
     setFailure('')
     setConnectionIssue('')
+    setRequestIssue('')
     setLoading(true)
     onStateRef.current('Connecting to Lean')
     void serialize(async () => {
       if (cancelled || !editorEl.current || !infoEl.current) return
-      const lean = new BrowserLeanMonaco((message) => {
-        if (cancelled) return
-        setConnectionIssue(message)
-        onStateRef.current('Lean paused: source too large')
-      })
+      const lean = new BrowserLeanMonaco(
+        (message) => {
+          if (cancelled) return
+          setConnectionIssue(message)
+          onStateRef.current('Lean paused: source too large')
+        },
+        (message, uri) => {
+          if (
+            !cancelled &&
+            (!uri ||
+              uri ===
+                new FileUri('/workspace/' + fileRef.current?.path).toString())
+          )
+            setRequestIssue(message)
+        },
+      )
       own = { lean }
       runtime.current = own
       lean.setInfoviewElement(infoEl.current)
@@ -824,6 +860,30 @@ export function LeanWorkspace({
     onProofStateChange,
   ])
 
+  async function restartLean() {
+    const clients = runtime.current?.lean.clientProvider?.getClients() || []
+    if (!clients.length || restarting) return
+    setRestarting(true)
+    setRestartIssue('')
+    try {
+      await Promise.all(clients.map((client) => client.restart()))
+      if (clients.some((client) => !client.isRunning()))
+        throw new Error(
+          'Lean could not reconnect. Try Restart Lean again or reopen the project.',
+        )
+      setRequestIssue('')
+      setRestartIssue('')
+    } catch (error) {
+      setRestartIssue(
+        error instanceof Error
+          ? error.message
+          : 'Lean could not restart. Try reopening the project.',
+      )
+    } finally {
+      setRestarting(false)
+    }
+  }
+
   return (
     <div
       ref={workspaceEl}
@@ -839,6 +899,23 @@ export function LeanWorkspace({
               Your unsaved edits remain in the editor. Reduce the source, then
               reopen the project to reconnect.
             </p>
+          </div>
+        )}
+        {restartIssue && (
+          <div className="lean-connection-notice" role="alert">
+            {restartIssue}
+          </div>
+        )}
+        {requestIssue && (
+          <div className="lean-connection-notice" role="alert">
+            <p>{requestIssue}</p>
+            <button
+              className="button small secondary"
+              onClick={() => void restartLean()}
+              disabled={restarting}
+            >
+              {restarting ? 'Restarting…' : 'Restart Lean'}
+            </button>
           </div>
         )}
         <div
@@ -888,6 +965,14 @@ export function LeanWorkspace({
         <div className="pane-caption">
           <span className="status-dot" />
           Goals &amp; diagnostics{' '}
+          <button
+            className="button small subtle"
+            onClick={() => void restartLean()}
+            disabled={loading || restarting || !!connectionIssue}
+            title="Restart this editor's Lean connection. Your unsaved edits stay in the editor."
+          >
+            {restarting ? 'Restarting…' : 'Restart Lean'}
+          </button>
           <span className="caption-hint">Move the cursor to inspect</span>
         </div>
         <div ref={infoEl} className="infoview-host" />

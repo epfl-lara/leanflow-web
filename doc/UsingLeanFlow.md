@@ -16,15 +16,34 @@ The shared Mathlib template stays protected; your own playgrounds can be deleted
 
 Choose **Import or create project**. Create a project with compatible library presets, paste a public repository URL, or upload a local folder.
 
-GitHub subdirectory links work too, such as `https://github.com/epfl-lara/jordan-curve-theorem/tree/main/HOLLight-Lean`. For branch names containing `/`, use **More options → Branch or revision**. Imports keep their Lean version and dependency pins.
+GitHub subdirectory links work too, such as `https://github.com/epfl-lara/jordan-curve-theorem/tree/main/HOLLight-Lean`. For branch names containing `/`, use **More options → Branch, tag, or commit**. Imports keep their Lean version and dependency pins.
+
+**Enable publishing changes back** is selected for repository imports. Leave **Working branch** blank to create a unique branch at the imported revision, or enter a branch name. If the name conflicts, the app preserves existing branches, chooses a unique alternative and shows the change. Importing never pushes changes. Clear the checkbox if you only want to work locally; you can enable publishing later in **Publish**. GitHub, GitLab and other public HTTPS Git repositories are supported.
 
 Use **Upload** or drag files/folders into the upload area. **Upload** in the Files header adds to the open project. The app asks about ambiguous project folders and name conflicts.
 
 **Let Lemex repair setup if needed** allows an automatic configuration repair after setup fails. Use **Stop setup** to cancel.
 
-## Stop a running check
+When available on the server, the specialized Lemex setup agent starts automatically after a recoverable setup failure. It diagnoses an isolated copy, proposes configuration repairs and validates them with Lean before they are applied. The progress card shows when repair is queued, its current activity and elapsed time. Repair has a 15-minute default deadline, including its wait for an assistant slot.
+
+Setup shows its current stage, from preparing Lean and libraries to testing the environment. If automatic setup needs a configuration repair, **Lemex is repairing setup** appears while Lemex diagnoses the problem. **Testing the setup repair** appears before the checked configuration is accepted and setup retries. You can open another project while this runs.
+
+Use **Refresh setup** in an open project to recheck its environment. Valid compiled caches are reused. Choose the adjacent info icon for details about cache reuse and automatic repair. Stop active checks and chats, and close the terminal before refreshing.
+
+## View evaluation results and stop a check
+
+Put the cursor on a completed `#eval` command to see its output in **Goals & diagnostics**. For example:
+
+```lean
+#eval show IO Unit from do
+  IO.println "Hello"
+```
+
+An interactive program such as LeanTui's `#eval chessMain []` waits for keyboard input. Remove that command, then use **Restart Lean** to recover the editor. Unsaved edits stay in the editor. Save your changes and open **Terminal** to run the project's executable, for example `lake exe chess-demo`.
 
 While a project or file check runs, **Checking…** shows the elapsed wall-clock time in minutes. Use **Stop check** beside it to cancel the check and wait for its worker to stop. Fix or remove the blocking command before checking again.
+
+If an older imported project reports a ProofWidgets `package-lock.json.hash` read-only error, stop its active checks and chats, then use **Refresh setup**. Setup prepares and tests the dependencies before sharing them read only, preserving the project's Lean version and dependency pins.
 
 ## Use the project terminal
 
@@ -85,7 +104,17 @@ Choose **Open locally** to view a module from the project's pinned Lean installa
 
 To jump to a declaration from the editor, put the cursor on its name and press **F12**, or right-click and choose **Go to Definition**. Project files open in the editor; definitions in Lean's installed library open in the scrollable read-only viewer at the position reported by Lean. Navigation between project files uses the usual unsaved-edit prompt.
 
-In **Source control**, save files, review the diff, and enter a commit message. Use **New branch** if needed. To push, choose a repository and branch in **Publish**, then **Preview push**. Review it and provide a repository token with push permission; the token is used only for that push and stays out of the proof agent.
+In **Source control → Changes**, save files, review the diff, and enter a commit message. Use **Create branch** if you need a new branch. An import with publishing enabled already has a working branch.
+
+Choose **Publish** in the project header, or the **Publish** tab in Source control. If publishing was disabled during import, choose **Enable publishing**. The imported repository is filled in automatically. You can replace it with an existing fork where you have write access.
+
+Choose the branch to push and the repository host. GitHub and GitLab are detected for their public services; select the provider for a self-hosted installation, or **Other** for ordinary Git pushing. **Merge into branch** selects the target for a later PR or MR; leave it blank to use the repository's default branch.
+
+Choose **Preview push**, review the commit, destination and branch, then provide your repository token and choose **Publish reviewed commit**. The token is used only for that push, is cleared afterward, and stays out of Lemex. The server rechecks the reviewed commit and does not force-push. Saved changes must be committed to be included.
+
+You can close Source control during a push and reopen it later. After the push succeeds, its confirmed branch and PR/MR link remain available. Imported projects stay shallow; publishing retrieves missing history in a temporary export without copying the dependency cache.
+
+After a confirmed GitHub push, choose **Open pull request on GitHub**. For GitLab, choose **Open merge request on GitLab**. These links open the provider's request form with the published branch selected. Review the target, title and description, then submit the form there. When pushing to a fork, select the upstream repository in that form to contribute back. Other Git hosts keep their usual branch and review workflow.
 
 Deleted files, folders, projects, and chats go to **Trash**. Use **Restore** or the immediate **Undo** notice. To trash a project with active work, choose **Stop all processes and move to Trash** in its confirmation dialog. LeanFlow stops its checks, Lemex runs, and setup before moving it. Stop an active chat before deleting it.
 

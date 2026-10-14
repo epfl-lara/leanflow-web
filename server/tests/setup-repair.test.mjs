@@ -5,7 +5,10 @@ import os from 'node:os'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { repairProjectSetup } from '../setup-repair.mjs'
+import {
+  repairProjectSetup,
+  withSetupRepairDeadline,
+} from '../setup-repair.mjs'
 import { rcpModelCatalog, DEFAULT_MODEL } from '../model-catalog.mjs'
 import { catalogModels } from '../config.mjs'
 
@@ -86,5 +89,39 @@ test('repair writes the normalized model catalog and sends the exact configured 
   assert.equal(
     requests.find((r) => r.method === 'turn/start').params.effort,
     'max',
+  )
+})
+
+test('the automatic repair deadline cancels queued or running work and reports a retryable timeout', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let signal
+  const repair = withSetupRepairDeadline(
+    (bounded) => {
+      signal = bounded
+      return new Promise((_, reject) =>
+        bounded.addEventListener('abort', () => reject(bounded.reason), {
+          once: true,
+        }),
+      )
+    },
+    { timeoutMs: 1000 },
+  )
+  t.mock.timers.tick(1000)
+  await assert.rejects(
+    repair,
+    /setup repair reached its time limit.*source files are preserved/,
+  )
+  assert.equal(signal.aborted, true)
+})
+
+test('a stopped setup cannot enter the specialized repair agent', async () => {
+  const controller = new AbortController()
+  controller.abort(new Error('Stopped fixture'))
+  await assert.rejects(
+    withSetupRepairDeadline(
+      () => assert.fail('Repair invoked after cancellation'),
+      { signal: controller.signal },
+    ),
+    /Stopped fixture/,
   )
 })

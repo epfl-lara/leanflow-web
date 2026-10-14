@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { api, errorText, post, type GitInfo, type Project } from './api'
+import {
+  api,
+  errorText,
+  post,
+  type GitInfo,
+  type Project,
+  type GitProvider,
+  type GitPushPreview,
+  type GitPushResult,
+} from './api'
 import { Dialog } from './Dialog'
 import { Icon } from './Icons'
 import { GitDiff } from './GitDiff'
+import { HelpTip } from './HelpTip'
 import './git.css'
 
-interface PushPreview {
-  previewId: string
-  head: string
-  branch: string
-  remoteUrl: string
-  commits: { sha: string; message: string }[]
-  historyCount: number
-  uncommittedCount: number
-}
 const headOf = (info: GitInfo | null) => info?.revision || info?.head || null
 const namedBranch = (branch?: string | null) =>
   !!branch &&
@@ -21,9 +22,23 @@ const namedBranch = (branch?: string | null) =>
   !branch.startsWith('HEAD ') &&
   !branch.startsWith('(HEAD')
 
+function providerFromUrl(value: string): GitProvider {
+  try {
+    const host = new URL(value).hostname
+    return host === 'github.com'
+      ? 'github'
+      : host === 'gitlab.com'
+        ? 'gitlab'
+        : 'other'
+  } catch {
+    return 'other'
+  }
+}
+
 export function GitModal({
   project,
   initialInfo,
+  initialTab = 'changes',
   dirty,
   localBlockedReason,
   onSave,
@@ -32,6 +47,7 @@ export function GitModal({
 }: {
   project: Project
   initialInfo: GitInfo | null
+  initialTab?: 'changes' | 'publish'
   dirty: boolean
   localBlockedReason?: string
   onSave: () => Promise<void>
@@ -40,7 +56,7 @@ export function GitModal({
 }) {
   const [info, setInfo] = useState(initialInfo)
   const [loaded, setLoaded] = useState(false)
-  const [tab, setTab] = useState<'changes' | 'publish'>('changes')
+  const [tab, setTab] = useState<'changes' | 'publish'>(initialTab)
   const [selected, setSelected] = useState<string | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
@@ -50,12 +66,20 @@ export function GitModal({
   const [authorName, setAuthorName] = useState('')
   const [authorEmail, setAuthorEmail] = useState('')
   const [branchOpen, setBranchOpen] = useState(false)
-  const [branchName, setBranchName] = useState('')
+  const [branchName, setBranchName] = useState(
+    initialInfo?.suggestedBranch || '',
+  )
+  const branchNameTouched = useRef(false)
   const [remoteUrl, setRemoteUrl] = useState(initialInfo?.remoteUrl || '')
   const [targetBranch, setTargetBranch] = useState(
     namedBranch(initialInfo?.branch) ? initialInfo!.branch! : '',
   )
-  const [preview, setPreview] = useState<PushPreview | null>(null)
+  const [provider, setProvider] = useState<GitProvider>(
+    initialInfo?.provider || providerFromUrl(initialInfo?.remoteUrl || ''),
+  )
+  const [baseBranch, setBaseBranch] = useState(initialInfo?.baseBranch || '')
+  const [preview, setPreview] = useState<GitPushPreview | null>(null)
+  const [published, setPublished] = useState<GitPushResult | null>(null)
   const previewRef = useRef(preview)
   const previewSourceBranch = useRef<string | null>(null)
   const [token, setToken] = useState('')
@@ -89,8 +113,18 @@ export function GitModal({
       )
       if (!destinationTouched.current) {
         setRemoteUrl(value.remoteUrl || '')
-        setTargetBranch(namedBranch(value.branch) ? value.branch! : '')
+        setTargetBranch(
+          project.repository && value.branch === value.baseBranch
+            ? value.suggestedBranch || value.branch || ''
+            : namedBranch(value.branch)
+              ? value.branch!
+              : '',
+        )
+        setProvider(value.provider || providerFromUrl(value.remoteUrl || ''))
+        setBaseBranch(value.baseBranch || '')
+        if (value.lastPublished) setPublished(value.lastPublished)
       }
+      if (!branchNameTouched.current) setBranchName(value.suggestedBranch || '')
       if (
         previewRef.current &&
         (previewRef.current.head !== headOf(value) ||
@@ -104,7 +138,7 @@ export function GitModal({
         )
       }
     },
-    [onUpdated],
+    [onUpdated, project.repository],
   )
   const refresh = useCallback(async () => {
     const id = ++request.current
@@ -137,8 +171,26 @@ export function GitModal({
 
   const resetPreview = () => {
     setPreview(null)
+    setPublished(null)
     setToken('')
     setUsername('')
+  }
+  async function enablePublishing() {
+    if (locked) return
+    setBusy('Enabling publishing')
+    setError('')
+    resetPreview()
+    try {
+      acceptInfo(await post<GitInfo>(endpoint, { action: 'enable-publishing' }))
+      if (mounted.current)
+        setNotice(
+          'Publishing enabled. Save and commit changes before reviewing a push.',
+        )
+    } catch (error) {
+      if (mounted.current) setError(errorText(error))
+    } finally {
+      if (mounted.current) setBusy('')
+    }
   }
   async function saveAndRefresh() {
     if (locked) return
@@ -207,9 +259,10 @@ export function GitModal({
       })
       if (!mounted.current) return
       acceptInfo(value)
-      destinationTouched.current = false
+      destinationTouched.current = true
       setTargetBranch(value.branch || '')
       setBranchName('')
+      branchNameTouched.current = false
       setBranchOpen(false)
       setNotice(`Switched to ${value.branch || 'the new branch'}.`)
       await refresh()
@@ -223,6 +276,7 @@ export function GitModal({
     event.preventDefault()
     if (
       locked ||
+      info?.publishingEnabled === false ||
       !namedBranch(info?.branch) ||
       !remoteUrl.trim() ||
       !targetBranch.trim()
@@ -233,10 +287,14 @@ export function GitModal({
     setNotice('')
     resetPreview()
     try {
-      const value = await post<PushPreview>(endpoint, {
+      const value = await post<GitPushPreview>(endpoint, {
         action: 'preview-push',
         remoteUrl: remoteUrl.trim(),
         branch: targetBranch.trim(),
+        provider,
+        ...(provider !== 'other' && baseBranch.trim()
+          ? { baseBranch: baseBranch.trim() }
+          : {}),
       })
       if (mounted.current) {
         previewSourceBranch.current = info?.branch || null
@@ -250,7 +308,13 @@ export function GitModal({
   }
   async function publish(event: FormEvent) {
     event.preventDefault()
-    if (locked || !preview || !token.trim()) return
+    if (
+      locked ||
+      info?.publishingEnabled === false ||
+      !preview ||
+      !token.trim()
+    )
+      return
     const reviewed = preview
     const credential = token.trim(),
       login = username.trim()
@@ -261,13 +325,7 @@ export function GitModal({
     setToken('')
     setUsername('')
     try {
-      const value = await post<{
-        pushed: boolean
-        head: string
-        branch: string
-        remoteUrl: string
-        warning?: string
-      }>(endpoint, {
+      const value = await post<GitPushResult>(endpoint, {
         action: 'push',
         previewId: reviewed.previewId,
         token: credential,
@@ -276,6 +334,7 @@ export function GitModal({
       if (!mounted.current) return
       if (!value.pushed)
         throw new Error('The repository did not confirm the push.')
+      setPublished(value)
       setNotice(
         `Published ${value.head.slice(0, 12)} to ${value.branch}.${value.warning ? ` ${value.warning}` : ''}`,
       )
@@ -549,7 +608,10 @@ export function GitModal({
                     <input
                       id="git-branch-name"
                       value={branchName}
-                      onChange={(event) => setBranchName(event.target.value)}
+                      onChange={(event) => {
+                        branchNameTouched.current = true
+                        setBranchName(event.target.value)
+                      }}
                       placeholder="proof/my-theorem"
                       disabled={locked}
                       maxLength={121}
@@ -575,6 +637,67 @@ export function GitModal({
             role="tabpanel"
             aria-labelledby="git-tab-publish"
           >
+            {info?.publishingEnabled === false && (
+              <section
+                className="git-publish-preview"
+                aria-label="Enable publishing"
+              >
+                <p>
+                  Publishing was disabled when this project was imported. You
+                  can enable it here; each push still requires your review and
+                  repository credentials.
+                </p>
+                <button
+                  className="button secondary"
+                  disabled={locked}
+                  onClick={() => void enablePublishing()}
+                >
+                  Enable publishing
+                </button>
+              </section>
+            )}
+            {published && (
+              <section
+                className="git-push-preview"
+                aria-label="Published branch"
+              >
+                <h3>Changes published</h3>
+                <p>
+                  Branch <strong>{published.branch}</strong> is now available in{' '}
+                  {published.remoteUrl}.
+                </p>
+                {published.review ? (
+                  <>
+                    <a
+                      className="button primary"
+                      href={published.review.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {published.review.label}
+                    </a>
+                    <p className="field-help">
+                      Opens{' '}
+                      {published.review.kind === 'pull-request'
+                        ? 'GitHub'
+                        : 'GitLab'}{' '}
+                      with your published branch selected. Review the title,
+                      description and target, then submit the form to create the
+                      request.
+                    </p>
+                  </>
+                ) : (
+                  <p className="field-help">
+                    Open your repository host to review or merge this branch.
+                  </p>
+                )}
+              </section>
+            )}
+            <p className="field-help">
+              Save and commit your files in Changes, then preview the push
+              below. Use a new branch to propose changes without updating the
+              original branch.
+            </p>
             {!namedBranch(info?.branch) && (
               <p className="git-blocked">
                 Create a local branch before publishing.{' '}
@@ -600,10 +723,12 @@ export function GitModal({
                 type="url"
                 value={remoteUrl}
                 placeholder="https://github.com/owner/repository.git"
-                disabled={locked}
+                disabled={locked || info?.publishingEnabled === false}
                 onChange={(event) => {
                   destinationTouched.current = true
                   setRemoteUrl(event.target.value)
+                  setProvider(providerFromUrl(event.target.value))
+                  setBaseBranch('')
                   resetPreview()
                 }}
               />
@@ -614,21 +739,74 @@ export function GitModal({
                 id="git-target-branch"
                 value={targetBranch}
                 placeholder="main"
-                disabled={locked}
+                disabled={locked || info?.publishingEnabled === false}
                 onChange={(event) => {
                   destinationTouched.current = true
                   setTargetBranch(event.target.value)
                   resetPreview()
                 }}
               />
+              <div className="help-label">
+                <label className="field-label" htmlFor="git-provider">
+                  Repository host
+                </label>
+                <HelpTip label="Repository host">
+                  GitHub and GitLab offer a request form after a successful
+                  push. Choose your provider for a self-hosted installation, or
+                  Other for a Git host that supports ordinary pushing.
+                </HelpTip>
+              </div>
+              <select
+                id="git-provider"
+                value={provider}
+                disabled={locked || info?.publishingEnabled === false}
+                onChange={(event) => {
+                  const value = event.target.value
+                  if (
+                    value !== 'github' &&
+                    value !== 'gitlab' &&
+                    value !== 'other'
+                  )
+                    return
+                  destinationTouched.current = true
+                  setProvider(value)
+                  resetPreview()
+                }}
+              >
+                <option value="github">GitHub</option>
+                <option value="gitlab">GitLab</option>
+                <option value="other">Other</option>
+              </select>
+              {provider !== 'other' && (
+                <>
+                  <label className="field-label" htmlFor="git-base-branch">
+                    Merge into branch{' '}
+                    <span className="git-optional">optional</span>
+                  </label>
+                  <input
+                    id="git-base-branch"
+                    value={baseBranch}
+                    placeholder="Repository default branch"
+                    disabled={locked || info?.publishingEnabled === false}
+                    onChange={(event) => {
+                      destinationTouched.current = true
+                      setBaseBranch(event.target.value)
+                      resetPreview()
+                    }}
+                  />
+                </>
+              )}
               <p className="field-help">
                 Use a public HTTPS repository address. You need permission to
-                push to its target branch.
+                push to its target branch. You can use your existing fork if you
+                cannot push to the imported repository; choose the upstream
+                repository in the request form when contributing back.
               </p>
               <button
                 className="button secondary"
                 disabled={
                   locked ||
+                  info?.publishingEnabled === false ||
                   !headOf(info) ||
                   !namedBranch(info?.branch) ||
                   !remoteUrl.trim() ||
@@ -659,6 +837,12 @@ export function GitModal({
                       <code>{preview.head}</code>
                     </dd>
                   </div>
+                  {preview.provider !== 'other' && preview.baseBranch && (
+                    <div>
+                      <dt>Merge into</dt>
+                      <dd>{preview.baseBranch}</dd>
+                    </div>
+                  )}
                 </dl>
                 <p>
                   This publishes the reviewed commit and its existing committed

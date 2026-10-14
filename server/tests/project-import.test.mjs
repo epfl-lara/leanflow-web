@@ -308,6 +308,9 @@ test('automatic setup repair is announced, retains original configuration and re
     broken: true,
     setupRepair: async ({ root, onOutput }) => {
       repairs++
+      const running = f.store.list('alice')[0]
+      assert.equal(running.status, 'preparing')
+      assert.equal(running.setupPhase, 'repairing-setup')
       onOutput('Repairing the Lake name.\n')
       await fs.writeFile(path.join(root, 'lakefile.toml'), 'name = "fixed"\n')
     },
@@ -320,6 +323,7 @@ test('automatic setup repair is announced, retains original configuration and re
   assert.equal(project.status, 'ready', project.error)
   assert.equal(repairs, 1)
   assert.equal(project.setupRepair.status, 'completed')
+  assert.equal(project.setupPhase, 'checking-environment')
   assert.deepEqual(project.setupRepair.changes, ['lakefile.toml'])
   assert.match(project.log, /Automatic setup failed. Lemex is repairing/)
   assert.equal(
@@ -555,7 +559,12 @@ test('Mathlib setup must pass an import proof, requests Lemex repair on failure,
     ).includes('fixed')
     return fixed
       ? result
-      : { code: 1, stderr: 'Compiled Mathlib artifact missing', stdout: '' }
+      : {
+          code: 1,
+          stderr:
+            "error: object file '/workspace/.lake/packages/mathlib/Mathlib.olean' of module Mathlib does not exist",
+          stdout: '',
+        }
   }
   const manifest = JSON.stringify({
     packages: [
@@ -713,6 +722,23 @@ test('unsupported chosen Lean releases are reported without asking Lemex to subs
   assert.equal(
     await fs.readFile(path.join(project.root, 'lean-toolchain'), 'utf8'),
     chosen,
+  )
+})
+
+test('ready legacy-cache projects expose preparation guidance through both list and detail without changing their pins', async (t) => {
+  const f = await fixture(t)
+  const project = await f.create({ files: sources })
+  f.runtime.dependencyPreparationReason = () =>
+    'An older cache needs Refresh setup.'
+  const listed = f.store.list('alice').find((item) => item.id === project.id)
+  const detail = f.store.get(project.id, 'alice')
+  assert.equal(listed.needsPreparation, true)
+  assert.equal(detail.dependencyWarning, 'An older cache needs Refresh setup.')
+  assert.equal(detail.status, 'ready')
+  assert.equal(detail.toolchain, toolchain)
+  assert.equal(
+    (await f.store.readFile(project.id, 'alice', 'Main.lean')).content,
+    sources[2].content,
   )
 })
 

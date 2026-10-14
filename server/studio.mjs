@@ -17,10 +17,13 @@ import { ChatStore } from './chats.mjs'
 import { createChatTitleGenerator } from './chat-titles.mjs'
 import { searchDeclarations } from './search.mjs'
 import { LspFrames, frame, validateClientUris } from './rpc.mjs'
+import { LeanRequests } from './lean-requests.mjs'
+import { LeanProgress } from './lean-progress.mjs'
 import { ProjectActivity } from './project-activity.mjs'
 import { acquireServerLease } from './lease.mjs'
-import { repairProjectSetup } from './setup-repair.mjs'
+import { repairProjectSetup, withSetupRepairDeadline } from './setup-repair.mjs'
 import { GitPublisher } from './git-publish.mjs'
+import { validateGitBranch } from './git-branches.mjs'
 import { proofTargetReference } from './proof-target.mjs'
 import { loadCapacity } from './capacity.mjs'
 import {
@@ -203,11 +206,25 @@ export async function createStudio({
   })
   if (config.provider.LEMEX_API_KEY)
     workspaces.setupRepair = (args) =>
-      agents.runSetupRepair(
-        (signal) => repairProjectSetup({ runtime, config, ...args, signal }),
-        { signal: args.signal },
+      withSetupRepairDeadline(
+        (boundedSignal) =>
+          agents.runSetupRepair(
+            (signal) =>
+              repairProjectSetup({ runtime, config, ...args, signal }),
+            {
+              signal: boundedSignal,
+              onQueued: () => args.onProgress?.('waiting-for-repair'),
+              onStarted: () => args.onProgress?.('repairing-setup'),
+            },
+          ),
+        { signal: args.signal, timeoutMs: capacity.setupRepairTimeoutMs },
       )
-  const jobs = new JobManager({ runtime, workspaces, events })
+  const jobs = new JobManager({
+    runtime,
+    workspaces,
+    events,
+    checkTimeoutMs: capacity.checkTimeoutMs,
+  })
   const activity = new ProjectActivity({
     events,
     jobs,
@@ -645,6 +662,12 @@ export async function createStudio({
       return res.json(
         await publisher.push(req.user.id, req.params.id, req.body),
       )
+    if (action === 'enable-publishing') {
+      await workspaces.enablePublishing(req.params.id, req.user.id, {
+        assertIdle: () => requireNoRun(req.params.id, req.user.id),
+      })
+      return res.json(await gitInfo(req.params.id, req.user))
+    }
     await publisher.withProject(req.user.id, req.params.id, async (project) => {
       const options = { network: 'none', timeoutMs: 60_000 }
       const gitRoot = workspaces.repositoryRoot(project)
@@ -668,16 +691,7 @@ export async function createStudio({
         return result
       }
       if (action === 'branch') {
-        if (
-          typeof name !== 'string' ||
-          !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,120}$/.test(name) ||
-          name.includes('..') ||
-          name.endsWith('.lock')
-        )
-          throw Object.assign(new Error('Enter a valid branch name.'), {
-            status: 400,
-          })
-        await command(['switch', '-c', name])
+        await command(['switch', '-c', validateGitBranch(name)])
       } else if (action === 'commit') {
         if (
           typeof message !== 'string' ||
@@ -991,7 +1005,7 @@ export async function createStudio({
     let child,
       alive = true,
       lastActivity = Date.now()
-    const pending = new Map()
+    let requests, progress
     try {
       child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
         network: 'none',
@@ -999,17 +1013,16 @@ export async function createStudio({
           ? { readOnlyWorkspace: true, writeLakeCache: true }
           : {}),
       })
-      const frames = new LspFrames((message) => {
-        const method = pending.get(message.id)
-        if ('id' in message && !message.method) pending.delete(message.id)
-        if (
-          method === 'textDocument/completion' &&
-          message.result?.items?.length > 300
-        ) {
-          message.result.items = message.result.items.slice(0, 300)
-          message.result.isIncomplete = true
-        }
+      const sendToClient = (message) => {
         if (ws.readyState === 1) ws.send(JSON.stringify(message))
+      }
+      requests = new LeanRequests({
+        sendToClient,
+      })
+      progress = new LeanProgress(sendToClient)
+      const frames = new LspFrames((message) => {
+        progress.server(message)
+        if (requests.receive(message)) sendToClient(message)
       })
       child.stdout.on('data', (chunk) => {
         try {
@@ -1033,10 +1046,8 @@ export async function createStudio({
         lastActivity = Date.now()
         try {
           const message = validateClientUris(JSON.parse(data.toString()))
-          if (message.method && 'id' in message)
-            pending.set(message.id, message.method)
-          if (pending.size > 1000)
-            throw new Error('Too many outstanding Lean requests.')
+          requests.track(message)
+          progress.client(message)
           child.stdin.write(frame(message))
         } catch (error) {
           if (error.sourceTooLarge) ws.close(1009, error.message)
@@ -1057,6 +1068,8 @@ export async function createStudio({
     }, 30_000)
     ws.on('close', () => {
       clearInterval(heartbeat)
+      requests?.dispose()
+      progress?.dispose()
       child?.kill()
       sockets.delete(ws)
       socketProjects.delete(ws)

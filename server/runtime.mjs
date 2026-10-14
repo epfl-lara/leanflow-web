@@ -13,6 +13,7 @@ import {
   SharedDependencyCache,
   configurationDigest,
   readDependencyConfiguration,
+  sharedDependencyCacheSchema,
 } from './shared-dependencies.mjs'
 
 const projectDir = path.resolve(
@@ -122,6 +123,24 @@ finally:
 `
 
 export class Runtime {
+  dependencyPreparationReason(root) {
+    try {
+      const source = this.dependencyRoot(root)
+      if (!this.#sharedSource(source)) return null
+      const metadata = JSON.parse(
+        fs.readFileSync(path.join(source, '.ready.json'), 'utf8'),
+      )
+      return metadata.schema === sharedDependencyCacheSchema
+        ? null
+        : 'This project uses an older dependency cache. Stop active checks and chats, then use Refresh setup to rebuild the pinned environment.'
+    } catch (error) {
+      if (error.status === 409)
+        return 'The project configuration no longer matches its prepared dependencies. Use Refresh setup to check the updated environment.'
+      if (error.code === 'ENOENT')
+        return 'The prepared dependencies are unavailable. Use Refresh setup to rebuild the pinned environment.'
+      throw error
+    }
+  }
   constructor({
     dataDir,
     image = process.env.LEMEX_WORKER_IMAGE || 'lemex-web-worker:local',

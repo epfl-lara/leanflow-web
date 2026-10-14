@@ -111,7 +111,7 @@ export class AgentManager {
         { status: 503 },
       )
     const project = this.workspaces.get(projectId, owner)
-    if (project.status !== 'ready')
+    if (project.status !== 'ready' || project.needsPreparation)
       throw Object.assign(
         new Error('Prepare this project before asking Lemex to work on it.'),
         { status: 409 },
@@ -392,7 +392,7 @@ export class AgentManager {
     if (queued.created) await this.followups.deliver(id)
     return this.events.getMetadata(id, owner)
   }
-  runSetupRepair(execute, { signal } = {}) {
+  runSetupRepair(execute, { signal, onQueued, onStarted } = {}) {
     if (this.stopping || signal?.aborted)
       return Promise.reject(
         signal?.reason || new Error('The server is shutting down.'),
@@ -408,7 +408,7 @@ export class AgentManager {
       )
     return new Promise((resolve, reject) => {
       const controller = new AbortController()
-      const job = { execute, resolve, reject, controller, signal }
+      const job = { execute, resolve, reject, controller, signal, onStarted }
       job.abort = () => {
         controller.abort(signal?.reason || new Error('Setup repair stopped.'))
         const index = this.queue.indexOf(job)
@@ -419,6 +419,7 @@ export class AgentManager {
         }
       }
       signal?.addEventListener('abort', job.abort, { once: true })
+      onQueued?.()
       this.queue.push(job)
       queueMicrotask(() => this.#drain())
     })
@@ -441,7 +442,10 @@ export class AgentManager {
         this.setupRepairs ||= new Set()
         this.setupRepairs.add(id)
         const task = Promise.resolve()
-          .then(() => id.execute(id.controller.signal))
+          .then(() => {
+            id.onStarted?.()
+            return id.execute(id.controller.signal)
+          })
           .then(id.resolve, id.reject)
           .finally(() => {
             id.signal?.removeEventListener('abort', id.abort)

@@ -789,7 +789,7 @@ test('a timed-out Lean check reports how to recover from blocking evaluation', a
   const job = jobs.check('alice', 'project')
   const result = await finishedJob(events, job.id)
   assert.equal(result.status, 'failed')
-  assert.match(result.error, /time limit.*#eval.*terminal/)
+  assert.match(result.error, /time limit.*last module/)
 })
 
 test('settings remain private per user, persist, and validate tool choices and instruction size', async (t) => {

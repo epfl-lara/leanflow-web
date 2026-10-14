@@ -278,7 +278,7 @@ export function Studio() {
   const [trashItems, setTrashItems] = useState<TrashItem[]>([])
   const [trashError, setTrashError] = useState('')
   const [restoring, setRestoring] = useState<string | null>(null)
-  const [gitOpen, setGitOpen] = useState(false)
+  const [gitOpen, setGitOpen] = useState<'changes' | 'publish' | null>(null)
   const [newFileModal, setNewFileModal] = useState(false)
   const [newFileName, setNewFileName] = useState('')
   const [newFileError, setNewFileError] = useState('')
@@ -532,7 +532,7 @@ export function Studio() {
       setFocusEditorRequest(null)
       setRevealProof(null)
       setGit(null)
-      setGitOpen(false)
+      setGitOpen(null)
       setTerminalOpen(false)
       setJob(null)
       setFileFilter('')
@@ -1441,7 +1441,7 @@ export function Studio() {
               </div>
               <button
                 className="button secondary small git-source-entry"
-                onClick={() => setGitOpen(true)}
+                onClick={() => setGitOpen('changes')}
               >
                 <Icon name="git" size={14} />
                 Source control
@@ -1514,6 +1514,24 @@ export function Studio() {
                 {git.branch}
               </span>
             )}
+            {project?.status === 'ready' &&
+              project.repository &&
+              !singleFileMode && (
+                <div className="help-label workspace-publish">
+                  <button
+                    className="button small subtle"
+                    onClick={() => setGitOpen('publish')}
+                  >
+                    <Icon name="git" size={14} /> Publish
+                  </button>
+                  <HelpTip label="Publishing changes">
+                    Save and commit your changes, then review a push to the
+                    imported repository or your existing fork. After publishing,
+                    open GitHub or GitLab to finish creating a pull request or
+                    merge request.
+                  </HelpTip>
+                </div>
+              )}
           </div>
           <div className="header-actions">
             <div className="help-label">
@@ -1549,6 +1567,24 @@ export function Studio() {
                 <Icon name="terminal" size={15} />
                 Terminal
               </button>
+            )}
+            {project?.status === 'ready' && !singleFileMode && (
+              <div className="help-label">
+                <button
+                  className="button small subtle"
+                  onClick={retryPrepare}
+                  disabled={saving || !!(job && !terminalJob(job))}
+                >
+                  <Icon name="refresh" size={14} /> Refresh setup
+                </button>
+                <HelpTip label="Refresh setup">
+                  Recheck the project’s Lean environment, reuse valid compiled
+                  caches, and prepare missing libraries. If setup still fails,
+                  Lemex repairs it automatically when enabled. Your files and
+                  pinned versions are preserved. Stop active checks and chats,
+                  and close the terminal first.
+                </HelpTip>
+              </div>
             )}
             <button
               className="icon-button"
@@ -1777,11 +1813,14 @@ export function Studio() {
                 </button>
               </div>
             )}
-            {project.needsPreparation && !singleFileMode && (
-              <div className="setup-editor-details">
-                <ProjectSetupDetails project={project} />
-              </div>
-            )}
+            {(project.needsPreparation ||
+              project.buildWarning ||
+              project.publishingWarning) &&
+              !singleFileMode && (
+                <div className="setup-editor-details">
+                  <ProjectSetupDetails project={project} />
+                </div>
+              )}
             <div className="file-toolbar">
               <div className="file-tab">
                 <Icon name="file" size={15} />
@@ -1842,6 +1881,7 @@ export function Studio() {
                   onStop={() => void stopCheck()}
                   disabled={
                     project.status !== 'ready' ||
+                    project.needsPreparation ||
                     !file?.path.endsWith('.lean') ||
                     saving
                   }
@@ -1927,12 +1967,19 @@ export function Studio() {
                   />
                 </button>
                 {jobOpen && (
-                  <pre>
-                    {job.log ||
-                      (job.result
-                        ? pretty(job.result)
-                        : job.error || 'Waiting for Lean…')}
-                  </pre>
+                  <>
+                    {job.error && (
+                      <p className="error-message" role="alert">
+                        {job.error}
+                      </p>
+                    )}
+                    <pre>
+                      {job.log ||
+                        (job.result
+                          ? pretty(job.result)
+                          : job.error || 'Waiting for Lean…')}
+                    </pre>
+                  </>
                 )}
               </section>
             )}
@@ -2174,6 +2221,7 @@ export function Studio() {
       {projectModal && (
         <ProjectModal
           templates={session.templates}
+          repairAvailable={session.lemex?.configured === true}
           initialPreset={projectModal.preset}
           onClose={() => setProjectModal(null)}
           onCreated={(created) => {
@@ -2238,6 +2286,7 @@ export function Studio() {
           key={project.id}
           project={project}
           initialInfo={git}
+          initialTab={gitOpen}
           dirty={dirty}
           localBlockedReason={
             job && !terminalJob(job)
@@ -2246,7 +2295,7 @@ export function Studio() {
           }
           onSave={saveCompletely}
           onUpdated={acceptGit}
-          onClose={() => setGitOpen(false)}
+          onClose={() => setGitOpen(null)}
         />
       )}
       {pendingAction && (

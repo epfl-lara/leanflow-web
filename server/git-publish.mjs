@@ -5,6 +5,12 @@ import { randomUUID, createHash } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 import { validateRepository } from './workspaces.mjs'
+import { validateGitBranch } from './git-branches.mjs'
+import {
+  gitReviewLink,
+  gitReviewProvider,
+  suggestedPublishBranch,
+} from './git-review.mjs'
 
 const HASH = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/
 const UUID =
@@ -80,24 +86,50 @@ function destinationHint(value) {
   }
 }
 function targetBranch(value) {
+  return validateGitBranch(value, {
+    message: 'Choose a valid destination branch name.',
+  })
+}
+function namedBranch(value) {
+  try {
+    return validateGitBranch(value)
+  } catch {
+    return null
+  }
+}
+function requirePublishing(project) {
+  if (project.publishingEnabled === false)
+    fail(
+      'Enable publishing for this project before previewing or pushing changes.',
+      409,
+    )
+}
+function rememberedPublication(value) {
   if (
-    typeof value !== 'string' ||
-    value === 'HEAD' ||
-    !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,120}$/.test(value) ||
-    value.includes('..') ||
-    value.includes('//') ||
-    value
-      .split('/')
-      .some(
-        (part) =>
-          !part ||
-          part.startsWith('.') ||
-          part.endsWith('.') ||
-          part.endsWith('.lock'),
-      )
+    !value ||
+    value.pushed !== true ||
+    !HASH.test(value.head) ||
+    !namedBranch(value.branch) ||
+    typeof value.remoteUrl !== 'string' ||
+    destinationHint(value.remoteUrl) !== value.remoteUrl ||
+    !['github', 'gitlab', 'other'].includes(value.provider) ||
+    (value.baseBranch !== null && !namedBranch(value.baseBranch))
   )
-    fail('Choose a valid destination branch name.')
-  return value
+    return null
+  try {
+    const publication = {
+      pushed: true,
+      head: value.head,
+      branch: value.branch,
+      remoteUrl: value.remoteUrl,
+      provider: gitReviewProvider(value.remoteUrl, value.provider),
+      baseBranch: value.baseBranch,
+    }
+    const review = gitReviewLink(publication)
+    return { ...publication, ...(review ? { review } : {}) }
+  } catch {
+    return null
+  }
 }
 async function optionalStat(filename) {
   try {
@@ -195,6 +227,7 @@ export class GitPublisher {
     this.previews = new Map()
     this.busy = new Set()
     this.destinationWrites = Promise.resolve()
+    this.defaultBranches = new Map()
   }
   async init() {
     if (!this.initialization)
@@ -368,6 +401,62 @@ export class GitPublisher {
     if (!HASH.test(head)) fail('Create a commit before previewing a push.', 409)
     return head
   }
+  async #defaultBranch(root, head) {
+    const previous = this.defaultBranches.get(root)
+    if (previous?.head === head) return previous.result
+    const result = this.#readDefaultBranch(root)
+    const entry = { head, result }
+    this.defaultBranches.delete(root)
+    this.defaultBranches.set(root, entry)
+    while (this.defaultBranches.size > 1000)
+      this.defaultBranches.delete(this.defaultBranches.keys().next().value)
+    try {
+      return await result
+    } catch (error) {
+      if (this.defaultBranches.get(root) === entry)
+        this.defaultBranches.delete(root)
+      throw error
+    }
+  }
+  async #readDefaultBranch(root) {
+    try {
+      const result = await this.#run(
+        root,
+        ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'],
+        { readOnlyWorkspace: true, readOnlyHome: true },
+      )
+      const reference = result.stdout.trim()
+      return reference.startsWith('origin/')
+        ? namedBranch(reference.slice('origin/'.length))
+        : null
+    } catch (error) {
+      if (error.status !== 409) throw error
+      return null
+    }
+  }
+  async #exportedShallowBoundaries(root, hashes) {
+    const result = await this.#run(
+      root,
+      [
+        '--git-dir=/workspace/repository.git',
+        'cat-file',
+        '--batch-check=%(objectname) %(objecttype)',
+      ],
+      {
+        readOnlyWorkspace: true,
+        readOnlyHome: true,
+        input: hashes.join('\n') + '\n',
+      },
+    )
+    const lines = result.stdout.trim().split('\n')
+    if (lines.length !== hashes.length)
+      fail('The exported shallow history could not be verified.', 409)
+    return hashes.filter((hash, index) => {
+      if (lines[index] === hash + ' commit') return true
+      if (lines[index] === hash + ' missing') return false
+      fail('The exported shallow history could not be verified.', 409)
+    })
+  }
   async #history(root, bare = false) {
     const prefix = bare ? ['--git-dir=/workspace/repository.git'] : []
     const commits = await this.#run(
@@ -397,11 +486,25 @@ export class GitPublisher {
   }
   async #remembered(owner, projectId) {
     try {
-      return (
-        JSON.parse(
-          await fs.readFile(path.join(this.dir, 'destinations.json'), 'utf8'),
-        )[owner]?.[projectId] || null
-      )
+      const saved = JSON.parse(
+        await fs.readFile(path.join(this.dir, 'destinations.json'), 'utf8'),
+      )[owner]?.[projectId]
+      if (typeof saved === 'string') return { remoteUrl: saved }
+      if (!saved || typeof saved.remoteUrl !== 'string') return null
+      const lastPublished = rememberedPublication(saved.lastPublished)
+      return {
+        remoteUrl: saved.remoteUrl,
+        ...(['github', 'gitlab', 'other'].includes(saved.provider)
+          ? { provider: saved.provider }
+          : {}),
+        ...(Object.hasOwn(saved, 'baseBranch') &&
+        (saved.baseBranch === null || saved.baseBranch === '')
+          ? { baseBranch: null }
+          : namedBranch(saved.baseBranch)
+            ? { baseBranch: saved.baseBranch }
+            : {}),
+        ...(lastPublished ? { lastPublished } : {}),
+      }
     } catch (error) {
       if (error.code !== 'ENOENT') throw error
       return null
@@ -430,13 +533,19 @@ export class GitPublisher {
     const project = this.workspaces.get(projectId, owner)
     status ||= await this.workspaces.gitStatus(projectId, owner)
     const blockedReason = this.blocked(owner, projectId)
+    const remembered = await this.#remembered(owner, projectId)
     let remoteUrl =
-        (await this.#remembered(owner, projectId)) ||
-        destinationHint(project.repository),
-      commits = []
+        remembered?.remoteUrl || destinationHint(project.repository),
+      commits = [],
+      defaultBranch = null
     if (status.repository) {
       const root = await this.#source(project)
       if (status.revision) commits = (await this.#history(root)).commits
+      if (
+        !Object.hasOwn(remembered || {}, 'baseBranch') &&
+        !namedBranch(project.publishingBaseBranch)
+      )
+        defaultBranch = await this.#defaultBranch(root, status.revision)
     }
     const review = createHash('sha256').update(
       JSON.stringify({
@@ -494,6 +603,15 @@ export class GitPublisher {
     return {
       ...status,
       remoteUrl,
+      publishingEnabled: project.publishingEnabled !== false,
+      provider: gitReviewProvider(remoteUrl, remembered?.provider),
+      baseBranch: Object.hasOwn(remembered || {}, 'baseBranch')
+        ? remembered.baseBranch
+        : namedBranch(project.publishingBaseBranch) || defaultBranch,
+      suggestedBranch: suggestedPublishBranch(project.id, this.now()),
+      ...(remembered?.lastPublished
+        ? { lastPublished: remembered.lastPublished }
+        : {}),
       commits,
       reviewToken: review.digest('hex'),
       mutationBlocked: !!blockedReason,
@@ -505,6 +623,7 @@ export class GitPublisher {
       owner,
       projectId,
       async (project) => {
+        requirePublishing(project)
         await this.init()
         for (const [id, item] of this.previews)
           if (
@@ -522,6 +641,16 @@ export class GitPublisher {
         const destination = await this.#destination(
           input.remoteUrl || status.remoteUrl,
         )
+        const provider = gitReviewProvider(
+          destination.remoteUrl,
+          input.provider,
+        )
+        const baseBranch =
+          input.baseBranch === undefined || input.baseBranch === ''
+            ? null
+            : validateGitBranch(input.baseBranch, {
+                message: 'Choose a valid pull or merge request target branch.',
+              })
         const head = await this.#head(source),
           previewId = randomUUID()
         const root = path.join(this.dir, previewId)
@@ -636,8 +765,26 @@ export class GitPublisher {
             this.pinSupported = true
           }
           if (shallowHashes.length) {
+            // An imported revision can leave unrelated shallow branch tips in
+            // the source repository. HEAD-only bundles omit those objects;
+            // marking them shallow would make --unshallow reject the export.
+            shallowHashes = await this.#exportedShallowBoundaries(
+              root,
+              shallowHashes,
+            )
+          }
+          if (shallowHashes.length) {
+            const exportedBoundaries = path.join(
+              root,
+              'exported-shallow-boundaries',
+            )
+            await fs.writeFile(
+              exportedBoundaries,
+              shallowHashes.join('\n') + '\n',
+              { mode: 0o600, flag: 'wx' },
+            )
             await safeCopy(
-              path.join(root, 'shallow-boundaries'),
+              exportedBoundaries,
               path.join(root, 'repository.git', 'shallow'),
               1024 * 1024,
             )
@@ -718,9 +865,13 @@ export class GitPublisher {
             head,
             branch,
             remoteUrl: destination.remoteUrl,
+            provider,
+            baseBranch,
             ...history,
             uncommittedCount: status.changes.length,
           }
+          const review = gitReviewLink(preview)
+          if (review) preview.review = review
           this.previews.set(previewId, {
             ...preview,
             owner,
@@ -737,7 +888,7 @@ export class GitPublisher {
       { workspaceLock: false },
     )
   }
-  async #recordDestination(owner, projectId, remoteUrl) {
+  async #recordDestination(owner, projectId, destination) {
     const task = this.destinationWrites
       .catch(() => {})
       .then(async () => {
@@ -748,7 +899,7 @@ export class GitPublisher {
         } catch (error) {
           if (error.code !== 'ENOENT') throw error
         }
-        stored[owner] = { ...stored[owner], [projectId]: remoteUrl }
+        stored[owner] = { ...stored[owner], [projectId]: destination }
         const temporary = filename + '.' + randomUUID()
         await fs.writeFile(temporary, JSON.stringify(stored), {
           mode: 0o600,
@@ -764,6 +915,7 @@ export class GitPublisher {
       owner,
       projectId,
       async (project) => {
+        requirePublishing(project)
         if (typeof input.previewId !== 'string' || !UUID.test(input.previewId))
           fail('Preview this push before publishing it.')
         const preview = this.previews.get(input.previewId)
@@ -866,18 +1018,29 @@ export class GitPublisher {
               409,
             )
           }
+          const published = {
+            pushed: true,
+            head: preview.head,
+            branch: preview.branch,
+            remoteUrl: preview.remoteUrl,
+            provider: preview.provider,
+            baseBranch: preview.baseBranch,
+            ...(preview.review ? { review: preview.review } : {}),
+          }
           let warning
           try {
-            await this.#recordDestination(owner, projectId, preview.remoteUrl)
+            await this.#recordDestination(owner, projectId, {
+              remoteUrl: preview.remoteUrl,
+              provider: preview.provider,
+              baseBranch: preview.baseBranch,
+              lastPublished: published,
+            })
           } catch {
             warning =
               'The repository was pushed, but its destination could not be saved for the next visit.'
           }
           return {
-            pushed: true,
-            head: preview.head,
-            branch: preview.branch,
-            remoteUrl: preview.remoteUrl,
+            ...published,
             ...(warning ? { warning } : {}),
           }
         } catch (error) {

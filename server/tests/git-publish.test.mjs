@@ -9,6 +9,7 @@ import { promisify } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
 import { createStudio } from '../studio.mjs'
 import { GitPublisher } from '../git-publish.mjs'
+import { gitReviewLink, gitReviewProvider } from '../git-review.mjs'
 
 const execute = promisify(execFile)
 const DEST = 'https://git.example.invalid/alice/proofs.git'
@@ -229,6 +230,8 @@ test('preview exports committed objects only and publishes the exact reviewed HE
   )
   const preview = await previewResponse.json()
   assert.equal(preview.branch, 'main')
+  assert.equal(preview.provider, 'other')
+  assert.equal(preview.baseBranch, null)
   assert.equal(preview.historyCount, 1)
   assert.equal(preview.uncommittedCount, info.changes.length)
   const oneUse = 'dummy-repository-token-not-a-real-credential'
@@ -243,6 +246,8 @@ test('preview exports committed objects only and publishes the exact reviewed HE
     head: preview.head,
     branch: 'main',
     remoteUrl: DEST,
+    provider: 'other',
+    baseBranch: null,
   })
   assert.equal(
     (
@@ -297,6 +302,489 @@ test('preview exports committed objects only and publishes the exact reviewed HE
   )
 })
 
+test('review forms preserve the reviewed repository and safely encode branch names for GitHub, nested GitLab, and explicit self-hosted providers', () => {
+  const branch = 'leanflow/improve-proof',
+    baseBranch = 'release/4.35'
+  const github = gitReviewLink({
+    remoteUrl: 'https://github.com/alice/proofs.git',
+    provider: 'github',
+    branch,
+    baseBranch,
+  })
+  assert.equal(github.kind, 'pull-request')
+  assert.equal(
+    github.url,
+    'https://github.com/alice/proofs/compare/release%2F4.35...leanflow%2Fimprove-proof?quick_pull=1',
+  )
+  for (const remoteUrl of [
+    'https://gitlab.com/group/subgroup/proofs.git',
+    'https://git.example.invalid/group/subgroup/proofs.git',
+  ]) {
+    const gitlab = gitReviewLink({
+      remoteUrl,
+      provider: 'gitlab',
+      branch,
+      baseBranch,
+    })
+    const url = new URL(gitlab.url)
+    assert.equal(gitlab.kind, 'merge-request')
+    assert.equal(url.origin, new URL(remoteUrl).origin)
+    assert.equal(url.pathname, '/group/subgroup/proofs/-/merge_requests/new')
+    assert.equal(url.searchParams.get('merge_request[source_branch]'), branch)
+    assert.equal(
+      url.searchParams.get('merge_request[target_branch]'),
+      baseBranch,
+    )
+  }
+  assert.equal(
+    gitReviewProvider('https://github.com/alice/proofs.git'),
+    'github',
+  )
+  assert.equal(
+    gitReviewProvider('https://gitlab.com/group/subgroup/proofs.git'),
+    'gitlab',
+  )
+  assert.equal(
+    gitReviewProvider('https://github.com.evil.invalid/alice/proofs.git'),
+    'other',
+  )
+  assert.equal(
+    gitReviewProvider('https://git.example.invalid/alice/proofs.git'),
+    'other',
+  )
+  assert.equal(
+    gitReviewLink({
+      remoteUrl: 'https://github.com/alice/proofs.git',
+      provider: 'other',
+      branch,
+    }),
+    undefined,
+  )
+  for (const remoteUrl of [
+    'https://name:token@github.com/alice/proofs.git',
+    'https://github.com/alice/proofs.git?token=credential',
+    'https://github.com/alice/proofs.git#fragment',
+    'https://github.com/alice/proofs.git/extra',
+    'https://github.com/alice%2Felsewhere/proofs.git',
+    'https://github.com/alice/%252E%252E.git',
+    'https://github.com/alice/%00proofs.git',
+  ])
+    assert.throws(() => gitReviewProvider(remoteUrl, 'github'), { status: 400 })
+  assert.throws(() => gitReviewProvider(DEST, 'bitbucket'), { status: 400 })
+})
+
+test('pushing a reviewed topic branch returns a provider form bound to that preview and retains no credential', async (t) => {
+  const f = await fixture(t)
+  const remoteUrl = 'https://gitlab.com/group/subgroup/proofs.git'
+  const preview = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl,
+    branch: 'leanflow/topic',
+    baseBranch: 'release/stable',
+  })
+  assert.equal(preview.provider, 'gitlab')
+  assert.equal(preview.baseBranch, 'release/stable')
+  assert.equal(preview.review.kind, 'merge-request')
+  let delivered
+  f.publisher.publishTransport = async (input) => {
+    delivered = input
+    assert(input.args.includes(remoteUrl))
+    assert(input.args.includes(`${preview.head}:refs/heads/leanflow/topic`))
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const oneUse = 'dummy-topic-branch-repository-token'
+  const result = await f.publisher.push('owner', f.project.id, {
+    previewId: preview.previewId,
+    token: oneUse,
+    remoteUrl: 'https://unreviewed.example.invalid/elsewhere/repo.git',
+    branch: 'main',
+    provider: 'github',
+    baseBranch: 'main',
+  })
+  assert.equal(result.remoteUrl, remoteUrl)
+  assert.equal(result.branch, 'leanflow/topic')
+  assert.equal(result.provider, 'gitlab')
+  assert.equal(result.baseBranch, 'release/stable')
+  assert.deepEqual(result.review, preview.review)
+  assert.equal(
+    delivered.credentials.token,
+    '',
+    'The in-memory credential is consumed after one push',
+  )
+  assert.equal(f.publisher.previews.has(preview.previewId), false)
+  const metadata = await f.publisher.metadata('owner', f.project.id)
+  assert.equal(metadata.provider, 'gitlab')
+  assert.equal(metadata.baseBranch, 'release/stable')
+  assert.equal(metadata.remoteUrl, remoteUrl)
+  assert.match(
+    metadata.suggestedBranch,
+    /^leanflow\/\d{4}-\d{2}-\d{2}-[A-Za-z0-9]{1,8}$/,
+  )
+  const stored = await fs.readFile(
+    path.join(f.dataDir, 'git-publish/destinations.json'),
+    'utf8',
+  )
+  assert(!stored.includes(oneUse))
+  assert(!JSON.stringify(result).includes(oneUse))
+  await assert.rejects(
+    fs.stat(path.join(f.dataDir, 'git-publish', preview.previewId)),
+    { code: 'ENOENT' },
+  )
+  await assert.rejects(
+    f.publisher.push('owner', f.project.id, {
+      previewId: preview.previewId,
+      token: oneUse,
+    }),
+    { status: 404 },
+  )
+})
+
+test('publishing can be disabled without preventing local Git review and only the project owner can use a preview', async (t) => {
+  const f = await fixture(t)
+  const preview = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: DEST,
+  })
+  const project = f.workspaces.get(f.project.id, 'owner')
+  project.publishingEnabled = false
+  project.publishingBaseBranch = 'release/pinned'
+  f.workspaces.db
+    .prepare('UPDATE projects SET data=? WHERE id=?')
+    .run(JSON.stringify(project), project.id)
+  const metadata = await f.publisher.metadata('owner', f.project.id)
+  assert.equal(metadata.publishingEnabled, false)
+  assert.equal(metadata.baseBranch, 'release/pinned')
+  assert.equal(metadata.commits[0].message, 'Initial valid source')
+  await assert.rejects(
+    f.publisher.preview('owner', f.project.id, { remoteUrl: DEST }),
+    /Enable publishing/,
+  )
+  await assert.rejects(
+    f.publisher.push('owner', f.project.id, {
+      previewId: preview.previewId,
+      token: 'dummy-disabled-token',
+    }),
+    /Enable publishing/,
+  )
+  await assert.rejects(
+    f.publisher.push('another-owner', f.project.id, {
+      previewId: preview.previewId,
+    }),
+    { status: 404 },
+  )
+  assert.equal(f.sent.length, 0)
+})
+
+test('known and self-hosted provider choices survive reopening while other Git hosts keep ordinary pushing', async (t) => {
+  const f = await fixture(t)
+  const cases = [
+    {
+      remoteUrl: 'https://github.com/alice/proofs.git',
+      provider: 'github',
+      expectedReview: 'pull-request',
+    },
+    {
+      remoteUrl: 'https://git.example.invalid/group/subgroup/proofs.git',
+      provider: 'gitlab',
+      expectedReview: 'merge-request',
+    },
+    {
+      remoteUrl: 'https://github.com/alice/proofs.git',
+      provider: 'other',
+    },
+    { remoteUrl: DEST, provider: 'other' },
+  ]
+  f.publisher.publishTransport = async () => ({
+    code: 0,
+    stdout: '',
+    stderr: '',
+  })
+  for (const item of cases) {
+    const preview = await f.publisher.preview('owner', f.project.id, {
+      remoteUrl: item.remoteUrl,
+      provider: item.provider,
+      branch: 'leanflow/export',
+      baseBranch: 'main',
+    })
+    const result = await f.publisher.push('owner', f.project.id, {
+      previewId: preview.previewId,
+    })
+    assert.equal(result.provider, item.provider)
+    assert.equal(result.review?.kind, item.expectedReview)
+    const metadata = await f.publisher.metadata('owner', f.project.id)
+    assert.equal(metadata.provider, item.provider)
+    assert.equal(metadata.remoteUrl, item.remoteUrl)
+    assert.equal(metadata.baseBranch, 'main')
+  }
+  await fs.writeFile(
+    path.join(f.dataDir, 'git-publish/destinations.json'),
+    JSON.stringify({
+      owner: { [f.project.id]: 'https://github.com/alice/proofs.git' },
+    }),
+  )
+  const legacy = await f.publisher.metadata('owner', f.project.id)
+  assert.equal(legacy.remoteUrl, 'https://github.com/alice/proofs.git')
+  assert.equal(legacy.provider, 'github')
+})
+
+test('review defaults use the local origin HEAD rather than the working branch, and explicitly clearing a base persists', async (t) => {
+  const f = await fixture(t)
+  await f.git('switch', '-c', 'leanflow/improved-proofs')
+  let metadata = await f.publisher.metadata('owner', f.project.id)
+  assert.equal(metadata.branch, 'leanflow/improved-proofs')
+  assert.equal(
+    metadata.baseBranch,
+    null,
+    'An unknown repository default is not guessed from the working branch',
+  )
+  const head = (await f.git('rev-parse', 'HEAD')).stdout.trim()
+  await f.git('update-ref', 'refs/remotes/origin/main', head)
+  await f.git(
+    'symbolic-ref',
+    'refs/remotes/origin/HEAD',
+    'refs/remotes/origin/main',
+  )
+  await f.git(
+    '-c',
+    'user.name=Fixture',
+    '-c',
+    'user.email=fixture@example.invalid',
+    'commit',
+    '--allow-empty',
+    '-m',
+    'New revision with known origin default',
+  )
+  metadata = await f.publisher.metadata('owner', f.project.id)
+  assert.equal(metadata.baseBranch, 'main')
+  assert(
+    !f.calls.some((call) => call.options.network === 'bridge'),
+    'Finding a default branch never contacts a repository',
+  )
+
+  const project = f.workspaces.get(f.project.id, 'owner')
+  project.publishingBaseBranch = 'release/pinned'
+  f.workspaces.db
+    .prepare('UPDATE projects SET data=? WHERE id=?')
+    .run(JSON.stringify(project), project.id)
+  f.publisher.publishTransport = async () => ({
+    code: 0,
+    stdout: '',
+    stderr: '',
+  })
+  const preview = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: 'https://github.com/alice/proofs.git',
+    branch: 'leanflow/improved-proofs',
+    baseBranch: '',
+  })
+  assert.equal(preview.baseBranch, null)
+  assert.equal(
+    new URL(preview.review.url).pathname,
+    '/alice/proofs/compare/leanflow%2Fimproved-proofs',
+  )
+  await f.publisher.push('owner', f.project.id, {
+    previewId: preview.previewId,
+  })
+  metadata = await f.publisher.metadata('owner', f.project.id)
+  assert.equal(
+    metadata.baseBranch,
+    null,
+    'Cleared targets stay at the provider default despite known local defaults',
+  )
+  const remembered = JSON.parse(
+    await fs.readFile(
+      path.join(f.dataDir, 'git-publish/destinations.json'),
+      'utf8',
+    ),
+  )
+  assert.equal(remembered.owner[f.project.id].baseBranch, null)
+})
+
+test('pushing directly to the review target stays supported and emits no empty pull or merge request form', async (t) => {
+  const f = await fixture(t)
+  f.publisher.publishTransport = async () => ({
+    code: 0,
+    stdout: '',
+    stderr: '',
+  })
+  for (const remoteUrl of [
+    'https://github.com/alice/proofs.git',
+    'https://gitlab.com/group/proofs.git',
+  ]) {
+    const preview = await f.publisher.preview('owner', f.project.id, {
+      remoteUrl,
+      branch: 'main',
+      baseBranch: 'main',
+    })
+    assert.equal(preview.review, undefined)
+    const result = await f.publisher.push('owner', f.project.id, {
+      previewId: preview.previewId,
+    })
+    assert.equal(result.pushed, true)
+    assert.equal(result.review, undefined)
+    assert.equal(result.baseBranch, 'main')
+  }
+})
+
+test('only a confirmed push is recoverable after reopening, and its saved review remains scoped to its owner without credentials', async (t) => {
+  const f = await fixture(t)
+  const preview = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: 'https://github.com/alice/proofs.git',
+    branch: 'leanflow/recoverable-publication',
+    baseBranch: 'main',
+  })
+  assert.equal(
+    (await f.publisher.metadata('owner', f.project.id)).lastPublished,
+    undefined,
+  )
+  let release, began
+  const entered = new Promise((resolve) => {
+      began = resolve
+    }),
+    gate = new Promise((resolve) => {
+      release = resolve
+    })
+  f.publisher.publishTransport = async () => {
+    began()
+    await gate
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const token = 'dummy-confirmed-publication-token'
+  const publishing = f.publisher.push('owner', f.project.id, {
+    previewId: preview.previewId,
+    token,
+  })
+  await entered
+  assert.equal(
+    (await f.publisher.metadata('owner', f.project.id)).lastPublished,
+    undefined,
+    'An in-progress push is not reported as confirmed',
+  )
+  release()
+  const confirmed = await publishing
+  const reopened = await new GitPublisher({
+    dataDir: f.dataDir,
+    runtime: f.runtime,
+    workspaces: f.workspaces,
+  }).init()
+  const info = await reopened.metadata('owner', f.project.id)
+  assert.deepEqual(info.lastPublished, confirmed)
+  assert.equal(info.lastPublished.review.kind, 'pull-request')
+  const stored = await fs.readFile(
+    path.join(f.dataDir, 'git-publish/destinations.json'),
+    'utf8',
+  )
+  assert(!stored.includes(token))
+  assert(!stored.includes('username'))
+  assert.deepEqual(
+    JSON.parse(stored).owner[f.project.id].lastPublished,
+    confirmed,
+  )
+  await assert.rejects(reopened.metadata('another-owner', f.project.id), {
+    status: 404,
+  })
+  const otherProject = await f.workspaces.create('another-owner', {
+    name: 'Separate owner',
+    preset: 'lean',
+    autoRepair: false,
+  })
+  await f.workspaces.jobs.get(otherProject.id)
+  assert.equal(
+    (await reopened.metadata('another-owner', otherProject.id)).lastPublished,
+    undefined,
+  )
+
+  const rejected = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: 'https://github.com/alice/proofs.git',
+    branch: 'leanflow/rejected-publication',
+    baseBranch: 'main',
+  })
+  f.publisher.publishTransport = async () => ({
+    code: 1,
+    stderr: 'fixture remote rejects this push',
+    stdout: '',
+  })
+  await assert.rejects(
+    f.publisher.push('owner', f.project.id, { previewId: rejected.previewId }),
+    /rejected this push/,
+  )
+  assert.deepEqual(
+    (await reopened.metadata('owner', f.project.id)).lastPublished,
+    confirmed,
+    'Failed attempts do not overwrite the last confirmed push',
+  )
+})
+
+test('successful pushes retain the existing actionable warning when publication metadata cannot be saved', async (t) => {
+  const f = await fixture(t)
+  f.publisher.publishTransport = async () => ({
+    code: 0,
+    stdout: '',
+    stderr: '',
+  })
+  const initial = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: DEST,
+    branch: 'initial-publication',
+  })
+  const confirmed = await f.publisher.push('owner', f.project.id, {
+    previewId: initial.previewId,
+  })
+  const next = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: DEST,
+    branch: 'unsaved-publication',
+  })
+  const originalDir = f.publisher.dir
+  f.publisher.dir = path.join(f.dataDir, 'missing-publication-storage')
+  const result = await f.publisher.push('owner', f.project.id, {
+    previewId: next.previewId,
+  })
+  assert.equal(result.pushed, true)
+  assert.equal(result.branch, 'unsaved-publication')
+  assert.match(result.warning, /pushed.*could not be saved/)
+  f.publisher.dir = originalDir
+  assert.deepEqual(
+    (await f.publisher.metadata('owner', f.project.id)).lastPublished,
+    confirmed,
+  )
+})
+
+test('positive and negative origin-default lookups reuse their worker result until the source HEAD changes', async (t) => {
+  const f = await fixture(t)
+  const lookups = () =>
+    f.calls.filter((call) => call.args.includes('refs/remotes/origin/HEAD'))
+      .length
+  assert.equal(
+    (await f.publisher.metadata('owner', f.project.id)).baseBranch,
+    null,
+  )
+  const first = lookups()
+  assert.equal(first, 1)
+  await f.publisher.metadata('owner', f.project.id)
+  assert.equal(lookups(), first, 'Missing defaults are cached too')
+  const head = (await f.git('rev-parse', 'HEAD')).stdout.trim()
+  await f.git('update-ref', 'refs/remotes/origin/main', head)
+  await f.git(
+    'symbolic-ref',
+    'refs/remotes/origin/HEAD',
+    'refs/remotes/origin/main',
+  )
+  await f.git(
+    '-c',
+    'user.name=Fixture',
+    '-c',
+    'user.email=fixture@example.invalid',
+    'commit',
+    '--allow-empty',
+    '-m',
+    'Invalidate default branch cache',
+  )
+  assert.equal(
+    (await f.publisher.metadata('owner', f.project.id)).baseBranch,
+    'main',
+  )
+  assert.equal(lookups(), first + 1)
+  await f.publisher.metadata('owner', f.project.id)
+  assert.equal(lookups(), first + 1, 'Known defaults reuse the same result')
+  assert(!f.calls.some((call) => call.options.network === 'bridge'))
+})
+
 test('publish previews reject private destinations, wrong owners, stale HEADs, expiry, and invalid branch/token input', async (t) => {
   const f = await fixture(t)
   for (const remoteUrl of [
@@ -312,6 +800,19 @@ test('publish previews reject private destinations, wrong owners, stale HEADs, e
   for (const branch of ['HEAD', 'topic/.hidden', '../bad', 'main.lock'])
     await assert.rejects(
       f.publisher.preview('owner', f.project.id, { remoteUrl: DEST, branch }),
+      { status: 400 },
+    )
+  for (const input of [
+    { provider: 'bitbucket' },
+    { provider: null },
+    { baseBranch: 'HEAD' },
+    { baseBranch: '../main' },
+    { baseBranch: 'release/.secret' },
+    { baseBranch: 'main.lock' },
+    { baseBranch: 123 },
+  ])
+    await assert.rejects(
+      f.publisher.preview('owner', f.project.id, { remoteUrl: DEST, ...input }),
       { status: 400 },
     )
   let preview = await f.publisher.preview('owner', f.project.id, {

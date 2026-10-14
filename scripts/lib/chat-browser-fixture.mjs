@@ -453,5 +453,18 @@ export async function chatBrowserFixture({
   }
   const closeLean = (options) =>
     Promise.all(leanSockets.map((socket) => socket.close(options)))
-  return { page, browser, state, report, emit, ready, assertClean, closeLean }
+  const sendLean = (message) => {
+    leanSockets.at(-1)?.send(JSON.stringify(message))
+  }
+  return {
+    page,
+    browser,
+    state,
+    report,
+    emit,
+    ready,
+    assertClean,
+    closeLean,
+    sendLean,
+  }
 }

@@ -66,14 +66,17 @@ export function environmentSmokeProof(imports) {
   )
 }
 
-export function dependencyBuildTargets(manifest) {
+export function dependencyBuildTargets(
+  manifest,
+  { includeInherited = false } = {},
+) {
   if (!Array.isArray(manifest?.packages)) return []
   return manifest.packages
     .filter(
       (pkg) =>
         pkg?.type === 'git' &&
         pkg.name !== 'mathlib' &&
-        pkg.inherited !== true &&
+        (includeInherited || pkg.inherited !== true) &&
         /^[A-Za-z][A-Za-z0-9_-]*$/.test(pkg.name),
     )
     .map((pkg) => pkg.name)

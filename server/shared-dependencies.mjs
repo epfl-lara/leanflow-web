@@ -5,6 +5,7 @@ import {
   runDependencyCache,
   setupInfrastructureFailure,
   setupFailureMessage,
+  certifyDependencyBuilds,
 } from './pinned-lake.mjs'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
@@ -23,9 +24,10 @@ const configFiles = [
   'lakefile.lean',
   'lakefile.toml',
 ]
-// Version 3 certifies a complete Mathlib build, including dependency traces.
+// Version 4 also replays builds with the final read-only dependency mounts.
 // Earlier import-only entries remain immutable for projects already using them.
-const cacheSchema = 3
+export const sharedDependencyCacheSchema = 4
+const cacheSchema = sharedDependencyCacheSchema
 const digest = (value) => createHash('sha256').update(value).digest('hex')
 const canonical = (value) => JSON.stringify(sort(value))
 function sort(value) {
@@ -254,6 +256,7 @@ export class SharedDependencyCache {
     this.runtime = runtime
     this.directory = directory
     this.building = new Map()
+    this.outputs = new Map()
   }
 
   async prepare(options) {
@@ -291,13 +294,19 @@ export class SharedDependencyCache {
       }
     }
     if (ready()) return { root, reused: true }
+    let outputs = this.outputs.get(spec.key)
+    if (!outputs) this.outputs.set(spec.key, (outputs = new Set()))
+    if (options.onOutput) outputs.add(options.onOutput)
     let build = this.building.get(spec.key)
     if (!build) {
       // The shared builder has no caller's cancellation signal. Cancelling one
       // wait cannot destroy a cache another preparing project is waiting for.
-      build = this.build(spec, root, options.onOutput).finally(() =>
-        this.building.delete(spec.key),
-      )
+      build = this.build(spec, root, (message) => {
+        for (const output of outputs) output(message)
+      }).finally(() => {
+        this.building.delete(spec.key)
+        this.outputs.delete(spec.key)
+      })
       this.building.set(spec.key, build)
     }
     let abort
@@ -317,6 +326,7 @@ export class SharedDependencyCache {
       return { root, reused: false }
     } finally {
       options.signal?.removeEventListener('abort', abort)
+      if (options.onOutput) outputs.delete(options.onOutput)
     }
   }
 
@@ -373,7 +383,10 @@ export class SharedDependencyCache {
         network: 'bridge',
         timeoutMs: 5400000,
       })
-      for (const target of dependencyBuildTargets(spec.manifest))
+      const targets = dependencyBuildTargets(spec.manifest, {
+        includeInherited: true,
+      })
+      for (const target of targets)
         await run(['lake', 'build', target], { network: 'bridge' })
       if (configurationDigest(readDependencyConfiguration(stage)) !== original)
         throw new Error('Lake changed the pinned dependency configuration')
@@ -408,6 +421,12 @@ export class SharedDependencyCache {
           throw new Error('Missing pinned dependency checkout')
       }
       await this.runtime.inheritDependencies(stage, stage)
+      // A successful writable build alone does not prove that replay has every
+      // hash it will need. Certify the same mounts used by editors and checks.
+      await certifyDependencyBuilds(this.runtime, stage, spec.manifest, {
+        onOutput,
+        cleanHome: true,
+      })
       await run(['lake', 'env', 'lean', '--stdin'], {
         readOnlyWorkspace: true,
         writeLakeCache: true,
@@ -432,7 +451,7 @@ export class SharedDependencyCache {
           key: spec.key,
           schema: cacheSchema,
           verifiedAt: new Date().toISOString(),
-          check: 'lake build @mathlib; import Mathlib',
+          check: 'read-only lake build @mathlib; import Mathlib',
         }) + '\n',
         { mode: 0o400, flag: 'wx' },
       )

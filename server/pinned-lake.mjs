@@ -2,6 +2,7 @@ import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { dependencyBuildTargets } from './project-libraries.mjs'
 
 // Lake may select a dependency's newer Lean release while resolving packages.
 // Every setup invocation must retain the user's release, including implicit updates.
@@ -106,6 +107,12 @@ export function dependencyCacheCommands(
 }
 
 export function setupFailureMessage(result) {
+  return (
+    infrastructureFailureMessage(result) || dependencyFailureMessage(result)
+  )
+}
+
+function infrastructureFailureMessage(result) {
   const output = [result.stderr, result.stdout].filter(Boolean).join('\n')
   if (result.timedOut)
     return 'The Lean build exceeded its time limit. Retry; if it happens again, ask the administrator to review the build limits.'
@@ -127,8 +134,62 @@ export function setupFailureMessage(result) {
   return null
 }
 
+export function dependencyFailureMessage(result) {
+  const output = [result.stderr, result.stdout].filter(Boolean).join('\n')
+  if (
+    /(?:read.only file system|EROFS|permission denied)[^\n]*(?:\n\s*)?[^\n]*\.lake\/packages|\.lake\/packages[^\n]*(?:read.only|EROFS|permission denied)/i.test(
+      output,
+    )
+  )
+    return 'A dependency needs build files that are missing from its read-only environment. Use Refresh setup to rebuild the pinned dependencies.'
+  if (
+    /\.lake\/packages\/[^\n]+:\d+:\d+:\s*error:|object file[^\n]*\.lake\/packages[^\n]*does not exist|failed to fetch[^\n]*(?:release|prebuilt)|(?:release|prebuilt)[^\n]*(?:fetch|download)[^\n]*failed/i.test(
+      output,
+    )
+  )
+    return 'A project dependency could not be prepared. Use Refresh setup, then inspect Setup output if it still fails.'
+  return null
+}
+
+export async function certifyDependencyBuilds(
+  runtime,
+  root,
+  manifest,
+  options = {},
+) {
+  const targets = dependencyBuildTargets(manifest, { includeInherited: true })
+  if (manifest?.packages?.some((pkg) => pkg.name === 'mathlib'))
+    targets.unshift('@mathlib')
+  for (const target of targets) {
+    const result = await runPinnedLake(
+      runtime,
+      root,
+      ['lake', 'build', target],
+      {
+        ...options,
+        network: 'none',
+        readOnlyWorkspace: true,
+        writeLakeCache: true,
+        timeoutMs: 5400000,
+      },
+    )
+    options.signal?.throwIfAborted()
+    if (result.code !== 0)
+      throw Object.assign(
+        new Error(
+          setupFailureMessage(result) ||
+            `Dependency build replay failed: ${(result.stderr || result.stdout || '').slice(-2000)}`,
+        ),
+        {
+          setupEnvironment: true,
+          infrastructure: setupInfrastructureFailure(result),
+        },
+      )
+  }
+}
+
 export function setupInfrastructureFailure(result) {
-  return setupFailureMessage(result) !== null
+  return infrastructureFailureMessage(result) !== null
 }
 
 // Prebuilt Physlib artifacts are an optimization. Older revisions/releases can

@@ -64,6 +64,18 @@ export function loadCapacity(env = process.env) {
       positiveNumber(env, 'STUDIO_SETUP_BUILD_TIMEOUT_MS', 1800000),
       'STUDIO_SETUP_BUILD_TIMEOUT_MS',
     ),
+    checkTimeoutMs: validateSetupBuildTimeout(
+      positiveNumber(
+        env,
+        'STUDIO_CHECK_TIMEOUT_MS',
+        positiveNumber(env, 'STUDIO_SETUP_BUILD_TIMEOUT_MS', 1800000),
+      ),
+      'STUDIO_CHECK_TIMEOUT_MS',
+    ),
+    setupRepairTimeoutMs: validateSetupBuildTimeout(
+      positiveNumber(env, 'STUDIO_SETUP_REPAIR_TIMEOUT_MS', 900000),
+      'STUDIO_SETUP_REPAIR_TIMEOUT_MS',
+    ),
     workerCpus: positiveNumber(env, 'STUDIO_WORKER_CPUS', 2, false),
     workerMemory,
   }
