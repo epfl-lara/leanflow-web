@@ -26,6 +26,16 @@ Use **Upload** or drag files/folders into the upload area. **Upload** in the Fil
 
 While a project or file check runs, **Checking…** shows the elapsed wall-clock time in minutes. Use **Stop check** beside it to cancel the check and wait for its worker to stop. Fix or remove the blocking command before checking again.
 
+## Use the project terminal
+
+Choose **Terminal** in an open, prepared workspace. Save editor changes first, then run commands such as `lake env lean Main.lean` or `lake build`. The terminal starts in `/workspace` with the project's pinned Lean environment. It uses the same worker sandbox as Lemex: project files are writable, shared dependencies and toolchains are read only, and outbound network access is available. Host files, other projects, and provider credentials are not mounted into the terminal.
+
+Type normally, use the arrow keys for command history, and press **Ctrl+C** to interrupt a command. Drag the separator above the terminal to resize it. Saved file changes refresh in the editor; unsaved editor text stays intact and the usual save conflict checks still apply. Terminal edits are saved directly. Run a Lean check to verify them.
+
+The worker includes the Lemex CLI. Run `lemex` to open it, or `lemex --version` to see its version. Configure your own CLI login or provider inside the terminal if needed; the server's assistant credentials stay private. The terminal home is temporary, so save lasting work in `/workspace`.
+
+Closing the terminal, changing workspaces, or disconnecting stops its shell and background processes. An idle terminal closes after 30 minutes without input. **Reconnect terminal** starts a new shell. Close the terminal before preparing again, using source control to change or publish the project, uploading files, or moving project data to Trash. **Stop all processes and move to Trash** also stops the terminal. Terminals share the server's worker capacity with editors, agents, setup, and checks.
+
 ## Ask about one proof
 
 1. Open a Lean file. In **Outline**, click a declaration to navigate, then **+ Chat** to attach it.

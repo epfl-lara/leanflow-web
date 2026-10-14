@@ -35,6 +35,12 @@ export function loadCapacity(env = process.env) {
     workerQueue: positiveNumber(env, 'STUDIO_MAX_WORKER_QUEUE', 24),
     editors: positiveNumber(env, 'STUDIO_MAX_EDITORS', 4),
     editorsPerProject: positiveNumber(env, 'STUDIO_MAX_EDITORS_PER_PROJECT', 2),
+    terminals: positiveNumber(env, 'STUDIO_MAX_TERMINALS', 2),
+    terminalsPerProject: positiveNumber(
+      env,
+      'STUDIO_MAX_TERMINALS_PER_PROJECT',
+      1,
+    ),
     agents: positiveNumber(env, 'STUDIO_MAX_AGENTS', 2),
     agentQueue: positiveNumber(env, 'STUDIO_MAX_AGENT_QUEUE', 12),
     searches: positiveNumber(env, 'STUDIO_MAX_SEARCHES', 4),

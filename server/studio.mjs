@@ -7,6 +7,7 @@ import compression from 'compression'
 import { WebSocketServer } from 'ws'
 import { Auth, sameOrigin } from './auth.mjs'
 import { Runtime } from './runtime.mjs'
+import { Terminals } from './terminals.mjs'
 import { WorkspaceStore } from './workspaces.mjs'
 import { loadConfig } from './config.mjs'
 import { EventStore, JobManager } from './events.mjs'
@@ -225,6 +226,7 @@ export async function createStudio({
         ws.close(1012, 'Project configuration changed. Retry setup.')
   }
   const origin = process.env.STUDIO_ORIGIN
+  const terminals = new Terminals({ runtime, capacity, redact: config.redact })
   let publisher
   const requireNoGit = (
     projectId,
@@ -251,6 +253,7 @@ export async function createStudio({
   const requireNoRun = (projectId, owner, { ignoreGit = false } = {}) => {
     if (!ignoreGit) requireNoGit(projectId, owner)
     else activity.assertCanStart(owner, projectId)
+    terminals.assertIdle(projectId)
     if (
       events.db
         .prepare(
@@ -271,6 +274,7 @@ export async function createStudio({
     { ignoreStopping = false } = {},
   ) => {
     requireNoGit(projectId, owner, { includeArchived: true, ignoreStopping })
+    terminals.assertIdle(projectId)
     const active = events.db
       .prepare(
         "SELECT 1 FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') LIMIT 1",
@@ -521,6 +525,7 @@ export async function createStudio({
     }
     const receipt = req.body.stopActive
       ? await activity.withStopped(req.user.id, req.params.id, async () => {
+          terminals.closeProject(req.params.id)
           for (const ws of sockets)
             if (socketProjects.get(ws) === req.params.id)
               ws.close(1001, 'Project processes stopped for Trash.')
@@ -932,20 +937,34 @@ export async function createStudio({
   server.on('upgrade', (req, socket, head) => {
     const user = auth.identify(req)
     const match = /^\/websocket\/([a-zA-Z0-9_-]+)$/.exec(req.url || '')
+    const terminalMatch = /^\/websocket\/terminal\/([a-zA-Z0-9_-]+)$/.exec(
+      req.url || '',
+    )
     const reject = (status) => {
       socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`)
     }
     if (!user) return reject('401 Unauthorized')
     if (!sameOrigin(req, origin)) return reject('403 Forbidden')
-    if (!match) return reject('404 Not Found')
+    if (!match && !terminalMatch) return reject('404 Not Found')
     let project
     try {
-      project = workspaces.get(match[1], user.id)
+      project = workspaces.get((terminalMatch || match)[1], user.id)
     } catch {
       return reject('404 Not Found')
     }
     if (project.status !== 'ready') return reject('409 Conflict')
     if (activity.isStopping(user.id, project.id)) return reject('409 Conflict')
+    if (terminalMatch) {
+      try {
+        requireNoGit(project.id, user.id)
+        terminals.assertCapacity(project.id)
+      } catch (error) {
+        return reject(
+          error.status === 429 ? '429 Too Many Requests' : '409 Conflict',
+        )
+      }
+      return terminals.upgrade(req, socket, head, project)
+    }
     if (
       sockets.size >= capacity.editors ||
       (languageServers.get(project.id) || 0) >= capacity.editorsPerProject
@@ -1045,6 +1064,7 @@ export async function createStudio({
       chats.stopNaming()
       const stopped = new Promise((resolve) => server.close(resolve))
       server.closeAllConnections()
+      terminals.close()
       for (const ws of sockets) ws.terminate()
       const checksStopped = jobs.shutdown(),
         agentsStopped = agents.shutdown()

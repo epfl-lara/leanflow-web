@@ -35,6 +35,8 @@ export interface Session {
     workerQueue: number
     editors: number
     editorsPerProject: number
+    terminals: number
+    terminalsPerProject: number
     agents: number
     agentQueue: number
     searches: number

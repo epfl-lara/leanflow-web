@@ -1,0 +1,43 @@
+.project-terminal {
+  flex: 0 0 auto;
+  max-height: 55%;
+  min-height: 150px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #fff;
+}
+.project-terminal.dark {
+  background: #12141b;
+}
+.terminal-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  background: var(--bg);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.terminal-status {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+}
+.terminal-help {
+  margin: 0;
+  padding: 2px 12px 6px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+}
+.terminal-screen {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  padding: 0 8px 6px;
+}
+.terminal-screen .xterm {
+  height: 100%;
+}

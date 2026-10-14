@@ -18,6 +18,8 @@ test('invalid capacity settings fail before startup rather than disabling admiss
     'STUDIO_MAX_WORKER_QUEUE',
     'STUDIO_MAX_EDITORS',
     'STUDIO_MAX_EDITORS_PER_PROJECT',
+    'STUDIO_MAX_TERMINALS',
+    'STUDIO_MAX_TERMINALS_PER_PROJECT',
     'STUDIO_MAX_AGENTS',
     'STUDIO_MAX_AGENT_QUEUE',
     'STUDIO_MAX_SEARCHES',

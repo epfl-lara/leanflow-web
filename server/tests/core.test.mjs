@@ -1066,6 +1066,216 @@ test('WebSocket authentication, origin, and project ownership fail before any Le
   assert.equal(runtime.spawned.length, 0)
 })
 
+test('terminal authentication, origin, ownership and preparation checks reject before starting a worker', async (t) => {
+  const { url, token, otherToken, project, runtime, workspaces } =
+    await fixture(t)
+  const endpoint =
+    url.replace('http:', 'ws:') + '/websocket/terminal/' + project.id
+  assert.equal(await rejectedSocket(endpoint, {}), 401)
+  assert.equal(
+    await rejectedSocket(endpoint, {
+      Authorization: `Bearer ${token}`,
+      Origin: 'https://evil.test',
+    }),
+    403,
+  )
+  assert.equal(
+    await rejectedSocket(endpoint, { Authorization: `Bearer ${otherToken}` }),
+    404,
+  )
+  const saved = workspaces.get(project.id, 'owner')
+  saved.status = 'preparing'
+  workspaces.db
+    .prepare('UPDATE projects SET data=? WHERE id=?')
+    .run(JSON.stringify(saved), project.id)
+  assert.equal(
+    await rejectedSocket(endpoint, { Authorization: `Bearer ${token}` }),
+    409,
+  )
+  assert.equal(runtime.spawned.length, 0)
+})
+
+async function connectTerminal(t, f) {
+  const ws = new WebSocket(
+    f.url.replace('http:', 'ws:') + '/websocket/terminal/' + f.project.id,
+    {
+      headers: { Authorization: `Bearer ${f.token}` },
+    },
+  )
+  t.after(() => ws.terminate())
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve)
+    ws.once('error', reject)
+  })
+  return ws
+}
+
+test('terminal relays bytes, accepts bounded input and resize, and stops its worker on disconnect', async (t) => {
+  const f = await fixture(t)
+  const ws = await connectTerminal(t, f)
+  const child = f.runtime.spawned[0]
+  assert.equal(child.root, f.workspaces.get(f.project.id, 'owner').root)
+  assert.equal(child.args[0], 'python3')
+  assert.equal(child.options.network, 'bridge')
+  assert.equal(child.options.freshHome, true)
+  assert.equal(child.options.cleanHome, true)
+  assert(!Object.values(child.options.env).includes(f.providerSecret))
+  const output = new Promise((resolve) =>
+    ws.once('message', (data, binary) => resolve({ data, binary })),
+  )
+  const bytes = Buffer.from('\u001b[32mLean α\u001b[0m\r\n')
+  child.stdout.write(bytes)
+  assert.deepEqual(await output, { data: bytes, binary: true })
+  const received = new Promise((resolve) => child.stdin.once('data', resolve))
+  ws.send(
+    JSON.stringify({
+      type: 'input',
+      data: 'lake build\r',
+      root: '/etc',
+      env: { SECRET: 'unused' },
+    }),
+  )
+  assert.deepEqual(JSON.parse(String(await received)), {
+    type: 'input',
+    data: 'lake build\r',
+  })
+  const resized = new Promise((resolve) => child.stdin.once('data', resolve))
+  ws.send(JSON.stringify({ type: 'resize', rows: 24, cols: 80 }))
+  assert.deepEqual(JSON.parse(String(await resized)), {
+    type: 'resize',
+    rows: 24,
+    cols: 80,
+  })
+  const killed = new Promise((resolve) => child.once('close', resolve))
+  ws.close()
+  await killed
+  assert.equal(child.killed, true)
+})
+
+test('terminal output pauses until the browser acknowledges bytes', async (t) => {
+  const f = await fixture(t)
+  const ws = await connectTerminal(t, f)
+  const child = f.runtime.spawned[0]
+  const output = new Promise((resolve) => ws.once('message', resolve))
+  child.stdout.write(Buffer.alloc(256 * 1024, 65))
+  await output
+  assert.equal(child.stdout.isPaused(), true)
+  const resumed = new Promise((resolve) => child.stdout.once('resume', resolve))
+  ws.send(JSON.stringify({ type: 'ack', bytes: 256 * 1024 }))
+  await resumed
+  assert.equal(child.stdout.isPaused(), false)
+  assert.equal(
+    child.requests.length,
+    0,
+    'acknowledgements must not reach the shell',
+  )
+})
+
+test('a disconnected terminal holds its project guard and capacity until worker cleanup finishes', async (t) => {
+  const f = await fixture(t)
+  let finishCleanup
+  const spawn = f.runtime.spawn.bind(f.runtime)
+  f.runtime.spawn = (...args) => {
+    const child = spawn(...args)
+    child.workerStopped = new Promise((resolve) => {
+      finishCleanup = resolve
+    })
+    return child
+  }
+  const ws = await connectTerminal(t, f)
+  const stopped = new Promise((resolve) =>
+    f.runtime.spawned[0].once('close', resolve),
+  )
+  ws.close()
+  await stopped
+  const endpoint =
+    f.url.replace('http:', 'ws:') + '/websocket/terminal/' + f.project.id
+  assert.equal(
+    await rejectedSocket(endpoint, { Authorization: `Bearer ${f.token}` }),
+    429,
+  )
+  const options = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  }
+  assert.equal(
+    (await f.request(`/api/projects/${f.project.id}/prepare`, options)).status,
+    409,
+  )
+  finishCleanup()
+  await new Promise((resolve) => setImmediate(resolve))
+  const next = await connectTerminal(t, f)
+  assert.equal(next.readyState, WebSocket.OPEN)
+  finishCleanup()
+})
+
+for (const message of [
+  { type: 'resize', rows: 0, cols: 80 },
+  { type: 'resize', rows: 20, cols: 1.5 },
+  { type: 'input', data: 'a'.repeat(16 * 1024 + 1) },
+  { type: 'input', data: 3 },
+  { type: 'ack', bytes: 1 },
+  { type: 'exec', command: ['sh'] },
+  null,
+]) {
+  test(`invalid terminal ${message?.type || 'message'} stops the worker before forwarding input (${JSON.stringify(message).slice(0, 90)})`, async (t) => {
+    const f = await fixture(t)
+    const ws = await connectTerminal(t, f)
+    const closed = new Promise((resolve) => ws.once('close', resolve))
+    ws.send(JSON.stringify(message))
+    assert.equal(await closed, 1008)
+    assert.equal(f.runtime.spawned[0].requests.length, 0)
+    assert.equal(f.runtime.spawned[0].killed, true)
+  })
+}
+
+test('terminal guards capacity, preparation, Git and Trash, and stop-all cleans it up', async (t) => {
+  const json = (body) => ({
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const f = await fixture(t)
+  const ws = await connectTerminal(t, f)
+  const endpoint =
+    f.url.replace('http:', 'ws:') + '/websocket/terminal/' + f.project.id
+  assert.equal(
+    await rejectedSocket(endpoint, { Authorization: `Bearer ${f.token}` }),
+    429,
+  )
+  for (const [route, body] of [
+    ['prepare', {}],
+    ['git', { action: 'branch', name: 'test' }],
+    ['trash', {}],
+    [
+      'upload',
+      {
+        files: [
+          { path: 'extra.lean', content: 'example : True := by trivial' },
+        ],
+      },
+    ],
+  ]) {
+    const response = await f.request(`/api/projects/${f.project.id}/${route}`, {
+      method: 'POST',
+      ...json(body),
+    })
+    assert.equal(response.status, 409, route)
+    assert.match((await response.json()).error, /Close the project terminal/)
+  }
+  f.runtime.stopProject = async (root) => {
+    for (const child of f.runtime.spawned) if (child.root === root) child.kill()
+  }
+  const closed = new Promise((resolve) => ws.once('close', resolve))
+  const response = await f.request(`/api/projects/${f.project.id}/trash`, {
+    method: 'POST',
+    ...json({ stopActive: true }),
+  })
+  assert.equal(response.status, 200)
+  await closed
+  assert.equal(f.runtime.spawned[0].killed, true)
+})
+
 test('repaired project LSP preserves source isolation and permits only Lake cache writes', async (t) => {
   const { url, token, project, runtime, workspaces } = await fixture(t)
   const saved = workspaces.get(project.id, 'owner')

@@ -23,6 +23,7 @@ import {
   type TrashItem,
 } from './api'
 import { AssistantPanel } from './AssistantPanel'
+import { TerminalPanel } from './TerminalPanel'
 import { Dialog } from './Dialog'
 import { CheckControls } from './CheckControls'
 import { TrashDialog } from './TrashDialog'
@@ -288,6 +289,7 @@ export function Studio() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(() => window.innerWidth > 1000)
   const [showInfoview, setShowInfoview] = useState(true)
+  const [terminalOpen, setTerminalOpen] = useState(false)
   const [leanState, setLeanState] = useState('')
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('lemex-theme')
@@ -531,6 +533,7 @@ export function Studio() {
       setRevealProof(null)
       setGit(null)
       setGitOpen(false)
+      setTerminalOpen(false)
       setJob(null)
       setFileFilter('')
       setLeanState('')
@@ -903,14 +906,15 @@ export function Studio() {
   }
 
   const refreshLiveFiles = useCallback(
-    async (paths: string[]) => {
+    async (paths: string[], source: 'agent' | 'terminal' = 'agent') => {
       const id = projectIdRef.current
       if (!id) return
-      await loadFiles(id)
-      void loadGit(id)
+      const listing = await loadFiles(id)
+      if (projectIdRef.current !== id) return
+      if (source === 'agent') void loadGit(id)
       const current = fileRef.current
       if (!current || (paths.length && !paths.includes(current.path))) return
-      if (savePromise.current || current.content !== current.savedContent) {
+      if (!listing.some((entry) => entry.path === current.path)) {
         setAgentPendingFile(current.path)
         return
       }
@@ -924,6 +928,7 @@ export function Studio() {
         now.generation !== current.generation
       )
         return
+      if (latest.hash === now.hash) return
       if (savePromise.current || now.content !== now.savedContent) {
         setAgentPendingFile(now.path)
         return
@@ -942,10 +947,41 @@ export function Studio() {
           : previous,
       )
       setAgentPendingFile(null)
-      setNotice('Agent edits updated live')
+      setNotice(
+        source === 'terminal'
+          ? 'Terminal edits refreshed'
+          : 'Agent edits updated live',
+      )
     },
     [loadFiles, loadGit],
   )
+
+  useEffect(() => {
+    if (!terminalOpen || project?.status !== 'ready') return
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout>
+    const refresh = async () => {
+      try {
+        await refreshLiveFiles([], 'terminal')
+      } catch (error) {
+        if (!disposed) setError(errorText(error))
+      }
+      if (!disposed) timer = setTimeout(() => void refresh(), 2000)
+    }
+    void refresh()
+    return () => {
+      disposed = true
+      clearTimeout(timer)
+    }
+  }, [terminalOpen, project?.id, project?.status, refreshLiveFiles])
+
+  function closeTerminal() {
+    setTerminalOpen(false)
+    void refreshLiveFiles([], 'terminal').catch((error) =>
+      setError(errorText(error)),
+    )
+    if (projectIdRef.current) void loadGit(projectIdRef.current)
+  }
 
   async function retryPrepare() {
     if (!projectId) return
@@ -1487,6 +1523,18 @@ export function Studio() {
               <Icon name="bot" size={15} />
               Lemex
             </button>
+            {project?.status === 'ready' && (
+              <button
+                className={`button small subtle ${terminalOpen ? 'selected' : ''}`}
+                aria-pressed={terminalOpen}
+                onClick={() => {
+                  if (terminalOpen) closeTerminal()
+                  else setTerminalOpen(true)
+                }}
+              >
+                Terminal
+              </button>
+            )}
             <button
               className="icon-button"
               aria-label="Assistant settings"
@@ -1520,8 +1568,8 @@ export function Studio() {
         {agentPendingFile && file?.path === agentPendingFile && (
           <div className="workspace-alert live-edit-alert" role="status">
             <span>
-              Lemex updated the saved file. Your unsaved edits are preserved in
-              this editor.
+              The saved file changed outside this editor. Your unsaved edits are
+              preserved in this editor.
             </span>
             <button
               className="button small secondary"
@@ -1874,6 +1922,14 @@ export function Studio() {
               </section>
             )}
           </>
+        )}
+        {terminalOpen && project?.status === 'ready' && (
+          <TerminalPanel
+            key={project.id}
+            projectId={project.id}
+            theme={theme}
+            onClose={closeTerminal}
+          />
         )}
         <footer className="statusbar">
           <span>
