@@ -8,6 +8,8 @@ import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
 
 const id = 'terminal-ui-fixture'
 const source = 'example : True := by\n  trivial\n'
+const scratchId = 'scratch-terminal-fixture'
+const scratchSource = '-- private Scratch proof\nexample : 2 = 2 := rfl\n'
 const f = await chatBrowserFixture({
   session: {
     user: { id: 'fixture', name: 'Fixture' },
@@ -18,10 +20,17 @@ const f = await chatBrowserFixture({
   projects: [
     { id, name: 'Terminal fixture', status: 'ready' },
     { id: 'other-terminal-project', name: 'Other fixture', status: 'ready' },
+    {
+      id: scratchId,
+      name: 'Scratch.lean',
+      kind: 'single-file',
+      status: 'ready',
+    },
   ],
   files: {
     [id]: { 'Main.lean': source },
     'other-terminal-project': { 'Main.lean': source },
+    [scratchId]: { 'Main.lean': scratchSource },
   },
   chats: [{ id: 'fixture-chat', projectId: id, title: 'Fixture', runCount: 0 }],
   runs: [],
@@ -30,6 +39,7 @@ const directory = path.resolve('.runtime/terminal-ui')
 await fs.mkdir(directory, { recursive: true })
 const messages = []
 const sockets = []
+const terminalProjects = []
 let closed = 0
 let expectedHash
 let onTerminalStop = () => {}
@@ -39,11 +49,21 @@ await f.page.route('**/api/projects/*/terminal/stop', (route) => {
 })
 await f.page.routeWebSocket('**/websocket/terminal/**', (socket) => {
   sockets.push(socket)
+  const projectId = decodeURIComponent(
+    new URL(socket.url()).pathname.split('/').at(-1),
+  )
+  terminalProjects.push(projectId)
   socket.onClose(() => {
     closed++
   })
   socket.onMessage((raw) => messages.push(JSON.parse(String(raw))))
-  socket.send(Buffer.from('\x1b[32mTerminal ready α\x1b[0m\r\n/workspace $ '))
+  socket.send(
+    Buffer.from(
+      '\x1b[32mTerminal ready α\x1b[0m\r\n' +
+        f.state.files[projectId]['Main.lean'].replaceAll('\n', '\r\n') +
+        '/workspace $ ',
+    ),
+  )
 })
 await f.page.route(`**/api/projects/${id}/file?path=Main.lean`, (route) => {
   if (route.request().method() !== 'PUT') return route.fallback()
@@ -261,6 +281,7 @@ try {
   await f.page.getByRole('button', { name: 'Terminal', exact: true }).click()
   await panel.getByText('Connected', { exact: true }).waitFor()
   const closedBeforeSwitch = closed
+  const connectionsBeforeSwitch = sockets.length
   // Discard unsaved text through the existing navigation dialog.
   await f.page
     .getByRole('button', { name: /Other fixture/ })
@@ -272,7 +293,14 @@ try {
     'workspace switch stops terminal',
   )
   assert.equal(await panel.count(), 0)
-  f.report.checks.push('Switching workspaces disconnects the old terminal.')
+  assert.equal(
+    sockets.length,
+    connectionsBeforeSwitch,
+    'Switching must not briefly connect a terminal to the next workspace',
+  )
+  f.report.checks.push(
+    'Switching workspaces disconnects the old terminal without opening another shell.',
+  )
   await f.page.getByRole('button', { name: 'Terminal', exact: true }).click()
   await panel.getByText('Connected', { exact: true }).waitFor()
   onTerminalStop = () => {
@@ -293,6 +321,70 @@ try {
   assert.equal(await panel.count(), 0)
   f.report.checks.push(
     'Closing a terminal reloads preparation status and exposes Retry setup after configuration edits.',
+  )
+  await f.page
+    .getByRole('button', { name: /Terminal fixture/ })
+    .first()
+    .click()
+  await f.page.getByRole('button', { name: 'Terminal', exact: true }).click()
+  await panel.getByText('Connected', { exact: true }).waitFor()
+  assert.equal(terminalProjects.at(-1), id)
+  const connectionsBeforeScratch = sockets.length
+  const closedBeforeScratch = closed
+  const fullProjectSource = f.state.files[id]['Main.lean']
+  await f.page
+    .getByRole('button', { name: /Scratch\.lean/ })
+    .first()
+    .click()
+  await until(
+    () => closed > closedBeforeScratch,
+    'project terminal closes when opening Scratch',
+  )
+  assert.equal(await panel.count(), 0)
+  assert.equal(sockets.length, connectionsBeforeScratch)
+  await until(
+    async () =>
+      (await f.page.locator('.file-tab').innerText()).includes('Main.lean'),
+    'Scratch editor shows its actual disk filename',
+  )
+  assert(
+    !(await f.page.locator('.file-tab').innerText()).includes('Scratch.lean'),
+  )
+  await f.page.getByRole('button', { name: 'Terminal', exact: true }).click()
+  await panel.getByText('Connected', { exact: true }).waitFor()
+  assert.equal(terminalProjects.at(-1), scratchId)
+  assert.equal(
+    await panel.locator('.terminal-project').innerText(),
+    'Scratch.lean',
+  )
+  await until(
+    async () =>
+      (await panel.locator('.xterm-accessibility-tree').innerText()).includes(
+        'private Scratch proof',
+      ),
+    'terminal displays the selected Scratch source',
+  )
+  assert(
+    !(await panel.locator('.xterm-accessibility-tree').innerText()).includes(
+      'another terminal write',
+    ),
+  )
+  f.state.files[scratchId]['Main.lean'] =
+    scratchSource + '-- saved in Scratch terminal\n'
+  await until(
+    async () =>
+      (await f.page.locator('.monaco-editor').innerText())
+        .replaceAll('\u00a0', ' ')
+        .includes('saved in Scratch terminal'),
+    'Scratch terminal changes refresh its editor',
+  )
+  assert.equal(f.state.files[id]['Main.lean'], fullProjectSource)
+  await panel
+    .getByRole('button', { name: 'Close terminal', exact: true })
+    .click()
+  assert.equal(await panel.count(), 0)
+  f.report.checks.push(
+    'Scratch shows Main.lean in the editor, identifies its terminal by playground name, and refreshes its own source after switching from a full project.',
   )
   f.assertClean()
   console.log(

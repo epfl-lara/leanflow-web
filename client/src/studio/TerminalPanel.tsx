@@ -14,10 +14,12 @@ const terminalTheme = (theme: 'light' | 'dark') =>
 
 export function TerminalPanel({
   projectId,
+  projectName,
   theme,
   onClose,
 }: {
   projectId: string
+  projectName: string
   theme: 'light' | 'dark'
   onClose: () => void
 }) {
@@ -186,6 +188,9 @@ export function TerminalPanel({
           <div className="terminal-title">
             <Icon name="terminal" size={17} />
             <strong>Terminal</strong>
+            <span className="terminal-project" title={projectName}>
+              {projectName}
+            </span>
             <span className="terminal-location">/workspace</span>
           </div>
           <output className="terminal-status" data-connected={connected}>

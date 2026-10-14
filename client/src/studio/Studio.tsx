@@ -293,7 +293,9 @@ export function Studio() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(() => window.innerWidth > 1000)
   const [showInfoview, setShowInfoview] = useState(true)
-  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [terminalProjectId, setTerminalProjectId] = useState<string | null>(
+    null,
+  )
   const [leanState, setLeanState] = useState('')
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('lemex-theme')
@@ -321,6 +323,7 @@ export function Studio() {
   filesRef.current = files
   projectIdRef.current = projectId
   const project = projects.find((item) => item.id === projectId)
+  const terminalOpen = !!project && terminalProjectId === project.id
   const projectKindRef = useRef(project?.kind)
   projectKindRef.current = project?.kind
   const singleFileMode = project?.kind === 'single-file'
@@ -537,7 +540,7 @@ export function Studio() {
       setRevealProof(null)
       setGit(null)
       setGitOpen(null)
-      setTerminalOpen(false)
+      setTerminalProjectId(null)
       setJob(null)
       setFileFilter('')
       setLeanState('')
@@ -987,8 +990,8 @@ export function Studio() {
   ])
 
   async function closeTerminal() {
-    setTerminalOpen(false)
-    const id = projectIdRef.current
+    setTerminalProjectId(null)
+    const id = terminalProjectId
     if (!id) return
     try {
       await post(`/api/projects/${encodeURIComponent(id)}/terminal/stop`)
@@ -1593,7 +1596,7 @@ export function Studio() {
                 pressed={terminalOpen}
                 onClick={() => {
                   if (terminalOpen) closeTerminal()
-                  else setTerminalOpen(true)
+                  else setTerminalProjectId(project.id)
                 }}
                 help="Open a terminal in this project to run commands and inspect their output. Commands can change project files; close the terminal before refreshing setup."
               />
@@ -1853,11 +1856,7 @@ export function Studio() {
             <div className="file-toolbar">
               <div className="file-tab">
                 <Icon name="file" size={15} />
-                <span title={file?.path}>
-                  {singleFileMode && file?.path === 'Main.lean'
-                    ? playgroundDownloadName(project.name)
-                    : file?.path || 'Choose a file'}
-                </span>
+                <span title={file?.path}>{file?.path || 'Choose a file'}</span>
                 {file?.readOnly && <span className="tag">Read only</span>}
                 {dirty && (
                   <span className="dirty-dot" aria-label="Unsaved changes" />
@@ -2018,6 +2017,7 @@ export function Studio() {
           <TerminalPanel
             key={project.id}
             projectId={project.id}
+            projectName={project.name}
             theme={theme}
             onClose={closeTerminal}
           />

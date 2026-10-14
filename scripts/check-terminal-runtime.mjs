@@ -12,6 +12,13 @@ import { Terminals } from '../server/terminals.mjs'
 const directory = path.resolve('.runtime/terminal-runtime', randomUUID())
 const dataDir = path.join(directory, 'data')
 const root = path.join(dataDir, 'project')
+const scratchRoot = path.join(dataDir, 'scratch')
+const previousSource = '-- previous full project\n'
+const scratchSource = '-- private Scratch proof\nexample : 2 = 2 := rfl\n'
+const projects = new Map([
+  ['/', { id: 'fixture', root }],
+  ['/scratch', { id: 'scratch', kind: 'single-file', root: scratchRoot }],
+])
 const dependencies = path.join(dataDir, 'dependencies')
 const runtime = new Runtime({
   dataDir,
@@ -69,8 +76,9 @@ try {
     path.join(dataDir, 'sibling-secret'),
     path.join(root, 'escape'),
   )
+  await fs.writeFile(path.join(root, 'Main.lean'), previousSource)
   server.on('upgrade', (req, stream, head) =>
-    terminals.upgrade(req, stream, head, { id: 'fixture', root }),
+    terminals.upgrade(req, stream, head, projects.get(req.url)),
   )
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/`)
@@ -169,6 +177,55 @@ try {
   )
   report.checks.push(
     'Ctrl+C interrupts commands; disconnect removes the shell, background processes, and container.',
+  )
+  await until(
+    () => terminals.sessions.size === 0,
+    'previous terminal fully released',
+  )
+  await fs.mkdir(scratchRoot)
+  for (const filename of ['lean-toolchain', 'lakefile.toml'])
+    await fs.copyFile(
+      path.join(root, filename),
+      path.join(scratchRoot, filename),
+    )
+  await fs.writeFile(path.join(scratchRoot, 'Main.lean'), scratchSource)
+  await runtime.inheritDependencies(dependencies, scratchRoot)
+  output = ''
+  socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/scratch`)
+  socket.on('message', (data, binary) => {
+    if (!binary) return
+    output += data.toString()
+    if (socket.readyState === 1)
+      socket.send(JSON.stringify({ type: 'ack', bytes: data.length }))
+  })
+  await new Promise((resolve, reject) => {
+    socket.once('open', resolve)
+    socket.once('error', reject)
+  })
+  await until(() => output.includes('/workspace'), 'Scratch terminal prompt')
+  input('stty -echo\r')
+  input(
+    "cat Main.lean; printf '\n-- saved in Scratch terminal\n' >> Main.lean; printf 'SCRATCH_EDIT_DONE\n'\r",
+  )
+  await until(
+    () =>
+      output.includes('private Scratch proof') &&
+      output.includes('SCRATCH_EDIT_DONE'),
+    'Scratch source and terminal edit',
+  )
+  assert.equal(
+    await fs.readFile(path.join(scratchRoot, 'Main.lean'), 'utf8'),
+    scratchSource + '\n-- saved in Scratch terminal\n',
+  )
+  assert.equal(
+    await fs.readFile(path.join(root, 'Main.lean'), 'utf8'),
+    previousSource,
+  )
+  assert(!output.includes('previous full project'))
+  await terminals.closeProject('scratch')
+  await until(() => runtime.children.size === 0, 'Scratch worker cleanup')
+  report.checks.push(
+    'A Scratch terminal reads and edits its own Main.lean after a full-project terminal closes; the other project source stays unchanged.',
   )
   report.passed = true
 } finally {

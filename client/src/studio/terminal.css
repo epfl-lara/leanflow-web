@@ -30,6 +30,21 @@
   gap: 8px;
   flex-shrink: 0;
 }
+.terminal-title {
+  min-width: 0;
+  flex-shrink: 1;
+}
+.terminal-title > svg,
+.terminal-title > strong {
+  flex-shrink: 0;
+}
+.terminal-project {
+  min-width: 0;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .terminal-title > svg {
   color: var(--accent);
 }

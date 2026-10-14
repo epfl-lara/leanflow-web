@@ -4,6 +4,9 @@ import * as fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+import { WebSocket } from 'ws'
 import { createStudio } from '../studio.mjs'
 import { WorkspaceStore } from '../workspaces.mjs'
 import {
@@ -635,6 +638,88 @@ test('large single-file uploads retain the prepared Mathlib environment and hash
   assert.equal(
     await fs.readFile(path.join(project.root, 'lake-manifest.json'), 'utf8'),
     f.manifest,
+  )
+  assert.equal(f.providerCalls(), 0)
+})
+
+test('playground terminals select their own root and Main.lean after a different workspace was opened', async (t) => {
+  const f = await fixture(t)
+  const previous = await f.create({
+    name: 'Previous full project',
+    kind: 'project',
+  })
+  const first = await f.create({
+    file: { path: 'Scratch.lean', content: '-- first playground\n' },
+  })
+  const second = await f.create({
+    file: { path: 'Scratch2.lean', content: '-- second playground\n' },
+  })
+  const spawned = []
+  f.runtime.spawn = (root, args, options) => {
+    const child = new EventEmitter()
+    Object.assign(child, {
+      root,
+      args,
+      options,
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+    })
+    child.kill = () => {
+      if (child.killed) return
+      child.killed = true
+      queueMicrotask(() => child.emit('close', 0))
+    }
+    spawned.push(child)
+    return child
+  }
+  for (const project of [previous, first, second, first]) {
+    const source = await f.request(
+      `/api/projects/${project.id}/file?path=Main.lean`,
+      undefined,
+      undefined,
+      'GET',
+    )
+    assert.equal(source.status, 200)
+    const saved = await source.json()
+    const endpoint = new URL(`/websocket/terminal/${project.id}`, source.url)
+    endpoint.protocol = 'ws:'
+    const token = (
+      await fs.readFile(path.join(f.dataDir, 'auth/owner.token'), 'utf8')
+    ).trim()
+    const socket = new WebSocket(endpoint, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    t.after(() => socket.terminate())
+    await new Promise((resolve, reject) => {
+      socket.once('open', resolve)
+      socket.once('error', reject)
+    })
+    const child = spawned.at(-1)
+    assert.equal(child.root, project.root)
+    assert.equal(
+      await fs.readFile(path.join(child.root, 'Main.lean'), 'utf8'),
+      saved.content,
+    )
+    if (project.kind === 'single-file')
+      assert.equal(
+        saved.content,
+        project.id === first.id
+          ? '-- first playground\n'
+          : '-- second playground\n',
+      )
+    const closed = new Promise((resolve) => socket.once('close', resolve))
+    const stop = await f.request(
+      `/api/projects/${project.id}/terminal/stop`,
+      {},
+    )
+    assert.equal(stop.status, 200)
+    await closed
+    assert.equal(child.killed, true)
+  }
+  assert.deepEqual(
+    spawned.map((child) => child.root),
+    [previous.root, first.root, second.root, first.root],
   )
   assert.equal(f.providerCalls(), 0)
 })
