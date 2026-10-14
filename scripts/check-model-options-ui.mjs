@@ -95,7 +95,10 @@ try {
   assert.equal(await model.inputValue(), DEFAULT_MODEL)
   assert.equal(await effort.inputValue(), 'max')
   assert.deepEqual(await levels(), ['', 'low', 'high', 'xhigh', 'max'])
-  assert.equal(await page.getByLabel('Edit files live').isChecked(), false)
+  assert.equal(
+    await page.getByLabel('Edit files live', { exact: true }).isChecked(),
+    false,
+  )
   report.checks.push(
     'DeepSeek max opens even with an old saved model/effort; edit preference is preserved',
   )

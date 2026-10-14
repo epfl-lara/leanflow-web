@@ -11,6 +11,7 @@ import {
   type RunProofTarget,
 } from './api'
 import { Icon } from './Icons'
+import { HelpTip } from './HelpTip'
 import { Dialog } from './Dialog'
 import { ChatPicker, type ChatChoice } from './ChatPicker'
 import { FileContextPicker } from './FileContextPicker'
@@ -775,18 +776,27 @@ export function AssistantPanel({
         deleteDisabled={activeHere}
         loading={chatBusy}
       />
-      <div className="mode-tabs" aria-label="Assistant mode">
-        {chatModes.map((item) => (
-          <button
-            type="button"
-            key={item.id}
-            className={mode === item.id ? 'selected' : ''}
-            aria-pressed={mode === item.id}
-            onClick={() => draft.setMode(item.id)}
-          >
-            {item.name}
-          </button>
-        ))}
+      <div className="assistant-mode-picker">
+        <div className="mode-tabs" aria-label="Assistant mode">
+          {chatModes.map((item) => (
+            <button
+              type="button"
+              key={item.id}
+              className={mode === item.id ? 'selected' : ''}
+              aria-pressed={mode === item.id}
+              onClick={() => draft.setMode(item.id)}
+            >
+              {item.name}
+            </button>
+          ))}
+        </div>
+        <HelpTip label="Assistant modes">
+          {chatModes.map((item) => (
+            <span key={item.id}>
+              <b>{item.name}:</b> {item.hint}
+            </span>
+          ))}
+        </HelpTip>
       </div>
       <ChatOptions
         models={session.models}

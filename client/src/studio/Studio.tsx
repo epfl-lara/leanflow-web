@@ -24,6 +24,7 @@ import {
 import { AssistantPanel } from './AssistantPanel'
 import { Dialog } from './Dialog'
 import { Icon } from './Icons'
+import { HelpTip } from './HelpTip'
 import { LeanWorkspace } from './LeanWorkspace'
 import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
@@ -1387,13 +1388,19 @@ export function Studio() {
             )}
           </div>
           <div className="header-actions">
-            <button
-              className={`button small ${showInfoview ? 'subtle selected' : 'subtle'}`}
-              onClick={() => setShowInfoview((value) => !value)}
-              aria-pressed={showInfoview}
-            >
-              Goals
-            </button>
+            <div className="help-label">
+              <button
+                className={`button small ${showInfoview ? 'subtle selected' : 'subtle'}`}
+                onClick={() => setShowInfoview((value) => !value)}
+                aria-pressed={showInfoview}
+              >
+                Goals
+              </button>
+              <HelpTip label="Goals (Infoview)">
+                Show Lean’s goals, local assumptions, and messages at your
+                cursor. Click inside a proof to see what remains to prove.
+              </HelpTip>
+            </div>
             <button
               className={`button small ${toolsOpen ? 'subtle selected' : 'subtle'}`}
               onClick={() => setToolsOpen((value) => !value)}

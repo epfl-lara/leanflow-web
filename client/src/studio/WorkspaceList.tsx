@@ -1,4 +1,5 @@
 import { Icon } from './Icons'
+import { HelpTip } from './HelpTip'
 import type { Project } from './api'
 import type { ReactNode } from 'react'
 
@@ -24,13 +25,15 @@ export function WorkspaceList({
       {[
         {
           title: 'Playgrounds',
+          help: 'Start a single Lean file with Mathlib ready to use. Choose New playground or Open .lean file. Convert to a project when you need more files or custom dependencies.',
           items: projects.filter((item) => item.kind === 'single-file'),
         },
         {
           title: 'Projects',
+          help: 'Work with multiple files and the project’s own Lean version and dependencies. Import a repository, upload local files, or start from a library.',
           items: projects.filter((item) => item.kind !== 'single-file'),
         },
-      ].map(({ title, items }) => (
+      ].map(({ title, help, items }) => (
         <details
           key={title}
           className="sidebar-projects-details"
@@ -40,6 +43,7 @@ export function WorkspaceList({
           <summary className="sidebar-section-title">
             <Icon name="chevron" size={13} />
             <span>{title}</span>
+            <HelpTip label={title}>{help}</HelpTip>
           </summary>
           {title === 'Playgrounds' && (
             <div className="playground-create">{playgroundActions}</div>

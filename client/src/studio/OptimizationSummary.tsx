@@ -1,3 +1,5 @@
+import { HelpTip } from './HelpTip'
+
 interface Measurement {
   available?: boolean
   compiled?: boolean | null
@@ -51,13 +53,31 @@ export function OptimizationSummary({
         </thead>
         <tbody>
           <tr>
-            <th>Proof tokens</th>
+            <th>
+              <span className="help-label">
+                Proof tokens
+                <HelpTip label="Proof tokens">
+                  Measure the size of the proof text. Optimize can try to reduce
+                  this count while preserving the theorem statement and checking
+                  the proof in Lean.
+                </HelpTip>
+              </span>
+            </th>
             <td>{tokens(before)}</td>
             <td>{tokens(after)}</td>
             <td>{reduction(result.reductions?.proofTokensPercent)}</td>
           </tr>
           <tr>
-            <th>Heartbeats</th>
+            <th>
+              <span className="help-label">
+                Heartbeats
+                <HelpTip label="Heartbeats">
+                  Lean’s measure of work spent checking a proof. Fewer
+                  heartbeats mean less checking work in the same Lean
+                  environment; they do not measure seconds or model usage.
+                </HelpTip>
+              </span>
+            </th>
             <td>{heartbeats(before)}</td>
             <td>{heartbeats(after)}</td>
             <td>{reduction(result.reductions?.heartbeatsPercent)}</td>

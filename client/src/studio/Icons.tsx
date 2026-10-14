@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react'
 const paths = {
   edit: 'm16 3 5 5M4 20l4-1L21 6a2 2 0 0 0-5-5L3 14l-1 5Z',
   plus: 'M12 5v14M5 12h14',
+  info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20M12 11v6M12 7h.01',
   folder:
     'M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z',
   file: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6',
