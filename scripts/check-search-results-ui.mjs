@@ -301,9 +301,62 @@ async function checkTypes(theme) {
       bg = luminance(style.background)
     assert((Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05) >= 4.5)
   }
+  const cdp = await page.context().newCDPSession(page)
+  try {
+    await cdp.send('DOM.enable')
+    await cdp.send('CSS.enable')
+    const { root } = await cdp.send('DOM.getDocument')
+    const { nodeId } = await cdp.send('DOM.querySelector', {
+      nodeId: root.nodeId,
+      selector: '#declaration-query',
+    })
+    await cdp.send('CSS.forcePseudoState', {
+      nodeId,
+      forcedPseudoClasses: ['autofill'],
+    })
+    await query.focus()
+    const bar = await query.evaluate((element) => {
+      const input = getComputedStyle(element)
+      const form = element.closest('form')
+      const container = getComputedStyle(form)
+      return {
+        autofill: element.matches(':autofill'),
+        fill: input.boxShadow,
+        text: input.webkitTextFillColor,
+        color: container.color,
+        background: container.backgroundColor,
+        fieldHeight: element.getBoundingClientRect().height,
+        innerHeight:
+          form.getBoundingClientRect().height -
+          parseFloat(container.borderTopWidth) -
+          parseFloat(container.borderBottomWidth),
+        fieldOutline: input.outlineStyle,
+        barOutline: container.outlineStyle,
+      }
+    })
+    assert.equal(bar.autofill, true)
+    assert(bar.fill.includes(bar.background), JSON.stringify(bar))
+    assert.equal(bar.text, bar.color)
+    assert.equal(bar.fieldHeight, bar.innerHeight)
+    assert.equal(bar.fieldOutline, 'none')
+    assert.equal(bar.barOutline, 'solid')
+    await page.screenshot({
+      path: path.join(output, `search-bar-autofill-${theme}.png`),
+      clip: await page.locator('.workbench-header').boundingBox(),
+    })
+    await cdp.send('CSS.forcePseudoState', {
+      nodeId,
+      forcedPseudoClasses: [],
+    })
+  } finally {
+    await cdp.detach()
+  }
   await page.screenshot({ path: path.join(output, `search-${theme}.png`) })
   report.checks.push(
     `${theme}: readable types and Markdown docs, inline/display math with local fonts, contained wide equations, literal Lean code, lists, tables, wrapping, contrast, safe links and no injected HTML`,
+  )
+  report.checks.push(
+    `${theme}: browser-autofilled query blends into the bar, fills its height, keeps readable text and uses the bar's shared focus outline`,
   )
 }
 try {
