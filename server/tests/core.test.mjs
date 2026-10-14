@@ -716,6 +716,82 @@ test('Check validates the selected Lean file even if it is outside default Lake 
   )
 })
 
+test('stopping a Lean check is owner-scoped, cancels its worker and skips subsequent file evaluation', async (t) => {
+  const { request, runtime, workspaces, project } = await fixture(t)
+  let started
+  const ready = new Promise((resolve) => {
+    started = resolve
+  })
+  runtime.run = async (root, args, options) => {
+    assert.equal(root, workspaces.get(project.id, 'owner').root)
+    assert.deepEqual(args, ['lake', 'build'])
+    started()
+    return new Promise((resolve) => {
+      AbortSignal.any([
+        options.signal,
+        AbortSignal.timeout(3000),
+      ]).addEventListener(
+        'abort',
+        () => resolve({ code: 137, cancelled: true, stdout: '', stderr: '' }),
+        { once: true },
+      )
+    })
+  }
+  const checked = await request(`/api/projects/${project.id}/check`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'Main.lean' }),
+  })
+  assert.equal(checked.status, 202)
+  const job = await checked.json()
+  await ready
+  const forbidden = await request(
+    `/api/jobs/${job.id}/stop`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    },
+    'collaborator-test-token',
+  )
+  assert.equal(forbidden.status, 404)
+  const stopped = await request(`/api/jobs/${job.id}/stop`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  assert.equal(stopped.status, 200)
+  assert.equal((await stopped.json()).status, 'cancelled')
+  assert.equal(
+    (
+      await (
+        await request(`/api/jobs/${job.id}/stop`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        })
+      ).json()
+    ).status,
+    'cancelled',
+  )
+})
+
+test('a timed-out Lean check reports how to recover from blocking evaluation', async (t) => {
+  const events = new EventStore(await temp(t))
+  t.after(() => events.close())
+  const jobs = new JobManager({
+    events,
+    workspaces: { get: () => ({ root: '/fixture', status: 'ready' }) },
+    runtime: {
+      run: async () => ({ code: 137, timedOut: true, stdout: '', stderr: '' }),
+    },
+  })
+  const job = jobs.check('alice', 'project')
+  const result = await finishedJob(events, job.id)
+  assert.equal(result.status, 'failed')
+  assert.match(result.error, /time limit.*#eval.*terminal/)
+})
+
 test('settings remain private per user, persist, and validate tool choices and instruction size', async (t) => {
   const directory = await temp(t),
     settings = new Settings(directory)

@@ -200,6 +200,46 @@ export class EventStore extends EventEmitter {
       this.#hydrate(job),
     )
   }
+  projectMetadata(owner, projectId) {
+    return this.db
+      .prepare(
+        "SELECT payload FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=?",
+      )
+      .all(owner, projectId)
+      .map((row) => this.#metadata(JSON.parse(row.payload)))
+  }
+  activeMetadata(owner, projectId, kind) {
+    return this.projectMetadata(owner, projectId).filter(
+      (job) => (!kind || job.kind === kind) && !TERMINAL.has(job.status),
+    )
+  }
+  deleteRuns(owner, ids) {
+    const jobs = [...new Set(ids)].map((id) => this.getMetadata(id, owner))
+    if (jobs.some((job) => !TERMINAL.has(job.status)))
+      throw Object.assign(
+        new Error('Stop active runs before permanently deleting this content.'),
+        { status: 409 },
+      )
+    this.#transaction(() => {
+      for (const job of jobs) {
+        this.db.prepare('DELETE FROM events WHERE job=?').run(job.id)
+        this.db.prepare('DELETE FROM job_changes WHERE job=?').run(job.id)
+        this.db
+          .prepare('DELETE FROM jobs WHERE id=? AND owner=?')
+          .run(job.id, owner)
+      }
+    })
+    for (const job of jobs) this.reasoningCache.delete(job.id)
+  }
+  deleteProject(owner, projectId) {
+    const ids = this.db
+      .prepare(
+        "SELECT id FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=?",
+      )
+      .all(owner, projectId)
+      .map((row) => row.id)
+    this.deleteRuns(owner, ids)
+  }
   summaries(owner, projectId, kind = 'agent') {
     const fields = [
       'projectId',
@@ -335,6 +375,7 @@ export class JobManager {
   constructor({ events, runtime, workspaces }) {
     Object.assign(this, { events, runtime, workspaces })
     this.active = new Map()
+    this.controllers = new Map()
     this.stopping = false
   }
   check(owner, projectId, file) {
@@ -352,14 +393,19 @@ export class JobManager {
         { status: 409 },
       )
     const job = this.events.create(owner, { kind: 'check', projectId, file })
+    const controller = new AbortController()
+    this.controllers.set(job.id, controller)
     const task = Promise.resolve()
       .then(async () => {
         try {
+          controller.signal.throwIfAborted()
           if (file) await this.workspaces.readFile(projectId, owner, file)
+          controller.signal.throwIfAborted()
           this.events.updateMetadata(job.id, { status: 'running' })
           const options = {
             network: 'none',
             timeoutMs: 600_000,
+            signal: controller.signal,
             ...(project.repairedConfiguration
               ? { readOnlyWorkspace: true, writeLakeCache: true }
               : {}),
@@ -371,12 +417,14 @@ export class JobManager {
             ['lake', 'build'],
             options,
           )
+          controller.signal.throwIfAborted()
           if (file && file.endsWith('.lean') && result.code === 0) {
             const checked = await this.runtime.run(
               project.root,
               ['lake', 'env', 'lean', '--json', '-Dwarn.sorry=true', file],
               options,
             )
+            controller.signal.throwIfAborted()
             result = {
               ...checked,
               stdout: result.stdout + checked.stdout,
@@ -389,19 +437,62 @@ export class JobManager {
             error:
               result.code === 0
                 ? undefined
-                : 'Lean build failed. See the build output.',
+                : result.timedOut
+                  ? 'Lean checking reached its time limit. If a #eval command waits for input or runs an event loop, remove it and run the program in a terminal. Otherwise, check the build output and try a smaller target.'
+                  : 'Lean build failed. See the build output.',
           })
         } catch (error) {
+          const cancelled = controller.signal.aborted && !error.workerCleanup
           this.events.updateMetadata(job.id, {
-            status: 'failed',
-            error: error.message,
+            status: cancelled ? 'cancelled' : 'failed',
+            error: cancelled ? undefined : error.message,
           })
+          if (error.workerCleanup) throw error
         }
       })
-      .finally(() => this.active.delete(job.id))
+      .finally(() => {
+        this.active.delete(job.id)
+        this.controllers.delete(job.id)
+      })
     this.active.set(job.id, task)
     task.catch(() => {}) // shutdown() retains and observes the original promise.
     return job
+  }
+  async stop(owner, id) {
+    const job = this.events.getMetadata(id, owner)
+    if (job.kind !== 'check')
+      throw Object.assign(new Error('This job is not a Lean check.'), {
+        status: 400,
+      })
+    if (TERMINAL.has(job.status)) {
+      await this.active.get(id)
+      return
+    }
+    const controller = this.controllers.get(id)
+    if (!controller)
+      throw Object.assign(new Error('This Lean check is no longer running.'), {
+        status: 409,
+      })
+    this.events.updateMetadata(id, { status: 'stopping' })
+    controller.abort(new Error('Lean check stopped.'))
+    await this.active.get(id)
+  }
+  async stopProject(owner, projectId) {
+    this.workspaces.get(projectId, owner)
+    const ids = new Set(
+      this.events
+        .activeMetadata(owner, projectId, 'check')
+        .map((job) => job.id),
+    )
+    for (const id of this.active.keys()) {
+      const job = this.events.getMetadata(id)
+      if (job.owner === owner && job.projectId === projectId) ids.add(id)
+    }
+    const results = await Promise.allSettled(
+      [...ids].map((id) => this.stop(owner, id)),
+    )
+    const failed = results.find((result) => result.status === 'rejected')
+    if (failed) throw failed.reason
   }
   shutdown() {
     this.stopping = true

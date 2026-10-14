@@ -1,4 +1,9 @@
 import { removeDisposableTree } from './temporary-workspaces.mjs'
+import {
+  storedDiskBytes,
+  storedManifest,
+  removeStoredTree,
+} from './trash-storage.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
@@ -807,6 +812,8 @@ export class WorkspaceStore {
       kind: entry.kind,
       recoverable: entry.state === 'trashed',
       createdAt: entry.createdAt,
+      sizeBytes: Number.isSafeInteger(entry.sizeBytes) ? entry.sizeBytes : null,
+      ...(entry.state === 'deleting' ? { deleting: true } : {}),
       ...(entry.state === 'restored' ? { restored: true } : {}),
     }
   }
@@ -815,10 +822,110 @@ export class WorkspaceStore {
     validateOwner(owner)
     return this.db
       .prepare(
-        "SELECT data FROM trash WHERE owner=? AND json_extract(data,'$.state')='trashed' ORDER BY rowid DESC LIMIT 100",
+        "SELECT data FROM trash WHERE owner=? AND json_extract(data,'$.state') IN ('trashed','deleting') ORDER BY rowid DESC LIMIT 100",
       )
       .all(owner)
       .map((row) => this.#trashReceipt(JSON.parse(row.data)))
+  }
+
+  async listTrashWithSizes(owner, { projectRunIds = () => [] } = {}) {
+    for (const receipt of this.listTrash(owner)) {
+      if (receipt.sizeBytes !== null) continue
+      await this.#locked(receipt.projectId, async () => {
+        const row = this.db
+          .prepare('SELECT data FROM trash WHERE id=? AND owner=?')
+          .get(receipt.trashId, owner)
+        if (!row) return
+        const entry = JSON.parse(row.data)
+        if (!['trashed', 'deleting'].includes(entry.state)) return
+        entry.sizeBytes = await this.#trashSize(
+          entry,
+          projectRunIds(entry.projectId),
+        )
+        this.#saveTrash(entry)
+      })
+    }
+    return this.listTrash(owner)
+  }
+
+  #projectTrash(id, owner) {
+    return this.db
+      .prepare('SELECT data FROM trash WHERE project=? AND owner=?')
+      .all(id, owner)
+      .map((row) => JSON.parse(row.data))
+  }
+
+  async #projectSnapshots(project, candidateRunIds = []) {
+    candidateRunIds.forEach((id) => validateId(id, 'run'))
+    const trusted = new Set(candidateRunIds)
+    const snapshots = []
+    for (const name of await fs.readdir(this.snapshotsDir)) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(name)) continue
+      const ownership = await storedManifest(
+        this.snapshotsDir,
+        name,
+        'ownership.json',
+      )
+      const manifest = await storedManifest(this.snapshotsDir, name)
+      const records = [ownership, manifest].filter((record) => record !== null)
+      const claimed = records.some(
+        (record) =>
+          record.projectId === project.id && record.owner === project.owner,
+      )
+      if (!claimed && !trusted.has(name)) continue
+      for (const record of records)
+        if (
+          record.projectId !== project.id ||
+          record.owner !== project.owner ||
+          record.runId !== name ||
+          record.root !== path.join(this.snapshotsDir, name, 'workspace')
+        )
+          fail(
+            'A saved candidate has invalid project metadata. Contact the administrator.',
+            409,
+          )
+      snapshots.push(name)
+    }
+    return snapshots
+  }
+
+  async #projectStorage(project, candidateRunIds = []) {
+    return [
+      { directory: this.projectsDir, name: validateId(project.id) },
+      { directory: this.historyDir, name: project.id },
+      ...(await this.#projectSnapshots(project, candidateRunIds)).map(
+        (name) => ({
+          directory: this.snapshotsDir,
+          name,
+        }),
+      ),
+      ...this.#projectTrash(project.id, project.owner).map((entry) => ({
+        directory: this.trashDir,
+        name: validateId(entry.trashId, 'trash'),
+      })),
+    ]
+  }
+
+  async #trashSize(entry, candidateRunIds = []) {
+    return storedDiskBytes(
+      entry.kind === 'project'
+        ? [
+            ...(await this.#projectStorage(
+              this.#owned(entry.projectId, entry.owner),
+              candidateRunIds,
+            )),
+            {
+              directory: this.trashDir,
+              name: validateId(entry.trashId, 'trash'),
+            },
+          ]
+        : [
+            {
+              directory: this.trashDir,
+              name: validateId(entry.trashId, 'trash'),
+            },
+          ],
+    )
   }
 
   getTrash(trashId, owner) {
@@ -831,7 +938,12 @@ export class WorkspaceStore {
     return this.#trashReceipt(JSON.parse(row.data))
   }
 
-  async trash(id, owner, filename, { assertIdle = () => {} } = {}) {
+  async trash(
+    id,
+    owner,
+    filename,
+    { assertIdle = () => {}, candidateRunIds = [] } = {},
+  ) {
     this.get(id, owner)
     if (filename !== undefined) relativeFile(filename, { write: true })
     return this.#locked(id, async () => {
@@ -869,6 +981,7 @@ export class WorkspaceStore {
           JSON.stringify(entry),
           { mode: 0o600, flag: 'wx' },
         )
+        entry.sizeBytes = await this.#trashSize(entry, candidateRunIds)
         if (this.jobs.has(id) || this.get(id, owner).status === 'preparing')
           fail(
             'Wait for project preparation to finish before archiving the project.',
@@ -940,6 +1053,7 @@ export class WorkspaceStore {
         assertIdle()
         await fs.rename(anchored, path.join(container, 'content'))
         entry.state = 'trashed'
+        entry.sizeBytes = await this.#trashSize(entry)
         this.#saveTrash(entry)
         this.#invalidateConfiguration(project, filename)
         this.#event(
@@ -972,11 +1086,11 @@ export class WorkspaceStore {
     if (!row) fail('Recoverable deletion not found', 404)
     const initial = JSON.parse(row.data)
     return this.#locked(initial.projectId, async () => {
-      const entry = JSON.parse(
-        this.db
-          .prepare('SELECT data FROM trash WHERE id=? AND owner=?')
-          .get(trashId, owner).data,
-      )
+      const current = this.db
+        .prepare('SELECT data FROM trash WHERE id=? AND owner=?')
+        .get(trashId, owner)
+      if (!current) fail('Recoverable deletion not found', 404)
+      const entry = JSON.parse(current.data)
       if (entry.state === 'restored') return this.#trashReceipt(entry)
       if (entry.state !== 'trashed')
         fail('This deletion is not ready to restore', 409)
@@ -1109,6 +1223,137 @@ export class WorkspaceStore {
       } finally {
         await parent.handle.close()
       }
+    })
+  }
+
+  async deleteForever(
+    trashId,
+    owner,
+    { assertIdle = () => {}, candidateRunIds = [] } = {},
+  ) {
+    validateId(trashId, 'trash')
+    validateOwner(owner)
+    const initial = this.db
+      .prepare('SELECT project FROM trash WHERE id=? AND owner=?')
+      .get(trashId, owner)
+    if (!initial) fail('Recoverable deletion not found', 404)
+    return this.#locked(initial.project, async () => {
+      const row = this.db
+        .prepare('SELECT data FROM trash WHERE id=? AND owner=?')
+        .get(trashId, owner)
+      if (!row) fail('Recoverable deletion not found', 404)
+      const entry = JSON.parse(row.data)
+      if (!['trashed', 'deleting'].includes(entry.state))
+        fail(
+          'This item was restored and cannot be permanently deleted from Trash.',
+          409,
+        )
+      const project = this.#owned(entry.projectId, owner)
+      if (project.status === 'preparing' || this.jobs.has(project.id))
+        fail(
+          'Wait for project preparation to stop before permanently deleting its data.',
+          409,
+        )
+      assertIdle()
+      let locations = [{ directory: this.trashDir, name: trashId }]
+      if (entry.kind === 'project') {
+        if (!project.archivedAt || project.archivedTrashId !== trashId)
+          fail(
+            'This project archive no longer matches the deletion receipt.',
+            409,
+          )
+        const checkout = this.repositoryRoot(project)
+        const snapshots =
+          entry.deletion?.snapshots ||
+          (await this.#projectSnapshots(project, candidateRunIds))
+        const trash =
+          entry.deletion?.trash ||
+          this.#projectTrash(project.id, owner).map((item) => item.trashId)
+        snapshots.forEach((id) => validateId(id, 'run'))
+        trash.forEach((id) => validateId(id, 'trash'))
+        const roots = [
+          project.root,
+          ...snapshots.map((id) =>
+            path.join(this.snapshotsDir, id, 'workspace'),
+          ),
+        ]
+        for (const root of new Set([checkout, ...roots])) {
+          const stat = await exists(root)
+          if (
+            stat &&
+            (!stat.isDirectory() ||
+              stat.isSymbolicLink() ||
+              (await fs.realpath(root)) !== root)
+          )
+            fail(
+              'A stored workspace directory is unsafe. Contact the administrator before permanently deleting it.',
+              403,
+            )
+        }
+        // Refresh the runtime's dependency registry before checking references.
+        // Cached packages outside these trees remain owned by the runtime.
+        if (await exists(project.root))
+          this.runtime.dependencyRoot?.(project.root)
+        const inside = (filename, root) =>
+          filename === root || filename.startsWith(root + path.sep)
+        for (const [target, source] of this.runtime.dependencies || [])
+          if (
+            inside(source, checkout) &&
+            !inside(target, checkout) &&
+            !snapshots.some((id) =>
+              inside(target, path.join(this.snapshotsDir, id)),
+            )
+          )
+            fail(
+              'Another saved workspace still uses this project’s dependency cache. Remove that workspace before deleting this project forever.',
+              409,
+            )
+        locations = [
+          ...snapshots.map((name) => ({ directory: this.snapshotsDir, name })),
+          { directory: this.historyDir, name: project.id },
+          { directory: this.projectsDir, name: project.id },
+          ...trash.map((name) => ({ directory: this.trashDir, name })),
+        ]
+        // Archiving closes editor sockets asynchronously. Wait for their workers
+        // and candidate workers before removing any mounted project content.
+        for (const root of new Set([checkout, ...roots]))
+          await this.runtime.stopProject?.(root)
+        assertIdle()
+        for (const root of roots)
+          if (await exists(root))
+            await this.runtime.clearInheritedDependencies?.(root, {
+              force: true,
+            })
+        entry.deletion = { snapshots, trash }
+      }
+      assertIdle()
+      const receipt = this.#trashReceipt(entry)
+      entry.state = 'deleting'
+      this.#saveTrash(entry)
+      // Leave a retryable deleting receipt after a filesystem failure; partly
+      // removed content must never become available for restoration again.
+      for (const { directory, name } of locations)
+        await removeStoredTree(directory, name)
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        if (entry.kind === 'project') {
+          this.db.prepare('DELETE FROM events WHERE project=?').run(project.id)
+          this.db
+            .prepare('DELETE FROM trash WHERE project=? AND owner=?')
+            .run(project.id, owner)
+          this.db
+            .prepare('DELETE FROM projects WHERE id=? AND owner=?')
+            .run(project.id, owner)
+        } else
+          this.db
+            .prepare('DELETE FROM trash WHERE id=? AND owner=?')
+            .run(trashId, owner)
+        this.db.exec('COMMIT')
+      } catch (error) {
+        this.db.exec('ROLLBACK')
+        throw error
+      }
+      return { ...receipt, recoverable: false, deleted: true }
     })
   }
 
@@ -2579,7 +2824,7 @@ export class WorkspaceStore {
     const project = this.get(id, owner)
     this.#ready(project)
     validateId(runId, 'run')
-    return this.#locked(id, () => this.#capture(project, runId))
+    return this.#locked(id, () => this.#capture(this.get(id, owner), runId))
   }
 
   async #capture(project, runId) {
@@ -2593,6 +2838,13 @@ export class WorkspaceStore {
         throw error
       })
     const root = path.join(container, 'workspace')
+    // This server-owned marker precedes every source copy and dependency bind.
+    // An interrupted capture remains attributable even without its manifest.
+    await fs.writeFile(
+      path.join(container, 'ownership.json'),
+      JSON.stringify({ projectId: id, owner, runId, root }),
+      { mode: 0o600, flag: 'wx' },
+    )
     const inherit = typeof this.runtime.inheritDependencies === 'function'
     await copyWorkspace(project.root, root, { omitDependencies: inherit })
     if (inherit) await this.runtime.inheritDependencies(project.root, root)

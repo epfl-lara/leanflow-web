@@ -236,7 +236,7 @@ test('setup RPC workers wait for runtime capacity and queued cancellation never 
   occupied.stdin.end()
   const child = await next
   child.stdin.end()
-  await new Promise((resolve) => child.once('close', resolve))
+  await child.workerStopped
   assert.equal(runtime.queue.length, 0)
   assert.equal(runtime.children.size, 0)
 })

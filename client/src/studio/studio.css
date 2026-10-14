@@ -2569,6 +2569,27 @@ body.panel-resizing iframe {
   margin-top: 5px;
   overflow-wrap: anywhere;
 }
+.trash-item .trash-size {
+  flex-shrink: 0;
+  margin-top: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.trash-delete-forever {
+  color: var(--danger);
+  flex-shrink: 0;
+}
+.trash-details {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 16px;
+}
+.trash-details dt {
+  color: var(--muted);
+}
+.trash-details dd {
+  margin: 0;
+}
 @media (hover: none) {
   .project-delete,
   .file-delete {

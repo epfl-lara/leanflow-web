@@ -438,6 +438,17 @@ export class ChatStore {
   }
 
   #receipt(chat) {
+    let sizeBytes = Buffer.byteLength(JSON.stringify(chat))
+    if (this.events.db) {
+      const measured = this.events.db.prepare(
+        `SELECT length(CAST(payload AS BLOB))
+          + COALESCE((SELECT SUM(length(CAST(events.payload AS BLOB))) FROM events WHERE events.job=jobs.id),0)
+          + COALESCE((SELECT SUM(length(CAST(job_changes.payload AS BLOB))) FROM job_changes WHERE job_changes.job=jobs.id),0)
+        AS bytes FROM jobs WHERE owner=? AND id=?`,
+      )
+      for (const id of this.#runIds(chat))
+        sizeBytes += Number(measured.get(chat.owner, id).bytes)
+    }
     return {
       trashId: chat.trashId,
       chatId: chat.id,
@@ -447,6 +458,7 @@ export class ChatStore {
       kind: 'chat',
       path: null,
       createdAt: chat.archivedAt,
+      sizeBytes,
       recoverable: true,
     }
   }
@@ -494,6 +506,77 @@ export class ChatStore {
     chat.updatedAt = new Date().toISOString()
     this.#save(chat)
     return { ...receipt, recoverable: false, restored: true }
+  }
+
+  #runIds(chat) {
+    const ids = new Set(
+      this.db
+        .prepare('SELECT run FROM chat_runs WHERE chat=?')
+        .all(chat.id)
+        .map((row) => row.run),
+    )
+    if (this.events.db)
+      for (const row of this.events.db
+        .prepare(
+          "SELECT id FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.chatId')=?",
+        )
+        .all(chat.owner, chat.projectId, chat.id))
+        ids.add(row.id)
+    return [...ids].filter((id) => {
+      try {
+        const run = this.events.getMetadata(id, chat.owner)
+        return run.projectId === chat.projectId && run.kind === 'agent'
+      } catch (error) {
+        if (error.status === 404) return false
+        throw error
+      }
+    })
+  }
+
+  #deleteChat(chat) {
+    this.titleTasks.get(chat.id)?.controller.abort(new Error('Chat deleted.'))
+    this.db.prepare('DELETE FROM chat_runs WHERE chat=?').run(chat.id)
+    this.db
+      .prepare('DELETE FROM chats WHERE id=? AND owner=?')
+      .run(chat.id, chat.owner)
+  }
+
+  deleteForever(owner, trashId) {
+    const receipt = this.getTrash(trashId, owner)
+    const chat = this.#owned(receipt.chatId, owner, {
+      archived: true,
+      project: false,
+    })
+    this.#assertInactive(chat)
+    this.events.deleteRuns(owner, this.#runIds(chat))
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.#deleteChat(chat)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return { ...receipt, recoverable: false, deleted: true }
+  }
+
+  deleteProject(owner, projectId) {
+    ownerId(owner)
+    identifier(projectId)
+    const chats = this.db
+      .prepare('SELECT data FROM chats WHERE owner=? AND project=?')
+      .all(owner, projectId)
+      .map((row) => JSON.parse(row.data))
+    chats.forEach((chat) => this.#assertInactive(chat))
+    this.events.deleteProject(owner, projectId)
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      chats.forEach((chat) => this.#deleteChat(chat))
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   stopNaming() {

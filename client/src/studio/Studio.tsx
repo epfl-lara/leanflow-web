@@ -20,9 +20,12 @@ import {
   type OpenFile,
   type Project,
   type Session,
+  type TrashItem,
 } from './api'
 import { AssistantPanel } from './AssistantPanel'
 import { Dialog } from './Dialog'
+import { CheckControls } from './CheckControls'
+import { TrashDialog } from './TrashDialog'
 import { Icon } from './Icons'
 import { HelpTip } from './HelpTip'
 import { LeanWorkspace } from './LeanWorkspace'
@@ -59,17 +62,6 @@ import {
 import './studio.css'
 import './single-file.css'
 
-interface TrashItem {
-  workspaceKind?: 'single-file' | 'project'
-  chatId?: string
-  trashId: string
-  projectId: string
-  projectName?: string
-  name?: string
-  path: string | null
-  kind: 'project' | 'file' | 'folder' | 'chat'
-  createdAt: string
-}
 interface DeleteTarget {
   chatId?: string
   projectId: string
@@ -80,6 +72,8 @@ interface DeleteTarget {
 
 interface Job {
   id: string
+  projectId: string
+  createdAt: string
   status: string
   log?: string
   result?: unknown
@@ -277,6 +271,7 @@ export function Studio() {
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [deleteError, setDeleteError] = useState('')
+  const [deleteStopping, setDeleteStopping] = useState(false)
   const [lastTrash, setLastTrash] = useState<TrashItem | null>(null)
   const [trashOpen, setTrashOpen] = useState(false)
   const [trashItems, setTrashItems] = useState<TrashItem[]>([])
@@ -307,6 +302,9 @@ export function Studio() {
   >(null)
   const [job, setJob] = useState<Job | null>(null)
   const [jobOpen, setJobOpen] = useState(false)
+  const [startingCheck, setStartingCheck] = useState(false)
+  const [stoppingCheck, setStoppingCheck] = useState(false)
+  const checkRequest = useRef(false)
   const fileRef = useRef(file)
   const filesRef = useRef(files)
   const projectIdRef = useRef(projectId)
@@ -775,20 +773,72 @@ export function Studio() {
   }
 
   async function check() {
-    if (!projectId || !file) return
+    if (!projectId || !file || checkRequest.current) return
+    const id = projectId
+    checkRequest.current = true
+    setStartingCheck(true)
     setError('')
     try {
       await saveCompletely()
       const value = await post<Job>(
-        `/api/projects/${encodeURIComponent(projectId)}/check`,
+        `/api/projects/${encodeURIComponent(id)}/check`,
         { path: file.path },
       )
-      setJob(value)
-      setJobOpen(true)
+      if (projectIdRef.current === id) {
+        setJob(value)
+        setJobOpen(true)
+      }
     } catch (error) {
       setError(errorText(error))
+    } finally {
+      checkRequest.current = false
+      setStartingCheck(false)
     }
   }
+
+  async function stopCheck() {
+    if (!job || terminalJob(job) || stoppingCheck) return
+    const id = job.id
+    setStoppingCheck(true)
+    setError('')
+    try {
+      const stopped = await post<Job>(
+        `/api/jobs/${encodeURIComponent(id)}/stop`,
+      )
+      setJob((current) => (current?.id === id ? stopped : current))
+      if (projectIdRef.current === stopped.projectId) {
+        const active = await api<Job[]>(
+          `/api/projects/${encodeURIComponent(stopped.projectId)}/checks`,
+        )
+        setJob((current) =>
+          current?.id === id ? active[0] || stopped : current,
+        )
+      }
+    } catch (error) {
+      setError(errorText(error))
+    } finally {
+      setStoppingCheck(false)
+    }
+  }
+
+  useEffect(() => {
+    setJob(null)
+    if (!projectId || !session) return
+    let cancelled = false
+    void api<Job[]>(`/api/projects/${encodeURIComponent(projectId)}/checks`)
+      .then((active) => {
+        if (!cancelled && active.length)
+          setJob((current) =>
+            current && !terminalJob(current) ? current : active[0],
+          )
+      })
+      .catch((error) => {
+        if (!cancelled) setError(errorText(error))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, session])
 
   useEffect(() => {
     if (!job || terminalJob(job)) return
@@ -914,6 +964,7 @@ export function Studio() {
 
   function requestDelete(target: DeleteTarget) {
     setDeleteError('')
+    setDeleteStopping(false)
     setDeleteTarget(target)
   }
   async function showTrash() {
@@ -925,10 +976,11 @@ export function Studio() {
       setTrashError(errorText(error))
     }
   }
-  async function deleteItem() {
+  async function deleteItem(stopActive = false) {
     if (!deleteTarget || deleteBusy) return
     const target = deleteTarget
     setDeleteBusy(true)
+    setDeleteStopping(stopActive)
     setDeleteError('')
     try {
       if (savePromise.current)
@@ -939,13 +991,19 @@ export function Studio() {
         target.kind === 'chat'
           ? `/api/chats/${encodeURIComponent(target.chatId!)}/trash`
           : `/api/projects/${encodeURIComponent(target.projectId)}/trash`,
-        target.path === undefined ? {} : { path: target.path },
+        {
+          ...(target.path === undefined ? {} : { path: target.path }),
+          ...(stopActive ? { stopActive: true } : {}),
+        },
       )
       setLastTrash({ ...receipt, name: target.name })
       const active = projectIdRef.current === target.projectId
       if (target.kind === 'chat') {
         window.dispatchEvent(new Event('lemex-chats-changed'))
       } else if (target.kind === 'project') {
+        setJob((current) =>
+          current?.projectId === target.projectId ? null : current,
+        )
         if (active) {
           ++openRequest.current
           setFile(null)
@@ -987,7 +1045,27 @@ export function Studio() {
       setDeleteError(errorText(error))
     } finally {
       setDeleteBusy(false)
+      setDeleteStopping(false)
     }
+  }
+  async function deleteForever(item: TrashItem) {
+    await post(`/api/trash/${encodeURIComponent(item.trashId)}/delete-forever`)
+    setTrashItems((previous) =>
+      previous.filter((entry) =>
+        item.kind === 'project'
+          ? entry.projectId !== item.projectId
+          : entry.trashId !== item.trashId,
+      ),
+    )
+    setLastTrash((previous) =>
+      previous?.trashId === item.trashId ||
+      (item.kind === 'project' && previous?.projectId === item.projectId)
+        ? null
+        : previous,
+    )
+    if (item.kind === 'chat' || item.kind === 'project')
+      window.dispatchEvent(new Event('lemex-chats-changed'))
+    setNotice('Permanently deleted')
   }
   async function restoreItem(item: TrashItem) {
     if (restoring) return
@@ -1696,23 +1774,19 @@ export function Studio() {
                   <Icon name="save" size={14} />
                   {saving ? 'Saving…' : 'Save'}
                 </button>
-                <button
-                  className="button small subtle lean-check-button"
-                  onClick={check}
+                <CheckControls
+                  onCheck={() => void check()}
+                  onStop={() => void stopCheck()}
                   disabled={
                     project.status !== 'ready' ||
                     !file?.path.endsWith('.lean') ||
-                    saving ||
-                    !!(job && !terminalJob(job))
+                    saving
                   }
-                >
-                  <Icon name="check" size={14} />
-                  {job && !terminalJob(job)
-                    ? 'Checking…'
-                    : singleFileMode
-                      ? 'Check File'
-                      : 'Check Project'}
-                </button>
+                  singleFile={singleFileMode}
+                  starting={startingCheck}
+                  activeJob={job && !terminalJob(job) ? job : null}
+                  stopping={stoppingCheck}
+                />
               </div>
             </div>
             {project.status === 'ready' ? (
@@ -1964,6 +2038,13 @@ export function Studio() {
                 kept so you can restore it.
               </p>
             )}
+            {deleteTarget.kind !== 'chat' && (
+              <p>
+                If this project has active checks, Lemex runs, or setup, choose
+                <strong> Stop all processes and move to Trash</strong>. LeanFlow
+                will wait for them to stop before moving the item.
+              </p>
+            )}
             {dirty &&
               deleteTarget.projectId === projectId &&
               (deleteTarget.kind === 'project' ||
@@ -1988,78 +2069,36 @@ export function Studio() {
             >
               Cancel
             </button>
+            {deleteTarget.kind !== 'chat' && (
+              <button
+                className="button danger"
+                disabled={deleteBusy}
+                onClick={() => void deleteItem(true)}
+              >
+                {deleteBusy && deleteStopping
+                  ? 'Stopping processes…'
+                  : 'Stop all processes and move to Trash'}
+              </button>
+            )}
             <button
               className="button danger"
               disabled={deleteBusy}
               onClick={() => void deleteItem()}
             >
-              {deleteBusy ? 'Moving…' : 'Move to Trash'}
+              {deleteBusy && !deleteStopping ? 'Moving…' : 'Move to Trash'}
             </button>
           </footer>
         </Dialog>
       )}
       {trashOpen && (
-        <Dialog
-          title="Trash"
-          subtitle="Restore deleted files, folders, or projects. Existing files are never overwritten."
-          busy={!!restoring}
+        <TrashDialog
+          items={trashItems}
+          error={trashError}
+          restoring={restoring}
+          onRestore={restoreItem}
+          onDeleteForever={deleteForever}
           onClose={() => setTrashOpen(false)}
-        >
-          <div className="trash-list">
-            {trashError && (
-              <p className="error-message" role="alert">
-                {trashError}
-              </p>
-            )}
-            {!trashItems.length && !trashError && (
-              <p className="field-help">Trash is empty.</p>
-            )}
-            {trashItems.map((item) => (
-              <div className="trash-item" key={item.trashId}>
-                <Icon
-                  name={
-                    item.kind === 'file' || item.workspaceKind === 'single-file'
-                      ? 'file'
-                      : 'folder'
-                  }
-                  size={18}
-                />
-                <div>
-                  <strong>
-                    {item.name ||
-                      item.path ||
-                      item.projectName ||
-                      'Deleted project'}
-                  </strong>
-                  <span>
-                    {item.kind === 'project' &&
-                    item.workspaceKind === 'single-file'
-                      ? 'playground'
-                      : item.kind}{' '}
-                    · {item.projectName || item.projectId} ·{' '}
-                    {new Date(item.createdAt).toLocaleString()}
-                  </span>
-                </div>
-                <button
-                  className="button small secondary"
-                  disabled={!!restoring}
-                  onClick={() => void restoreItem(item)}
-                >
-                  {restoring === item.trashId ? 'Restoring…' : 'Restore'}
-                </button>
-              </div>
-            ))}
-          </div>
-          <footer className="dialog-actions">
-            <button
-              className="button secondary"
-              disabled={!!restoring}
-              onClick={() => setTrashOpen(false)}
-            >
-              Close
-            </button>
-          </footer>
-        </Dialog>
+        />
       )}
       {projectModal && (
         <ProjectModal

@@ -271,6 +271,7 @@ export async function chatBrowserFixture({
           return respond(
             state.chats.filter((chat) => chat.projectId === project.id),
           )
+        if (endpoint === `${prefix}/checks`) return respond([])
         if (endpoint === `${prefix}/runs`)
           return respond(
             state.runs

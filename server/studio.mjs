@@ -16,6 +16,7 @@ import { ChatStore } from './chats.mjs'
 import { createChatTitleGenerator } from './chat-titles.mjs'
 import { searchDeclarations } from './search.mjs'
 import { LspFrames, frame, validateClientUris } from './rpc.mjs'
+import { ProjectActivity } from './project-activity.mjs'
 import { acquireServerLease } from './lease.mjs'
 import { repairProjectSetup } from './setup-repair.mjs'
 import { GitPublisher } from './git-publish.mjs'
@@ -206,6 +207,13 @@ export async function createStudio({
         { signal: args.signal },
       )
   const jobs = new JobManager({ runtime, workspaces, events })
+  const activity = new ProjectActivity({
+    events,
+    jobs,
+    agents,
+    workspaces,
+    runtime,
+  })
   const app = express(),
     server = http.createServer(app),
     sockets = new Set(),
@@ -218,7 +226,11 @@ export async function createStudio({
   }
   const origin = process.env.STUDIO_ORIGIN
   let publisher
-  const requireNoGit = (projectId, owner, { includeArchived = false } = {}) => {
+  const requireNoGit = (
+    projectId,
+    owner,
+    { includeArchived = false, ignoreStopping = false } = {},
+  ) => {
     if (includeArchived) {
       if (
         !workspaces.db
@@ -227,6 +239,7 @@ export async function createStudio({
       )
         throw Object.assign(new Error('Project not found.'), { status: 404 })
     } else workspaces.get(projectId, owner)
+    if (!ignoreStopping) activity.assertCanStart(owner, projectId)
     if (publisher?.busy.has(projectId))
       throw Object.assign(
         new Error(
@@ -237,6 +250,7 @@ export async function createStudio({
   }
   const requireNoRun = (projectId, owner, { ignoreGit = false } = {}) => {
     if (!ignoreGit) requireNoGit(projectId, owner)
+    else activity.assertCanStart(owner, projectId)
     if (
       events.db
         .prepare(
@@ -251,11 +265,15 @@ export async function createStudio({
         { status: 409 },
       )
   }
-  const requireNoActiveWork = (projectId, owner) => {
-    requireNoGit(projectId, owner, { includeArchived: true })
+  const requireNoActiveWork = (
+    projectId,
+    owner,
+    { ignoreStopping = false } = {},
+  ) => {
+    requireNoGit(projectId, owner, { includeArchived: true, ignoreStopping })
     const active = events.db
       .prepare(
-        "SELECT 1 FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.status') IN ('queued','running','stopping','verifying') LIMIT 1",
+        "SELECT 1 FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') LIMIT 1",
       )
       .get(owner, projectId)
     if (active || workspaces.jobs.has(projectId))
@@ -475,23 +493,40 @@ export async function createStudio({
       !req.body ||
       typeof req.body !== 'object' ||
       Array.isArray(req.body) ||
-      (req.body.path !== undefined && typeof req.body.path !== 'string')
+      (req.body.path !== undefined && typeof req.body.path !== 'string') ||
+      (req.body.stopActive !== undefined &&
+        typeof req.body.stopActive !== 'boolean')
     )
       throw Object.assign(
         new Error(
-          'Choose a file or folder path, or omit path to archive the project.',
+          'Choose a file or folder path, or omit path to archive the project. stopActive must be true or false.',
         ),
         { status: 400 },
       )
     workspaces.get(req.params.id, req.user.id)
-    const assertIdle = () => requireNoActiveWork(req.params.id, req.user.id)
-    assertIdle()
-    const receipt = await workspaces.trash(
-      req.params.id,
-      req.user.id,
-      req.body.path,
-      { assertIdle },
-    )
+    requireNoGit(req.params.id, req.user.id)
+    const move = async (ignoreStopping = false) => {
+      const assertIdle = () =>
+        requireNoActiveWork(req.params.id, req.user.id, { ignoreStopping })
+      assertIdle()
+      return workspaces.trash(req.params.id, req.user.id, req.body.path, {
+        assertIdle,
+        candidateRunIds:
+          req.body.path === undefined
+            ? events
+                .projectMetadata(req.user.id, req.params.id)
+                .map((job) => job.id)
+            : [],
+      })
+    }
+    const receipt = req.body.stopActive
+      ? await activity.withStopped(req.user.id, req.params.id, async () => {
+          for (const ws of sockets)
+            if (socketProjects.get(ws) === req.params.id)
+              ws.close(1001, 'Project processes stopped for Trash.')
+          return move(true)
+        })
+      : await move()
     if (receipt.kind === 'project')
       for (const ws of sockets)
         if (socketProjects.get(ws) === receipt.projectId)
@@ -503,13 +538,54 @@ export async function createStudio({
       closeProjectEditors(receipt.projectId)
     res.json(receipt)
   })
-  app.get('/api/trash', (req, res) =>
+  app.get('/api/trash', async (req, res) =>
     res.json(
-      [...workspaces.listTrash(req.user.id), ...chats.listTrash(req.user.id)]
+      [
+        ...(await workspaces.listTrashWithSizes(req.user.id, {
+          projectRunIds: (id) =>
+            events.projectMetadata(req.user.id, id).map((job) => job.id),
+        })),
+        ...chats.listTrash(req.user.id),
+      ]
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
         .slice(0, 100),
     ),
   )
+  app.post('/api/trash/:id/delete-forever', async (req, res) => {
+    if (
+      !req.body ||
+      typeof req.body !== 'object' ||
+      Array.isArray(req.body) ||
+      Object.keys(req.body).length
+    )
+      throw Object.assign(
+        new Error('Send an empty object to delete this item forever.'),
+        {
+          status: 400,
+        },
+      )
+    let entry
+    try {
+      entry = workspaces.getTrash(req.params.id, req.user.id)
+    } catch (error) {
+      if (error.status !== 404) throw error
+      return res.json(chats.deleteForever(req.user.id, req.params.id))
+    }
+    const assertIdle = () => requireNoActiveWork(entry.projectId, req.user.id)
+    assertIdle()
+    const result = await workspaces.deleteForever(req.params.id, req.user.id, {
+      assertIdle,
+      candidateRunIds:
+        entry.kind === 'project'
+          ? events
+              .projectMetadata(req.user.id, entry.projectId)
+              .map((job) => job.id)
+          : [],
+    })
+    if (entry.kind === 'project')
+      chats.deleteProject(req.user.id, entry.projectId)
+    res.json(result)
+  })
   app.post('/api/trash/:id/restore', async (req, res) => {
     let entry
     try {
@@ -538,9 +614,11 @@ export async function createStudio({
     ...(await publisher.metadata(user.id, id)),
     author: { name: user.name, email: `${user.id}@lemex-web.local` },
   })
-  app.get('/api/projects/:id/git', async (req, res) =>
-    res.json(await gitInfo(req.params.id, req.user)),
-  )
+  app.get('/api/projects/:id/git', async (req, res) => {
+    workspaces.get(req.params.id, req.user.id)
+    activity.assertCanStart(req.user.id, req.params.id)
+    res.json(await gitInfo(req.params.id, req.user))
+  })
   app.post('/api/projects/:id/git', async (req, res) => {
     const { action, name, message, authorName, authorEmail, reviewToken } =
       req.body
@@ -708,9 +786,21 @@ export async function createStudio({
     const job = jobs.check(req.user.id, req.params.id, req.body.path)
     res.status(202).json(publicJob(events.snapshot(job.id, req.user.id)))
   })
+  app.get('/api/projects/:id/checks', (req, res) => {
+    workspaces.get(req.params.id, req.user.id)
+    res.json(
+      events
+        .activeMetadata(req.user.id, req.params.id, 'check')
+        .map((job) => publicJob(events.snapshot(job.id, req.user.id))),
+    )
+  })
   app.get('/api/jobs/:id', (req, res) =>
     res.json(publicJob(events.snapshot(req.params.id, req.user.id))),
   )
+  app.post('/api/jobs/:id/stop', async (req, res) => {
+    await jobs.stop(req.user.id, req.params.id)
+    res.json(publicJob(events.snapshot(req.params.id, req.user.id)))
+  })
   app.get('/api/projects/:id/chats', (req, res) =>
     res.json(chats.list(req.user.id, req.params.id)),
   )
@@ -855,6 +945,7 @@ export async function createStudio({
       return reject('404 Not Found')
     }
     if (project.status !== 'ready') return reject('409 Conflict')
+    if (activity.isStopping(user.id, project.id)) return reject('409 Conflict')
     if (
       sockets.size >= capacity.editors ||
       (languageServers.get(project.id) || 0) >= capacity.editorsPerProject

@@ -79,6 +79,21 @@ export interface Project {
   }
 }
 
+export interface TrashItem {
+  workspaceKind?: 'single-file' | 'project'
+  chatId?: string
+  trashId: string
+  projectId: string
+  projectName?: string
+  name?: string
+  path: string | null
+  kind: 'project' | 'file' | 'folder' | 'chat'
+  createdAt: string
+  sizeBytes?: number | null
+  recoverable?: boolean
+  deleting?: boolean
+}
+
 export interface GitInfo {
   repository: boolean
   branch?: string | null

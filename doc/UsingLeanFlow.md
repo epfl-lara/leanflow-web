@@ -22,6 +22,10 @@ Use **Upload** or drag files/folders into the upload area. **Upload** in the Fil
 
 **Let Lemex repair setup if needed** allows an automatic configuration repair after setup fails. Use **Stop setup** to cancel.
 
+## Stop a running check
+
+While a project or file check runs, **Checking…** shows the elapsed wall-clock time in minutes. Use **Stop check** beside it to cancel the check and wait for its worker to stop. Fix or remove the blocking command before checking again.
+
 ## Ask about one proof
 
 1. Open a Lean file. In **Outline**, click a declaration to navigate, then **+ Chat** to attach it.
@@ -71,7 +75,9 @@ To jump to a declaration from the editor, put the cursor on its name and press *
 
 In **Source control**, save files, review the diff, and enter a commit message. Use **New branch** if needed. To push, choose a repository and branch in **Publish**, then **Preview push**. Review it and provide a repository token with push permission; the token is used only for that push and stays out of the proof agent.
 
-Deleted files, folders, projects, and chats go to **Trash**. Use **Restore** or the immediate **Undo** notice. Stop an active chat before deleting it.
+Deleted files, folders, projects, and chats go to **Trash**. Use **Restore** or the immediate **Undo** notice. To trash a project with active work, choose **Stop all processes and move to Trash** in its confirmation dialog. LeanFlow stops its checks, Lemex runs, and setup before moving it. Stop an active chat before deleting it.
+
+In **Trash**, each item shows its size in MB. Files, folders, and projects show allocated disk space; chats show their stored content size. Shared dependency targets are excluded from project sizes. Click the red **X** to review the name, project, size, and deletion date. Choose **Delete Forever** to permanently remove it, or **Do Nothing** to keep it in Trash. Permanently deleting a project also removes its saved chats and runs.
 
 Drag separators to resize panels; double-click to reset. If sign-in expires, use the recovery dialog with the same token to keep your edits and drafts.
 

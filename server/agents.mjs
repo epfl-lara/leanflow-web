@@ -646,6 +646,7 @@ export class AgentManager {
         child.once('close', resolve)
         child.once('error', resolve)
       })
+      active.workerStopped = child.workerStopped
       const rpc = (active.rpc = new AgentRpc(child))
       child.stderr.on('data', (text) => {
         // Runtime debug messages stay server-side; only bounded useful failures are surfaced.
@@ -976,6 +977,12 @@ export class AgentManager {
       active.rpc?.close()
       try {
         await active.childClosed
+        let cleanupError
+        try {
+          await active.workerStopped
+        } catch (error) {
+          cleanupError = error
+        }
         active.output?.flush()
         await active.mirror?.stop()
         await this.followups.finish(
@@ -984,6 +991,11 @@ export class AgentManager {
             ? 'The run stopped before this message was accepted.'
             : undefined,
         )
+        if (cleanupError) {
+          const message = this.config.redact(cleanupError.message)
+          this.events.updateMetadata(id, { status: 'failed', error: message })
+          this.#progress(id, 'Failed', message)
+        }
       } finally {
         this.active.delete(id)
         active.resolveDone()
@@ -995,6 +1007,8 @@ export class AgentManager {
     const active = this.active.get(id)
     if (TERMINAL.has(job.status)) {
       await active?.mirror?.stop()
+      await active?.done
+      await active?.workerStopped
       return this.events.get(id, owner)
     }
     if (active?.stopPromise) return active.stopPromise
@@ -1020,6 +1034,7 @@ export class AgentManager {
     const stopped = (async () => {
       await active?.mirror?.stop()
       await active?.done
+      await active?.workerStopped
       await this.followups.finish(
         id,
         'The run stopped before this message was accepted.',
@@ -1030,6 +1045,25 @@ export class AgentManager {
     })()
     if (active) active.stopPromise = stopped
     return stopped
+  }
+  async stopProject(owner, projectId) {
+    this.workspaces.get(projectId, owner)
+    const ids = new Set(
+      this.events
+        .activeMetadata(owner, projectId, 'agent')
+        .map((job) => job.id),
+    )
+    for (const id of this.active.keys()) {
+      const job = this.events.getMetadata(id)
+      if (job.owner === owner && job.projectId === projectId) ids.add(id)
+    }
+    const results = await Promise.allSettled(
+      [...ids].map((id) =>
+        this.stop(owner, id, 'Stopped before moving the project to Trash.'),
+      ),
+    )
+    const failed = results.find((result) => result.status === 'rejected')
+    if (failed) throw failed.reason
   }
   async apply(owner, id) {
     const job = this.events.get(id, owner)

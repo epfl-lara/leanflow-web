@@ -948,9 +948,29 @@ export class Runtime {
     })
     child.workerHome = home
     child.containerName = name
+    child.workspaceRoot = path.resolve(root)
     this.children.add(child)
     let timer
     let closing = false
+    let removal
+    const removeWorker = async () => {
+      try {
+        const result = await this.#host(['rm', '-f', name])
+        if (
+          result.code === 0 ||
+          /No such (?:container|object)/i.test(result.stderr)
+        )
+          return
+      } catch {
+        // Cleanup failures are actionable without exposing host configuration.
+      }
+      throw Object.assign(
+        new Error(
+          'The project worker could not be stopped. Try again, or ask the server administrator to check the worker service.',
+        ),
+        { status: 503, workerCleanup: true },
+      )
+    }
     const originalKill = child.kill.bind(child)
     child.kill = (signal = 'SIGTERM') => {
       if (closing) return false
@@ -958,15 +978,13 @@ export class Runtime {
       child.cancelled = true
       // Killing the container removes the complete worker process tree, including
       // language servers, shell jobs, MCP tools, and agent code-mode subprocesses.
-      this.#host(['rm', '-f', name]).catch(() => {})
+      removal = removeWorker()
+      removal.catch(() => {})
       try {
         originalKill(signal)
       } catch {
         /* Already exited. */
       }
-      setTimeout(() => {
-        this.#host(['rm', '-f', name]).catch(() => {})
-      }, 250).unref()
       return true
     }
     const abort = () => child.kill('SIGTERM')
@@ -980,13 +998,29 @@ export class Runtime {
       child.stdout.on('data', (chunk) => onOutput(chunk.toString(), 'stdout'))
       child.stderr.on('data', (chunk) => onOutput(chunk.toString(), 'stderr'))
     }
-    child.once('close', () => {
-      if (timer) clearTimeout(timer)
-      signal?.removeEventListener('abort', abort)
-      this.children.delete(child)
-      this.#host(['rm', '-f', name]).catch(() => {})
-      this.#drain()
-    })
+    const closed = new Promise((resolve) => child.once('close', resolve))
+    let cleanup
+    child.cleanupWorker = () => {
+      cleanup ||= (async () => {
+        await closed
+        if (timer) clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
+        await removal?.catch(() => {})
+        // The final removal happens after the Docker client has exited, so a
+        // cancelled launch cannot create its container after this check.
+        await removeWorker()
+        this.children.delete(child)
+        this.#drain()
+      })().catch((error) => {
+        cleanup = undefined
+        throw error
+      })
+      return cleanup
+    }
+    child.workerStopped = child.cleanupWorker()
+    // Callers observe cleanup failure through run() or workerStopped. Retain
+    // the child in the live set so a later project stop can retry safely.
+    child.workerStopped.catch(() => {})
     return child
   }
 
@@ -1066,17 +1100,21 @@ export class Runtime {
         stderr = append(stderr, chunk)
       })
       child.once('error', reject)
-      child.once('close', (code, signal) =>
-        resolve({
-          code: code ?? (child.timedOut ? 124 : 130),
-          stdout,
-          stderr,
-          signal,
-          timedOut: Boolean(child.timedOut),
-          cancelled: Boolean(child.cancelled),
-          truncated,
-        }),
-      )
+      child.once('close', (code, signal) => {
+        child.workerStopped.then(
+          () =>
+            resolve({
+              code: code ?? (child.timedOut ? 124 : 130),
+              stdout,
+              stderr,
+              signal,
+              timedOut: Boolean(child.timedOut),
+              cancelled: Boolean(child.cancelled),
+              truncated,
+            }),
+          reject,
+        )
+      })
       child.stdin.on('error', (error) => {
         if (error.code !== 'EPIPE') reject(error)
       })
@@ -1287,7 +1325,32 @@ export class Runtime {
     ])
     const containers = list.stdout.trim().split(/\s+/).filter(Boolean)
     if (containers.length) await this.#host(['rm', '-f', ...containers])
+    await Promise.allSettled(children.map((child) => child.workerStopped))
     await Promise.allSettled([...this.sharedCache.building.values()])
+  }
+
+  async stopProject(root) {
+    const resolved = path.resolve(root)
+    for (let index = this.queue.length - 1; index >= 0; index--) {
+      const job = this.queue[index]
+      if (path.resolve(job.root) !== resolved) continue
+      this.queue.splice(index, 1)
+      job.options.signal?.removeEventListener('abort', job.abort)
+      job.reject(
+        Object.assign(new Error('This project stopped its queued work.'), {
+          status: 409,
+        }),
+      )
+    }
+    const children = [...this.children].filter(
+      (child) => child.workspaceRoot === resolved,
+    )
+    for (const child of children) child.kill('SIGTERM')
+    const results = await Promise.allSettled(
+      children.map((child) => child.cleanupWorker()),
+    )
+    const failed = results.find((result) => result.status === 'rejected')
+    if (failed) throw failed.reason
   }
 }
 
