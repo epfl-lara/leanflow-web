@@ -97,14 +97,26 @@ function Brand() {
         <img className="brand-mark" src="/leanflow-mark.svg" alt="" />
         <strong>LeanFlow Web</strong>
       </div>
-      <a
-        className="brand-credit"
-        href="https://lara.epfl.ch/"
-        target="_blank"
-        rel="noreferrer"
-      >
-        Developed by EPFL LARA
-      </a>
+      <div className="brand-links">
+        <a
+          className="brand-credit"
+          href="https://lara.epfl.ch/"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Developed by EPFL LARA
+        </a>
+        <span aria-hidden="true">·</span>
+        <a
+          className="brand-credit"
+          href="https://github.com/epfl-lara/leanflow-web"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="LeanFlow Web on GitHub (opens in a new tab)"
+        >
+          GitHub
+        </a>
+      </div>
     </div>
   )
 }
