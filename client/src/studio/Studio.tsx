@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type FormEvent,
   type CSSProperties,
 } from 'react'
@@ -18,7 +19,6 @@ import {
   SESSION_RESTORED_EVENT,
   type FileEntry,
   type GitInfo,
-  type OpenFile,
   type Project,
   type Session,
   type TrashItem,
@@ -33,6 +33,7 @@ import { Icon } from './Icons'
 import { HelpTip } from './HelpTip'
 import { ToolbarAction } from './ToolbarAction'
 import { LeanWorkspace } from './LeanWorkspace'
+import { WorkspaceBuffers } from './workspaceBuffers'
 import { PdfFileViewer } from './PdfFileViewer'
 import { MarkdownFilePreview } from './MarkdownFilePreview'
 import { isMarkdownPath } from './fileReading'
@@ -261,7 +262,17 @@ export function Studio() {
   const [folders, setFolders] = useState<string[]>([])
   const [foldersAvailable, setFoldersAvailable] = useState<boolean | null>(null)
   const [createdFolder, setCreatedFolder] = useState<string | null>(null)
-  const [file, setFile] = useState<OpenFile | null>(null)
+  const [bufferStore] = useState(() => new WorkspaceBuffers())
+  const {
+    file,
+    buffers,
+    discardVersion,
+    saveVersion,
+    savedPaths,
+    removeVersion,
+    removedPaths,
+  } = useSyncExternalStore(bufferStore.subscribe, bufferStore.getSnapshot)
+  const setFile = bufferStore.setFile
   const [markdownPreview, setMarkdownPreview] = useState(false)
   const [proofFocus, setProofFocus] = useState<ProofFocusRequest | null>(null)
   const [editorProof, setEditorProof] = useState<EditorProofState | null>(null)
@@ -275,6 +286,8 @@ export function Studio() {
   const [git, setGit] = useState<GitInfo | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [reloadBusy, setReloadBusy] = useState(false)
+  const [reloadTarget, setReloadTarget] = useState<string | null>(null)
   const [agentPendingFile, setAgentPendingFile] = useState<string | null>(null)
   const [projectModal, setProjectModal] = useState<{ preset?: string } | null>(
     null,
@@ -405,7 +418,16 @@ export function Studio() {
     Math.min(80, 100 - (100 / sourceSectionsSize.height) * 100),
   )
   const fileTreePercent = clamp(fileTreeSize, fileTreeMinimum, fileTreeMaximum)
-  const dirty = !!file && file.content !== file.savedContent
+  const dirtyFiles = bufferStore.dirty()
+  const dirtyKey = dirtyFiles
+    .map((file) => file.path)
+    .sort()
+    .join('\0')
+  const dirtyPaths = useMemo(
+    () => new Set(dirtyKey.split('\0').filter(Boolean)),
+    [dirtyKey],
+  )
+  const dirty = dirtyFiles.length > 0
   const pdfPreview = file?.preview === 'pdf'
   const readingFile =
     pdfPreview || (isMarkdownPath(file?.path) && markdownPreview)
@@ -577,21 +599,26 @@ export function Studio() {
       setError('')
       try {
         const pdf = isPdfFile(path)
-        const value = pdf
-          ? { content: '', hash: '', readOnly: true }
-          : await api<{
-              content: string
-              hash: string
-              readOnly?: boolean
-            }>(
-              `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
-            )
+        const cached = bufferStore.getSnapshot().buffers.get(path)
+        const value =
+          cached && cached.content !== cached.savedContent
+            ? cached
+            : pdf
+              ? { content: '', hash: '', readOnly: true }
+              : await api<{
+                  content: string
+                  hash: string
+                  readOnly?: boolean
+                }>(
+                  `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
+                )
         if (request !== openRequest.current || projectIdRef.current !== id)
           return
         setFile({
           path,
           content: value.content,
-          savedContent: value.content,
+          savedContent:
+            cached && value === cached ? cached.savedContent : value.content,
           hash: value.hash,
           generation: ++generation.current,
           readOnly:
@@ -610,7 +637,7 @@ export function Studio() {
         if (request === openRequest.current) setOpening(false)
       }
     },
-    [],
+    [bufferStore, setFile],
   )
 
   useEffect(() => {
@@ -664,22 +691,40 @@ export function Studio() {
     loadFiles,
     loadGit,
     openFile,
+    setFile,
   ])
 
   const saveFile = useCallback(async () => {
     if (savePromise.current) return savePromise.current
-    const snapshot = fileRef.current
+    const snapshots = bufferStore.dirty()
+    const snapshot = snapshots[0]
     const id = projectIdRef.current
-    if (
-      !snapshot ||
-      !id ||
-      snapshot.readOnly ||
-      snapshot.content === snapshot.savedContent
-    )
-      return
+    if (!snapshot || !id || snapshot.readOnly || !snapshots.length) return
     const task = (async () => {
       setSaving(true)
       try {
+        if (snapshots.length > 1 || snapshot.path !== fileRef.current?.path) {
+          const value = await api<{
+            applied: number
+            requiresPreparation: boolean
+            files: { path: string; hash: string }[]
+          }>(`/api/projects/${encodeURIComponent(id)}/files`, {
+            method: 'PUT',
+            body: JSON.stringify({
+              files: snapshots.map((file) => ({
+                path: file.path,
+                content: file.content,
+                expectedHash: file.hash,
+              })),
+            }),
+          })
+          if (projectIdRef.current === id)
+            bufferStore.saved(snapshots, value.files)
+          setNotice(`Saved ${snapshots.length} files`)
+          if (value.requiresPreparation) await loadProjects()
+          else void loadGit(id)
+          return
+        }
         const value = await api<{
           content: string
           hash: string
@@ -695,15 +740,9 @@ export function Studio() {
           },
         )
         if (projectIdRef.current === id)
-          setFile((current) =>
-            current?.path === snapshot.path
-              ? {
-                  ...current,
-                  savedContent: value.content ?? snapshot.content,
-                  hash: value.hash,
-                }
-              : current,
-          )
+          bufferStore.saved(snapshots, [
+            { path: snapshot.path, hash: value.hash },
+          ])
         setNotice('File saved')
         if (value.requiresPreparation) await loadProjects()
         else void loadGit(id)
@@ -714,54 +753,41 @@ export function Studio() {
     })()
     savePromise.current = task
     return task
-  }, [loadGit, loadProjects])
+  }, [loadGit, loadProjects, bufferStore])
 
   const saveCompletely = useCallback(async () => {
     // Saving is optimistic: preserve edits made during the request and save them
     // before handing a snapshot to an assistant or changing the current file.
     await saveFile()
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
-    const current = fileRef.current
-    if (current && current.content !== current.savedContent) await saveFile()
+    if (bufferStore.dirty().length) await saveFile()
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
-    if (
-      fileRef.current &&
-      fileRef.current.content !== fileRef.current.savedContent
-    )
+    if (bufferStore.dirty().length)
       throw new Error(
-        'The file is still being edited. Save it before continuing.',
+        'Files are still being edited. Save them before continuing.',
       )
-  }, [saveFile])
+  }, [saveFile, bufferStore])
 
   const beforeApply = useCallback(async () => {
     if (savePromise.current)
       throw new Error(
         'A file save is still in progress. Wait for it to finish before applying the candidate.',
       )
-    const current = fileRef.current
-    if (current && current.content !== current.savedContent)
+    if (bufferStore.dirty().length)
       throw new Error(
         'The editor has unsaved changes. Keep them and start a new run, or discard them before applying this candidate.',
       )
-  }, [])
+  }, [bufferStore])
 
   const discardUnsavedEdits = useCallback(async () => {
     if (savePromise.current)
       throw new Error(
         'A file save is still in progress. Wait for it to finish before discarding edits.',
       )
-    setFile((current) =>
-      current
-        ? {
-            ...current,
-            content: current.savedContent,
-            generation: ++generation.current,
-          }
-        : current,
-    )
+    bufferStore.discard(++generation.current)
     setNotice('Unsaved edits discarded')
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
-  }, [])
+  }, [bufferStore])
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
@@ -771,10 +797,7 @@ export function Studio() {
       }
     }
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (
-        fileRef.current &&
-        fileRef.current.content !== fileRef.current.savedContent
-      ) {
+      if (bufferStore.dirty().length) {
         event.preventDefault()
         event.returnValue = ''
       }
@@ -785,7 +808,7 @@ export function Studio() {
       window.removeEventListener('keydown', keydown)
       window.removeEventListener('beforeunload', beforeUnload)
     }
-  }, [saveFile])
+  }, [saveFile, bufferStore])
 
   useEffect(() => {
     if (!notice) return
@@ -793,21 +816,25 @@ export function Studio() {
     return () => clearTimeout(timer)
   }, [notice])
 
-  const navigate = useCallback((action: () => Promise<void>) => {
-    if (
-      fileRef.current &&
-      fileRef.current.content !== fileRef.current.savedContent
-    )
-      setPendingAction(() => action)
-    else void action().catch((error) => setError(errorText(error)))
-  }, [])
+  const navigate = useCallback(
+    (action: () => Promise<void>) => {
+      if (bufferStore.dirty().length) setPendingAction(() => action)
+      else void action().catch((error) => setError(errorText(error)))
+    },
+    [bufferStore],
+  )
 
   const chooseFile = useCallback(
     (path: string) => {
       const id = projectIdRef.current
-      if (id) navigate(() => openFile(id, path))
+      if (id) {
+        const action = () => openFile(id, path)
+        if (bufferStore.getSnapshot().buffers.has(path))
+          void action().catch((error) => setError(errorText(error)))
+        else navigate(action)
+      }
     },
-    [navigate, openFile],
+    [navigate, openFile, bufferStore],
   )
 
   function acceptCreatedProject(created: Project) {
@@ -863,6 +890,7 @@ export function Studio() {
     if (!pendingAction) return
     try {
       if (save) await saveCompletely()
+      else await discardUnsavedEdits()
       const action = pendingAction
       setPendingAction(null)
       await action()
@@ -1079,7 +1107,7 @@ export function Studio() {
           : 'Agent edits updated live',
       )
     },
-    [loadFiles, loadGit, openFile],
+    [loadFiles, loadGit, openFile, setFile],
   )
 
   useEffect(() => {
@@ -1175,6 +1203,21 @@ export function Studio() {
         throw new Error(
           'Wait for the current file save to finish before deleting.',
         )
+      if (
+        target.kind !== 'chat' &&
+        projectIdRef.current === target.projectId &&
+        bufferStore
+          .dirty()
+          .some(
+            (buffer) =>
+              !target.path ||
+              buffer.path === target.path ||
+              buffer.path.startsWith(target.path + '/'),
+          )
+      )
+        throw new Error(
+          'Save or discard unsaved changes in the files being deleted before moving them to Trash.',
+        )
       const receipt = await post<TrashItem>(
         target.kind === 'chat'
           ? `/api/chats/${encodeURIComponent(target.chatId!)}/trash`
@@ -1209,10 +1252,8 @@ export function Studio() {
           !!current &&
           (current.path === target.path ||
             current.path.startsWith(target.path + '/'))
-        if (removed) {
-          ++openRequest.current
-          setFile(null)
-        }
+        if (target.path) bufferStore.remove(target.path)
+        if (removed) ++openRequest.current
         const updated = await loadProjects()
         if (
           updated.find((item) => item.id === target.projectId)?.status ===
@@ -1498,6 +1539,7 @@ export function Studio() {
                   revealFolder={createdFolder}
                   selectedPath={file?.path}
                   dirty={dirty}
+                  dirtyPaths={dirtyPaths}
                   disabled={opening || saving}
                   filter={fileFilter}
                   ready={workspaceEditable}
@@ -2102,8 +2144,21 @@ export function Studio() {
                   disabled={!dirty || saving || opening || file?.readOnly}
                 >
                   <Icon name="save" size={14} />
-                  {saving ? 'Saving…' : 'Save'}
+                  {saving
+                    ? 'Saving…'
+                    : dirtyFiles.length > 1
+                      ? `Save all (${dirtyFiles.length})`
+                      : 'Save'}
                 </button>
+                {file && !file.readOnly && (
+                  <button
+                    className="button small subtle"
+                    disabled={saving || opening}
+                    onClick={() => setReloadTarget(file.path)}
+                  >
+                    Reload file
+                  </button>
+                )}
                 <CheckControls
                   onCheck={() => void check()}
                   onStop={() => void stopCheck()}
@@ -2128,6 +2183,13 @@ export function Studio() {
                   key={project.id}
                   projectId={project.id}
                   file={pdfPreview ? null : file}
+                  buffers={buffers}
+                  bufferDiscardVersion={discardVersion}
+                  bufferSaveVersion={saveVersion}
+                  savedPaths={savedPaths}
+                  bufferRemoveVersion={removeVersion}
+                  removedPaths={removedPaths}
+                  onRenameSources={bufferStore.register}
                   theme={theme}
                   showInfoview={showInfoview && !!file?.path.endsWith('.lean')}
                   goalsSize={goalsSize}
@@ -2151,16 +2213,14 @@ export function Studio() {
                     setSidebarOpen(false)
                   }}
                   onState={setLeanState}
-                  onChange={(path, content) =>
-                    setFile((current) =>
-                      current?.path === path
-                        ? { ...current, content }
-                        : current,
-                    )
-                  }
-                  onOpenFile={(path, line, column) =>
-                    navigate(() => openFile(project.id, path, line, column))
-                  }
+                  onChange={bufferStore.change}
+                  onOpenFile={(path, line, column) => {
+                    const action = () =>
+                      openFile(project.id, path, line, column)
+                    if (bufferStore.getSnapshot().buffers.has(path))
+                      void action().catch((error) => setError(errorText(error)))
+                    else navigate(action)
+                  }}
                   onOpenLibrary={setLibrarySource}
                 />
               ) : (
@@ -2368,6 +2428,7 @@ export function Studio() {
                 readOnly={file?.readOnly}
                 session={session}
                 dirty={dirty}
+                dirtyFileCount={dirtyFiles.length}
                 beforeRun={saveCompletely}
                 beforeApply={beforeApply}
                 onDiscard={discardUnsavedEdits}
@@ -2436,12 +2497,15 @@ export function Studio() {
             )}
             {dirty &&
               deleteTarget.projectId === projectId &&
-              (deleteTarget.kind === 'project' ||
-                file?.path === deleteTarget.path ||
-                file?.path.startsWith(deleteTarget.path + '/')) && (
+              dirtyFiles.some(
+                (buffer) =>
+                  deleteTarget.kind === 'project' ||
+                  buffer.path === deleteTarget.path ||
+                  buffer.path.startsWith(deleteTarget.path + '/'),
+              ) && (
                 <p className="review-note">
-                  Unsaved changes in this item will be discarded. Cancel to keep
-                  or save them first.
+                  Save or discard unsaved edits in this item before moving it to
+                  Trash. Edits in other files are kept.
                 </p>
               )}
             {deleteError && (
@@ -2587,15 +2651,74 @@ export function Studio() {
           onOpenConnections={() => setGitConnectionsOpen(true)}
         />
       )}
+      {reloadTarget && (
+        <Dialog
+          title="Reload saved file"
+          busy={reloadBusy}
+          onClose={() => {
+            if (!reloadBusy) setReloadTarget(null)
+          }}
+        >
+          <p>
+            Discard unsaved changes in {reloadTarget} and reload its saved
+            contents? Edits in other files are kept.
+          </p>
+          <footer className="dialog-actions">
+            <button
+              className="button secondary"
+              disabled={reloadBusy}
+              onClick={() => setReloadTarget(null)}
+            >
+              Cancel
+            </button>
+            <button
+              className="button primary"
+              disabled={reloadBusy}
+              onClick={() =>
+                void (async () => {
+                  const id = projectIdRef.current
+                  if (!id || savePromise.current) return
+                  setReloadBusy(true)
+                  try {
+                    const latest = await api<{ content: string; hash: string }>(
+                      `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(reloadTarget)}`,
+                    )
+                    if (projectIdRef.current !== id) return
+                    setFile({
+                      path: reloadTarget,
+                      ...latest,
+                      savedContent: latest.content,
+                      generation: ++generation.current,
+                    })
+                    setReloadTarget(null)
+                    setAgentPendingFile(null)
+                  } catch (error) {
+                    setError(errorText(error))
+                    setReloadTarget(null)
+                  } finally {
+                    setReloadBusy(false)
+                  }
+                })()
+              }
+            >
+              Reload this file
+            </button>
+          </footer>
+        </Dialog>
+      )}
       {pendingAction && (
         <Dialog
           title="Save your changes?"
-          subtitle={`${file?.path || 'This file'} has unsaved edits.`}
+          subtitle={
+            dirtyFiles.length > 1
+              ? `${dirtyFiles.length} files have unsaved edits.`
+              : `${file?.path || 'This file'} has unsaved edits.`
+          }
           onClose={() => setPendingAction(null)}
           busy={saving}
         >
           <p className="dialog-body">
-            Save the current file before continuing, or discard these edits.
+            Save all changed files before continuing, or discard these edits.
           </p>
           <footer className="dialog-actions">
             <button

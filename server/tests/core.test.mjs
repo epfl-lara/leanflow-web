@@ -187,6 +187,66 @@ function rejectedSocket(url, headers) {
   })
 }
 
+test('HTTP batch saves enforce ownership and all-or-none conflicts, and protect active-run configuration', async (t) => {
+  const f = await fixture(t)
+  const endpoint = `/api/projects/${f.project.id}/files`
+  const put = (body, access = f.token) =>
+    f.request(
+      endpoint,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      access,
+    )
+  const main = await f.workspaces.readFile(f.project.id, 'owner', 'Main.lean')
+  const pin = await f.workspaces.readFile(
+    f.project.id,
+    'owner',
+    'lean-toolchain',
+  )
+  const changed = {
+    path: 'Main.lean',
+    content: main.content + '\n-- editor',
+    expectedHash: main.hash,
+  }
+  assert.equal((await put({ files: [changed] }, null)).status, 401)
+  assert.equal((await put({ files: [changed] }, f.otherToken)).status, 404)
+  for (const body of [
+    {},
+    { files: [] },
+    { files: [{ ...changed, expectedHash: null }] },
+    { files: [changed, changed] },
+  ])
+    assert.equal((await put(body)).status, 400)
+  const active = f.events.create('owner', {
+    kind: 'agent',
+    projectId: f.project.id,
+  })
+  const blocked = await put({
+    files: [
+      changed,
+      {
+        path: 'lean-toolchain',
+        content: pin.content + '\n',
+        expectedHash: pin.hash,
+      },
+    ],
+  })
+  assert.equal(blocked.status, 409)
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, 'owner', 'Main.lean')).content,
+    main.content,
+  )
+  assert.equal(f.events.getMetadata(active.id).status, 'queued')
+  f.events.updateMetadata(active.id, { status: 'completed' })
+  const saved = await put({ files: [changed] })
+  assert.equal(saved.status, 200)
+  assert.equal((await saved.json()).applied, 1)
+  assert.equal((await put({ files: [changed] })).status, 409)
+})
+
 test('HTTP folder creation validates input, enforces authentication and ownership, and reports collisions', async (t) => {
   const f = await fixture(t)
   const endpoint = `/api/projects/${f.project.id}/folders`
@@ -1524,6 +1584,13 @@ test('Lean WebSocket rename preserves qualified references in unsaved and saved 
     'Main.lean',
     '#check Saved.blank',
     file.hash,
+  )
+  const build = path.join(project.root, '.lake/build/lib/lean')
+  await fs.mkdir(build, { recursive: true })
+  await fs.writeFile(path.join(build, 'Main.ilean'), '{}')
+  await fs.writeFile(
+    path.join(build, 'Main.trace'),
+    JSON.stringify({ inputs: [['/workspace/Main.lean', 'fake build hash']] }),
   )
   const ws = new WebSocket(
     url.replace('http:', 'ws:') + '/websocket/' + project.id,

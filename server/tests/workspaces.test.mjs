@@ -698,6 +698,167 @@ test('applies new, edited and deleted files while preserving backups', async (t)
   assert.ok(contents.includes('keep this original\n'))
 })
 
+test('saving several editor buffers checks every hash before changing any file', async (t) => {
+  const { store, project } = await fixture(t)
+  await store.writeFile(project.id, 'alice', 'Use.lean', '#check Nat\n', null)
+  const main = await store.readFile(project.id, 'alice', 'Main.lean')
+  const use = await store.readFile(project.id, 'alice', 'Use.lean')
+  await store.writeFile(
+    project.id,
+    'alice',
+    'Use.lean',
+    '#check Int\n',
+    use.hash,
+  )
+  await assert.rejects(
+    store.writeFiles(project.id, 'alice', [
+      {
+        path: 'Main.lean',
+        content: 'example : True := by trivial\n',
+        expectedHash: main.hash,
+      },
+      { path: 'Use.lean', content: '#check Bool\n', expectedHash: use.hash },
+    ]),
+    { status: 409 },
+  )
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Main.lean')).content,
+    main.content,
+  )
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Use.lean')).content,
+    '#check Int\n',
+  )
+  const latest = await store.readFile(project.id, 'alice', 'Use.lean')
+  const result = await store.writeFiles(project.id, 'alice', [
+    {
+      path: 'Main.lean',
+      content: 'example : True := by trivial\n',
+      expectedHash: main.hash,
+    },
+    { path: 'Use.lean', content: '#check Bool\n', expectedHash: latest.hash },
+  ])
+  assert.equal(result.applied, 2)
+  assert.equal(result.requiresPreparation, false)
+  for (const file of result.files)
+    assert.equal(
+      (await store.readFile(project.id, 'alice', file.path)).hash,
+      file.hash,
+    )
+  assert.equal(store.get(project.id, 'alice').status, 'ready')
+})
+
+test('staged editor buffers can be saved before retrying a changed project configuration', async (t) => {
+  const { store, project } = await fixture(t)
+  const before = await store.readFile(project.id, 'alice', 'Main.lean')
+  await store.writeFile(
+    project.id,
+    'alice',
+    'lean-toolchain',
+    TOOLCHAIN + '\n-- changed\n',
+  )
+  assert(store.get(project.id, 'alice').needsPreparation)
+  const result = await store.writeFiles(project.id, 'alice', [
+    {
+      path: 'Main.lean',
+      content: before.content + '\n-- preserved draft\n',
+      expectedHash: before.hash,
+    },
+  ])
+  assert.equal(result.applied, 1)
+  assert.match(
+    (await store.readFile(project.id, 'alice', 'Main.lean')).content,
+    /preserved draft/,
+  )
+  store.jobs.set(project.id, Promise.resolve())
+  await assert.rejects(
+    store.writeFiles(project.id, 'alice', [
+      {
+        path: 'Main.lean',
+        content: 'blocked',
+        expectedHash: result.files[0].hash,
+      },
+    ]),
+    { status: 409 },
+  )
+  store.jobs.delete(project.id)
+})
+
+test('batch saves reject invalid, secret, dependency, duplicate and oversized changes without partial writes', async (t) => {
+  const { store, project } = await fixture(t)
+  const main = await store.readFile(project.id, 'alice', 'Main.lean')
+  const first = {
+    path: 'Main.lean',
+    content: 'candidate',
+    expectedHash: main.hash,
+  }
+  for (const files of [
+    null,
+    [],
+    [first, first],
+    [first, { ...first, path: '../outside.lean' }],
+    [first, { ...first, path: '.env' }],
+    [first, { ...first, path: '.lake/packages/dep/Use.lean' }],
+    [first, { ...first, expectedHash: null }],
+  ]) {
+    await assert.rejects(store.writeFiles(project.id, 'alice', files))
+    assert.equal(
+      (await store.readFile(project.id, 'alice', 'Main.lean')).content,
+      main.content,
+    )
+  }
+  const large = 'x'.repeat(7 * 1024 * 1024)
+  await assert.rejects(
+    store.writeFiles(
+      project.id,
+      'alice',
+      Array.from({ length: 5 }, (_, i) => ({
+        path: `Large${i}.lean`,
+        content: large,
+        expectedHash: main.hash,
+      })),
+    ),
+    { status: 413 },
+  )
+  await assert.rejects(store.writeFiles(project.id, 'bob', [first]), {
+    status: 404,
+  })
+})
+
+test('configuration guards run before a batch save writes any source', async (t) => {
+  const { store, project } = await fixture(t)
+  const main = await store.readFile(project.id, 'alice', 'Main.lean')
+  const pin = await store.readFile(project.id, 'alice', 'lean-toolchain')
+  await assert.rejects(
+    store.writeFiles(
+      project.id,
+      'alice',
+      [
+        { path: 'Main.lean', content: 'candidate', expectedHash: main.hash },
+        {
+          path: 'lean-toolchain',
+          content: pin.content + '\n',
+          expectedHash: pin.hash,
+        },
+      ],
+      {
+        assertConfigurationIdle: () => {
+          throw Object.assign(new Error('Active proof run'), { status: 409 })
+        },
+      },
+    ),
+    { status: 409 },
+  )
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Main.lean')).content,
+    main.content,
+  )
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'lean-toolchain')).content,
+    pin.content,
+  )
+})
+
 test('candidate symlink replacements and manifest escapes are rejected', async (t) => {
   const { store, project, dataDir } = await fixture(t)
   const snapshot = await store.snapshot(project.id, 'alice', 'run-symlink')

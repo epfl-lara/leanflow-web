@@ -60,6 +60,7 @@ export const FileBrowser = memo(function FileBrowser({
   revealFolder,
   selectedPath,
   dirty,
+  dirtyPaths,
   disabled,
   filter,
   ready,
@@ -72,6 +73,7 @@ export const FileBrowser = memo(function FileBrowser({
   revealFolder: string | null
   selectedPath?: string
   dirty: boolean
+  dirtyPaths?: ReadonlySet<string>
   disabled: boolean
   filter: string
   ready: boolean
@@ -188,7 +190,9 @@ export const FileBrowser = memo(function FileBrowser({
             </span>
           )}
         </span>
-        {selectedPath === file.path && dirty && (
+        {(dirtyPaths
+          ? dirtyPaths.has(file.path)
+          : selectedPath === file.path && dirty) && (
           <span className="dirty-dot" aria-label="Unsaved changes" />
         )}
       </button>

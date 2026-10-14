@@ -40,7 +40,21 @@ function fixture({
       method: 'textDocument/rename',
       params: {
         textDocument: { uri: filename },
-        position: { line: 0, character: 5 },
+        position: (() => {
+          const text =
+            renames.documents.get(filename)?.text ?? '#check Cell.blank'
+          const i = Math.max(
+            0,
+            text.indexOf('blank') >= 0
+              ? text.indexOf('blank')
+              : text.indexOf('empty'),
+          )
+          const head = text.slice(0, i)
+          return {
+            line: head.split('\n').length - 1,
+            character: i - (head.lastIndexOf('\n') + 1) + 1,
+          }
+        })(),
         newName,
       },
     })
@@ -48,7 +62,16 @@ function fixture({
     client({
       id: 1,
       method: 'textDocument/prepareRename',
-      params: { textDocument: { uri }, position: { line: 0, character: 14 } },
+      params: {
+        textDocument: { uri },
+        position: {
+          line: 0,
+          character: Math.min(
+            14,
+            (renames.documents.get(uri)?.text.split('\n')[0].length ?? 15) - 1,
+          ),
+        },
+      },
     })
   const reply = async (result) => {
     assert.equal(renames.receive({ jsonrpc: '2.0', id: 1, result }), false)
@@ -198,7 +221,7 @@ test('qualified input copied from a use changes only the declaration’s final n
 })
 
 test('namespace moves and malformed names fail before any edits are returned', async () => {
-  for (const newName of ['Other.blankC', 'bad name', '']) {
+  for (const newName of ['Other.blankC', 'bad name', '', 'λ', 'Π', 'Σ', ':=']) {
     const f = fixture()
     f.open('def blank := 0\n#check Cell.blank')
     f.rename(newName)
@@ -208,6 +231,27 @@ test('namespace moves and malformed names fail before any edits are returned', a
     assert.equal(f.sent[0].error.code, -32602)
     assert.equal(f.sent[0].result, undefined)
   }
+})
+
+test('Greek identifier renames preserve qualifiers using Lean identifier character classes', async () => {
+  const f = fixture()
+  f.open('def α := 0\n#check Cell.α')
+  f.client({
+    id: 1,
+    method: 'textDocument/rename',
+    params: {
+      textDocument: { uri },
+      position: { line: 0, character: 4 },
+      newName: 'β',
+    },
+  })
+  await f.reply({
+    changes: { [uri]: [edit(0, 4, 5, 'β'), edit(1, 7, 13, 'β')] },
+  })
+  assert.deepEqual(
+    f.sent[0].result.changes[uri].map((change) => change.newText),
+    ['β', 'Cell.β'],
+  )
 })
 
 test('reads unopened project sources through the guarded workspace reader', async () => {
@@ -223,8 +267,17 @@ test('reads unopened project sources through the guarded workspace reader', asyn
   assert.equal(f.sent[0].result.changes[other][0].newText, 'Cell.blankC')
 })
 
-test('multi-file renames fail as a whole before the editor can apply or save a partial rename', async () => {
-  const f = fixture()
+test('multi-file renames preserve qualifiers and return exact source buffers with saved hashes', async () => {
+  const read = []
+  const f = fixture({
+    readFile: async (path) => {
+      read.push(path)
+      return {
+        content:
+          path === 'Screen.lean' ? 'def blank := 0' : '#check Cell.blank',
+      }
+    },
+  })
   f.open('def blank := 0')
   f.rename()
   await f.reply({
@@ -233,9 +286,40 @@ test('multi-file renames fail as a whole before the editor can apply or save a p
       'file:///workspace/Use.lean': [edit(0, 7, 17)],
     },
   })
-  assert.equal(f.sent[0].error.code, -32803)
-  assert.match(f.sent[0].error.message, /affects multiple files.*Use VS Code/)
-  assert.equal(f.sent[0].result, undefined)
+  assert.deepEqual(f.sent[0].result.changes['file:///workspace/Use.lean'], [
+    edit(0, 7, 17, 'Cell.blankC'),
+  ])
+  assert.deepEqual(read, ['Screen.lean', 'Use.lean'])
+  const sources = f.sent[0].result.leanflowSources
+  assert.deepEqual(
+    sources.map((source) => [source.path, source.content, source.unsaved]),
+    [
+      ['Screen.lean', 'def blank := 0', false],
+      ['Use.lean', '#check Cell.blank', false],
+    ],
+  )
+  assert(sources.every((source) => /^[a-f0-9]{64}$/.test(source.hash)))
+})
+
+test('cross-file rename retains unsaved editor text and still records the saved-file base', async () => {
+  const f = fixture({
+    readFile: async (path) => ({
+      content: path === 'Screen.lean' ? 'def blank := 0' : '#check Cell.blank',
+    }),
+  })
+  f.open('def blank := 0\n-- unsaved')
+  f.rename()
+  await f.reply({
+    changes: {
+      [uri]: [edit(0, 4, 9)],
+      'file:///workspace/Use.lean': [edit(0, 7, 17)],
+    },
+  })
+  assert.equal(
+    f.sent[0].result.leanflowSources[0].content,
+    'def blank := 0\n-- unsaved',
+  )
+  assert.equal(f.sent[0].result.leanflowSources[0].unsaved, true)
 })
 
 test('changed buffers and mismatched versions reject the entire rename', async () => {
@@ -293,6 +377,40 @@ test('a range that no longer contains an identifier fails without returning part
   await f.reply({ changes: { [uri]: [edit(0, 4, 9), edit(1, 6, 12)] } })
   assert.equal(f.sent[0].error.code, -32803)
   assert.equal(f.sent[0].result, undefined)
+})
+
+test('a stale reference index cannot rename only part of a newer identifier', async () => {
+  for (const mode of ['prepare', 'rename']) {
+    const f = fixture()
+    f.open('#check Cell.blankC')
+    if (mode === 'prepare') {
+      f.prepare()
+      await f.reply(range(0, 7, 17))
+    } else {
+      f.rename('blankD')
+      await f.reply({ changes: { [uri]: [edit(0, 7, 17, 'blankD')] } })
+    }
+    assert.equal(f.sent[0].error.code, -32803)
+    assert.equal(f.sent[0].result, undefined)
+  }
+})
+
+test('stale indexes cannot replace another identifier, punctuation, or an adjacent expression', async () => {
+  for (const replacement of ['other', 'blank)', ':=']) {
+    const f = fixture({
+      readFile: async () => ({ content: '#check ' + replacement }),
+    })
+    f.open('def blank := 0')
+    f.rename()
+    await f.reply({
+      changes: {
+        [uri]: [edit(0, 4, 9)],
+        'file:///workspace/Use.lean': [edit(0, 7, 7 + replacement.length)],
+      },
+    })
+    assert.equal(f.sent[0].error.code, -32803)
+    assert.equal(f.sent[0].result, undefined)
+  }
 })
 
 test('untrusted response URIs and dependency edits are never read or returned', async () => {
@@ -357,4 +475,19 @@ test('unrelated messages and original Lean errors pass through without file read
   }
   assert.equal(f.renames.receive(error), false)
   assert.deepEqual(f.sent, [error])
+})
+
+test('a late update to a closed file cannot make it appear open or replace saved source', async () => {
+  const f = fixture({ readFile: async () => '#check Cell.blank' })
+  f.client({
+    method: 'textDocument/didChange',
+    params: {
+      textDocument: { uri, version: 2 },
+      contentChanges: [{ text: '#check Other.blank' }],
+    },
+  })
+  assert.equal(f.renames.documents.has(uri), false)
+  f.rename()
+  await f.reply({ changes: { [uri]: [edit(0, 7, 17)] } })
+  assert.equal(f.sent[0].result.changes[uri][0].newText, 'Cell.blankC')
 })

@@ -14,6 +14,11 @@ export function sourceBodyKind(request) {
     return 'upload'
   if (
     request.method === 'PUT' &&
+    /^\/api\/projects\/[^/]+\/files$/.test(pathname)
+  )
+    return 'batch'
+  if (
+    request.method === 'PUT' &&
     /^\/api\/projects\/[^/]+\/file$/.test(pathname)
   )
     return 'source'
@@ -58,7 +63,7 @@ export function sourceRequestAdmission({
       response.setHeader('Retry-After', '1')
       return response.status(429).json({
         error:
-          kind === 'source'
+          kind === 'source' || kind === 'batch'
             ? 'Source saves are busy. Wait a moment and try again. Your unsaved edits are preserved.'
             : 'Project creation and uploads are busy. Wait a moment and try again.',
       })

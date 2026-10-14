@@ -334,6 +334,16 @@ test('source body capacity fails fast, leaves ordinary APIs responsive and relea
     429,
     'Alternate accepted route spelling cannot bypass admission',
   )
+  for (const endpoint of ['files', 'FILES/']) {
+    const batchDenied = await overflow(
+      `/api/projects/${f.projects[0].id}/${endpoint}`,
+    )
+    assert.equal(batchDenied.status, 429)
+    assert.match(
+      (await batchDenied.json()).error,
+      /unsaved edits are preserved/,
+    )
+  }
   assert.equal(
     (await fetch(f.base + '/api/session', { headers: f.headers })).status,
     200,

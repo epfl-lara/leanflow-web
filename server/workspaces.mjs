@@ -52,7 +52,10 @@ import {
   toolchainSourceModule,
 } from './library-sources.mjs'
 
-import { sourceFileByteLimit } from '../shared/source-limits.mjs'
+import {
+  sourceFileByteLimit,
+  MAX_SOURCE_UPLOAD_BYTES,
+} from '../shared/source-limits.mjs'
 import { MAX_PDF_FILE_BYTES, isPdfFile } from '../shared/file-previews.mjs'
 import { validatePdfBytes } from './pdf-preview.mjs'
 import { validateSetupBuildTimeout } from './capacity.mjs'
@@ -3244,6 +3247,14 @@ export class WorkspaceStore {
     return this.#walk(project.root, { dependencies: true, dependencyRoot })
   }
 
+  async renameFiles(id, owner) {
+    const project = this.get(id, owner)
+    const files = await this.#walk(project.root, { limit: 10001 })
+    if (files.length > 10000)
+      fail('This project has too many files to index safely for rename.', 413)
+    return files
+  }
+
   async folders(id, owner) {
     const project = this.get(id, owner)
     return (await this.#walk(project.root, { foldersOnly: true })).map(
@@ -4133,6 +4144,38 @@ export class WorkspaceStore {
     })
   }
 
+  async writeFiles(id, owner, files, { assertConfigurationIdle } = {}) {
+    this.get(id, owner)
+    if (!Array.isArray(files) || !files.length || files.length > 1000)
+      fail('Save between 1 and 1000 files at once.')
+    let bytes = 0
+    const changes = files.map((file) => {
+      if (
+        !file ||
+        typeof file !== 'object' ||
+        typeof file.content !== 'string' ||
+        typeof file.expectedHash !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(file.expectedHash)
+      )
+        fail('Every saved file requires its content and original hash.')
+      bytes += Buffer.byteLength(file.content)
+      if (bytes > MAX_SOURCE_UPLOAD_BYTES)
+        fail('Saved files must total at most 32 MiB.', 413)
+      return {
+        path: relativeFile(file.path, { write: true }),
+        after: file.content,
+        beforeHash: file.expectedHash,
+      }
+    })
+    return this.#locked(id, () => {
+      if (this.jobs.has(id))
+        fail('Wait for project preparation to finish before saving.', 409)
+      if (changes.some((change) => CONFIGURATION_FILES.has(change.path)))
+        assertConfigurationIdle?.()
+      return this.#applyLocked(this.get(id, owner), changes, 'saved')
+    })
+  }
+
   async applyChanges(id, owner, changes, { snapshot } = {}) {
     const project = this.get(id, owner)
     this.#ready(project)
@@ -4149,7 +4192,7 @@ export class WorkspaceStore {
 
   async #applyLocked(project, changes, reason = 'applied') {
     project = this.get(project.id, project.owner)
-    this.#ready(project, reason === 'undo')
+    this.#ready(project, reason === 'undo' || reason === 'saved')
     const { id, owner } = project
     const seen = new Set()
     const prepared = []
@@ -4192,7 +4235,9 @@ export class WorkspaceStore {
       const before = pdfUpload ? null : await textFile(destination, true)
       if ((before?.hash ?? null) !== change.beforeHash)
         fail(
-          `Cannot apply: ${filename} changed since the assistant run started.`,
+          reason === 'saved'
+            ? `Cannot save: ${filename} changed since it was opened. Reload it before saving.`
+            : `Cannot apply: ${filename} changed since the assistant run started.`,
           409,
         )
       prepared.push({
@@ -4289,9 +4334,11 @@ export class WorkspaceStore {
     const action =
       reason === 'live'
         ? `Saved ${prepared.length} live assistant edits`
-        : reason === 'undo'
-          ? `Undid ${prepared.length} live assistant edits`
-          : `Applied ${prepared.length} reviewed changes`
+        : reason === 'saved'
+          ? `Saved ${prepared.length} files`
+          : reason === 'undo'
+            ? `Undid ${prepared.length} live assistant edits`
+            : `Applied ${prepared.length} reviewed changes`
     this.#event(
       project,
       reason,

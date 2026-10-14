@@ -42,6 +42,16 @@ Setup shows its current stage, from preparing Lean and libraries to testing the 
 
 Use **Refresh setup** in an open project to recheck its environment. Valid compiled caches are reused. Choose the adjacent info icon for details about cache reuse and automatic repair. Stop active checks and chats, and close the terminal before refreshing.
 
+## Rename a Lean symbol
+
+Put the cursor on a declaration or reference and press **F2**, or right-click and choose **Rename Symbol**. Enter the final name, such as `blankC`. Existing qualifiers are preserved: `Cell.blank` becomes `Cell.blankC`.
+
+Lean finds references across indexed project files, including files you have not opened. The changed files are marked in the file tree and stay in the browser until you choose **Save all** or press **Ctrl+S** (**Cmd+S** on macOS). You can open another affected file to inspect its edits. One editor undo reverses the whole rename. Existing unsaved edits are kept. Save all before starting another rename while other affected files have unsaved changes.
+
+If another editor or an assistant changed a file on disk, Save all reports a conflict and leaves every saved file unchanged. Select the affected file and copy any draft changes you need. Choose **Reload file** to load its saved contents, merge your changes, then Save all again. Reload discards only that file's draft; edits in other files are kept. Choosing **Discard edits** when leaving discards unsaved changes in all affected files. Save or discard edits in an item before deleting it.
+
+References depend on Lean's compiled project index. Prepare and build the project first. If an unopened module has no current index, rename asks you to build it. Use **Check Project**, then retry; updated indexes are loaded without reopening the project. After saving a rename, use Check Project to verify the result. Hidden text buffers retain undo history without running a separate Lean worker for every file.
+
 ## Read project documents
 
 Choose **Lean docs** beside the search bar to read local copies of _Functional Programming in Lean_, _Theorem Proving in Lean 4_, and the _Lean Language Reference_. On a small screen, use the book icon beside search. The reading panel opens below the editor, leaving Lemex available beside it. Choose **Expand** for more reading space, or **Split view** to return. Close and reopen Lean docs to keep your current chapter.

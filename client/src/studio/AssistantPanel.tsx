@@ -66,6 +66,7 @@ export function AssistantPanel({
   onApplied,
   onFilesUpdated,
   dirty,
+  dirtyFileCount = 1,
   readOnly,
   focusRequest,
   bookRequest,
@@ -87,6 +88,7 @@ export function AssistantPanel({
   onApplied: () => Promise<void>
   onFilesUpdated: (paths: string[]) => Promise<void>
   dirty: boolean
+  dirtyFileCount?: number
   readOnly?: boolean
   focusRequest?: ProofFocusRequest | null
   bookRequest?: BookChatRequest | null
@@ -1150,11 +1152,14 @@ export function AssistantPanel({
                   <strong>Apply is paused for your unsaved edits</strong>
                   <p>
                     Keep your edits and start a new run, or explicitly restore
-                    this file's saved contents.
+                    the saved contents of all changed files.
                   </p>
                   {confirmDiscard ? (
                     <>
-                      <p>Discard the unsaved changes in this file?</p>
+                      <p>
+                        Discard unsaved changes in {dirtyFileCount}{' '}
+                        {dirtyFileCount === 1 ? 'file' : 'files'}?
+                      </p>
                       <div className="unsaved-candidate-actions">
                         <button
                           className="button small secondary"

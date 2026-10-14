@@ -22,6 +22,7 @@ import { LspFrames, frame, validateClientUris } from './rpc.mjs'
 import { LeanRequests } from './lean-requests.mjs'
 import { LeanProgress } from './lean-progress.mjs'
 import { LeanRenames } from './lean-renames.mjs'
+import { LeanProjectIndex } from './lean-project-index.mjs'
 import { ProjectActivity } from './project-activity.mjs'
 import { acquireServerLease } from './lease.mjs'
 import { repairProjectSetup, withSetupRepairDeadline } from './setup-repair.mjs'
@@ -389,7 +390,7 @@ export async function createStudio({
     const parser =
       !kind || isSmallSourceBody(req)
         ? ordinaryJson
-        : kind === 'upload'
+        : kind === 'upload' || kind === 'batch'
           ? uploadJson
           : sourceJson
     parser(req, res, next)
@@ -542,6 +543,22 @@ export async function createStudio({
   )
   app.get('/api/projects/:id/files', async (req, res) =>
     res.json(await workspaces.files(req.params.id, req.user.id)),
+  )
+  app.put(
+    '/api/projects/:id/files',
+    sourceRequestHandler(async (req, res) => {
+      const saved = await workspaces.writeFiles(
+        req.params.id,
+        req.user.id,
+        req.body?.files,
+        {
+          assertConfigurationIdle: () =>
+            requireNoRun(req.params.id, req.user.id),
+        },
+      )
+      if (saved.requiresPreparation) closeProjectEditors(req.params.id)
+      res.json(saved)
+    }),
   )
   app.get('/api/projects/:id/folders', async (req, res) =>
     res.json(await workspaces.folders(req.params.id, req.user.id)),
@@ -1071,7 +1088,10 @@ export async function createStudio({
     let child,
       alive = true,
       lastActivity = Date.now()
-    let requests, progress, renames
+    let requests,
+      progress,
+      renames,
+      indexBusy = false
     try {
       child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
         network: 'none',
@@ -1090,9 +1110,12 @@ export async function createStudio({
       }
       renames = new LeanRenames({
         readFile: async (filename) =>
-          (await workspaces.readFile(project.id, project.owner, filename))
-            .content,
+          workspaces.readFile(project.id, project.owner, filename),
         sendToClient: forward,
+      })
+      const renameIndex = new LeanProjectIndex({
+        root: project.root,
+        files: () => workspaces.renameFiles(project.id, project.owner),
       })
       progress = new LeanProgress(sendToClient)
       const frames = new LspFrames((message) => {
@@ -1124,7 +1147,61 @@ export async function createStudio({
           requests.track(message)
           progress.client(message)
           renames.track(message)
-          child.stdin.write(frame(message))
+          if (
+            ['textDocument/prepareRename', 'textDocument/rename'].includes(
+              message.method,
+            ) &&
+            'id' in message
+          ) {
+            if (indexBusy) {
+              renames.receive({
+                jsonrpc: '2.0',
+                id: message.id,
+                error: {
+                  code: -32803,
+                  message:
+                    'Lean is finishing another rename request. Try again in a moment.',
+                },
+              })
+              return
+            }
+            indexBusy = true
+            void (async () => {
+              try {
+                const snapshot = await renameIndex.capture(
+                  new Set(renames.documents.keys()),
+                  () => !renames.pending.has(message.id),
+                )
+                const pending = renames.pending.get(message.id)
+                if (!pending) return
+                pending.index = snapshot
+                if (snapshot.changes.length)
+                  child.stdin.write(
+                    frame({
+                      jsonrpc: '2.0',
+                      method: 'workspace/didChangeWatchedFiles',
+                      params: { changes: snapshot.changes },
+                    }),
+                  )
+                snapshot.commit()
+                child.stdin.write(frame(message))
+              } catch (error) {
+                renames.receive({
+                  jsonrpc: '2.0',
+                  id: message.id,
+                  error: {
+                    code: -32803,
+                    message:
+                      error.code === -32803
+                        ? error.message
+                        : 'Lean could not refresh this project index. Use Check Project, then rename again.',
+                  },
+                })
+              } finally {
+                indexBusy = false
+              }
+            })()
+          } else child.stdin.write(frame(message))
         } catch (error) {
           if (error.sourceTooLarge) ws.close(1009, error.message)
           else ws.close(1008, 'Invalid Lean message or workspace path.')

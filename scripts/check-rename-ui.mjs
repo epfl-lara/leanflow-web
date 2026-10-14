@@ -52,6 +52,8 @@ const report = {
 const runtime = new Runtime({ dataDir, scope: 'helper', cpus: 1, memory: '2g' })
 let studio, browser, page
 const leanMessages = []
+const clientMessages = []
+const browserErrors = []
 try {
   studio = await createStudio({
     dataDir,
@@ -102,15 +104,39 @@ try {
     { id: project.id },
   )
   page = await context.newPage()
-  page.on('websocket', (socket) =>
+  page.on('pageerror', (error) => browserErrors.push(String(error.stack)))
+  page.on('console', (message) => {
+    if (['error', 'warning'].includes(message.type()))
+      browserErrors.push(message.text())
+  })
+  page.on('websocket', (socket) => {
     socket.on('framereceived', (event) => {
       try {
         leanMessages.push(JSON.parse(String(event.payload)))
       } catch {}
-    }),
-  )
+    })
+    socket.on('framesent', (event) => {
+      try {
+        clientMessages.push({
+          url: socket.url(),
+          message: JSON.parse(String(event.payload)),
+        })
+      } catch {}
+    })
+  })
   await page.goto(base)
   const editor = page.locator('.monaco-editor textarea').first()
+  async function saveAndWait(button, batch = false) {
+    const response = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PUT' &&
+        new URL(response.url()).pathname ===
+          `/api/projects/${project.id}/${batch ? 'files' : 'file'}`,
+    )
+    await button.click()
+    const saved = await response
+    assert.equal(saved.status(), 200, await saved.text())
+  }
   await editor.waitFor({ state: 'visible', timeout: 60000 })
   await until(
     () =>
@@ -120,16 +146,9 @@ try {
     'real Lean diagnostics',
     60000,
   )
-  async function rename(
-    needle,
-    oldName,
-    newName,
-    expectedSource,
-    contextMenu = false,
-    rejection = '',
-  ) {
+  async function placeSymbolCursor(needle, oldName, filePath = 'Main.lean') {
     const lines = (
-      await studio.workspaces.readFile(project.id, 'owner', 'Main.lean')
+      await studio.workspaces.readFile(project.id, 'owner', filePath)
     ).content.split('\n')
     const targetLine = lines.findIndex((line) => line.includes(needle))
     assert(targetLine >= 0)
@@ -144,18 +163,36 @@ try {
       column++
     )
       await page.keyboard.press('ArrowRight')
+  }
+  async function startRename(
+    needle,
+    oldName,
+    newName,
+    contextMenu = false,
+    filePath = 'Main.lean',
+  ) {
+    await placeSymbolCursor(needle, oldName, filePath)
     const input = page.locator('.rename-box input').first()
     // Lean's reference index can finish after its first diagnostics notification.
     await until(
       async () => {
         await editor.focus()
+        await page.keyboard.press('Escape')
         if (contextMenu) {
           await page.keyboard.press('Shift+F10')
-          await page.getByRole('menuitem', { name: /Rename Symbol/ }).hover()
+          const action = page.getByRole('menuitem', { name: /Rename Symbol/ })
+          if (!(await action.isVisible())) {
+            await page.keyboard.press('Escape')
+            return false
+          }
+          await action.hover()
           await page.keyboard.press('Enter')
         } else await page.keyboard.press('F2')
         await sleep(300)
-        return input.isVisible()
+        if (!(await input.isVisible())) return false
+        if ((await input.inputValue()) === oldName) return true
+        await input.press('Escape')
+        return false
       },
       'Lean rename reference index',
       30000,
@@ -167,6 +204,16 @@ try {
     )
     await input.fill(newName)
     await input.press('Enter')
+  }
+  async function rename(
+    needle,
+    oldName,
+    newName,
+    expectedSource,
+    contextMenu = false,
+    rejection = '',
+  ) {
+    await startRename(needle, oldName, newName, contextMenu)
     const save = page.getByRole('button', { name: 'Save', exact: true })
     if (rejection) {
       const notice = page.getByRole('alert').filter({ hasText: rejection })
@@ -181,7 +228,7 @@ try {
       return
     }
     await until(() => save.isEnabled(), 'renamed editor buffer')
-    await save.click()
+    await saveAndWait(save)
     await until(
       async () =>
         (await studio.workspaces.readFile(project.id, 'owner', 'Main.lean'))
@@ -259,8 +306,11 @@ try {
   report.checks.push(
     'The live editor reports no Lean errors after the rename and a subsequent unsaved edit.',
   )
-  const otherSource =
-    'import Main\ndef otherUse : RenameFixture.Cell := RenameFixture.Cell.blank\n'
+  await saveAndWait(page.getByRole('button', { name: 'Save', exact: true }))
+  let otherSource =
+    'import Main\nimport Use.Extra\ndef otherUse : RenameFixture.Cell := RenameFixture.Cell.blank\n'
+  let nestedSource =
+    'import Main\nnamespace Nested\ndef nestedUse : RenameFixture.Cell := _root_.RenameFixture.Cell.blank\nend Nested\n'
   project = await studio.workspaces.create('owner', {
     name: 'Multi-file rename safety',
     autoRepair: false,
@@ -273,6 +323,7 @@ try {
       },
       { path: 'Main.lean', content: source },
       { path: 'Use.lean', content: otherSource },
+      { path: 'Use/Extra.lean', content: nestedSource },
     ],
   })
   await studio.workspaces.jobs.get(project.id)
@@ -281,22 +332,433 @@ try {
     localStorage.setItem('lemex-project', id)
     localStorage.setItem(`lemex-file-${id}`, 'Main.lean')
   }, project.id)
+  const projectMark = leanMessages.length
   await page.reload()
   await editor.waitFor({ state: 'visible', timeout: 60000 })
-  await rename(
-    'def blank : Cell := {}',
-    'blank',
-    'blankC',
-    source,
+  await until(
+    () =>
+      leanMessages
+        .slice(projectMark)
+        .some(
+          (message) => message.method === 'textDocument/publishDiagnostics',
+        ),
+    'multi-file Lean diagnostics',
+    60000,
+  )
+  const beforeShift = await studio.workspaces.readFile(
+    project.id,
+    'owner',
+    'Use.lean',
+  )
+  otherSource = '-- inserted after the editor connected\n' + otherSource
+  await studio.workspaces.writeFile(
+    project.id,
+    'owner',
+    'Use.lean',
+    otherSource,
+    beforeShift.hash,
+  )
+  await placeSymbolCursor('def blank : Cell := {}', 'blank')
+  await page.keyboard.press('F2')
+  await page
+    .getByRole('alert')
+    .filter({ hasText: /Use.lean.*Check Project/ })
+    .first()
+    .waitFor()
+  assert.equal(
+    await page.locator('.rename-box input').first().isVisible(),
     false,
-    'This rename affects multiple files.',
+  )
+  const indexed = await context.request.post(
+    `${base}/api/projects/${project.id}/check`,
+    { data: { path: 'Main.lean' } },
+  )
+  assert(indexed.ok())
+  const indexedJob = await indexed.json()
+  await until(
+    () =>
+      ['completed', 'failed'].includes(
+        studio.events.getMetadata(indexedJob.id).status,
+      ),
+    'rebuild shifted module',
+    60000,
+  )
+  assert.equal(
+    studio.events.getMetadata(indexedJob.id).status,
+    'completed',
+    studio.events.getMetadata(indexedJob.id).log,
+  )
+  report.checks.push(
+    'An unopened module shifted after connection is rejected safely; rebuilding refreshes its real Lean index without reconnecting.',
+  )
+  await editor.focus()
+  await page.keyboard.press('Control+End')
+  await page.keyboard.type('-- preserve my unsaved note\n')
+  await startRename('def blank : Cell := {}', 'blank', 'blankC', true)
+  const saveAll = page.getByRole('button', {
+    name: 'Save all (3)',
+    exact: true,
+  })
+  await until(() => saveAll.isEnabled(), 'all three renamed buffers')
+  assert(await page.locator('.file-item[title="Use.lean"] .dirty-dot').count())
+  await page
+    .getByRole('button', { name: 'Move file Main.lean to trash', exact: true })
+    .click()
+  await page.getByRole('button', { name: 'Move to Trash', exact: true }).click()
+  await page
+    .getByRole('alert')
+    .filter({ hasText: /Save or discard unsaved changes/ })
+    .waitFor()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  assert(await saveAll.isEnabled())
+  assert.equal(
+    (await studio.workspaces.readFile(project.id, 'owner', 'Main.lean'))
+      .content,
+    source,
+  )
+  report.checks.push(
+    'Deleting a staged file is blocked without dropping edits in other files, and every staged file is marked in the file tree.',
+  )
+  await editor.focus()
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('Control+z')
+  await until(
+    () => saveAll.count().then((count) => !count),
+    'workspace rename undo',
+  )
+  assert(
+    await page.getByRole('button', { name: 'Save', exact: true }).isEnabled(),
+  )
+  await page.keyboard.press('Control+Shift+z')
+  await until(() => saveAll.isEnabled(), 'workspace rename redo')
+  await page.locator('.file-item[title="Use.lean"]').click()
+  await until(
+    () =>
+      page
+        .locator('.monaco-editor')
+        .first()
+        .innerText()
+        .then((text) => text.includes('Cell.blankC')),
+    'inspect renamed reference buffer',
+  )
+  assert.equal(await page.getByRole('dialog').count(), 0)
+  await page.locator('.file-item[title="Main.lean"]').click()
+  await until(
+    () =>
+      page
+        .locator('.monaco-editor')
+        .first()
+        .innerText()
+        .then((text) =>
+          text.replaceAll('\u00a0', ' ').includes('namespace RenameFixture'),
+        ),
+    'return to definition file',
+  )
+  await editor.focus()
+  await page.keyboard.press('Control+End')
+  await until(
+    () =>
+      page
+        .locator('.monaco-editor')
+        .first()
+        .innerText()
+        .then((text) =>
+          text.replaceAll('\u00a0', ' ').includes('preserve my unsaved note'),
+        ),
+    'unsaved note retained across files',
+  )
+  await editor.focus()
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('Control+z')
+  await until(
+    () => saveAll.count().then((count) => !count),
+    'workspace undo after visiting other files',
+  )
+  await page.keyboard.press('Control+Shift+z')
+  await until(
+    () => saveAll.isEnabled(),
+    'workspace redo after visiting other files',
+  )
+
+  assert.equal(
+    (await studio.workspaces.readFile(project.id, 'owner', 'Main.lean'))
+      .content,
+    source,
   )
   assert.equal(
     (await studio.workspaces.readFile(project.id, 'owner', 'Use.lean')).content,
     otherSource,
   )
+  const nestedBefore = await studio.workspaces.readFile(
+    project.id,
+    'owner',
+    'Use/Extra.lean',
+  )
+  await studio.workspaces.writeFile(
+    project.id,
+    'owner',
+    'Use/Extra.lean',
+    nestedSource + '-- external edit\n',
+    nestedBefore.hash,
+  )
+  await saveAll.click()
+  await page
+    .getByRole('alert')
+    .filter({ hasText: /changed since it was opened/ })
+    .waitFor()
+  assert.equal(
+    (await studio.workspaces.readFile(project.id, 'owner', 'Main.lean'))
+      .content,
+    source,
+  )
+  assert.equal(
+    (await studio.workspaces.readFile(project.id, 'owner', 'Use.lean')).content,
+    otherSource,
+  )
+  assert(await saveAll.isEnabled())
+  const folder = page.locator('.folder-toggle[title="Use"]')
+  if ((await folder.getAttribute('aria-expanded')) !== 'true')
+    await folder.click()
+  await page.locator('.file-item[title="Use/Extra.lean"]').click()
+  await page.getByRole('button', { name: 'Reload file', exact: true }).click()
+  await page
+    .getByRole('button', { name: 'Reload this file', exact: true })
+    .click()
+  await until(
+    () =>
+      page
+        .getByRole('button', { name: 'Save all (2)', exact: true })
+        .isEnabled(),
+    'reload preserves sibling drafts',
+  )
+  await until(
+    () =>
+      page
+        .locator('.monaco-editor')
+        .first()
+        .innerText()
+        .then((text) =>
+          text.replaceAll('\u00a0', ' ').includes('external edit'),
+        ),
+    'new saved content loaded for only this file',
+  )
+  nestedSource += '-- external edit\n'
+  await editor.focus()
+  await page.keyboard.press('Control+a')
+  await page.keyboard.insertText(
+    nestedSource.replaceAll('Cell.blank', 'Cell.blankC'),
+  )
+  await until(() => saveAll.isEnabled(), 'merged external file draft')
+  await page.locator('.file-item[title="Main.lean"]').click()
+  await until(
+    () =>
+      page
+        .locator('.monaco-editor')
+        .first()
+        .innerText()
+        .then((text) => text.includes('blankC')),
+    'sibling rename retained after targeted reload',
+  )
   report.checks.push(
-    'A real multi-file rename is rejected before any buffer or saved source changes, with a visible explanation.',
+    'Per-file reload resolves a last-file conflict, preserves both sibling drafts and the external edit, and permits one atomic Save all.',
+  )
+
+  await saveAndWait(saveAll, true)
+  await until(
+    async () =>
+      (await studio.workspaces.readFile(project.id, 'owner', 'Use.lean'))
+        .content === otherSource.replaceAll('Cell.blank', 'Cell.blankC'),
+    'saved cross-file references',
+  )
+  const multiExpected = qualifiedExpected + '-- preserve my unsaved note\n'
+  assert.equal(
+    (await studio.workspaces.readFile(project.id, 'owner', 'Main.lean'))
+      .content,
+    multiExpected,
+  )
+  assert.equal(
+    (await studio.workspaces.readFile(project.id, 'owner', 'Use/Extra.lean'))
+      .content,
+    nestedSource.replaceAll('Cell.blank', 'Cell.blankC'),
+  )
+  report.checks.push(
+    'Context-menu rename updates three files, including unvisited nested modules, and one Save commits them together while retaining unsaved user edits.',
+    'Native workspace undo and redo cover every renamed file; inspecting another staged file preserves the original unsaved note.',
+    'A concurrent change in the last file rejects the entire Save and keeps all three browser buffers for recovery.',
+  )
+  const multiCheck = await context.request.post(
+    `${base}/api/projects/${project.id}/check`,
+    { data: { path: 'Main.lean' } },
+  )
+  assert(multiCheck.ok())
+  const multiJob = await multiCheck.json()
+  await until(
+    () =>
+      ['completed', 'failed'].includes(
+        studio.events.getMetadata(multiJob.id).status,
+      ),
+    'multi-file renamed project build',
+    60000,
+  )
+  assert.equal(
+    studio.events.getMetadata(multiJob.id).status,
+    'completed',
+    studio.events.getMetadata(multiJob.id).error,
+  )
+  report.checks.push(
+    'The project with three renamed modules compiles using the pinned Lean release.',
+  )
+  const readFile = studio.workspaces.readFile.bind(studio.workspaces)
+  let heldRead = false,
+    releaseRead
+  const gate = new Promise((resolve) => {
+    releaseRead = resolve
+  })
+  studio.workspaces.readFile = async (...args) => {
+    if (args[2] === 'Use/Extra.lean') {
+      heldRead = true
+      await gate
+    }
+    return readFile(...args)
+  }
+  const cancelMark = clientMessages.length
+  try {
+    await startRename('def blankC : Cell := {}', 'blankC', 'cancelledName')
+    await until(() => heldRead, 'rename awaiting another source')
+    await editor.focus()
+    await page.keyboard.press('Control+End')
+    await page.keyboard.type('-- typed during pending rename\n')
+  } finally {
+    studio.workspaces.readFile = readFile
+    releaseRead()
+  }
+  await until(
+    () =>
+      clientMessages
+        .slice(cancelMark)
+        .some(({ message }) => message.method === '$/cancelRequest'),
+    'native rename cancellation',
+  )
+  await saveAndWait(page.getByRole('button', { name: 'Save', exact: true }))
+  await until(
+    async () =>
+      (await readFile(project.id, 'owner', 'Main.lean')).content ===
+      multiExpected + '-- typed during pending rename\n',
+    'typing preserved after rename cancellation',
+  )
+  assert.equal(
+    (await readFile(project.id, 'owner', 'Use.lean')).content,
+    otherSource.replaceAll('Cell.blank', 'Cell.blankC'),
+  )
+  const latestCheck = await context.request.post(
+    `${base}/api/projects/${project.id}/check`,
+    { data: { path: 'Main.lean' } },
+  )
+  assert(latestCheck.ok())
+  const latestJob = await latestCheck.json()
+  await until(
+    () =>
+      ['completed', 'failed'].includes(
+        studio.events.getMetadata(latestJob.id).status,
+      ),
+    'compile latest saved sources',
+    60000,
+  )
+  assert.equal(
+    studio.events.getMetadata(latestJob.id).status,
+    'completed',
+    studio.events.getMetadata(latestJob.id).log,
+  )
+  await page.locator('.file-item[title="Use.lean"]').click()
+  await until(
+    () =>
+      page
+        .locator('.monaco-editor')
+        .first()
+        .innerText()
+        .then((text) => text.includes('otherUse')),
+    'reference file ready',
+  )
+  await startRename('def otherUse', 'blankC', 'blankD', true, 'Use.lean')
+  await until(() => saveAll.isEnabled(), 'rename initiated from another module')
+  await page.locator('.file-item[title="lakefile.toml"]').click()
+  await page.getByRole('button', { name: 'Discard edits', exact: true }).click()
+  await until(
+    () =>
+      page
+        .getByRole('dialog')
+        .count()
+        .then((count) => !count),
+    'discard all affected buffers',
+  )
+  assert.equal(await saveAll.count(), 0)
+  await page.locator('.file-item[title="Use.lean"]').click()
+  await until(
+    () =>
+      page
+        .locator('.monaco-editor')
+        .first()
+        .innerText()
+        .then((text) => text.includes('Cell.blankC')),
+    'discarded reference restored',
+  )
+  assert(
+    await page.getByRole('button', { name: 'Save', exact: true }).isDisabled(),
+  )
+  report.checks.push(
+    'Typing while a multi-file rename is waiting cancels it without losing the new text or changing other files; Discard resets every staged buffer.',
+  )
+  const oldId = project.id
+  const switchMark = clientMessages.length
+  await page.locator('.project-item[title="Rename regression"]').click()
+  await until(
+    () =>
+      clientMessages
+        .slice(switchMark)
+        .some(
+          ({ url, message }) =>
+            !url.endsWith(oldId) &&
+            message.method === 'textDocument/didOpen' &&
+            message.params.textDocument.text.includes('-- refreshed'),
+        ),
+    'original project reconnected',
+  )
+  assert(
+    !clientMessages
+      .slice(switchMark)
+      .some(
+        ({ url, message }) =>
+          !url.endsWith(oldId) &&
+          message.method === 'textDocument/didOpen' &&
+          /\/Use(?:\/|\.lean)/.test(message.params.textDocument.uri),
+      ),
+    'Other projects must not receive hidden rename models',
+  )
+  report.checks.push(
+    'Switching projects disposes hidden rename models before the next Lean connection starts.',
+  )
+  const openBySocket = new Map()
+  let peakOpenFiles = 0
+  for (const { url, message } of clientMessages) {
+    let opened = openBySocket.get(url)
+    if (!opened) {
+      opened = new Set()
+      openBySocket.set(url, opened)
+    }
+    if (message.method === 'textDocument/didOpen')
+      opened.add(message.params.textDocument.uri)
+    if (message.method === 'textDocument/didClose')
+      opened.delete(message.params.textDocument.uri)
+    peakOpenFiles = Math.max(peakOpenFiles, opened.size)
+  }
+  assert.equal(
+    peakOpenFiles,
+    1,
+    'Hidden rename buffers must not open Lean workers',
+  )
+  report.peakOpenLeanFiles = peakOpenFiles
+  report.checks.push(
+    'Only the visible file is open in Lean throughout multi-file rename, undo, inspection, saves, and project switches.',
   )
   await page.screenshot({ path: path.join(directory, 'renamed.png') })
   report.passed = true
@@ -307,11 +769,16 @@ try {
     .catch(() => {})
   process.exitCode = 1
 } finally {
+  report.browserErrors = browserErrors
   await browser?.close()
   await studio?.close()
   await fs.writeFile(
     path.join(directory, 'result.json'),
     JSON.stringify(report, null, 2) + '\n',
+  )
+  await fs.writeFile(
+    path.join(directory, 'client-messages.json'),
+    JSON.stringify(clientMessages, null, 2) + '\n',
   )
   await fs.writeFile(
     path.join(directory, 'lsp-messages.json'),

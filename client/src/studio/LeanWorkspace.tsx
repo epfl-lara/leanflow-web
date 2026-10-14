@@ -1,5 +1,6 @@
 import { LeanMonaco, LeanMonacoEditor } from 'lean4monaco'
 import { CloseAction, ErrorAction } from 'vscode-languageclient/browser'
+import type { CancellationToken } from 'monaco-editor'
 import type { WebSocketConfigOptionsUrl } from 'monaco-editor-wrapper'
 import { FileUri } from 'lean4monaco/dist/vscode-lean4/vscode-lean4/src/utils/exturi'
 import type { SourceRequest } from './LibrarySourceDialog'
@@ -20,6 +21,10 @@ import { connectInfoviewTheme } from './infoviewTheme'
 import { ResizeHandle } from './ResizeHandle'
 import { DEFAULT_LAYOUT, useMediaQuery } from './layout'
 import { isMarkdownPath } from './fileReading'
+import { RenameModels } from './renameModels'
+import { initializeLeanEditor } from './leanEditorServices'
+import type { RenameSource } from './workspaceBuffers'
+import { installLeanRenameMiddleware } from './leanRenameMiddleware'
 import type { ChatMode } from './chatModes'
 import {
   proofDeclarations,
@@ -32,6 +37,9 @@ import {
 } from './proofTarget'
 
 class BrowserLeanMonaco extends LeanMonaco {
+  closeHiddenDocuments: () => Promise<void> = async () => {}
+  showVisibleDocument: () => Promise<void> = async () => {}
+  refreshVisibleDocument: () => Promise<void> = async () => {}
   constructor(
     private readonly onConnectionIssue: (message: string) => void,
     private readonly onProcessingNotice: (
@@ -39,6 +47,14 @@ class BrowserLeanMonaco extends LeanMonaco {
       uri?: string,
     ) => void,
     private readonly onRenameIssue: (message: string) => void,
+    private readonly renameContext: () => {
+      uri: string | null
+      hiddenDirty: boolean
+    },
+    private readonly prepareRenameSources: (
+      sources: RenameSource[],
+      token: CancellationToken,
+    ) => Promise<void>,
   ) {
     super()
   }
@@ -50,6 +66,15 @@ class BrowserLeanMonaco extends LeanMonaco {
     const onConnectionIssue = this.onConnectionIssue
     const onProcessingNotice = this.onProcessingNotice
     const onRenameIssue = this.onRenameIssue
+    const setDocumentController = (
+      controller: ReturnType<typeof installLeanRenameMiddleware>,
+    ) => {
+      this.closeHiddenDocuments = controller.closeHidden
+      this.showVisibleDocument = controller.showVisible
+      this.refreshVisibleDocument = controller.refreshVisible
+    }
+    const renameContext = this.renameContext
+    const prepareRenameSources = this.prepareRenameSources
     return {
       ...settings,
       startOptions: {
@@ -70,40 +95,15 @@ class BrowserLeanMonaco extends LeanMonaco {
                   : undefined,
               )
           })
-          if (client) {
-            const middleware = client.clientOptions.middleware
-            client.clientOptions.middleware = {
-              ...middleware,
-              async provideRenameEdits(
-                document,
-                position,
-                newName,
-                token,
-                next,
-              ) {
-                onRenameIssue('')
-                try {
-                  return await (middleware?.provideRenameEdits
-                    ? middleware.provideRenameEdits(
-                        document,
-                        position,
-                        newName,
-                        token,
-                        next,
-                      )
-                    : next(document, position, newName, token))
-                } catch (error) {
-                  if (!token.isCancellationRequested)
-                    onRenameIssue(
-                      error instanceof Error
-                        ? error.message
-                        : 'Lean could not prepare this rename. Try renaming again.',
-                    )
-                  return null
-                }
-              },
-            }
-          }
+          if (client)
+            setDocumentController(
+              installLeanRenameMiddleware(
+                client,
+                renameContext,
+                onRenameIssue,
+                prepareRenameSources,
+              ),
+            )
           const previous = client?.clientOptions.errorHandler
           if (!client || !previous) return
           let sourceTooLarge = false
@@ -172,12 +172,14 @@ function serialize(task: () => Promise<void> | void) {
 }
 
 interface Runtime {
-  lean: LeanMonaco
+  lean: BrowserLeanMonaco
   editor?: LeanMonacoEditor
   subscription?: { dispose(): void }
   restoreOpenEditor?: () => void
   connectionSubscriptions?: { dispose(): void }[]
   outlineCleanup?: () => void
+  visibleReadyPath?: string
+  renameModels?: RenameModels
 }
 interface ConnectionClient {
   isRunning(): boolean
@@ -189,6 +191,13 @@ interface ConnectionClient {
 export function LeanWorkspace({
   projectId,
   file,
+  buffers,
+  bufferDiscardVersion,
+  bufferSaveVersion,
+  savedPaths,
+  bufferRemoveVersion,
+  removedPaths,
+  onRenameSources,
   theme,
   onChange,
   onState,
@@ -205,6 +214,13 @@ export function LeanWorkspace({
 }: {
   projectId: string
   file: OpenFile | null
+  buffers: ReadonlyMap<string, OpenFile>
+  bufferDiscardVersion: number
+  bufferSaveVersion: number
+  savedPaths: readonly string[]
+  bufferRemoveVersion: number
+  removedPaths: readonly string[]
+  onRenameSources: (sources: RenameSource[]) => void
   theme: 'light' | 'dark'
   onChange: (path: string, content: string) => void
   onState: (state: string) => void
@@ -227,6 +243,8 @@ export function LeanWorkspace({
   const infoEl = useRef<HTMLDivElement>(null)
   const runtime = useRef<Runtime | null>(null)
   const fileRef = useRef(file)
+  const buffersRef = useRef(buffers)
+  buffersRef.current = buffers
   const syncingContent = useRef(false)
   const pendingLocalChange = useRef<{
     path: string
@@ -234,6 +252,7 @@ export function LeanWorkspace({
     content: string
   } | null>(null)
   const onChangeRef = useRef(onChange)
+  const onRenameSourcesRef = useRef(onRenameSources)
   const onStateRef = useRef(onState)
   const onOpenFileRef = useRef(onOpenFile)
   const onOpenLibraryRef = useRef(onOpenLibrary)
@@ -265,6 +284,7 @@ export function LeanWorkspace({
   onOpenFileRef.current = onOpenFile
   onOpenLibraryRef.current = onOpenLibrary
   themeRef.current = theme
+  onRenameSourcesRef.current = onRenameSources
   onFocusProofRef.current = onFocusProof
 
   useEffect(() => {
@@ -302,12 +322,43 @@ export function LeanWorkspace({
         (message) => {
           if (!cancelled) setRenameIssue(message)
         },
+        () => {
+          const path = fileRef.current?.path
+          return {
+            uri:
+              path && own?.visibleReadyPath === path
+                ? 'file:///workspace/' +
+                  path.split('/').map(encodeURIComponent).join('/')
+                : null,
+            hiddenDirty: [...buffersRef.current.values()].some(
+              (buffer) =>
+                buffer.path !== path && buffer.content !== buffer.savedContent,
+            ),
+          }
+        },
+        async (sources, token) => {
+          if (cancelled || !own?.renameModels)
+            throw new Error('Rename cancelled.')
+          await own.renameModels.prepare(sources, token)
+        },
       )
-      own = { lean }
+      own = {
+        lean,
+        renameModels: new RenameModels(
+          () => own?.editor?.editor.getModel() ?? null,
+          (sources) => onRenameSourcesRef.current(sources),
+          (path, content) => {
+            if (!cancelled) onChangeRef.current(path, content)
+          },
+        ),
+      }
       runtime.current = own
       lean.setInfoviewElement(infoEl.current)
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
       try {
+        await initializeLeanEditor(
+          document.getElementById('root') ?? editorEl.current ?? undefined,
+        )
         await lean.start({
           websocket: {
             url: `${protocol}//${location.host}/websocket/${encodeURIComponent(projectId)}`,
@@ -405,7 +456,10 @@ export function LeanWorkspace({
           subscription.dispose(),
         )
         own?.restoreOpenEditor?.()
+        const closingModel = own?.editor?.editor.getModel()
         own?.editor?.dispose()
+        await own?.renameModels?.dispose()
+        if (closingModel && !closingModel.isDisposed()) closingModel.dispose()
         // The upstream provider calls stop() without awaiting it. Finish socket
         // shutdown before another project uses the shared /workspace model URIs.
         const clients = own?.lean.clientProvider?.getClients() || []
@@ -415,6 +469,38 @@ export function LeanWorkspace({
       })
     }
   }, [projectId])
+
+  useLayoutEffect(() => {
+    runtime.current?.renameModels?.synchronize(buffersRef.current)
+  }, [bufferDiscardVersion])
+
+  useEffect(() => {
+    let cancelled = false
+    void serialize(() => {
+      if (cancelled) return
+      const active = runtime.current
+      const path = fileRef.current?.path
+      // One visible worker is enough. Only another saved Lean module can
+      // invalidate its imports; saving this proof or a document needs no restart.
+      if (
+        path?.endsWith('.lean') &&
+        savedPaths.some((saved) => saved.endsWith('.lean') && saved !== path)
+      )
+        return active?.lean.refreshVisibleDocument()
+    }).catch(() => {
+      if (!cancelled)
+        setRestartIssue(
+          'Files were saved, but Lean could not refresh their imports. Use Restart Lean to reconnect.',
+        )
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [bufferSaveVersion, projectId, savedPaths])
+
+  useEffect(() => {
+    void runtime.current?.renameModels?.remove(removedPaths)
+  }, [bufferRemoveVersion, removedPaths])
 
   useEffect(() => {
     let cancelled = false
@@ -435,6 +521,8 @@ export function LeanWorkspace({
       active.outlineCleanup = undefined
       active.restoreOpenEditor?.()
       active.restoreOpenEditor = undefined
+      active.visibleReadyPath = undefined
+      await active.lean.closeHiddenDocuments()
       active.editor?.dispose()
       active.editor = undefined
       if (!snapshot || !editorEl.current) {
@@ -451,6 +539,13 @@ export function LeanWorkspace({
           return
         }
         const editor = ownEditor.editor
+        const languageModel = editor.getModel()
+        if (
+          snapshot.path.endsWith('.lean') &&
+          languageModel &&
+          languageModel.getLanguageId() !== 'lean4'
+        )
+          monacoEditor.setModelLanguage(languageModel, 'lean4')
         if (
           isMarkdownPath(snapshot.path) &&
           languages
@@ -464,6 +559,7 @@ export function LeanWorkspace({
         // so a retained VS Code model cannot show a previous project's buffer.
         if (editor.getValue() !== snapshot.content)
           editor.setValue(snapshot.content)
+        active.visibleReadyPath = snapshot.path
         pendingLocalChange.current = null
         editor.updateOptions({
           scrollBeyondLastLine: false,
@@ -542,6 +638,8 @@ export function LeanWorkspace({
           }
           onChangeRef.current(snapshot.path, content)
         })
+        await active.lean.showVisibleDocument()
+        if (cancelled) return
         // Document symbols and proof selections belong to Lean files. Reading
         // another language must not send Lean requests for that document.
         if (!snapshot.path.endsWith('.lean')) {
