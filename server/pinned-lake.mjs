@@ -3,26 +3,73 @@ import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { dependencyBuildTargets } from './project-libraries.mjs'
+import { runSetupStep } from './setup-output.mjs'
+
+async function pinnedText(filename, missing = false) {
+  let handle
+  try {
+    handle = await fs.open(
+      filename,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    )
+  } catch (error) {
+    if (missing && ['ENOENT', 'ELOOP'].includes(error.code)) return null
+    throw error
+  }
+  try {
+    if (!(await handle.stat()).isFile())
+      throw new Error('Invalid pinned project configuration file.')
+    return await handle.readFile('utf8')
+  } finally {
+    await handle.close()
+  }
+}
+
+async function restorePinnedText(filename, content) {
+  const temporary = path.join(path.dirname(filename), `.pin-${randomUUID()}`)
+  try {
+    await fs.writeFile(temporary, content, { mode: 0o600, flag: 'wx' })
+    await fs.rename(temporary, filename)
+  } finally {
+    await fs.rm(temporary, { force: true })
+  }
+}
+
+function parsedManifest(content) {
+  try {
+    return JSON.parse(content)
+  } catch {
+    return null
+  }
+}
+
+export function changedDependencyPin(original, current) {
+  for (const dependency of Array.isArray(original?.packages)
+    ? original.packages
+    : []) {
+    if (dependency?.type !== 'git' || !/^[a-f0-9]{40}$/.test(dependency.rev))
+      continue
+    const replacement = Array.isArray(current?.packages)
+      ? current.packages.find((pkg) => pkg?.name === dependency.name)
+      : null
+    if (
+      !replacement ||
+      replacement.rev !== dependency.rev ||
+      replacement.url !== dependency.url
+    )
+      return dependency.name || 'unnamed dependency'
+  }
+  return null
+}
 
 // Lake may select a dependency's newer Lean release while resolving packages.
 // Every setup invocation must retain the user's release, including implicit updates.
 export async function runPinnedLake(runtime, root, args, options = {}) {
   if (args[0] !== 'lake') return runtime.run(root, args, options)
   const filename = path.join(root, 'lean-toolchain')
-  async function readPin() {
-    const handle = await fs.open(
-      filename,
-      constants.O_RDONLY | constants.O_NOFOLLOW,
-    )
-    try {
-      if (!(await handle.stat()).isFile())
-        throw new Error('Invalid Lean toolchain file.')
-      return await handle.readFile('utf8')
-    } finally {
-      await handle.close()
-    }
-  }
-  const original = await readPin()
+  const original = await pinnedText(filename)
+  const manifestFile = path.join(root, 'lake-manifest.json')
+  const originalManifest = await pinnedText(manifestFile, true)
   try {
     const result = await runtime.run(
       root,
@@ -45,27 +92,32 @@ export async function runPinnedLake(runtime, root, args, options = {}) {
       )
     return result
   } finally {
-    let current
-    try {
-      current = await readPin()
-    } catch (error) {
-      if (!['ENOENT', 'ELOOP'].includes(error.code)) throw error
-    }
+    const messages = []
+    const current = await pinnedText(filename, true)
     if (current !== original) {
-      const temporary = path.join(root, `.toolchain-${randomUUID()}`)
-      try {
-        await fs.writeFile(temporary, original, { mode: 0o600, flag: 'wx' })
-        await fs.rename(temporary, filename)
-      } finally {
-        await fs.rm(temporary, { force: true })
-      }
-      throw Object.assign(
-        new Error(
-          'Lake changed the pinned Lean release. The original release was restored. Check that the dependencies support it, then retry setup.',
-        ),
-        { unsupportedEnvironment: true },
+      await restorePinnedText(filename, original)
+      messages.push(
+        'Lake changed the pinned Lean release. The original release was restored. Check that the dependencies support it, then retry setup.',
       )
     }
+    const lock = parsedManifest(originalManifest)
+    if (
+      originalManifest !== null &&
+      changedDependencyPin(
+        lock,
+        parsedManifest(await pinnedText(manifestFile, true)),
+      )
+    ) {
+      await restorePinnedText(manifestFile, originalManifest)
+      messages.push(
+        'Lake changed a pinned dependency revision. The original lockfile was restored. Check the dependency configuration before retrying setup.',
+      )
+    }
+    if (messages.length)
+      throw Object.assign(new Error(messages.join('\n')), {
+        unsupportedEnvironment: true,
+        pinnedEnvironment: true,
+      })
   }
 }
 
@@ -134,13 +186,16 @@ function infrastructureFailureMessage(result) {
   return null
 }
 
+export function readOnlyDependencyFailure(result) {
+  const output = [result.stderr, result.stdout].filter(Boolean).join('\n')
+  return /(?:read.only file system|EROFS|permission denied)[^\n]*(?:\n\s*)?[^\n]*\.lake\/packages|\.lake\/packages[^\n]*(?:read.only|EROFS|permission denied)/i.test(
+    output,
+  )
+}
+
 export function dependencyFailureMessage(result) {
   const output = [result.stderr, result.stdout].filter(Boolean).join('\n')
-  if (
-    /(?:read.only file system|EROFS|permission denied)[^\n]*(?:\n\s*)?[^\n]*\.lake\/packages|\.lake\/packages[^\n]*(?:read.only|EROFS|permission denied)/i.test(
-      output,
-    )
-  )
+  if (readOnlyDependencyFailure(result))
     return 'A dependency needs build files that are missing from its read-only environment. Use Refresh setup to rebuild the pinned dependencies.'
   if (
     /\.lake\/packages\/[^\n]+:\d+:\d+:\s*error:|object file[^\n]*\.lake\/packages[^\n]*does not exist|failed to fetch[^\n]*(?:release|prebuilt)|(?:release|prebuilt)[^\n]*(?:fetch|download)[^\n]*failed/i.test(
@@ -161,17 +216,17 @@ export async function certifyDependencyBuilds(
   if (manifest?.packages?.some((pkg) => pkg.name === 'mathlib'))
     targets.unshift('@mathlib')
   for (const target of targets) {
-    const result = await runPinnedLake(
-      runtime,
-      root,
-      ['lake', 'build', target],
-      {
-        ...options,
-        network: 'none',
-        readOnlyWorkspace: true,
-        writeLakeCache: true,
-        timeoutMs: 5400000,
-      },
+    const result = await runSetupStep(
+      `Verifying dependency build ${target.replace(/^@/, '')}`,
+      () =>
+        runPinnedLake(runtime, root, ['lake', 'build', target], {
+          ...options,
+          network: 'none',
+          readOnlyWorkspace: true,
+          writeLakeCache: true,
+          timeoutMs: 5400000,
+        }),
+      options,
     )
     options.signal?.throwIfAborted()
     if (result.code !== 0)
@@ -213,10 +268,19 @@ export async function runDependencyCache(runtime, root, command, options = {}) {
       return
     }
   }
-  const result = await runPinnedLake(runtime, root, command.args, {
-    ...options,
-    env: { ...options.env, ...command.env },
-  })
+  const label =
+    command.args.includes('cache') && command.args.includes('exe')
+      ? 'Fetching compiled Mathlib files'
+      : 'Fetching compiled Physlib files'
+  const result = await runSetupStep(
+    label,
+    () =>
+      runPinnedLake(runtime, root, command.args, {
+        ...options,
+        env: { ...options.env, ...command.env },
+      }),
+    options,
+  )
   options.signal?.throwIfAborted()
   if (result.code === 0) return result
   if (command.optional) {

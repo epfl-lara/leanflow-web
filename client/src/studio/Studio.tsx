@@ -326,6 +326,13 @@ export function Studio() {
   const fileRef = useRef(file)
   const filesRef = useRef(files)
   const projectIdRef = useRef(projectId)
+  const setupLogRef = useRef<{
+    owner: string
+    project: Pick<
+      Project,
+      'id' | 'status' | 'setupStartedAt' | 'setupEventAfter' | 'log'
+    >
+  } | null>(null)
   const openRequest = useRef(0)
   const generation = useRef(0)
   const savePromise = useRef<Promise<void> | null>(null)
@@ -431,19 +438,38 @@ export function Studio() {
     localStorage.setItem('lemex-theme', theme)
   }, [theme])
 
+  const sessionOwner = session?.user.id
   const loadProjects = useCallback(async () => {
     const value = await api<Project[]>('/api/projects')
     const selected = value.findIndex((item) => item.id === projectIdRef.current)
-    if (
-      selected >= 0 &&
-      (value[selected].status !== 'ready' || value[selected].setupRepair)
-    )
-      value[selected] = await api<Project>(
-        `/api/projects/${encodeURIComponent(value[selected].id)}`,
-      )
+    if (selected >= 0) {
+      const metadata = value[selected]
+      const cached = setupLogRef.current
+      // A completed attempt's output is immutable. Keep fresh list metadata
+      // while avoiding another large log request when other projects prepare.
+      if (
+        metadata.status !== 'preparing' &&
+        cached &&
+        cached.owner === sessionOwner &&
+        cached.project.id === metadata.id &&
+        cached.project.status === metadata.status &&
+        cached.project.setupStartedAt === metadata.setupStartedAt &&
+        cached.project.setupEventAfter === metadata.setupEventAfter
+      ) {
+        value[selected] = { ...metadata, log: cached.project.log }
+      } else {
+        setupLogRef.current = null
+        const detail = await api<Project>(
+          `/api/projects/${encodeURIComponent(metadata.id)}`,
+        )
+        value[selected] = detail
+        if (detail.status !== 'preparing' && sessionOwner)
+          setupLogRef.current = { owner: sessionOwner, project: detail }
+      }
+    }
     setProjects(value)
     return value
-  }, [])
+  }, [sessionOwner])
 
   useEffect(() => {
     if (!session) return
@@ -1946,14 +1972,19 @@ export function Studio() {
                 </button>
               </div>
             )}
-            {(project.needsPreparation ||
-              project.buildWarning ||
-              project.publishingWarning) &&
-              !singleFileMode && (
-                <div className="setup-editor-details">
-                  <ProjectSetupDetails project={project} />
-                </div>
-              )}
+            {!singleFileMode && (
+              <details
+                className="setup-editor-details"
+                open={Boolean(
+                  project.needsPreparation ||
+                  project.buildWarning ||
+                  project.publishingWarning,
+                )}
+              >
+                <summary>Project setup</summary>
+                <ProjectSetupDetails project={project} />
+              </details>
+            )}
             <div className="file-toolbar">
               <div className="file-tab">
                 <Icon name="file" size={15} />

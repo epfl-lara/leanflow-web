@@ -76,12 +76,17 @@ export interface Project {
   buildWarning?: string
   dependencyWarning?: string
   setupStartedAt?: string
+  setupEventAfter?: number
+  setupBuildStatus?: 'passed' | 'warnings' | 'reused'
+  sourceRevision?: string
   log?: string
   subdirectory?: string
   uploaded?: boolean
   autoRepair?: boolean
   setupPhase?:
     | 'reading-project'
+    | 'cloning-repository'
+    | 'selecting-revision'
     | 'preparing-lean'
     | 'preparing-dependencies'
     | 'building-project'

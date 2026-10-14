@@ -18,15 +18,21 @@ Choose **Import or create project**. Create a project with compatible library pr
 
 GitHub subdirectory links work too, such as `https://github.com/epfl-lara/jordan-curve-theorem/tree/main/HOLLight-Lean`. For branch names containing `/`, use **More options → Branch, tag, or commit**. Imports keep their Lean version and dependency pins.
 
+For GitLab, use the HTTPS clone URL ending in `.git`. If a repository URL redirects, setup tries its `.git` form once on the same host. If it still fails, copy the direct HTTPS URL from the repository's clone menu and create a new import. Lemex cannot repair setup until the project files have been downloaded.
+
 **Enable publishing changes back** is selected for repository imports. Leave **Working branch** blank to create a unique branch at the imported revision, or enter a branch name. If the name conflicts, the app preserves existing branches, chooses a unique alternative and shows the change. Importing never pushes changes. Clear the checkbox if you only want to work locally; you can enable publishing later in **Publish**. GitHub, GitLab and other public HTTPS Git repositories are supported.
 
 Use **Upload** or drag files/folders into the upload area. **Upload** in the Files header adds to the open project. The app asks about ambiguous project folders and name conflicts.
 
 **Let Lemex repair setup if needed** allows an automatic configuration repair after setup fails. Use **Stop setup** to cancel.
 
+**Retry setup** reuses a completed clone if fetching the selected revision failed. If cloning itself was interrupted and left partial files, create a new import as directed by the error. Partial files are preserved. A missing branch or tag needs a new import with an existing revision.
+
 When available on the server, the specialized Lemex setup agent starts automatically after a recoverable setup failure. It diagnoses an isolated copy, proposes configuration repairs and validates them with Lean before they are applied. The progress card shows when repair is queued, its current activity and elapsed time. Repair has a 15-minute default deadline, including its wait for an assistant slot.
 
 Setup shows its current stage, from preparing Lean and libraries to testing the environment. If automatic setup needs a configuration repair, **Lemex is repairing setup** appears while Lemex diagnoses the problem. **Testing the setup repair** appears before the checked configuration is accepted and setup retries. You can open another project while this runs.
+
+Open **Project setup** above the editor to see the Lean version, source revision and project build result. **Setup output** names each build or check and reports its elapsed time. It belongs to the latest setup attempt, and long output shows a marked tail. Dependency revision hashes include the package name. Lean errors and linter warnings remain visible; a ready environment can still contain project targets that need repair.
 
 Use **Refresh setup** in an open project to recheck its environment. Valid compiled caches are reused. Choose the adjacent info icon for details about cache reuse and automatic repair. Stop active checks and chats, and close the terminal before refreshing.
 

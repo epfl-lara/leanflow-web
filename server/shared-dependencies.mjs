@@ -1,4 +1,5 @@
 import { removeDisposableTree } from './temporary-workspaces.mjs'
+import { runSetupStep, setupCommandLabel } from './setup-output.mjs'
 import {
   runPinnedLake,
   dependencyCacheCommands,
@@ -336,13 +337,18 @@ export class SharedDependencyCache {
     )
     const home = path.join(this.runtime.runtimeDir, 'homes', digest(stage))
     const run = async (args, options = {}) => {
-      const result = await runPinnedLake(this.runtime, stage, args, {
-        network: 'none',
-        timeoutMs: 1800000,
-        onOutput,
-        cleanHome: true,
-        ...options,
-      })
+      const result = await runSetupStep(
+        setupCommandLabel(args),
+        () =>
+          runPinnedLake(this.runtime, stage, args, {
+            network: 'none',
+            timeoutMs: 1800000,
+            onOutput: args[0] === 'git' ? undefined : onOutput,
+            cleanHome: true,
+            ...options,
+          }),
+        { onOutput },
+      )
       if (result.code !== 0)
         throw Object.assign(
           new Error(
@@ -405,6 +411,7 @@ export class SharedDependencyCache {
           throw new Error(
             'Downloaded dependency revision does not match the lockfile',
           )
+        onOutput?.(`Verified dependency revision ${pkg.name}: ${pkg.rev}\n`)
         const status = await run([
           'git',
           '-C',

@@ -19,7 +19,13 @@ const sources = [
 ]
 async function fixture(
   t,
-  { setupRepair, cloneFiles, broken = false, setupBuildTimeoutMs } = {},
+  {
+    setupRepair,
+    cloneFiles,
+    broken = false,
+    setupBuildTimeoutMs,
+    resolveHost,
+  } = {},
 ) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-import-'))
   const calls = []
@@ -65,7 +71,7 @@ async function fixture(
   const store = await new WorkspaceStore({
     dataDir,
     runtime,
-    resolveHost: async () => [{ address: '140.82.112.3' }],
+    resolveHost: resolveHost || (async () => [{ address: '140.82.112.3' }]),
     setupRepair,
     setupBuildTimeoutMs,
   }).init()
@@ -81,6 +87,845 @@ async function fixture(
   }
   return { store, create, runtime, calls, dataDir }
 }
+
+const redirectResult = {
+  code: 128,
+  stdout: '',
+  stderr:
+    'fatal: unable to access repository: The requested URL returned error: 301',
+}
+
+test('GitLab redirect retries the validated .git URL once and retains revision and Git protections', async (t) => {
+  const f = await fixture(t, { cloneFiles: sources })
+  const run = f.runtime.run
+  const urls = []
+  f.runtime.run = async (root, args, options) => {
+    if (args.includes('clone')) {
+      urls.push(args.at(-2))
+      if (urls.length === 1) return redirectResult
+    }
+    return run(root, args, options)
+  }
+  const project = await f.create({
+    repository: 'https://gitlab.epfl.ch/lara/LeanTUI/',
+    revision: 'release/v1',
+  })
+  assert.equal(project.status, 'ready', project.error)
+  assert.deepEqual(urls, [
+    'https://gitlab.epfl.ch/lara/LeanTUI/',
+    'https://gitlab.epfl.ch/lara/LeanTUI.git',
+  ])
+  assert.equal(project.repository, urls[1])
+  assert.equal(project.sourceRevision, 'a'.repeat(40))
+  assert(
+    f.calls.some(
+      (call) =>
+        call.args.includes('fetch') && call.args.at(-1) === 'release/v1',
+    ),
+  )
+  assert(
+    f.calls
+      .filter((call) => call.args[0] === 'git')
+      .every((call) => call.args.includes('http.followRedirects=false')),
+  )
+  assert.match(project.log, /Retrying its \.git clone URL/)
+})
+
+test('persistent redirects give direct clone URL guidance without repeated retries or Lemex repair', async (t) => {
+  for (const suffix of ['', '.git']) {
+    let repairs = 0,
+      clones = 0
+    const f = await fixture(t, {
+      setupRepair: async () => {
+        repairs++
+      },
+    })
+    f.runtime.run = async () => {
+      clones++
+      return redirectResult
+    }
+    const project = await f.create({
+      repository: `https://gitlab.epfl.ch/lara/LeanTUI${suffix}`,
+    })
+    assert.equal(project.status, 'error')
+    assert.equal(clones, suffix ? 1 : 2)
+    assert.equal(repairs, 0)
+    assert.match(project.error, /direct HTTPS clone URL/)
+    assert.match(
+      project.log,
+      /repair can run after the project files are available/,
+    )
+    assert.doesNotMatch(project.log, /needs a supported Lean version/)
+  }
+})
+
+test('redirect retry revalidates DNS and rejects a host that becomes private', async (t) => {
+  let lookups = 0,
+    clones = 0
+  const f = await fixture(t, {
+    resolveHost: async () => [
+      { address: ++lookups <= 2 ? '140.82.112.3' : '127.0.0.1' },
+    ],
+  })
+  f.runtime.run = async () => {
+    clones++
+    return redirectResult
+  }
+  const project = await f.create({
+    repository: 'https://gitlab.example.org/group/project',
+  })
+  assert.equal(project.status, 'error')
+  assert.match(project.error, /Private repository hosts/)
+  assert.equal(clones, 1)
+  assert.equal(lookups, 3)
+})
+
+test('redirect retry preserves files left by an interrupted clone', async (t) => {
+  const f = await fixture(t)
+  let clones = 0
+  f.runtime.run = async (root) => {
+    clones++
+    await fs.writeFile(path.join(root, 'preserved.txt'), 'partial checkout')
+    return redirectResult
+  }
+  const project = await f.create({
+    repository: 'https://gitlab.example.org/group/project',
+  })
+  assert.equal(project.status, 'error')
+  assert.equal(clones, 1)
+  assert.equal(
+    await fs.readFile(path.join(project.root, 'preserved.txt'), 'utf8'),
+    'partial checkout',
+  )
+})
+
+test('stopping a clone prevents the redirect retry and automatic repair', async (t) => {
+  let began
+  const started = new Promise((resolve) => {
+    began = resolve
+  })
+  const f = await fixture(t)
+  let clones = 0
+  f.runtime.run = async (_root, _args, options) => {
+    clones++
+    began()
+    await new Promise((resolve) =>
+      options.signal.addEventListener('abort', resolve, { once: true }),
+    )
+    return redirectResult
+  }
+  const project = await f.store.create('alice', {
+    repository: 'https://gitlab.example.org/group/project',
+  })
+  await started
+  assert.equal(
+    f.store.get(project.id, 'alice').setupPhase,
+    'cloning-repository',
+  )
+  const stopped = await f.store.stopPreparation(project.id, 'alice')
+  assert.equal(stopped.status, 'error')
+  assert.match(stopped.error, /stopped/)
+  assert.equal(clones, 1)
+})
+
+test('setup output identifies streamed builds, preserves diagnostics and labels source revisions', async (t) => {
+  const f = await fixture(t, { cloneFiles: sources })
+  const run = f.runtime.run
+  f.runtime.run = async (root, args, options) => {
+    if (args.includes('build'))
+      options.onOutput?.(
+        'Build completed successfully (32 jobs).\nMain.lean: warning: fixture linter\n',
+      )
+    if (args.includes('rev-parse')) options.onOutput?.('a'.repeat(40) + '\n')
+    return run(root, args, options)
+  }
+  const project = await f.create({
+    repository: 'https://gitlab.example.org/group/project.git',
+  })
+  assert.equal(project.status, 'ready', project.error)
+  assert.equal(project.setupBuildStatus, 'passed')
+  assert.match(project.log, /Starting: Building project project\./)
+  assert.match(project.log, /Completed: Building project project \(\d+\.\d+s\)/)
+  assert.match(project.log, /Build completed successfully \(32 jobs\)/)
+  assert.match(project.log, /warning: fixture linter/)
+  assert.match(
+    project.log,
+    new RegExp(`Project source revision: ${'a'.repeat(40)}`),
+  )
+  assert.equal(project.log.split('\n').includes('a'.repeat(40)), false)
+})
+
+test('setup log retains more than 60 chunks and excludes later saves and background Git inspection', async (t) => {
+  const f = await fixture(t)
+  const run = f.runtime.run
+  f.runtime.run = async (root, args, options) => {
+    if (args.includes('build'))
+      for (let i = 0; i < 90; i++)
+        options.onOutput?.(`Fixture build module ${i}\n`)
+    if (args.includes('status')) {
+      options.onOutput?.('## main\0 M init\0 M fetch\0')
+      return { code: 0, stdout: '## main\0 M init\0 M fetch\0', stderr: '' }
+    }
+    if (args.includes('diff'))
+      options.onOutput?.('Private file diff must not appear in setup output')
+    return run(root, args, options)
+  }
+  const project = await f.create({ files: sources })
+  assert.equal(project.status, 'ready', project.error)
+  assert.match(project.log, /Fixture build module 0\n/)
+  assert.match(project.log, /Fixture build module 89\n/)
+  await f.store.writeFile(project.id, 'alice', 'init', 'fixture file')
+  await f.store.writeFile(project.id, 'alice', 'fetch', 'fixture file')
+  for (let i = 0; i < 80; i++)
+    await f.store.writeFile(project.id, 'alice', 'Main.lean', `-- edit ${i}\n`)
+  const outputs = () =>
+    f.store
+      .events(project.id, 'alice')
+      .filter((event) => event.type === 'output').length
+  const before = outputs()
+  await f.store.gitStatus(project.id, 'alice')
+  assert.equal(outputs(), before)
+  assert.equal(f.store.get(project.id, 'alice').log, project.log)
+  // Existing installations retain their setup window without a new scope marker.
+  const legacy = f.store.get(project.id, 'alice')
+  delete legacy.setupEventAfter
+  f.store.db
+    .prepare('UPDATE projects SET data=? WHERE id=?')
+    .run(JSON.stringify(legacy), project.id)
+  f.store.db
+    .prepare('INSERT INTO events(project,time,data) VALUES(?,?,?)')
+    .run(
+      project.id,
+      new Date().toISOString(),
+      JSON.stringify({ type: 'output', message: 'AFTER_SETUP_PRIVATE_DIFF' }),
+    )
+  const legacyLog = f.store.get(project.id, 'alice').log
+  assert.match(legacyLog, /Fixture build module 0\n/)
+  assert.doesNotMatch(
+    legacyLog,
+    /Saved |Private file diff|AFTER_SETUP_PRIVATE_DIFF/,
+  )
+})
+
+test('setup log marks its character limit and refresh replaces the previous attempt and warnings', async (t) => {
+  const f = await fixture(t)
+  const run = f.runtime.run
+  let first = true
+  f.runtime.run = async (root, args, options) => {
+    if (args.includes('build')) {
+      options.onOutput?.(
+        first ? 'OLD SETUP OUTPUT\n'.repeat(1500) : 'NEW SETUP OUTPUT\n',
+      )
+      if (first)
+        return { code: 1, stdout: '', stderr: 'Main.lean: unsolved goals' }
+    }
+    return run(root, args, options)
+  }
+  const project = await f.create({ files: sources })
+  assert.equal(project.status, 'ready', project.error)
+  assert.equal(project.setupBuildStatus, 'warnings')
+  assert.match(project.log, /^\[Showing the latest setup output/)
+  assert.match(project.log, /Warning: Some project targets did not compile/)
+  assert.equal(project.log.length, 20000)
+  first = false
+  await f.store.prepare(project.id, 'alice')
+  await f.store.jobs.get(project.id)
+  const refreshed = f.store.get(project.id, 'alice')
+  assert.equal(refreshed.status, 'ready', refreshed.error)
+  assert.equal(refreshed.setupBuildStatus, 'passed')
+  assert.match(refreshed.log, /NEW SETUP OUTPUT/)
+  assert.doesNotMatch(
+    refreshed.log,
+    /OLD SETUP OUTPUT|Warning:|earlier output was omitted/,
+  )
+})
+
+test('inaccessible or missing repositories explain the clone problem without another clone or setup repair', async (t) => {
+  for (const [stderr, message] of [
+    [
+      'fatal: could not read Username for public repository: terminal prompts disabled',
+      /Access to this repository was denied/,
+    ],
+    [
+      'fatal: requested URL returned error: 403',
+      /Access to this repository was denied/,
+    ],
+    [
+      'fatal: repository https://gitlab.example.org/group/missing.git not found',
+      /The repository was not found/,
+    ],
+  ]) {
+    let clones = 0,
+      repairs = 0
+    const f = await fixture(t, {
+      setupRepair: async () => {
+        repairs++
+      },
+    })
+    f.runtime.run = async () => {
+      clones++
+      return { code: 128, stdout: '', stderr }
+    }
+    const project = await f.create({
+      repository: 'https://gitlab.example.org/group/project.git',
+    })
+    assert.equal(project.status, 'error')
+    assert.match(project.error, message)
+    assert.equal(clones, 1)
+    assert.equal(repairs, 0)
+  }
+})
+
+test('a missing requested revision gives revision guidance after a successful clone', async (t) => {
+  const f = await fixture(t, { cloneFiles: sources })
+  const run = f.runtime.run
+  f.runtime.run = async (root, args, options) =>
+    args.includes('fetch')
+      ? {
+          code: 128,
+          stdout: '',
+          stderr: "fatal: couldn't find remote ref typo",
+        }
+      : run(root, args, options)
+  const project = await f.create({
+    repository: 'https://gitlab.example.org/group/project.git',
+    revision: 'typo',
+  })
+  assert.equal(project.status, 'error')
+  assert.match(
+    project.error,
+    /Revision typo was not found.*existing branch, tag, or full commit hash/,
+  )
+  assert.match(project.log, /selected revision could not be prepared/)
+  assert.doesNotMatch(project.log, /retry with the direct HTTPS clone URL/)
+})
+
+test('Retry resumes a completed clone after revision fetch failure, including after a server restart', async (t) => {
+  let repairs = 0
+  const f = await fixture(t, {
+    cloneFiles: sources,
+    setupRepair: async () => {
+      repairs++
+    },
+  })
+  const run = f.runtime.run
+  let clones = 0,
+    fetches = 0
+  f.runtime.run = async (root, args, options) => {
+    if (args.includes('clone')) clones++
+    if (args.includes('fetch') && ++fetches === 1)
+      return { code: 128, stdout: '', stderr: 'fatal: Connection timed out' }
+    return run(root, args, options)
+  }
+  const project = await f.create({
+    repository: 'https://gitlab.example.org/group/project.git',
+    revision: 'release/v1',
+  })
+  assert.equal(project.status, 'error')
+  assert.equal(repairs, 0)
+  await fs.writeFile(
+    path.join(project.root, '.git/shallow.lock'),
+    'interrupted fetch',
+  )
+  await fs.writeFile(
+    path.join(project.root, '.git/index.lock'),
+    'interrupted checkout',
+  )
+  await fs.writeFile(
+    path.join(project.root, '.git/preserved.lock'),
+    'unrelated metadata',
+  )
+  f.store.close()
+  await f.store.init()
+  await f.store.prepare(project.id, 'alice')
+  await f.store.jobs.get(project.id)
+  const ready = f.store.get(project.id, 'alice')
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.equal(clones, 1)
+  assert.equal(fetches, 2)
+  await assert.rejects(fs.stat(path.join(ready.root, '.git/shallow.lock')), {
+    code: 'ENOENT',
+  })
+  await assert.rejects(fs.stat(path.join(ready.root, '.git/index.lock')), {
+    code: 'ENOENT',
+  })
+  assert.equal(
+    await fs.readFile(path.join(ready.root, '.git/preserved.lock'), 'utf8'),
+    'unrelated metadata',
+  )
+  assert.equal(ready.revision, 'release/v1')
+  assert.equal(ready.repository, project.repository)
+  assert.equal(
+    await fs.readFile(path.join(ready.root, 'Main.lean'), 'utf8'),
+    sources[2].content,
+  )
+})
+
+test('Stop during revision fetch preserves the completed clone and Retry resumes it', async (t) => {
+  const f = await fixture(t, { cloneFiles: sources })
+  const run = f.runtime.run
+  let began,
+    clones = 0,
+    fetches = 0
+  const started = new Promise((resolve) => {
+    began = resolve
+  })
+  f.runtime.run = async (root, args, options) => {
+    if (args.includes('clone')) clones++
+    if (args.includes('fetch') && ++fetches === 1) {
+      began()
+      await new Promise((resolve) =>
+        options.signal.addEventListener('abort', resolve, { once: true }),
+      )
+      return { code: 137, stdout: '', stderr: 'stopped' }
+    }
+    return run(root, args, options)
+  }
+  const project = await f.store.create('alice', {
+    repository: 'https://gitlab.example.org/group/project.git',
+    revision: 'release/v1',
+  })
+  await started
+  assert.equal(
+    f.store.get(project.id, 'alice').setupPhase,
+    'selecting-revision',
+  )
+  const stopped = await f.store.stopPreparation(project.id, 'alice')
+  assert.match(stopped.error, /retry when ready/)
+  await f.store.prepare(project.id, 'alice')
+  await f.store.jobs.get(project.id)
+  assert.equal(f.store.get(project.id, 'alice').status, 'ready')
+  assert.equal(clones, 1)
+  assert.equal(fetches, 2)
+})
+
+test('a stopped partial clone explains that a new import is needed and preserves partial files', async (t) => {
+  const f = await fixture(t)
+  let began
+  const started = new Promise((resolve) => {
+    began = resolve
+  })
+  f.runtime.run = async (root, _args, options) => {
+    await fs.writeFile(path.join(root, 'partial.txt'), 'preserved')
+    began()
+    await new Promise((resolve) =>
+      options.signal.addEventListener('abort', resolve, { once: true }),
+    )
+    return { code: 137, stdout: '', stderr: 'stopped' }
+  }
+  const project = await f.store.create('alice', {
+    repository: 'https://gitlab.example.org/group/project.git',
+  })
+  await started
+  const stopped = await f.store.stopPreparation(project.id, 'alice')
+  assert.match(
+    stopped.error,
+    /Create a new import; the partial files were preserved/,
+  )
+  assert.equal(
+    await fs.readFile(path.join(stopped.root, 'partial.txt'), 'utf8'),
+    'preserved',
+  )
+  assert.doesNotMatch(stopped.error, /retry when ready/)
+})
+
+test('failed setup worker cleanup remains actionable, and Retry stops only its own remaining workers', async (t) => {
+  const f = await fixture(t)
+  const run = f.runtime.run
+  let began
+  const started = new Promise((resolve) => {
+    began = resolve
+  })
+  f.runtime.run = async (_root, _args, options) => {
+    began()
+    await new Promise((resolve) =>
+      options.signal.addEventListener('abort', resolve, { once: true }),
+    )
+    throw Object.assign(
+      new Error('The project worker could not be stopped. Try again.'),
+      { workerCleanup: true, status: 503 },
+    )
+  }
+  const project = await f.store.create('alice', { files: sources })
+  await started
+  const stopped = await f.store.stopPreparation(project.id, 'alice')
+  assert.match(stopped.error, /worker could not be stopped/)
+  assert.equal(stopped.setupCleanupFailed, true)
+  const roots = []
+  f.runtime.stopProject = async (root) => {
+    roots.push(root)
+  }
+  f.runtime.run = run
+  await f.store.prepare(project.id, 'alice')
+  await f.store.jobs.get(project.id)
+  const ready = f.store.get(project.id, 'alice')
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.equal(ready.setupCleanupFailed, undefined)
+  assert.deepEqual(roots, [project.root])
+})
+
+test('Retry cannot start setup while a previous setup worker still cannot be stopped', async (t) => {
+  const f = await fixture(t)
+  const project = await f.create({ files: sources })
+  project.status = 'error'
+  project.setupCleanupFailed = true
+  f.store.db
+    .prepare('UPDATE projects SET data=? WHERE id=?')
+    .run(JSON.stringify(project), project.id)
+  let launched = false
+  f.runtime.run = async () => {
+    launched = true
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  f.runtime.stopProject = async () => {
+    throw Object.assign(new Error('Worker cleanup still unavailable'), {
+      workerCleanup: true,
+      status: 503,
+    })
+  }
+  await assert.rejects(
+    f.store.prepare(project.id, 'alice'),
+    /cleanup still unavailable/,
+  )
+  assert.equal(launched, false)
+  assert.equal(f.store.get(project.id, 'alice').status, 'error')
+  assert.equal(f.store.get(project.id, 'alice').setupCleanupFailed, true)
+})
+
+test('the final project build cannot change the pinned Lean version or invoke repair to substitute it', async (t) => {
+  let repairs = 0
+  const f = await fixture(t, {
+    setupRepair: async () => {
+      repairs++
+    },
+  })
+  const run = f.runtime.run
+  f.runtime.run = async (root, args, options) => {
+    const result = await run(root, args, options)
+    if (args.includes('build'))
+      await fs.writeFile(
+        path.join(root, 'lean-toolchain'),
+        'leanprover/lean4:v4.35.0\n',
+      )
+    return result
+  }
+  const project = await f.create({ files: sources })
+  assert.equal(project.status, 'error')
+  assert.match(project.error, /pinned Lean release.*restored/)
+  assert.equal(
+    await fs.readFile(path.join(project.root, 'lean-toolchain'), 'utf8'),
+    toolchain + '\n',
+  )
+  assert.equal(repairs, 0)
+})
+
+test('normal setup restores a resolved dependency pin changed by Lake and never admits the changed environment', async (t) => {
+  let repairs = 0
+  const f = await fixture(t, {
+    setupRepair: async () => {
+      repairs++
+    },
+  })
+  const manifest = JSON.stringify({
+    packages: [
+      {
+        name: 'fixture-dependency',
+        type: 'git',
+        url: 'https://github.com/example/library.git',
+        rev: 'a'.repeat(40),
+      },
+    ],
+  })
+  const run = f.runtime.run
+  f.runtime.run = async (root, args, options) => {
+    const result = await run(root, args, options)
+    if (args[0] === 'lake')
+      await fs.writeFile(
+        path.join(root, 'lake-manifest.json'),
+        manifest.replace('a'.repeat(40), 'b'.repeat(40)),
+      )
+    return result
+  }
+  const project = await f.create({
+    files: [...sources, { path: 'lake-manifest.json', content: manifest }],
+  })
+  assert.equal(project.status, 'error')
+  assert.match(project.error, /pinned dependency.*lockfile was restored/)
+  assert.equal(
+    await fs.readFile(path.join(project.root, 'lake-manifest.json'), 'utf8'),
+    manifest,
+  )
+  assert.equal(repairs, 0)
+})
+
+test('Retry resolves dependencies when an interrupted update left .lake but no lockfile', async (t) => {
+  const f = await fixture(t)
+  const run = f.runtime.run
+  let updates = 0
+  f.runtime.run = async (root, args, options) => {
+    if (args.includes('update')) {
+      updates++
+      await fs.mkdir(path.join(root, '.lake'), { recursive: true })
+      if (updates === 1)
+        return {
+          code: 1,
+          stdout: '',
+          stderr: 'Fixture dependency download failed',
+        }
+      await fs.writeFile(
+        path.join(root, 'lake-manifest.json'),
+        '{"packages":[]}',
+      )
+    }
+    return run(root, args, options)
+  }
+  const project = await f.create({ files: sources, autoRepair: false })
+  assert.equal(project.status, 'error')
+  await f.store.prepare(project.id, 'alice')
+  await f.store.jobs.get(project.id)
+  const ready = f.store.get(project.id, 'alice')
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.equal(updates, 2)
+  assert.equal(
+    await fs.readFile(path.join(ready.root, 'lake-manifest.json'), 'utf8'),
+    '{"packages":[]}',
+  )
+})
+
+test('private dependency URLs are rejected before networked Lake work with or without a shared Mathlib graph', async (t) => {
+  for (const name of ['mathlib', 'private-library']) {
+    let repairs = 0
+    const f = await fixture(t, {
+      setupRepair: async () => {
+        repairs++
+      },
+    })
+    const manifest = JSON.stringify({
+      packages: [
+        {
+          name,
+          type: 'git',
+          url: 'https://10.0.0.1/private/repo.git',
+          rev: 'a'.repeat(40),
+        },
+      ],
+    })
+    const project = await f.create({
+      files: [...sources, { path: 'lake-manifest.json', content: manifest }],
+    })
+    assert.equal(project.status, 'error')
+    assert.match(project.error, /Private repository hosts/)
+    assert.equal(
+      f.calls.some(
+        (call) => call.args[0] === 'lake' && call.options.network === 'bridge',
+      ),
+      false,
+    )
+    assert.equal(repairs, 0)
+    assert.equal(
+      await fs.readFile(path.join(project.root, 'lake-manifest.json'), 'utf8'),
+      manifest,
+    )
+  }
+})
+
+test('a rejected repository recheck in shared preparation cannot fall back to unchecked private setup', async (t) => {
+  let lookups = 0,
+    repairs = 0,
+    shared = 0
+  const f = await fixture(t, {
+    resolveHost: async () => [
+      { address: ++lookups === 1 ? '140.82.112.3' : '127.0.0.1' },
+    ],
+    setupRepair: async () => {
+      repairs++
+    },
+  })
+  f.runtime.prepareSharedDependencies = async (_root, options) => {
+    shared++
+    await options.validateRepository(
+      'https://gitlab.example.org/group/library.git',
+    )
+    assert.fail('Rejected dependency URL must stop preparation')
+  }
+  const manifest = JSON.stringify({
+    packages: [
+      {
+        name: 'mathlib',
+        type: 'git',
+        url: 'https://gitlab.example.org/group/library.git',
+        rev: 'a'.repeat(40),
+      },
+    ],
+  })
+  const project = await f.create({
+    files: [...sources, { path: 'lake-manifest.json', content: manifest }],
+  })
+  assert.equal(project.status, 'error')
+  assert.match(project.error, /Private repository hosts/)
+  assert.equal(shared, 1)
+  assert.equal(repairs, 0)
+  assert.equal(
+    f.calls.some(
+      (call) => call.args[0] === 'lake' && call.options.network === 'bridge',
+    ),
+    false,
+  )
+  assert.doesNotMatch(project.log, /Continuing with a private environment/)
+})
+
+test('shared native build limitations keep a verified library environment editable without repair', async (t) => {
+  for (const usable of [true, false]) {
+    let repairs = 0
+    const f = await fixture(t, {
+      setupRepair: async () => {
+        repairs++
+      },
+    })
+    const run = f.runtime.run
+    f.runtime.prepareSharedDependencies = async (root) => ({
+      root,
+      reused: true,
+    })
+    f.runtime.inheritDependencies = async () => {}
+    f.runtime.run = async (root, args, options) => {
+      if (args.includes('build'))
+        return {
+          code: 1,
+          stdout: '',
+          stderr:
+            'error: unable to open output file /workspace/.lake/packages/mathlib/.lake/build/ir/Mathlib.c.o: Read-only file system',
+        }
+      if (!usable && args.at(-1) === '--stdin')
+        return { code: 1, stdout: '', stderr: 'Mathlib import is unavailable' }
+      return run(root, args, options)
+    }
+    const manifest = JSON.stringify({
+      packages: [
+        {
+          name: 'mathlib',
+          type: 'git',
+          url: 'https://github.com/example/mathlib.git',
+          rev: 'a'.repeat(40),
+        },
+      ],
+    })
+    const project = await f.create({
+      autoRepair: false,
+      files: [...sources, { path: 'lake-manifest.json', content: manifest }],
+    })
+    assert.equal(project.status, usable ? 'ready' : 'error')
+    if (usable) {
+      assert.equal(project.setupBuildStatus, 'warnings')
+      assert.match(project.buildWarning, /shared library cache/)
+      assert.doesNotMatch(project.buildWarning, /Refresh setup/)
+    } else assert.match(project.error, /environment is not ready/)
+    assert.equal(repairs, 0)
+  }
+  // The same soft build failure must not invoke an enabled automatic repair.
+  const f = await fixture(t, {
+    setupRepair: async () =>
+      assert.fail('Native-only build limitation must not call repair'),
+  })
+  const run = f.runtime.run
+  f.runtime.prepareSharedDependencies = async (root) => ({ root, reused: true })
+  f.runtime.inheritDependencies = async () => {}
+  f.runtime.run = async (root, args, options) =>
+    args.includes('build')
+      ? {
+          code: 1,
+          stdout: '',
+          stderr:
+            '.lake/packages/mathlib/.lake/build/ir/Mathlib.c.o: Read-only file system',
+        }
+      : run(root, args, options)
+  const project = await f.create({ files: sources })
+  assert.equal(project.status, 'ready', project.error)
+})
+
+test('derived setup logs are fetched separately and never stored in project metadata', async (t) => {
+  const f = await fixture(t)
+  const project = await f.create({ files: sources })
+  assert(project.log)
+  await f.store.rename(project.id, 'alice', { name: 'renamed' })
+  assert.equal(f.store.list('alice')[0].log, undefined)
+  const stored = JSON.parse(
+    f.store.db.prepare('SELECT data FROM projects WHERE id=?').get(project.id)
+      .data,
+  )
+  assert.equal(stored.log, undefined)
+  assert.equal(f.store.get(project.id, 'alice').log, project.log)
+})
+
+test('setup repair omits generated build caches and preserves the original cache and proof sources', async (t) => {
+  let repaired = false
+  const f = await fixture(t, {
+    broken: true,
+    setupRepair: async ({ root }) => {
+      await assert.rejects(fs.stat(path.join(root, '.lake')), {
+        code: 'ENOENT',
+      })
+      assert.equal(
+        await fs.readFile(path.join(root, 'Main.lean'), 'utf8'),
+        sources[2].content,
+      )
+      await fs.writeFile(path.join(root, 'lakefile.toml'), 'name = "fixed"\n')
+      repaired = true
+    },
+  })
+  const run = f.runtime.run
+  f.runtime.run = async (root, args, options) => {
+    if (!root.includes('setup-repairs') && args[0] === 'lake') {
+      await fs.mkdir(path.join(root, '.lake/build'), { recursive: true })
+      await fs.writeFile(
+        path.join(root, '.lake/build/preserved'),
+        'original build cache',
+      )
+    }
+    return run(root, args, options)
+  }
+  const project = await f.create({
+    files: sources.map((file) =>
+      file.path === 'lakefile.toml' ? { ...file, content: 'broken' } : file,
+    ),
+  })
+  assert.equal(project.status, 'ready', project.error)
+  assert.equal(repaired, true)
+  assert.equal(
+    await fs.readFile(path.join(project.root, '.lake/build/preserved'), 'utf8'),
+    'original build cache',
+  )
+})
+
+test('Stop before copying a repair candidate prevents the repair invocation', async (t) => {
+  let began,
+    repairs = 0
+  const started = new Promise((resolve) => {
+    began = resolve
+  })
+  const f = await fixture(t, {
+    broken: true,
+    setupRepair: async () => {
+      repairs++
+    },
+  })
+  f.runtime.claimTemporaryWorkspace = async () => {
+    began()
+  }
+  const project = await f.store.create('alice', {
+    files: sources.map((file) =>
+      file.path === 'lakefile.toml' ? { ...file, content: 'broken' } : file,
+    ),
+  })
+  await started
+  const stopped = await f.store.stopPreparation(project.id, 'alice')
+  assert.match(stopped.error, /stopped/)
+  assert.equal(repairs, 0)
+  assert.equal(
+    await fs.readFile(path.join(stopped.root, 'Main.lean'), 'utf8'),
+    sources[2].content,
+  )
+})
 
 test('parses GitHub subprojects, explicit slash branches and encoded refs without treating blob links as repos', () => {
   assert.deepEqual(
@@ -462,7 +1307,10 @@ test('Stop during project build cannot become a ready project or trigger setup r
   })
   const run = f.runtime.run
   f.runtime.run = async (root, args, options) => {
-    if (args[0] !== 'lake' || args[1] !== 'build')
+    if (
+      args.filter((arg) => arg !== '--keep-toolchain').join(' ') !==
+      'lake build'
+    )
       return run(root, args, options)
     began()
     await new Promise((resolve) =>
@@ -747,7 +1595,11 @@ test('import preparation uses its configured root build timeout while dependency
     const f = await fixture(t, { setupBuildTimeoutMs: timeout })
     const project = await f.create({ files: sources })
     assert.equal(project.status, 'ready')
-    const build = f.calls.find((call) => call.args.join(' ') === 'lake build')
+    const build = f.calls.find(
+      (call) =>
+        call.args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
+        'lake build',
+    )
     assert(build)
     assert.equal(build.options.timeoutMs, timeout ?? 1800000)
     assert.equal(

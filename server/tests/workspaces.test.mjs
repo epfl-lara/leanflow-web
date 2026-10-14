@@ -835,7 +835,7 @@ test('imports an exact Git revision through the runtime, preserves instructions,
       result.code = 0
       result.stdout = 'abcdef1234567890abcdef1234567890abcdef1234\n'
     }
-    if (args[0] === 'lake' && args[1] === 'build') {
+    if (args[0] === 'lake' && args.includes('build')) {
       result.code = 1
       result.stderr = 'Main.lean: unsolved goals'
     }

@@ -155,6 +155,30 @@ async function fixture(t, command = async () => null) {
   return { runtime, root, dataDir, calls, run }
 }
 
+test('shared setup logs identify cache, build, replay and dependency revisions without bare Git hashes', async (t) => {
+  const f = await fixture(t, async (_stage, args, options) => {
+    if (args[0] === 'git' && args.includes('rev-parse'))
+      options.onOutput?.(revision + '\n')
+    if (args.includes('build'))
+      options.onOutput?.('Build completed successfully (32 jobs).\n')
+  })
+  const output = []
+  await f.runtime.prepareSharedDependencies(
+    f.root,
+    request({ onOutput: (message) => output.push(message) }),
+  )
+  const log = output.join('')
+  assert.match(log, /Starting: Fetching compiled Mathlib files/)
+  assert.match(log, /Starting: Building dependency mathlib/)
+  assert.match(log, /Starting: Verifying dependency build mathlib/)
+  assert.match(log, /Build completed successfully \(32 jobs\)/)
+  assert.match(
+    log,
+    new RegExp(`Verified dependency revision mathlib: ${revision}`),
+  )
+  assert.equal(log.split('\n').includes(revision), false)
+})
+
 test('cache matches exact Lean, all dependency pins, image, account and settings while ignoring TOML project names', async () => {
   const first = await sharedDependencySpec(request())
   const renamed = request()
@@ -530,10 +554,17 @@ test('a cancelled cache waiter cannot cancel another import and remaining waiter
   await new Promise(setImmediate)
   controller.abort(new Error('Stopped fixture'))
   await assert.rejects(first, /Stopped fixture/)
+  const stoppedOutput = [...firstOutput]
   resume()
   assert(await second)
-  assert.deepEqual(firstOutput, ['Downloading pinned libraries'])
-  assert.deepEqual(secondOutput, ['Replaying dependency builds'])
+  assert.deepEqual(firstOutput, stoppedOutput)
+  assert(firstOutput.includes('Downloading pinned libraries'))
+  assert.equal(firstOutput.includes('Replaying dependency builds'), false)
+  assert(secondOutput.includes('Replaying dependency builds'))
+  assert.match(
+    secondOutput.join(''),
+    /Completed: Verifying dependency build mathlib/,
+  )
   assert.equal(
     calls.filter(
       (call) =>

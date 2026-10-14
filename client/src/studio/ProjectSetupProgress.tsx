@@ -2,6 +2,14 @@ import type { Project } from './api'
 import { useEffect, useState } from 'react'
 
 const stages = {
+  'cloning-repository': [
+    'Importing the repository',
+    'Downloading project files from the HTTPS clone URL before preparing Lean.',
+  ],
+  'selecting-revision': [
+    'Selecting the project revision',
+    'Fetching and checking out the chosen branch, tag, or commit.',
+  ],
   'waiting-for-repair': [
     'Waiting for Lemex',
     'Setup repair is queued for an available assistant slot. You can keep working in another project.',

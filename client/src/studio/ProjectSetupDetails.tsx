@@ -7,6 +7,37 @@ export function ProjectSetupDetails({ project }: { project: Project }) {
       {project.status === 'preparing' && (
         <ProjectSetupProgress project={project} />
       )}
+      {project.status === 'ready' &&
+        !project.needsPreparation &&
+        project.toolchain && (
+          <div className="setup-repair-notice">
+            <strong>Setup summary</strong>
+            <p>
+              Ready for editing with Lean{' '}
+              {project.toolchain.replace('leanprover/lean4:', '')}.
+            </p>
+            {project.setupBuildStatus === 'passed' && (
+              <p>Project build passed.</p>
+            )}
+            {project.setupBuildStatus === 'reused' && (
+              <p>Reused the verified library environment.</p>
+            )}
+            {project.setupBuildStatus === 'warnings' && (
+              <p>
+                Some project targets need attention. See the build messages
+                below.
+              </p>
+            )}
+            {project.subdirectory && (
+              <p>Project folder: {project.subdirectory}</p>
+            )}
+            {project.sourceRevision && (
+              <p>
+                Source revision: <code>{project.sourceRevision}</code>
+              </p>
+            )}
+          </div>
+        )}
       {project.publishingWarning && (
         <div className="setup-repair-notice" role="status">
           <strong>Working branch adjusted</strong>

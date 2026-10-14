@@ -219,10 +219,9 @@ try {
       buffer: Buffer.from('a'.repeat(8 * 1024 * 1024 + 1)),
     })
   await f.page
-    .getByText(
-      'TooLarge.lean is larger than 8 MiB. Reduce the file or split Lean sources into smaller modules.',
-      { exact: true },
-    )
+    .getByText('TooLarge.lean is larger than 8 MiB. Choose a smaller file.', {
+      exact: true,
+    })
     .waitFor()
   await f.page.getByRole('button', { name: 'Cancel', exact: true }).click()
   assert.equal(f.state.files[projectId]['TooLarge.lean'], undefined)

@@ -173,6 +173,7 @@ export class Runtime {
     this.children = new Set()
     this.toolchains = new Map()
     this.dependencies = new Map()
+    this.dependencyRegistryStamp = null
     this.sharedCache = new SharedDependencyCache(this, (relative) =>
       ensurePrivateDirectory(this.runtimeDir, relative),
     )
@@ -327,9 +328,14 @@ export class Runtime {
   async #removeTemporaryWorkspace(root) {
     this.#reloadDependencies()
     if (
-      [...this.dependencies].some(
-        ([target, source]) => target !== root && source === root,
-      )
+      [...this.dependencies].some(([target, source]) => {
+        if (target === root || source !== root) return false
+        try {
+          return this.#root(target) === target
+        } catch {
+          return false
+        }
+      })
     )
       return false
     await this.#persistDependencies({ delete: [root] })
@@ -349,37 +355,60 @@ export class Runtime {
   }
 
   #reloadDependencies() {
-    let registry
+    const filename = path.join(this.runtimeDir, 'dependencies.json')
+    const stamp = (stat) =>
+      `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`
+    let registry, loadedStamp
     try {
-      registry = JSON.parse(
-        fs.readFileSync(
-          path.join(this.runtimeDir, 'dependencies.json'),
-          'utf8',
-        ),
+      if (
+        stamp(fs.statSync(filename, { bigint: true })) ===
+        this.dependencyRegistryStamp
       )
+        return
+      // Read and fingerprint the same file, even if another server atomically
+      // replaces the registry during this lookup. Validate only the selected
+      // binding at use, so filesystem changes never depend on this cache.
+      const fd = fs.openSync(filename, 'r')
+      try {
+        loadedStamp = stamp(fs.fstatSync(fd, { bigint: true }))
+        registry = JSON.parse(fs.readFileSync(fd, 'utf8'))
+      } finally {
+        fs.closeSync(fd)
+      }
     } catch (error) {
-      if (error.code === 'ENOENT') return
+      if (error.code === 'ENOENT') {
+        this.dependencies.clear()
+        this.dependencyRegistryStamp = null
+        return
+      }
       throw error
     }
-    this.dependencies.clear()
-    for (const [target, source] of Object.entries(registry)) {
-      try {
-        if (
-          this.#root(target) === target &&
-          this.#root(source) === source &&
-          fs.existsSync(path.join(source, '.lake/packages'))
-        )
-          this.dependencies.set(target, source)
-      } catch {
-        /* Individual deleted workspaces are skipped. */
-      }
-    }
+    if (!registry || typeof registry !== 'object' || Array.isArray(registry))
+      throw new Error('Invalid runtime dependency registry')
+    this.dependencies = new Map(
+      Object.entries(registry).filter(
+        ([target, source]) =>
+          path.isAbsolute(target) &&
+          typeof source === 'string' &&
+          path.isAbsolute(source),
+      ),
+    )
+    this.dependencyRegistryStamp = loadedStamp
+  }
+
+  #dependencySource(root) {
+    const source = this.dependencies.get(root)
+    if (source && this.#root(source) !== source)
+      throw new Error(
+        'Dependency source must be a real directory inside the owned data directory',
+      )
+    return source
   }
 
   dependencyRoot(root) {
     this.#reloadDependencies()
     const actual = this.#root(root)
-    const source = this.dependencies.get(actual) || actual
+    const source = this.#dependencySource(actual) || actual
     const directory = this.#dependencyPackages(source)
     if (!directory) return null
     try {
@@ -502,23 +531,9 @@ export class Runtime {
     this.dependencyWrites = this.dependencyWrites
       .catch(() => {})
       .then(async () => {
-        const registry = await this.#updateRegistry(
-          'dependencies.json',
-          changes,
-        )
-        this.dependencies.clear()
-        for (const [target, source] of Object.entries(registry)) {
-          try {
-            if (
-              this.#root(target) === target &&
-              this.#root(source) === source &&
-              fs.existsSync(path.join(source, '.lake/packages'))
-            )
-              this.dependencies.set(target, source)
-          } catch {
-            /* Deleted workspaces are omitted from the live map. */
-          }
-        }
+        await this.#updateRegistry('dependencies.json', changes)
+        this.dependencyRegistryStamp = null
+        this.#reloadDependencies()
       })
     await this.dependencyWrites
   }
@@ -727,7 +742,7 @@ export class Runtime {
       'version = "12"\ntelemetry = false\n',
       { mode: 0o600 },
     )
-    const dependencySource = this.dependencies.get(actual)
+    const dependencySource = this.#dependencySource(actual)
     if (dependencySource && dependencySource !== actual) {
       const sourceCache = this.#dependencyArtifactCache(dependencySource)
       const privateCache = path.join(home, '.cache/lake')
@@ -851,7 +866,7 @@ export class Runtime {
       )
     this.#reloadDependencies()
     const actual = this.#root(root)
-    const dependencySource = this.dependencies.get(actual)
+    const dependencySource = this.#dependencySource(actual)
     this.#checkSharedBinding(actual, dependencySource)
     const lakeCache = writeLakeCache
       ? writableLakeCache(actual, {

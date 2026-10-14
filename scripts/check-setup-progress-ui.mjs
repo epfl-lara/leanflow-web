@@ -30,9 +30,27 @@ const reportDir = path.resolve('.runtime/setup-progress-ui')
 await fs.mkdir(reportDir, { recursive: true })
 let stops = 0
 let prepares = 0
+let detailRequests = 0
+let listRequests = 0
+await f.page.route('**/api/projects', (route) => {
+  listRequests++
+  return route.fulfill({
+    json: f.state.projects.map((item) => {
+      const metadata = { ...item }
+      delete metadata.log
+      return metadata
+    }),
+  })
+})
+await f.page.route(`**/api/projects/${id}`, (route) => {
+  detailRequests++
+  return route.fulfill({ json: project })
+})
 await f.page.route(`**/api/projects/${id}/prepare`, (route) => {
   prepares++
   project.status = 'preparing'
+  project.setupEventAfter = (project.setupEventAfter || 0) + 1
+  project.setupStartedAt = new Date().toISOString()
   project.setupPhase = 'preparing-dependencies'
   delete project.dependencyWarning
   delete project.needsPreparation
@@ -49,6 +67,12 @@ try {
   await f.page.goto(process.env.STUDIO_TEST_URL || 'http://127.0.0.1:8090')
   await f.page.getByText('Preparing libraries', { exact: true }).waitFor()
   assert(await f.page.locator('.setup-repair-notice .spinner').isVisible())
+  project.setupPhase = 'cloning-repository'
+  await f.page.getByText('Importing the repository', { exact: true }).waitFor()
+  project.setupPhase = 'selecting-revision'
+  await f.page
+    .getByText('Selecting the project revision', { exact: true })
+    .waitFor()
   project.setupPhase = 'repairing-setup'
   project.setupRepair = {
     id: 'repair-fixture',
@@ -65,6 +89,12 @@ try {
     .waitFor()
   assert.equal(await f.page.locator('.setup-repair-notice .spinner').count(), 0)
   project.status = 'ready'
+  project.setupBuildStatus = 'warnings'
+  project.sourceRevision = 'a'.repeat(40)
+  project.log =
+    'Starting: Building dependency mathlib.\nBuild completed successfully (32 jobs).\nVerified dependency revision mathlib: ' +
+    'b'.repeat(40) +
+    '\n'
   project.setupRepair.status = 'completed'
   project.buildWarning = 'A proof in Main.lean still has unsolved goals.'
   delete project.error
@@ -74,6 +104,60 @@ try {
     .waitFor()
   await f.page.getByText(project.buildWarning, { exact: true }).waitFor()
   await f.page.getByText('Setup repaired and tested', { exact: true }).waitFor()
+  await f.page.getByText('Setup summary', { exact: true }).waitFor()
+  await f.page
+    .getByText('Ready for editing with Lean v4.34.1.', { exact: true })
+    .waitFor()
+  await f.page
+    .getByText('Source revision: ' + project.sourceRevision, { exact: true })
+    .waitFor()
+  await f.page.getByText('Setup output', { exact: true }).click()
+  assert.match(
+    await f.page.locator('.setup-log').innerText(),
+    /Building dependency mathlib/,
+  )
+  project.setupBuildStatus = 'passed'
+  delete project.buildWarning
+  delete project.setupRepair
+  await f.page.reload()
+  await f.page.getByText('Project setup', { exact: true }).click()
+  await f.page.getByText('Project build passed.', { exact: true }).waitFor()
+  await f.page.getByText('Setup output', { exact: true }).click()
+  assert.match(
+    await f.page.locator('.setup-log').innerText(),
+    /Verified dependency revision mathlib/,
+  )
+  const background = {
+    id: 'background-setup',
+    name: 'Background',
+    status: 'preparing',
+  }
+  f.state.projects.push(background)
+  f.state.files[background.id] = {}
+  await f.page.reload()
+  await f.page.getByText('Project setup', { exact: true }).click()
+  await f.page.getByText('Setup output', { exact: true }).waitFor()
+  const initialDetails = detailRequests
+  const initialLists = listRequests
+  await until(() => listRequests >= initialLists + 2, 'background setup polls')
+  assert.equal(
+    detailRequests,
+    initialDetails,
+    'completed setup logs are fetched once while other projects prepare',
+  )
+  project.setupEventAfter = 200
+  project.setupStartedAt = new Date().toISOString()
+  project.log = 'Refreshed setup output from a new attempt.\n'
+  await f.page.getByText('Setup output', { exact: true }).click()
+  await until(
+    async () =>
+      (await f.page.locator('.setup-log').innerText()).includes(
+        'Refreshed setup output',
+      ),
+    'new attempt reloads the log',
+  )
+  assert.equal(detailRequests, initialDetails + 1)
+  f.state.projects.splice(f.state.projects.indexOf(background), 1)
   project.needsPreparation = true
   project.dependencyWarning =
     'This project uses an older dependency cache. Use Refresh setup.'
@@ -121,7 +205,7 @@ try {
     .waitFor()
   f.assertClean()
   f.report.checks.push(
-    'Setup shows live repair progress, Stop and Retry; Refresh setup has clickable cache and repair help; dependency warnings block new checks; unavailable Lemex repair is explained and disabled.',
+    'Setup shows clone and repair progress, Stop and Retry, a version/revision/build summary and contextual output; Refresh setup has clickable cache and repair help; dependency warnings block new checks; unavailable Lemex repair is explained and disabled.',
   )
   f.report.passed = true
 } catch (error) {

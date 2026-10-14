@@ -29,7 +29,14 @@ async function fixture(t, { deferPreparation = false } = {}) {
     'name = "ProofWorkspace"\ndefaultTargets = ["Main"]\n[[lean_lib]]\nname = "Main"\n',
   )
   const manifest = JSON.stringify({
-    packages: [{ name: 'mathlib', type: 'git', rev: REVISION }],
+    packages: [
+      {
+        name: 'mathlib',
+        type: 'git',
+        url: 'https://github.com/leanprover-community/mathlib4',
+        rev: REVISION,
+      },
+    ],
   })
   await fs.writeFile(path.join(template, 'lake-manifest.json'), manifest)
   await fs.writeFile(
@@ -117,6 +124,7 @@ async function fixture(t, { deferPreparation = false } = {}) {
       throw new Error('No provider calls allowed')
     },
   })
+  studio.workspaces.resolveHost = async () => [{ address: '140.82.112.3' }]
   studio.workspaces.setupRepair = async () => {
     providerCalls++
     throw new Error('No provider calls allowed')

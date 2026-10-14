@@ -16,7 +16,10 @@ import {
   projectDirectory,
   uploadedFiles,
   detectProjectDirectory,
+  cloneRepository,
+  repositoryAccessError,
 } from './project-import.mjs'
+import { runSetupStep, setupCommandLabel } from './setup-output.mjs'
 import {
   projectLibraries,
   projectEnvironmentImports,
@@ -31,6 +34,8 @@ import {
   setupFailureMessage,
   dependencyFailureMessage,
   certifyDependencyBuilds,
+  changedDependencyPin,
+  readOnlyDependencyFailure,
 } from './pinned-lake.mjs'
 import { configurationDigest } from './shared-dependencies.mjs'
 import { singleFileSource, availablePlaygroundName } from './single-files.mjs'
@@ -76,6 +81,14 @@ const GIT_ARGS = [
   '-c',
   'protocol.file.allow=never',
 ]
+const SETUP_EVENT_TYPES = new Set([
+  'preparing',
+  'output',
+  'warning',
+  'setup-repair',
+  'ready',
+  'error',
+])
 const sha = (value) => createHash('sha256').update(value).digest('hex')
 const clone = (value) => JSON.parse(JSON.stringify(value))
 
@@ -376,7 +389,7 @@ async function textFile(filename, missing = false) {
   return { content: text, hash: sha(content), mode }
 }
 
-async function fileHash(filename) {
+async function fileHash(filename, signal) {
   const handle = await fs.open(
     filename,
     constants.O_RDONLY | constants.O_NOFOLLOW,
@@ -389,8 +402,10 @@ async function fileHash(filename) {
     )
       fail('Source file changed during access', 409)
     const hash = createHash('sha256')
-    for await (const chunk of handle.createReadStream({ autoClose: false }))
+    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+      signal?.throwIfAborted()
       hash.update(chunk)
+    }
     return hash.digest('hex')
   } finally {
     await handle.close()
@@ -400,9 +415,10 @@ async function fileHash(filename) {
 async function copyWorkspace(
   source,
   target,
-  { omitDependencies = false, omitFiles = [] } = {},
+  { omitDependencies = false, omitFiles = [], signal } = {},
 ) {
   const visit = async (from, to, prefix = '', depth = 0) => {
+    signal?.throwIfAborted()
     if (depth > 64) fail('Project directory nesting exceeds 64 levels', 413)
     const directory = await fs.open(
       from,
@@ -417,6 +433,7 @@ async function copyWorkspace(
       await fs.mkdir(to, { recursive: true, mode: 0o700 })
       const anchor = `/proc/self/fd/${directory.fd}`
       for (const entry of await fs.readdir(anchor, { withFileTypes: true })) {
+        signal?.throwIfAborted()
         const relative = prefix ? `${prefix}/${entry.name}` : entry.name
         if (
           entry.name === 'node_modules' ||
@@ -661,7 +678,9 @@ export class WorkspaceStore {
         project.error =
           project.kind === 'single-file'
             ? 'Opening was interrupted by a server restart. Retry opening to continue.'
-            : 'Preparation was interrupted by a server restart. Retry preparation to continue.'
+            : (await this.#partialClone(project))
+              ? 'Project import was interrupted before cloning finished. Create a new import; the partial files were preserved.'
+              : 'Preparation was interrupted by a server restart. Retry preparation to continue.'
         if (project.setupRepair?.status === 'running')
           project.setupRepair = {
             ...project.setupRepair,
@@ -743,11 +762,13 @@ export class WorkspaceStore {
 
   #save(project) {
     project.updatedAt = new Date().toISOString()
+    const stored = { ...project }
+    delete stored.log
     this.db
       .prepare(
         'INSERT INTO projects(id,owner,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,owner=excluded.owner',
       )
-      .run(project.id, project.owner, JSON.stringify(project))
+      .run(project.id, project.owner, JSON.stringify(stored))
   }
 
   #event(project, type, message) {
@@ -755,13 +776,18 @@ export class WorkspaceStore {
       /(https?:\/\/)[^\s/@]+:[^\s/@]+@/g,
       '$1[redacted]@',
     )
-    this.db
-      .prepare('INSERT INTO events(project,time,data) VALUES(?,?,?)')
-      .run(
-        project.id,
-        new Date().toISOString(),
-        JSON.stringify({ type, message: sanitized }),
-      )
+    this.db.prepare('INSERT INTO events(project,time,data) VALUES(?,?,?)').run(
+      project.id,
+      new Date().toISOString(),
+      JSON.stringify({
+        type,
+        message: sanitized,
+        ...(this.preparationControllers.has(project.id) &&
+        SETUP_EVENT_TYPES.has(type)
+          ? { scope: 'setup' }
+          : {}),
+      }),
+    )
   }
 
   #setupPhase(project, phase) {
@@ -794,7 +820,10 @@ export class WorkspaceStore {
       .all(owner)
       .map((r) => JSON.parse(r.data))
       .filter((project) => !project.archivedAt)
-      .map((project) => this.#dependencyStatus(project))
+      .map((project) => {
+        delete project.log
+        return this.#dependencyStatus(project)
+      })
   }
 
   #dependencyStatus(project) {
@@ -829,17 +858,63 @@ export class WorkspaceStore {
     const project = this.#owned(id, owner)
     if (project.archivedAt) fail('Project not found', 404)
     this.#dependencyStatus(project)
-    const events = this.db
-      .prepare(
-        'SELECT data FROM events WHERE project=? ORDER BY id DESC LIMIT 60',
-      )
-      .all(id)
-      .reverse()
-    project.log = events
-      .map((r) => JSON.parse(r.data).message)
-      .join('')
-      .slice(-20000)
+    project.log = this.#setupLog(project)
     return project
+  }
+
+  #setupLog(project) {
+    const scoped = project.setupEventAfter !== undefined
+    if (!scoped && !project.setupStartedAt) return ''
+    // Older attempts have no scope tag. Their recorded start and first terminal
+    // event still distinguish setup from later saves, diffs and agent activity.
+    const after = scoped
+      ? project.setupEventAfter
+      : this.db
+          .prepare(
+            'SELECT COALESCE(MAX(id),0) AS id FROM events WHERE project=? AND time<?',
+          )
+          .get(project.id, project.setupStartedAt).id
+    const filter = scoped
+      ? "json_extract(data,'$.scope')='setup'"
+      : "json_extract(data,'$.type') IN ('preparing','output','warning','setup-repair','ready','error','interrupted')"
+    const terminal =
+      project.status !== 'preparing'
+        ? this.db
+            .prepare(
+              `SELECT MIN(id) AS id FROM events WHERE project=? AND id>? AND ${filter} AND json_extract(data,'$.type') IN ('ready','error','interrupted')`,
+            )
+            .get(project.id, after).id
+        : null
+    const limit = 20000
+    const messages = []
+    let before = terminal === null ? Number.MAX_SAFE_INTEGER : terminal + 1,
+      length = 0
+    while (length <= limit) {
+      const rows = this.db
+        .prepare(
+          `SELECT id,data FROM events WHERE project=? AND id>? AND id<? AND ${filter} ORDER BY id DESC LIMIT 100`,
+        )
+        .all(project.id, after, before)
+      for (const row of rows) {
+        const event = JSON.parse(row.data)
+        const prefix =
+          event.type === 'warning'
+            ? 'Warning: '
+            : event.type === 'error'
+              ? 'Error: '
+              : ''
+        const message = prefix + event.message
+        messages.push(message)
+        length += message.length
+        before = row.id
+        if (length > limit) break
+      }
+      if (rows.length < 100) break
+    }
+    const log = messages.reverse().join('')
+    const notice =
+      '[Showing the latest setup output; earlier output was omitted.]\n'
+    return length > limit ? notice + log.slice(-(limit - notice.length)) : log
   }
 
   #saveTrash(entry) {
@@ -1634,6 +1709,10 @@ export class WorkspaceStore {
     if (this.jobs.has(project.id)) return
     project.setupStartedAt = new Date().toISOString()
     project.setupPhase = 'reading-project'
+    project.setupEventAfter = this.db
+      .prepare('SELECT COALESCE(MAX(id),0) AS id FROM events WHERE project=?')
+      .get(project.id).id
+    delete project.setupBuildStatus
     this.#save(project)
     const controller = new AbortController()
     this.preparationControllers.set(project.id, controller)
@@ -1647,6 +1726,7 @@ export class WorkspaceStore {
               !project.autoRepair ||
               !this.setupRepair ||
               error.unsupportedEnvironment ||
+              error.repositoryValidation ||
               controller.signal.aborted ||
               (!project.imported &&
                 !project.uploaded &&
@@ -1658,11 +1738,24 @@ export class WorkspaceStore {
                 this.#event(
                   project,
                   'warning',
-                  !this.setupRepair
-                    ? 'Lemex setup repair is unavailable on this server. You can edit setup files and retry.\n'
-                    : !project.autoRepair
-                      ? 'Automatic setup repair is disabled for this project. You can edit setup files and retry.\n'
-                      : 'Automatic repair was skipped because this failure needs a supported Lean version, network access or available worker capacity. Inspect the setup error and retry.\n',
+                  !project.imported && project.repository
+                    ? project.repositoryCloned
+                      ? 'The repository was cloned, but its selected revision could not be prepared. Check the revision and repository connection, then retry.\n'
+                      : 'The repository could not be imported. Lemex setup repair can run after the project files are available. Check the clone error and retry with the direct HTTPS clone URL.\n'
+                    : !this.setupRepair
+                      ? 'Lemex setup repair is unavailable on this server. You can edit setup files and retry.\n'
+                      : !project.autoRepair
+                        ? 'Automatic setup repair is disabled for this project. You can edit setup files and retry.\n'
+                        : error.pinnedEnvironment
+                          ? 'Automatic repair cannot change the chosen Lean version or resolved dependency pins. Check the configuration described in the setup error before retrying.\n'
+                          : error.repositoryValidation
+                            ? 'A dependency repository is not permitted during setup. Follow the repository URL error before retrying; automatic repair cannot change its pinned source.\n'
+                            : error.unsupportedEnvironment
+                              ? 'Automatic repair cannot change the chosen Lean version. Check the supported release and dependency requirements in the setup error.\n'
+                              : error.infrastructure ||
+                                  [429, 503].includes(error.status)
+                                ? 'Automatic repair cannot resolve a network or worker failure. Follow the setup error and retry when access or capacity is available.\n'
+                                : 'Automatic repair was skipped to preserve the project files. Follow the setup error before retrying.\n',
                 )
               throw error
             }
@@ -1687,9 +1780,16 @@ export class WorkspaceStore {
           (!project.repository &&
             (await exists(path.join(project.root, 'lean-toolchain')))),
         )
-        project.error = controller.signal.aborted
-          ? 'Project setup stopped. You can retry when ready.'
-          : error.message || 'Project preparation failed'
+        const partialClone =
+          controller.signal.aborted && (await this.#partialClone(project))
+        if (error.workerCleanup) project.setupCleanupFailed = true
+        project.error = error.workerCleanup
+          ? error.message
+          : controller.signal.aborted
+            ? partialClone
+              ? 'Project import stopped before cloning finished. Create a new import; the partial files were preserved.'
+              : 'Project setup stopped. You can retry when ready.'
+            : error.message || 'Project preparation failed'
         if (project.setupRepair?.status === 'running')
           project.setupRepair = {
             ...project.setupRepair,
@@ -1711,6 +1811,7 @@ export class WorkspaceStore {
     return this.#locked(id, async () => {
       const project = this.#owned(id, owner)
       if (project.archivedAt) fail('Project not found', 404)
+      if (project.setupCleanupFailed) await this.#cleanupSetupWorkers(project)
       assertIdle()
       if (this.jobs.has(id)) return project
       project.status = 'preparing'
@@ -1732,12 +1833,35 @@ export class WorkspaceStore {
   }
 
   async stopPreparation(id, owner) {
-    this.get(id, owner)
+    const project = this.get(id, owner)
     this.preparationControllers
       .get(id)
       ?.abort(new Error('Project setup stopped.'))
+    if (project.setupCleanupFailed) {
+      await this.#locked(id, async () => {
+        const current = this.#owned(id, owner)
+        if (current.setupCleanupFailed) await this.#cleanupSetupWorkers(current)
+      })
+      this.preparationControllers
+        .get(id)
+        ?.abort(new Error('Project setup stopped.'))
+    }
     await this.jobs.get(id)
     return this.get(id, owner)
+  }
+
+  async #cleanupSetupWorkers(project) {
+    if (!this.runtime.stopProject)
+      fail(
+        'The setup worker could not be stopped. Ask the server administrator to check the worker service before retrying.',
+        503,
+      )
+    // Only retry cleanup for this failed setup. Shared dependency builders have
+    // their own roots and must remain available to other projects.
+    const roots = new Set([this.repositoryRoot(project), project.root])
+    for (const root of roots) await this.runtime.stopProject(root)
+    delete project.setupCleanupFailed
+    this.#save(project)
   }
 
   repositoryRoot(project) {
@@ -1956,7 +2080,11 @@ export class WorkspaceStore {
   }
 
   async #repairCandidate(project, { cause, signal, container, candidate }) {
-    await copyWorkspace(project.root, candidate, { omitDependencies: true })
+    await copyWorkspace(project.root, candidate, {
+      omitFiles: ['.lake'],
+      signal,
+    })
+    signal.throwIfAborted()
     const allowed = new Set([
       'lean-toolchain',
       'lakefile.lean',
@@ -1967,13 +2095,20 @@ export class WorkspaceStore {
     for (const entry of await this.#walk(candidate, {
       includeLinks: true,
       limit: Infinity,
+      signal,
     }))
       before.set(
         entry.path,
         entry.link === undefined
-          ? { hash: await fileHash(await guarded(candidate, entry.path)) }
+          ? {
+              hash: await fileHash(
+                await guarded(candidate, entry.path),
+                signal,
+              ),
+            }
           : { link: entry.link },
       )
+    signal.throwIfAborted()
     await this.setupRepair({
       root: candidate,
       project: { name: project.name, toolchain: project.toolchain },
@@ -2029,12 +2164,19 @@ export class WorkspaceStore {
       commands.push(['lake', 'update'])
     commands.push(['lake', 'env', 'lean', '--version'])
     for (const args of commands) {
-      const checked = await runPinnedLake(this.runtime, candidate, args, {
-        signal,
-        network: 'bridge',
-        timeoutMs: 900000,
-        onOutput: (message) => this.#event(project, 'setup-repair', message),
-      })
+      const onOutput = (message) =>
+        this.#event(project, 'setup-repair', message)
+      const checked = await runSetupStep(
+        `Testing repair: ${setupCommandLabel(args)}`,
+        () =>
+          runPinnedLake(this.runtime, candidate, args, {
+            signal,
+            network: 'bridge',
+            timeoutMs: 900000,
+            onOutput,
+          }),
+        { onOutput, signal },
+      )
       signal.throwIfAborted()
       if (checked.code !== 0)
         throw new Error(
@@ -2075,16 +2217,18 @@ export class WorkspaceStore {
       })
     }
     for (const target of dependencyBuildTargets(repairedManifest)) {
-      const built = await runPinnedLake(
-        this.runtime,
-        candidate,
-        ['lake', 'build', target],
-        {
-          signal,
-          network: 'bridge',
-          timeoutMs: 1800000,
-          onOutput: (message) => this.#event(project, 'setup-repair', message),
-        },
+      const onOutput = (message) =>
+        this.#event(project, 'setup-repair', message)
+      const built = await runSetupStep(
+        `Testing repair: building dependency ${target.replace(/^@/, '')}`,
+        () =>
+          runPinnedLake(this.runtime, candidate, ['lake', 'build', target], {
+            signal,
+            network: 'bridge',
+            timeoutMs: 1800000,
+            onOutput,
+          }),
+        { onOutput, signal },
       )
       signal.throwIfAborted()
       if (built.code !== 0)
@@ -2201,6 +2345,126 @@ export class WorkspaceStore {
     )
   }
 
+  async #partialClone(project) {
+    return Boolean(
+      project.repository &&
+      !project.repositoryCloned &&
+      !project.imported &&
+      (await fs.readdir(this.repositoryRoot(project))).length > 0,
+    )
+  }
+
+  async #importRepository(project, checkout, entries) {
+    if (project.imported) return
+    if (entries.length && !project.repositoryCloned)
+      fail(
+        'An interrupted import left project files. Create a new import to preserve these files safely.',
+        409,
+      )
+    if (project.repositoryCloned)
+      await this.#clearInterruptedImportLocks(project, checkout)
+    else {
+      this.#setupPhase(project, 'cloning-repository')
+      project.repository = await cloneRepository(project.repository, {
+        signal: this.preparationControllers.get(project.id)?.signal,
+        validateRepository: (url) => validateRepository(url, this.resolveHost),
+        isEmpty: async () => (await fs.readdir(checkout)).length === 0,
+        onOutput: (message) => this.#event(project, 'output', message),
+        run: (url) =>
+          this.#command(
+            project,
+            [
+              ...GIT_ARGS,
+              'clone',
+              '--depth=1',
+              '--no-recurse-submodules',
+              '--',
+              url,
+              '.',
+            ],
+            900000,
+            'bridge',
+          ),
+      })
+      // A completed clone survives a failed or stopped revision fetch. Retry
+      // continues from here without deleting files or cloning over them.
+      project.repositoryCloned = true
+      this.#save(project)
+    }
+    if (project.revision) {
+      this.#setupPhase(project, 'selecting-revision')
+      await validateRepository(project.repository, this.resolveHost)
+      try {
+        await this.#command(
+          project,
+          [...GIT_ARGS, 'fetch', '--depth=1', 'origin', project.revision],
+          900000,
+          'bridge',
+        )
+      } catch (error) {
+        if (
+          /couldn't find remote ref|not our ref|unadvertised object|not a valid object/i.test(
+            error.message,
+          )
+        )
+          throw new WorkspaceError(
+            `Revision ${project.revision} was not found. Create a new import with an existing branch, tag, or full commit hash.\n${error.message}`,
+          )
+        throw repositoryAccessError(error)
+      }
+      await this.#command(project, [
+        ...GIT_ARGS,
+        'checkout',
+        '--detach',
+        'FETCH_HEAD',
+      ])
+    }
+    project.imported = true
+
+    this.#save(project)
+  }
+
+  async #clearInterruptedImportLocks(project, checkout) {
+    if (
+      [...(this.runtime.children || [])].some(
+        (child) => child.workspaceRoot === checkout,
+      )
+    )
+      fail(
+        'A repository worker is still running. Stop setup and retry after it has stopped.',
+        503,
+      )
+    const git = path.join(checkout, '.git')
+    const directory = await fs.lstat(git)
+    if (
+      !directory.isDirectory() ||
+      directory.isSymbolicLink() ||
+      (await fs.realpath(git)) !== git
+    )
+      fail(
+        'The incomplete checkout has unsafe Git metadata. Create a new import; its files were preserved.',
+        409,
+      )
+    // This checkout has never been admitted for editing. Only these generated
+    // locks can belong to the stopped fetch/checkout; preserve all other files.
+    for (const name of ['shallow.lock', 'index.lock']) {
+      const filename = path.join(git, name)
+      const lock = await exists(filename)
+      if (!lock) continue
+      if (!lock.isFile() || lock.nlink !== 1)
+        fail(
+          'An interrupted Git lock is not a regular file. Create a new import; its files were preserved.',
+          409,
+        )
+      await fs.unlink(filename)
+      this.#event(
+        project,
+        'output',
+        `Removed interrupted Git lock ${name} before resuming the import.\n`,
+      )
+    }
+  }
+
   async #initializeRepository(project) {
     if (
       !project.repository &&
@@ -2221,32 +2485,39 @@ export class WorkspaceStore {
     network = 'none',
     env = {},
   ) {
-    const result = await runPinnedLake(
-      this.runtime,
-      args[0] === 'git' ? this.repositoryRoot(project) : project.root,
-      args,
-      {
-        timeoutMs,
-        network,
-        signal: this.preparationControllers.get(project.id)?.signal,
-        ...(args[0] !== 'git' && project.repairedConfiguration
-          ? { readOnlyWorkspace: true, writeLakeCache: true }
-          : {}),
-        env: {
-          GIT_TERMINAL_PROMPT: '0',
-          GIT_CONFIG_NOSYSTEM: '1',
-          GIT_LFS_SKIP_SMUDGE: '1',
-          ...env,
-        },
-        onOutput: (output) =>
-          this.#event(
-            project,
-            'output',
-            typeof output === 'string'
-              ? output
-              : output?.text || output?.data || '',
-          ),
-      },
+    const label = setupCommandLabel(args, { gitCommand: args[GIT_ARGS.length] })
+    const onOutput = (output) =>
+      this.#event(
+        project,
+        'output',
+        typeof output === 'string'
+          ? output
+          : output?.text || output?.data || '',
+      )
+    const result = await runSetupStep(
+      label,
+      () =>
+        runPinnedLake(
+          this.runtime,
+          args[0] === 'git' ? this.repositoryRoot(project) : project.root,
+          args,
+          {
+            timeoutMs,
+            network,
+            signal: this.preparationControllers.get(project.id)?.signal,
+            ...(args[0] !== 'git' && project.repairedConfiguration
+              ? { readOnlyWorkspace: true, writeLakeCache: true }
+              : {}),
+            env: {
+              GIT_TERMINAL_PROMPT: '0',
+              GIT_CONFIG_NOSYSTEM: '1',
+              GIT_LFS_SKIP_SMUDGE: '1',
+              ...env,
+            },
+            onOutput: label ? onOutput : undefined,
+          },
+        ),
+      { onOutput, signal: this.preparationControllers.get(project.id)?.signal },
     )
     if (result.code !== 0)
       throw Object.assign(
@@ -2264,24 +2535,11 @@ export class WorkspaceStore {
   }
 
   #assertRepairDependencyPins(original, repaired) {
-    for (const dependency of Array.isArray(original?.packages)
-      ? original.packages
-      : []) {
-      if (dependency?.type !== 'git' || !/^[a-f0-9]{40}$/.test(dependency.rev))
-        continue
-      const replacement = Array.isArray(repaired?.packages)
-        ? repaired.packages.find((pkg) => pkg?.name === dependency.name)
-        : null
-      if (
-        !replacement ||
-        replacement.rev !== dependency.rev ||
-        replacement.url !== dependency.url
+    if (changedDependencyPin(original, repaired))
+      fail(
+        'Setup repair changed a pinned dependency revision. The original lockfile was preserved.',
+        409,
       )
-        fail(
-          'Setup repair changed a pinned dependency revision. The original lockfile was preserved.',
-          409,
-        )
-    }
   }
 
   async #dependencyConfiguration(project) {
@@ -2308,7 +2566,7 @@ export class WorkspaceStore {
         toolchain: project.toolchain,
         configuration,
         signal,
-        validateRepository: (url) => validateRepository(url, this.resolveHost),
+        validateRepository: (url) => this.#validateDependencyRepository(url),
         onOutput: (message) => {
           if (!signal?.aborted)
             this.#event(
@@ -2322,7 +2580,7 @@ export class WorkspaceStore {
       signal?.throwIfAborted()
       // A private retry has the same resource and repository requirements.
       // Keep the actionable failure and avoid repeating that expensive work.
-      if (error.infrastructure) throw error
+      if (error.infrastructure || error.repositoryValidation) throw error
       this.#event(
         project,
         'warning',
@@ -2349,6 +2607,34 @@ export class WorkspaceStore {
     return shared
   }
 
+  async #validateDependencyRepository(url) {
+    try {
+      return await validateRepository(url, this.resolveHost)
+    } catch (error) {
+      error.repositoryValidation = true
+      throw error
+    }
+  }
+
+  async #validateDependencyRepositories(project) {
+    const file = await textFile(
+      await guarded(project.root, 'lake-manifest.json'),
+      true,
+    )
+    if (!file) return
+    let manifest
+    try {
+      manifest = JSON.parse(file.content)
+    } catch {
+      return
+    } // Lake reports malformed lockfiles.
+    for (const dependency of Array.isArray(manifest?.packages)
+      ? manifest.packages
+      : [])
+      if (dependency?.type === 'git')
+        await this.#validateDependencyRepository(dependency.url)
+  }
+
   async #checkProjectEnvironment(project, signal) {
     const configuration = await this.#dependencyConfiguration(project)
     let manifest = null
@@ -2363,24 +2649,30 @@ export class WorkspaceStore {
       'output',
       `Checking that ${imports.join(', ')} are ready for proofs.\n`,
     )
-    const result = await runPinnedLake(
-      this.runtime,
-      project.root,
-      ['lake', 'env', 'lean', '--stdin'],
-      {
-        input: environmentSmokeProof(imports),
-        signal,
-        network: 'none',
-        timeoutMs: 180000,
-        readOnlyWorkspace: true,
-        writeLakeCache: true,
-        onOutput: (message) =>
-          this.#event(
-            project,
-            'output',
-            typeof message === 'string' ? message : message?.text || '',
-          ),
-      },
+    const onOutput = (message) => this.#event(project, 'output', message)
+    const result = await runSetupStep(
+      'Testing library imports with Lean',
+      () =>
+        runPinnedLake(
+          this.runtime,
+          project.root,
+          ['lake', 'env', 'lean', '--stdin'],
+          {
+            input: environmentSmokeProof(imports),
+            signal,
+            network: 'none',
+            timeoutMs: 180000,
+            readOnlyWorkspace: true,
+            writeLakeCache: true,
+            onOutput: (message) =>
+              this.#event(
+                project,
+                'output',
+                typeof message === 'string' ? message : message?.text || '',
+              ),
+          },
+        ),
+      { onOutput, signal },
     )
     signal?.throwIfAborted()
     if (result.code !== 0)
@@ -2430,45 +2722,9 @@ export class WorkspaceStore {
         503,
       )
     const entries = await fs.readdir(checkout)
-    if (project.repository && !project.imported && entries.length)
-      fail(
-        'An interrupted import left project files. Create a new import to preserve these files safely.',
-        409,
-      )
-    if (project.repository && !entries.length) {
-      // Revalidate before each clone, rather than trusting a previously resolved URL.
-      await validateRepository(project.repository, this.resolveHost)
-      await this.#command(
-        project,
-        [
-          ...GIT_ARGS,
-          'clone',
-          '--depth=1',
-          '--no-recurse-submodules',
-          '--',
-          project.repository,
-          '.',
-        ],
-        900000,
-        'bridge',
-      )
-      if (project.revision) {
-        await this.#command(
-          project,
-          [...GIT_ARGS, 'fetch', '--depth=1', 'origin', project.revision],
-          900000,
-          'bridge',
-        )
-        await this.#command(project, [
-          ...GIT_ARGS,
-          'checkout',
-          '--detach',
-          'FETCH_HEAD',
-        ])
-      }
-      project.imported = true
-      this.#save(project)
-    } else if (
+    if (project.repository)
+      await this.#importRepository(project, checkout, entries)
+    else if (
       !project.repository &&
       (!entries.length ||
         (project.kind === 'single-file' && !project.presetInitialized))
@@ -2552,6 +2808,7 @@ export class WorkspaceStore {
       await this.#initializeRepository(project)
       this.preparationControllers.get(project.id)?.signal.throwIfAborted()
       project.status = 'ready'
+      project.setupBuildStatus = 'reused'
       delete project.needsPreparation
       delete project.error
       this.#save(project)
@@ -2591,18 +2848,26 @@ export class WorkspaceStore {
     // immediately without killing that shared download or changing its cache.
     let abortWait
     try {
-      await Promise.race([
-        this.runtime.prepareToolchain(toolchain, {
-          onOutput: (message) => {
-            if (!signal?.aborted) this.#event(project, 'output', message)
-          },
-        }),
-        new Promise((_, reject) => {
-          abortWait = () => reject(signal.reason)
-          signal?.addEventListener('abort', abortWait, { once: true })
-          if (signal?.aborted) abortWait()
-        }),
-      ])
+      await runSetupStep(
+        `Preparing Lean ${toolchain.replace('leanprover/lean4:', '')}`,
+        () =>
+          Promise.race([
+            this.runtime.prepareToolchain(toolchain, {
+              onOutput: (message) => {
+                if (!signal?.aborted) this.#event(project, 'output', message)
+              },
+            }),
+            new Promise((_, reject) => {
+              abortWait = () => reject(signal.reason)
+              signal?.addEventListener('abort', abortWait, { once: true })
+              if (signal?.aborted) abortWait()
+            }),
+          ]),
+        {
+          onOutput: (message) => this.#event(project, 'output', message),
+          signal,
+        },
+      )
     } finally {
       signal?.removeEventListener('abort', abortWait)
     }
@@ -2610,10 +2875,8 @@ export class WorkspaceStore {
     // Existing lockfiles are authoritative. Lake fetches missing packages using
     // the pinned manifest when evaluating its environment.
     this.#setupPhase(project, 'preparing-dependencies')
-    if (
-      !(await exists(path.join(project.root, 'lake-manifest.json'))) &&
-      !(await exists(path.join(project.root, '.lake')))
-    )
+    await this.#validateDependencyRepositories(project)
+    if (!(await exists(path.join(project.root, 'lake-manifest.json'))))
       await this.#command(project, ['lake', 'update'], 900000, 'bridge')
     const shared =
       project.repository ||
@@ -2668,35 +2931,52 @@ export class WorkspaceStore {
       // Failed user proofs remain repairable, so they do not make an otherwise
       // usable environment unavailable in the editor.
       this.#setupPhase(project, 'building-project')
-      const build = await this.runtime.run(project.root, ['lake', 'build'], {
-        timeoutMs: this.setupBuildTimeoutMs,
-        network: 'none',
-        signal: this.preparationControllers.get(project.id)?.signal,
-        ...(project.repairedConfiguration
-          ? { readOnlyWorkspace: true, writeLakeCache: true }
-          : {}),
-        onOutput: (output) =>
-          this.#event(
-            project,
-            'output',
-            typeof output === 'string'
-              ? output
-              : output?.text || output?.data || '',
-          ),
-      })
+      const build = await runSetupStep(
+        `Building project ${project.name}`,
+        () =>
+          runPinnedLake(this.runtime, project.root, ['lake', 'build'], {
+            timeoutMs: this.setupBuildTimeoutMs,
+            network: 'none',
+            signal: this.preparationControllers.get(project.id)?.signal,
+            ...(project.repairedConfiguration
+              ? { readOnlyWorkspace: true, writeLakeCache: true }
+              : {}),
+            onOutput: (output) =>
+              this.#event(
+                project,
+                'output',
+                typeof output === 'string'
+                  ? output
+                  : output?.text || output?.data || '',
+              ),
+          }),
+        {
+          onOutput: (message) => this.#event(project, 'output', message),
+          signal,
+        },
+      )
       signal?.throwIfAborted()
       if (build.code !== 0) {
-        const dependency = dependencyFailureMessage(build)
+        const readOnlyNativeBuild = shared && readOnlyDependencyFailure(build)
+        const dependency = readOnlyNativeBuild
+          ? null
+          : dependencyFailureMessage(build)
         if (dependency)
           throw Object.assign(new Error(dependency), {
             setupEnvironment: true,
             infrastructure: setupInfrastructureFailure(build),
           })
+        project.setupBuildStatus = 'warnings'
         project.buildWarning =
-          setupFailureMessage(build) ||
+          (readOnlyNativeBuild
+            ? 'Some project targets need native build files outside the shared library cache. The library import check will confirm whether editing and Lean checks are available. Build native executable targets in a writable local checkout.'
+            : setupFailureMessage(build)) ||
           'Some project targets did not compile. Open their files to inspect and repair the Lean errors.'
         this.#event(project, 'warning', `${project.buildWarning}\n`)
-      } else delete project.buildWarning
+      } else {
+        project.setupBuildStatus = 'passed'
+        delete project.buildWarning
+      }
       if (!shared) {
         await this.runtime.inheritDependencies?.(project.root, project.root)
         await certifyDependencyBuilds(this.runtime, project.root, manifest, {
@@ -2716,6 +2996,11 @@ export class WorkspaceStore {
           30000,
         )
         project.sourceRevision = result.stdout.trim()
+        this.#event(
+          project,
+          'output',
+          `Project source revision: ${project.sourceRevision}\n`,
+        )
       } catch {
         /* Fresh projects can have no commit yet. */
       }
@@ -2731,7 +3016,11 @@ export class WorkspaceStore {
       }
     delete project.error
     this.#save(project)
-    this.#event(project, 'ready', 'Project ready.\n')
+    this.#event(
+      project,
+      'ready',
+      `Project ready. Lean ${project.toolchain.replace('leanprover/lean4:', '')}; library import check passed.${project.buildWarning ? ' Some project targets still need attention; see the build messages above.' : ''}\n`,
+    )
   }
 
   #ready(project, allowConfigurationChange = false) {
@@ -2759,10 +3048,12 @@ export class WorkspaceStore {
       includeLinks = false,
       foldersOnly = false,
       limit = MAX_FILES,
+      signal,
     } = {},
   ) {
     const result = []
     const visit = async (directory, prefix = '') => {
+      signal?.throwIfAborted()
       let entries
       if (foldersOnly) {
         let handle
@@ -2795,6 +3086,7 @@ export class WorkspaceStore {
       } else entries = await fs.readdir(directory, { withFileTypes: true })
       entries.sort((a, b) => a.name.localeCompare(b.name))
       for (const entry of entries) {
+        signal?.throwIfAborted()
         if (result.length >= limit) break
         if (
           isSecret(entry.name) ||

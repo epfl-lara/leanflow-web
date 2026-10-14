@@ -33,6 +33,98 @@ const mounts = (argv) =>
   argv.flatMap((value, index) => (value === '--mount' ? [argv[index + 1]] : []))
 const cacheOptions = { readOnlyWorkspace: true, writeLakeCache: true }
 
+test('dependency lookups observe replacements, in-place edits and deletion after warming the registry', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  const sources = ['source-a', 'source-b'].map((name) =>
+    path.join(dataDir, name),
+  )
+  for (const source of sources) {
+    await fs.mkdir(path.join(source, '.lake/packages/mathlib'), {
+      recursive: true,
+    })
+  }
+  const filename = path.join(dataDir, 'runtime/dependencies.json')
+  const contents = (source) => JSON.stringify({ [root]: source })
+  await fs.writeFile(filename, contents(sources[0]))
+  assert.equal(runtime.dependencyRoot(root), sources[0])
+  const original = await fs.stat(filename)
+  await fs.writeFile(filename + '.replacement', contents(sources[1]))
+  await fs.utimes(filename + '.replacement', original.atime, original.mtime)
+  await fs.rename(filename + '.replacement', filename)
+  assert.equal(runtime.dependencyRoot(root), sources[1])
+  await fs.writeFile(filename, contents(sources[0]))
+  assert.equal(runtime.dependencyRoot(root), sources[0])
+  await fs.unlink(filename)
+  assert.equal(runtime.dependencyRoot(root), null)
+})
+
+test('a warm registry observes bindings written by another runtime and keeps unrelated bindings', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  const other = new Runtime({ dataDir, docker: runtime.docker })
+  const source = path.join(dataDir, 'source')
+  const target = path.join(dataDir, 'other-project')
+  await fs.mkdir(path.join(source, '.lake/packages/mathlib'), {
+    recursive: true,
+  })
+  await fs.mkdir(target)
+  await runtime.inheritDependencies(source, root)
+  assert.equal(runtime.dependencyRoot(root), source)
+  await other.inheritDependencies(source, target)
+  assert.equal(runtime.dependencyRoot(target), source)
+  assert.equal(runtime.dependencyRoot(root), source)
+  await other.clearInheritedDependencies(root, { force: true })
+  assert.equal(runtime.dependencyRoot(root), null)
+  assert.equal(runtime.dependencyRoot(target), source)
+})
+
+test('filesystem changes to dependency source roots remain visible with an unchanged registry', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  const source = path.join(dataDir, 'source')
+  const outside = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'leanflow-outside-cache-'),
+  )
+  t.after(() => fs.rm(outside, { recursive: true, force: true }))
+  await fs.writeFile(
+    path.join(dataDir, 'runtime/dependencies.json'),
+    JSON.stringify({ [root]: source }),
+  )
+  assert.throws(() => runtime.dependencyRoot(root), { code: 'ENOENT' })
+  await fs.mkdir(path.join(source, '.lake/packages/mathlib'), {
+    recursive: true,
+  })
+  assert.equal(runtime.dependencyRoot(root), source)
+  await fs.rm(source, { recursive: true })
+  await fs.symlink(outside, source)
+  assert.throws(() => runtime.dependencyRoot(root), /owned data directory/)
+  await assert.rejects(runtime.run(root, ['true']), /owned data directory/)
+})
+
+for (const link of ['.lake', '.lake/packages']) {
+  test(`warm registry lookups and workers still reject a replacement ${link} symlink`, async (t) => {
+    const { runtime, root, dataDir } = await fixture(t)
+    const source = path.join(dataDir, 'source')
+    const privateRoot = path.join(dataDir, 'private-project')
+    await fs.mkdir(path.join(source, '.lake/packages/mathlib'), {
+      recursive: true,
+    })
+    await fs.mkdir(path.join(privateRoot, 'packages/mathlib'), {
+      recursive: true,
+    })
+    await runtime.inheritDependencies(source, root)
+    assert.equal(runtime.dependencyRoot(root), source)
+    await fs.rm(path.join(source, link), { recursive: true })
+    await fs.symlink(privateRoot, path.join(source, link))
+    assert.throws(
+      () => runtime.dependencyRoot(root),
+      /real directories inside the selected dependency project/,
+    )
+    await assert.rejects(
+      runtime.run(root, ['true']),
+      /real directories inside the selected dependency project/,
+    )
+  })
+}
+
 test('new worker task pools follow the CPU quota and retain an explicit Lean thread setting', async (t) => {
   const { runtime, root } = await fixture(t)
   await fs.writeFile(

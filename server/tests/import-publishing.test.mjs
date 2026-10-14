@@ -403,7 +403,8 @@ test('different-HEAD and prefix branch collisions use a unique safe alternative 
     assert.equal(
       preparation.filter(
         ({ args }) =>
-          args[0] === 'lake' && args[1] === 'build' && args.length === 2,
+          args.filter((arg) => arg !== '--keep-toolchain').join(' ') ===
+          'lake build',
       ).length,
       1,
     )

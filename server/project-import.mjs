@@ -91,6 +91,76 @@ export function repositoryLocation(value, { revision, subdirectory } = {}) {
   }
 }
 
+function redirectFailure(error) {
+  return /requested URL returned error: (?:301|302|303|307|308)\b/i.test(
+    error.message || '',
+  )
+}
+
+export function repositoryAccessError(error) {
+  const message = error.message || ''
+  const reason =
+    /requested URL returned error: (?:401|403)\b|could not read (?:Username|Password)|Authentication failed/i.test(
+      message,
+    )
+      ? 'Access to this repository was denied. Use a public HTTPS clone URL or upload the project files.'
+      : /requested URL returned error: 404\b|repository[^\n]*not found/i.test(
+            message,
+          )
+        ? 'The repository was not found. Check the HTTPS clone URL and whether the repository is publicly accessible, or upload the project files.'
+        : null
+  return reason
+    ? Object.assign(new Error(`${reason}\n${message}`, { cause: error }), {
+        infrastructure: true,
+      })
+    : error
+}
+
+// GitLab redirects unsuffixed repository URLs to the .git endpoint. Try that
+// same-origin spelling once, without following a server-provided Location.
+export async function cloneRepository(
+  repository,
+  { run, validateRepository, isEmpty, onOutput, signal },
+) {
+  const attempt = async (url) => {
+    signal?.throwIfAborted()
+    await validateRepository(url)
+    signal?.throwIfAborted()
+    await run(url)
+    return url
+  }
+  try {
+    return await attempt(repository)
+  } catch (error) {
+    signal?.throwIfAborted()
+    if (!redirectFailure(error)) throw repositoryAccessError(error)
+    const url = new URL(repository)
+    const pathname = url.pathname.replace(/\/+$/, '')
+    if (!pathname.endsWith('.git') && (await isEmpty())) {
+      url.pathname = `${pathname}.git`
+      onOutput?.(
+        `The repository requires a redirect. Retrying its .git clone URL: ${url.href}\n`,
+      )
+      try {
+        return await attempt(url.href)
+      } catch (retryError) {
+        signal?.throwIfAborted()
+        if (!redirectFailure(retryError))
+          throw repositoryAccessError(retryError)
+        error = retryError
+      }
+    }
+    throw Object.assign(
+      new Error(
+        'The repository redirected the clone request. Import its direct HTTPS clone URL (usually ending in .git). Redirects are blocked during setup.\n' +
+          error.message,
+        { cause: error },
+      ),
+      { infrastructure: true },
+    )
+  }
+}
+
 export function uploadedFiles(input, validatePath) {
   if (!Array.isArray(input) || !input.length || input.length > 5000)
     fail('Choose between 1 and 5,000 project files.')
