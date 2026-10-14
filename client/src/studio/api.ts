@@ -3,6 +3,26 @@ import type { ReasoningBlock } from '../../../shared/reasoning-timeline.mjs'
 export type { ReasoningBlock } from '../../../shared/reasoning-timeline.mjs'
 export type RunProofTarget = Omit<ProofTarget, 'source'> & { source?: string }
 
+export interface LeanBook {
+  id: string
+  title: string
+  url: string
+  localUrl: string
+  available: boolean
+  downloadedAt?: string
+  leanVersion?: string | null
+  pageCount: number
+}
+
+export interface BookSearchResult {
+  bookId: string
+  bookTitle: string
+  title: string
+  path: string
+  url: string
+  excerpt: string
+}
+
 export interface Preset {
   id: string
   name: string

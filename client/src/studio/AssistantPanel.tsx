@@ -18,6 +18,7 @@ import { FileContextPicker } from './FileContextPicker'
 import { FileMentionTextarea } from './FileMentionTextarea'
 import { ChatFocusPicker } from './ChatFocusPicker'
 import { ChatOptions } from './ChatOptions'
+import type { BookChatRequest } from './BooksPanel'
 import { ConversationTurn } from './ConversationTurn'
 import { ChangeDiff, Verification } from './RunReview'
 import { mergeRunSnapshot } from './runStream'
@@ -67,6 +68,8 @@ export function AssistantPanel({
   dirty,
   readOnly,
   focusRequest,
+  bookRequest,
+  onBookHandled,
   onOpenTarget,
   onFocusHandled,
   editorProof,
@@ -86,6 +89,8 @@ export function AssistantPanel({
   dirty: boolean
   readOnly?: boolean
   focusRequest?: ProofFocusRequest | null
+  bookRequest?: BookChatRequest | null
+  onBookHandled?: (id: number) => void
   onOpenTarget?: (target: RunProofTarget) => void
   onFocusHandled?: (id: number) => void
   editorProof?: EditorProofState
@@ -131,6 +136,7 @@ export function AssistantPanel({
       new Map<string, DraftSubmission & { currentFile: string | null }>(),
     )
   const handledFocus = useRef<number | null>(null)
+  const handledBook = useRef<number | null>(null)
   draftRef.current = draft
   const liveSeen = useRef(new Map<string, string>()),
     livePending = useRef(new Set<string>())
@@ -199,6 +205,28 @@ export function AssistantPanel({
     document.getElementById('assistant-prompt')?.focus()
     onFocusHandled?.(focusRequest.id)
   }, [focusRequest, projectId, onFocusHandled, chatSelectionKey])
+  useEffect(() => {
+    if (
+      !bookRequest ||
+      bookRequest.projectId !== projectId ||
+      handledBook.current === bookRequest.id
+    )
+      return
+    handledBook.current = bookRequest.id
+    ++navigation.current
+    setChatBusy(false)
+    try {
+      localStorage.setItem(chatSelectionKey, chatRef.current || 'new')
+    } catch {
+      /* Keep the visible draft when storage is unavailable. */
+    }
+    const existing = draftRef.current.value.text
+    draftRef.current.setText(
+      existing ? `${existing}\n\n${bookRequest.text}` : bookRequest.text,
+    )
+    document.getElementById('assistant-prompt')?.focus()
+    onBookHandled?.(bookRequest.id)
+  }, [bookRequest, projectId, onBookHandled, chatSelectionKey])
   const dialogRun = [...runs, ...projectRuns].find(
     (item) => item.id === dialogId,
   )

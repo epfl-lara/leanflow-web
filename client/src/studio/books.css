@@ -1,0 +1,136 @@
+.books-panel {
+  flex: 0 0 50%;
+  min-height: 220px;
+  max-height: 75%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  box-shadow: 0 -5px 20px #0000000c;
+}
+.books-panel[hidden],
+.books-panel iframe[hidden] {
+  display: none;
+}
+.books-panel.expanded {
+  flex: 1 0 85%;
+  max-height: 90%;
+}
+.books-header,
+.books-header > div,
+.books-actions,
+.books-result-caption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.books-header {
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.books-controls {
+  padding: 8px 14px;
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr);
+  gap: 8px;
+}
+.books-controls select {
+  width: 100%;
+  min-width: 0;
+  font-size: 12px;
+}
+.books-controls form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding-left: 8px;
+  background: var(--input-bg, var(--bg));
+}
+.books-controls input {
+  border: 0;
+  padding: 5px;
+  width: 0;
+  min-width: 0;
+  flex: 1;
+  box-shadow: none;
+  background: transparent;
+  font-size: 12px;
+}
+.books-controls form:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.books-actions {
+  grid-column: 1 / -1;
+}
+.books-version {
+  flex: 1;
+  color: var(--muted);
+  font-size: 11px;
+}
+.books-panel iframe {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: white;
+}
+.books-notice {
+  padding: 10px 14px;
+  margin: 0;
+  font-size: 12px;
+}
+.books-results {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 14px;
+}
+.books-result-caption {
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+.books-results > button {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  text-align: left;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 10px;
+  margin-top: 8px;
+}
+.books-results > button:hover {
+  border-color: var(--accent);
+}
+.books-results > button span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.books-results > button strong {
+  font-size: 13px;
+}
+@media (max-width: 720px) {
+  .books-panel {
+    flex-basis: 60%;
+    max-height: 85%;
+  }
+  .books-controls {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 8px;
+  }
+  .books-header {
+    padding: 8px;
+  }
+}

@@ -149,6 +149,20 @@ projects and running workers are not migrated or deleted. Restart only when acti
 proof runs and setup have finished. Cache entries are retained; do not delete them
 while projects or snapshots reference them.
 
+## Local Lean books
+
+Download the three official Lean books once:
+
+```bash
+node scripts/install-lean-books.mjs
+```
+
+This installs HTML, styles, images, fonts, and chapter text in `.runtime/books`. Browsing and searching use these local files, without fetching the websites or calling a model. Each assistant run receives private chapter-text copies in its isolated worker home.
+
+To use another location, install with `node scripts/install-lean-books.mjs --dir /path/to/lean-books` and set `STUDIO_BOOKS_DIR=/path/to/lean-books` before starting the server. To import existing downloaded HTML, add `--source /path/to/downloads`. That directory must contain `functional-programming`, `theorem-proving`, and `reference` subdirectories, each with its own `index.html` and relative assets. Symlinks are rejected.
+
+Existing installed books are preserved. Install into a new directory for a refreshed snapshot, then change `STUDIO_BOOKS_DIR` when the server can be restarted after active work finishes. The reader reports the book's documented Lean version. It does not change project toolchains. Upstream scripts are disabled in the embedded reader; use the panel's local chapter search.
+
 ## Keep data and credentials private
 
 Back up your data directory (`.data` by default) while the server is stopped or from a consistent snapshot. It contains project sources, account tokens, saved provider settings, and chats. Dependency caches take several gigabytes; keep them while projects or runs use them.

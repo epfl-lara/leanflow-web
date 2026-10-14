@@ -29,6 +29,7 @@ import { validateGitBranch } from './git-branches.mjs'
 import { pdfDisposition } from './pdf-preview.mjs'
 import { proofTargetReference } from './proof-target.mjs'
 import { loadCapacity } from './capacity.mjs'
+import { LeanBooks, installBookRoutes } from './lean-books.mjs'
 import {
   sourceBodyKind,
   isSmallSourceBody,
@@ -146,6 +147,7 @@ export async function createStudio({
   gitConnections: suppliedGitConnections,
   titleGenerator: suppliedTitleGenerator,
   capacity = loadCapacity(),
+  books = new LeanBooks(),
 } = {}) {
   dataDir = path.resolve(dataDir)
   const workspaceDataDir = dataDir
@@ -220,6 +222,7 @@ export async function createStudio({
     config,
     settings,
     chats,
+    books,
     assertCanStart: (owner, projectId) => requireNoGit(projectId, owner),
     maxConcurrent: capacity.agents,
     maxQueue: capacity.agentQueue,
@@ -985,6 +988,8 @@ export async function createStudio({
       events.off(req.params.id, send)
     })
   })
+  app.use('/api/books', compression())
+  installBookRoutes(app, books)
   let searches = 0
   app.post('/api/search', async (req, res) => {
     if (searches >= capacity.searches)

@@ -50,6 +50,7 @@ import { usePlaygroundPreparation } from './usePlaygroundPreparation'
 import { playgroundDownloadName } from './playgroundNames'
 import { saveAs } from 'file-saver'
 import { SearchPanel } from './SearchPanel'
+import { BooksPanel, type BookChatRequest } from './BooksPanel'
 import { LibrarySourceDialog, type SourceRequest } from './LibrarySourceDialog'
 import { SettingsModal } from './SettingsModal'
 import { FileBrowser } from './FileBrowser'
@@ -309,6 +310,16 @@ export function Studio() {
   const [fileFilter, setFileFilter] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(() => window.innerWidth > 1000)
+  const [booksOpen, setBooksOpen] = useState(false)
+  const [booksMounted, setBooksMounted] = useState(false)
+  const [bookChatRequest, setBookChatRequest] =
+    useState<BookChatRequest | null>(null)
+  const [bookPageRequest, setBookPageRequest] = useState<{
+    id: number
+    url: string
+  } | null>(null)
+  const bookRequestId = useRef(0)
+  const closeBooks = useCallback(() => setBooksOpen(false), [])
   const [showInfoview, setShowInfoview] = useState(true)
   const [terminalProjectId, setTerminalProjectId] = useState<string | null>(
     null,
@@ -1354,6 +1365,26 @@ export function Studio() {
   return (
     <div
       ref={setStudioElement}
+      onClickCapture={(event) => {
+        const anchor =
+          event.target instanceof Element ? event.target.closest('a') : null
+        if (!anchor) return
+        const target = new URL(anchor.href, window.location.href)
+        if (
+          target.origin !== window.location.origin ||
+          !/^\/api\/books\/(functional-programming|theorem-proving|reference)\/content\//.test(
+            target.pathname,
+          )
+        )
+          return
+        event.preventDefault()
+        setBookPageRequest({
+          id: ++bookRequestId.current,
+          url: target.pathname + target.hash,
+        })
+        setBooksMounted(true)
+        setBooksOpen(true)
+      }}
       className={`studio ${toolsOpen ? '' : 'tools-hidden'} ${singleFileView ? 'single-file-mode' : ''}`}
       style={
         {
@@ -1717,6 +1748,16 @@ export function Studio() {
               )}
           </div>
           <div className="header-actions">
+            <ToolbarAction
+              label="Lean docs"
+              icon={<Icon name="book" size={15} />}
+              onClick={() => {
+                setBooksMounted(true)
+                setBooksOpen((value) => !value)
+              }}
+              pressed={booksOpen}
+              help="Browse and search the local Lean books alongside your code. Use Ask Lemex to add the current chapter or selected passage to your message."
+            />
             <ToolbarAction
               label="Goals"
               onClick={() => setShowInfoview((value) => !value)}
@@ -2199,6 +2240,24 @@ export function Studio() {
             onClose={closeTerminal}
           />
         )}
+        {booksMounted && (
+          <BooksPanel
+            open={booksOpen}
+            canAsk={project?.status === 'ready'}
+            pageRequest={bookPageRequest}
+            onClose={closeBooks}
+            onAsk={(text) => {
+              if (!project || project.status !== 'ready') return
+              setBookChatRequest({
+                id: ++bookRequestId.current,
+                projectId: project.id,
+                text,
+              })
+              setToolsOpen(true)
+              if (mobileLayout) setBooksOpen(false)
+            }}
+          />
+        )}
         <footer className="statusbar">
           <span>
             <span
@@ -2259,6 +2318,12 @@ export function Studio() {
                 currentFile={file?.path}
                 files={assistantFiles}
                 focusRequest={proofFocus || undefined}
+                bookRequest={bookChatRequest}
+                onBookHandled={(id) =>
+                  setBookChatRequest((current) =>
+                    current?.id === id ? null : current,
+                  )
+                }
                 editorProof={currentEditorProof || undefined}
                 onFocusEditor={(request) => {
                   if (!currentEditorProof) return

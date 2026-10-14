@@ -44,6 +44,14 @@ Use **Refresh setup** in an open project to recheck its environment. Valid compi
 
 ## Read project documents
 
+Choose **Lean docs** in the top bar to read local copies of _Functional Programming in Lean_, _Theorem Proving in Lean 4_, and the _Lean Language Reference_. The reading panel opens below the editor, leaving Lemex available beside it. Choose **Expand** for more reading space, or **Split view** to return. Close and reopen Lean docs to keep your current chapter.
+
+Choose a book, follow its chapter links, or use **Search this book** to find matching chapters. **Contents** returns to the start. The displayed Lean version belongs to the downloaded book; your project's pinned Lean version stays unchanged.
+
+With a prepared project open, choose **Ask Lemex** to add the current chapter to your draft. Select a passage first to include it. Your existing draft is preserved, and nothing is sent until you send the message. Lemex can search and read the downloaded books with its file tools. Chapter links in its replies open in Lean docs.
+
+If a book is missing, ask the server administrator to [install the local books](Configuration.md#local-lean-books).
+
 Choose a Markdown file such as `README.md` in **Files**. The editor highlights headings, emphasis, links, lists, and code fences. Choose **Preview Markdown** to read the formatted document, including tables and math written as `$x^2$`, `$$x^2$$`, `\(x^2\)`, or `\[x^2\]`. **Edit Markdown** returns to the same editor with your unsaved changes intact. Choose **Save** to save them.
 
 Formatted previews support documents up to 512 KiB. Larger Markdown files stay available in the editor.

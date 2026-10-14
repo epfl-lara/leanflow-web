@@ -117,6 +117,12 @@ test('hover recovery keeps answering, while a persistent loop stops without veri
       }
       const manager = new AgentManager({
         runtime,
+        books: {
+          async prepareAgent(workerHome) {
+            assert.equal(workerHome, home)
+            return '\nLocal documentation is available in /home/worker/lean-books.\n'
+          },
+        },
         events,
         workspaces: {
           get: () => ({
@@ -168,6 +174,11 @@ test('hover recovery keeps answering, while a persistent loop stops without veri
         result.error,
       )
       assert.equal(lookups, recovers ? 3 : 6)
+      assert.match(
+        requests.find((request) => request.method === 'thread/start').params
+          .developerInstructions,
+        /Local documentation is available in \/home\/worker\/lean-books/,
+      )
       assert.equal(
         requests.filter((request) => request.method === 'turn/steer').length,
         1,

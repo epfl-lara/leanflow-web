@@ -33,7 +33,7 @@ const fixture = await chatBrowserFixture({
       name: 'Help tips fixture',
       status: 'ready',
       toolchain: 'leanprover/lean4:v4.34.1',
-      repository: { url: 'https://github.com/fixture/project.git' },
+      repository: 'https://github.com/fixture/project.git',
     },
   ],
   files: { [projectId]: { 'Main.lean': 'example : True := by trivial\n' } },
@@ -114,6 +114,7 @@ try {
   const topics = [
     ['Playgrounds', /single Lean file with Mathlib/],
     ['Projects', /multiple files/],
+    ['Lean docs', /local Lean books/],
     ['Goals', /local assumptions/],
     ['Lemex', /review its changes in chat/],
     ['Terminal', /run commands and inspect their output/],
@@ -138,7 +139,7 @@ try {
     await dismissHelp()
   }
   report.checks.push(
-    'All twelve help topics appear on hover, stay readable under the pointer, and fit the desktop viewport',
+    'All thirteen help topics appear on hover, stay readable under the pointer, and fit the desktop viewport',
   )
 
   const toolbar = page.locator('.workbench-header')

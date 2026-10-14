@@ -72,6 +72,7 @@ export class AgentManager {
     config,
     settings,
     chats,
+    books,
     assertCanStart = () => {},
     optimizationMeasure = async (...args) =>
       (await import('./optimization.mjs')).measureOptimization(...args),
@@ -85,6 +86,7 @@ export class AgentManager {
       config,
       settings,
       chats,
+      books,
       assertCanStart,
       optimizationMeasure,
       maxConcurrent,
@@ -626,6 +628,9 @@ export class AgentManager {
           )
       }
       const home = await this.runtime.home(snapshot.root)
+      const bookInstructions = this.books
+        ? await this.books.prepareAgent(home)
+        : ''
       if (active.controller.signal.aborted) return
       this.#progress(
         id,
@@ -823,6 +828,7 @@ export class AgentManager {
         sandbox: 'danger-full-access',
         developerInstructions:
           instructions +
+          bookInstructions +
           (optimizationInstructions ? '\n\n' + optimizationInstructions : '') +
           `\nCurrent mode: ${job.mode}.\nProject toolchain: ${project.toolchain}.\n` +
           (job.liveEdits
