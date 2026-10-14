@@ -226,7 +226,12 @@ export async function createStudio({
         ws.close(1012, 'Project configuration changed. Retry setup.')
   }
   const origin = process.env.STUDIO_ORIGIN
-  const terminals = new Terminals({ runtime, capacity, redact: config.redact })
+  const terminals = new Terminals({
+    runtime,
+    capacity,
+    workspaces,
+    redact: config.redact,
+  })
   let publisher
   const requireNoGit = (
     projectId,
@@ -412,6 +417,11 @@ export async function createStudio({
   app.get('/api/projects/:id', (req, res) =>
     res.json(publicProject(workspaces.get(req.params.id, req.user.id))),
   )
+  app.post('/api/projects/:id/terminal/stop', async (req, res) => {
+    workspaces.get(req.params.id, req.user.id)
+    await terminals.closeProject(req.params.id)
+    res.json({ stopped: true })
+  })
   app.post('/api/projects/:id/convert', async (req, res) =>
     res.json(
       publicProject(
@@ -525,7 +535,7 @@ export async function createStudio({
     }
     const receipt = req.body.stopActive
       ? await activity.withStopped(req.user.id, req.params.id, async () => {
-          terminals.closeProject(req.params.id)
+          await terminals.closeProject(req.params.id)
           for (const ws of sockets)
             if (socketProjects.get(ws) === req.params.id)
               ws.close(1001, 'Project processes stopped for Trash.')

@@ -10,8 +10,8 @@ const maxInput = 16 * 1024
 const outputWindow = 256 * 1024
 
 export class Terminals {
-  constructor({ runtime, capacity, redact = String }) {
-    Object.assign(this, { runtime, capacity, redact })
+  constructor({ runtime, capacity, workspaces, redact = String }) {
+    Object.assign(this, { runtime, capacity, workspaces, redact })
     this.sessions = new Set()
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 })
   }
@@ -49,7 +49,7 @@ export class Terminals {
     this.sessions.add(session)
     let child
     let outstanding = 0
-    let lastInput = Date.now()
+    let lastActivity = Date.now()
     let alive = true
     const fail = (message, code = 1011) => {
       if (ws.readyState === 1)
@@ -58,7 +58,7 @@ export class Terminals {
       child?.kill()
     }
     const heartbeat = setInterval(() => {
-      if (!alive || Date.now() - lastInput > 30 * 60_000) {
+      if (!alive || Date.now() - lastActivity > 30 * 60_000) {
         child?.kill()
         return ws.terminate()
       }
@@ -75,6 +75,10 @@ export class Terminals {
       if (!child) this.sessions.delete(session)
     })
     try {
+      const configuration = this.workspaces?.configurationFingerprint(
+        project.id,
+        project.owner,
+      )
       child = this.runtime.spawn(
         project.root,
         ['python3', '-u', '-c', workerScript],
@@ -89,8 +93,10 @@ export class Terminals {
           },
         },
       )
+      session.child = child
       child.stdout.on('data', (chunk) => {
         if (ws.readyState !== 1) return
+        lastActivity = Date.now()
         outstanding += chunk.length
         if (outstanding >= outputWindow) child.stdout.pause()
         ws.send(chunk, { binary: true }, (error) => {
@@ -116,23 +122,34 @@ export class Terminals {
           ws.send(JSON.stringify({ type: 'exit', code }))
           ws.close(1000, 'Shell exited')
         }
-        if (!child.workerStopped) this.sessions.delete(session)
       })
-      child.workerStopped?.then(
-        async () => {
-          this.sessions.delete(session)
+      session.finalize = async () => {
+        if (configuration !== undefined) {
           try {
-            if (child.workerHome) await removeDisposableTree(child.workerHome)
-          } catch {
-            console.error(
-              '[LeanFlow terminal] Could not remove a closed terminal home.',
+            await this.workspaces.refreshExternalConfiguration(
+              project.id,
+              project.owner,
+              configuration,
             )
+          } catch (error) {
+            if (error.status !== 404) throw error
           }
-        },
-        () => {
-          /* Runtime retains the worker for a project stop retry. */
-        },
-      )
+        }
+        this.sessions.delete(session)
+        try {
+          if (child.workerHome) await removeDisposableTree(child.workerHome)
+        } catch {
+          console.error(
+            '[LeanFlow terminal] Could not remove a closed terminal home.',
+          )
+        }
+      }
+      session.finished = (
+        child.workerStopped ||
+        new Promise((resolve) => child.once('close', resolve))
+      ).then(session.finalize)
+      // Retain failed cleanup guards for an explicit stop/Trash retry.
+      session.finished.catch(() => {})
       ws.on('message', (raw, binary) => {
         try {
           const message = JSON.parse(raw.toString())
@@ -151,6 +168,7 @@ export class Terminals {
             )
               throw new Error()
             outstanding -= message.bytes
+            lastActivity = Date.now()
             if (outstanding < outputWindow / 2) child.stdout.resume()
             return
           }
@@ -169,7 +187,7 @@ export class Terminals {
             )
               throw new Error()
           } else throw new Error()
-          lastInput = Date.now()
+          lastActivity = Date.now()
           if (child.stdin.writableLength > 64 * 1024)
             return fail(
               'Too much terminal input is waiting. Reopen the terminal and send a smaller paste.',
@@ -197,13 +215,22 @@ export class Terminals {
     }
   }
 
-  closeProject(projectId) {
-    for (const session of this.sessions)
-      if (session.projectId === projectId) {
-        session.ws.close(1001, 'Project processes stopped')
-        // Runtime.stopProject has already awaited worker cleanup in the stop flow.
-        this.sessions.delete(session)
-      }
+  async closeProject(projectId) {
+    await Promise.all(
+      [...this.sessions]
+        .filter((session) => session.projectId === projectId)
+        .map(async (session) => {
+          session.ws.close(1000, 'Terminal closed')
+          session.child?.kill()
+          try {
+            await session.finished
+          } catch (error) {
+            if (!session.child?.cleanupWorker) throw error
+            await session.child.cleanupWorker()
+            await session.finalize()
+          }
+        }),
+    )
   }
 
   close() {

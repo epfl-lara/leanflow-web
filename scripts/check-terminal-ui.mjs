@@ -32,6 +32,11 @@ const messages = []
 const sockets = []
 let closed = 0
 let expectedHash
+let onTerminalStop = () => {}
+await f.page.route('**/api/projects/*/terminal/stop', (route) => {
+  onTerminalStop()
+  return route.fulfill({ json: { stopped: true } })
+})
 await f.page.routeWebSocket('**/websocket/terminal/**', (socket) => {
   sockets.push(socket)
   socket.onClose(() => {
@@ -268,6 +273,27 @@ try {
   )
   assert.equal(await panel.count(), 0)
   f.report.checks.push('Switching workspaces disconnects the old terminal.')
+  await f.page.getByRole('button', { name: 'Terminal', exact: true }).click()
+  await panel.getByText('Connected', { exact: true }).waitFor()
+  onTerminalStop = () => {
+    const project = f.state.projects.find(
+      (project) => project.id === 'other-terminal-project',
+    )
+    project.status = 'error'
+    project.needsPreparation = true
+    project.error =
+      'Project configuration changed. Retry setup to prepare and test the updated environment.'
+  }
+  await panel
+    .getByRole('button', { name: 'Close terminal', exact: true })
+    .click()
+  await f.page
+    .getByRole('button', { name: 'Retry setup', exact: true })
+    .waitFor()
+  assert.equal(await panel.count(), 0)
+  f.report.checks.push(
+    'Closing a terminal reloads preparation status and exposes Retry setup after configuration edits.',
+  )
   f.assertClean()
   console.log(
     JSON.stringify({ passed: true, checks: f.report.checks }, null, 2),
@@ -276,10 +302,12 @@ try {
   await f.page.screenshot({ path: path.join(directory, 'latest.png') })
   await fs.writeFile(
     path.join(directory, 'editor.txt'),
-    await f.page
-      .locator('.monaco-editor')
-      .innerText()
-      .catch(() => 'Editor closed'),
+    (await f.page.locator('.monaco-editor').count())
+      ? await f.page
+          .locator('.monaco-editor')
+          .innerText()
+          .catch(() => 'Editor closed')
+      : 'Editor closed',
   )
   await fs.writeFile(
     path.join(directory, 'report.json'),

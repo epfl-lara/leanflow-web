@@ -1171,6 +1171,93 @@ test('terminal output pauses until the browser acknowledges bytes', async (t) =>
   )
 })
 
+test('closing a terminal reconciles configuration and exposes the existing setup recovery flow', async (t) => {
+  const f = await fixture(t)
+  await connectTerminal(t, f)
+  const root = f.workspaces.get(f.project.id, 'owner').root
+  await fs.appendFile(path.join(root, 'lean-toolchain'), '\n')
+  const options = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  }
+  const stop = await f.request(
+    `/api/projects/${f.project.id}/terminal/stop`,
+    options,
+  )
+  assert.equal(stop.status, 200)
+  assert.deepEqual(await stop.json(), { stopped: true })
+  assert.equal(f.runtime.spawned[0].killed, true)
+  const project = await (
+    await f.request(`/api/projects/${f.project.id}`)
+  ).json()
+  assert.equal(project.status, 'error')
+  assert.equal(project.needsPreparation, true)
+  assert.match(project.error, /configuration changed.*Retry setup/)
+  const prepare = await f.request(
+    `/api/projects/${f.project.id}/prepare`,
+    options,
+  )
+  assert.equal(prepare.status, 200)
+  await f.workspaces.jobs.get(f.project.id)
+  assert.equal(f.workspaces.get(f.project.id, 'owner').status, 'ready')
+})
+
+test('terminal stop authenticates and scopes ownership; ordinary source edits do not invalidate setup', async (t) => {
+  const f = await fixture(t)
+  await connectTerminal(t, f)
+  const root = f.workspaces.get(f.project.id, 'owner').root
+  await fs.appendFile(
+    path.join(root, 'Main.lean'),
+    '\n-- terminal source edit\n',
+  )
+  const options = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  }
+  const endpoint = `/api/projects/${f.project.id}/terminal/stop`
+  assert.equal((await f.request(endpoint, options, '')).status, 401)
+  assert.equal((await f.request(endpoint, options, f.otherToken)).status, 404)
+  assert.equal(f.runtime.spawned[0].killed, false)
+  assert.equal((await f.request(endpoint, options)).status, 200)
+  assert.equal(f.workspaces.get(f.project.id, 'owner').status, 'ready')
+})
+
+test('terminal stop waits for worker cleanup before configuration reconciliation and preparation', async (t) => {
+  const f = await fixture(t)
+  const spawn = f.runtime.spawn.bind(f.runtime)
+  let finishCleanup
+  f.runtime.spawn = (...args) => {
+    const child = spawn(...args)
+    child.workerStopped = new Promise((resolve) => {
+      finishCleanup = resolve
+    })
+    return child
+  }
+  await connectTerminal(t, f)
+  const root = f.workspaces.get(f.project.id, 'owner').root
+  await fs.appendFile(path.join(root, 'lean-toolchain'), '\n')
+  const options = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  }
+  let stopped = false
+  const stop = f
+    .request(`/api/projects/${f.project.id}/terminal/stop`, options)
+    .then((response) => {
+      stopped = true
+      return response
+    })
+  await new Promise((resolve) => f.runtime.spawned[0].once('close', resolve))
+  assert.equal(stopped, false)
+  assert.equal(f.workspaces.get(f.project.id, 'owner').status, 'ready')
+  finishCleanup()
+  assert.equal((await stop).status, 200)
+  assert.equal(f.workspaces.get(f.project.id, 'owner').needsPreparation, true)
+})
+
 test('a disconnected terminal holds its project guard and capacity until worker cleanup finishes', async (t) => {
   const f = await fixture(t)
   let finishCleanup

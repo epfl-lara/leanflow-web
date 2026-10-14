@@ -88,7 +88,9 @@ export function readDependencyConfiguration(root) {
     try {
       fd = fs.openSync(
         path.join(root, name),
-        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+        fs.constants.O_RDONLY |
+          fs.constants.O_NOFOLLOW |
+          fs.constants.O_NONBLOCK,
       )
       const stat = fs.fstatSync(fd)
       if (!stat.isFile() || stat.size > 2 * 1024 * 1024)

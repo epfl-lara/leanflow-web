@@ -91,6 +91,54 @@ test('creates a durable scoped project with isolated runtime commands', async (t
   )
 })
 
+test('external terminal configuration changes require preparation while source-only edits preserve readiness', async (t) => {
+  const { store, project } = await fixture(t)
+  assert.throws(() => store.configurationFingerprint(project.id, 'bob'), {
+    status: 404,
+  })
+  const baseline = store.configurationFingerprint(project.id, 'alice')
+  await fs.appendFile(
+    path.join(project.root, 'Main.lean'),
+    '\n-- source edit\n',
+  )
+  assert.equal(
+    await store.refreshExternalConfiguration(project.id, 'alice', baseline),
+    false,
+  )
+  await fs.unlink(path.join(project.root, 'lean-toolchain'))
+  assert.equal(
+    await store.refreshExternalConfiguration(project.id, 'alice', baseline),
+    true,
+  )
+  assert.equal(store.get(project.id, 'alice').status, 'error')
+  assert.equal(store.get(project.id, 'alice').needsPreparation, true)
+})
+
+test('terminal-made non-regular dependency configuration cannot block fingerprinting', async (t) => {
+  const { store, project } = await fixture(t)
+  const { spawnSync } = await import('node:child_process')
+  const filename = path.join(project.root, 'lean-toolchain')
+  await fs.unlink(filename)
+  assert.equal(spawnSync('mkfifo', [filename]).status, 0)
+  const moduleUrl = new URL('../shared-dependencies.mjs', import.meta.url).href
+  const checked = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `
+    import {readDependencyConfiguration} from ${JSON.stringify(moduleUrl)};
+    try { readDependencyConfiguration(process.argv[1]); process.exit(1) }
+    catch(error) { if (!/Invalid dependency configuration file/.test(error.message)) throw error }
+  `,
+      project.root,
+    ],
+    { timeout: 3000 },
+  )
+  assert.equal(checked.error, undefined)
+  assert.equal(checked.status, 0)
+})
+
 test('guards traversal, secret files, dependency writes, and symlink escapes', async (t) => {
   const { store, project, dataDir } = await fixture(t)
   const secret = path.join(dataDir, 'host-secret')

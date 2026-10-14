@@ -7,6 +7,11 @@ import { useStoredSize } from './layout'
 import '@xterm/xterm/css/xterm.css'
 import './terminal.css'
 
+const terminalTheme = (theme: 'light' | 'dark') =>
+  theme === 'dark'
+    ? { background: '#12141b', foreground: '#e2e5ed', cursor: '#e2e5ed' }
+    : { background: '#ffffff', foreground: '#20232b', cursor: '#20232b' }
+
 export function TerminalPanel({
   projectId,
   theme,
@@ -18,6 +23,8 @@ export function TerminalPanel({
 }) {
   const host = useRef<HTMLDivElement>(null)
   const terminal = useRef<Terminal | null>(null)
+  const themeRef = useRef(theme)
+  themeRef.current = theme
   const [attempt, setAttempt] = useState(0)
   const [status, setStatus] = useState('Connecting…')
   const [connected, setConnected] = useState(false)
@@ -38,6 +45,7 @@ export function TerminalPanel({
       screenReaderMode: true,
       disableStdin: true,
       allowProposedApi: false,
+      theme: terminalTheme(themeRef.current),
     })
     terminal.current = term
     const fit = new FitAddon()
@@ -153,11 +161,7 @@ export function TerminalPanel({
   }, [projectId, attempt])
 
   useEffect(() => {
-    if (terminal.current)
-      terminal.current.options.theme =
-        theme === 'dark'
-          ? { background: '#12141b', foreground: '#e2e5ed', cursor: '#e2e5ed' }
-          : { background: '#ffffff', foreground: '#20232b', cursor: '#20232b' }
+    if (terminal.current) terminal.current.options.theme = terminalTheme(theme)
   }, [theme, attempt])
 
   return (

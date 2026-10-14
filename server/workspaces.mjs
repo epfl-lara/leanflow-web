@@ -2668,6 +2668,10 @@ export class WorkspaceStore {
 
   #invalidateConfiguration(project, filename, changed = true) {
     if (!changed || !CONFIGURATION_FILES.has(filename)) return false
+    return this.#requirePreparation(project)
+  }
+
+  #requirePreparation(project) {
     delete project.log
     project.status = 'error'
     project.needsPreparation = true
@@ -2676,6 +2680,27 @@ export class WorkspaceStore {
       'Project configuration changed. Retry setup to prepare and test the updated environment.'
     this.#save(project)
     return true
+  }
+
+  configurationFingerprint(id, owner) {
+    const project = this.get(id, owner)
+    return configurationDigest(readDependencyConfiguration(project.root))
+  }
+
+  async refreshExternalConfiguration(id, owner, previous) {
+    this.get(id, owner)
+    return this.#locked(id, () => {
+      const project = this.get(id, owner)
+      if (project.status === 'preparing') return false
+      let current
+      try {
+        current = configurationDigest(readDependencyConfiguration(project.root))
+      } catch {
+        // Missing, oversized, or non-regular configuration needs the same
+        // recovery path as a changed file. Never follow terminal-made links.
+      }
+      return current === previous ? false : this.#requirePreparation(project)
+    })
   }
 
   async writeFile(id, owner, filename, content, expectedHash) {

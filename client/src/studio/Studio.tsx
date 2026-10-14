@@ -963,6 +963,7 @@ export function Studio() {
     const refresh = async () => {
       try {
         await refreshLiveFiles([], 'terminal')
+        if (!disposed) await loadProjects()
       } catch (error) {
         if (!disposed) setError(errorText(error))
       }
@@ -973,14 +974,27 @@ export function Studio() {
       disposed = true
       clearTimeout(timer)
     }
-  }, [terminalOpen, project?.id, project?.status, refreshLiveFiles])
+  }, [
+    terminalOpen,
+    project?.id,
+    project?.status,
+    refreshLiveFiles,
+    loadProjects,
+  ])
 
-  function closeTerminal() {
+  async function closeTerminal() {
     setTerminalOpen(false)
-    void refreshLiveFiles([], 'terminal').catch((error) =>
-      setError(errorText(error)),
-    )
-    if (projectIdRef.current) void loadGit(projectIdRef.current)
+    const id = projectIdRef.current
+    if (!id) return
+    try {
+      await post(`/api/projects/${encodeURIComponent(id)}/terminal/stop`)
+      await loadProjects()
+      if (projectIdRef.current !== id) return
+      await refreshLiveFiles([], 'terminal')
+      void loadGit(id)
+    } catch (error) {
+      if (projectIdRef.current === id) setError(errorText(error))
+    }
   }
 
   async function retryPrepare() {

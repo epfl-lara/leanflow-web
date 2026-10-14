@@ -518,6 +518,22 @@ test('changed configuration cannot silently use the old mounted cache, while exi
   const { runtime, root, dataDir, run } = await fixture(t)
   const shared = await runtime.prepareSharedDependencies(root, request())
   await runtime.inheritDependencies(shared.root, root)
+  const store = await new WorkspaceStore({ dataDir, runtime }).init()
+  t.after(() => store.close())
+  const projectId = 'terminal-shared-fixture'
+  store.db.prepare('INSERT INTO projects(id,owner,data) VALUES(?,?,?)').run(
+    projectId,
+    'alice',
+    JSON.stringify({
+      id: projectId,
+      owner: 'alice',
+      root,
+      status: 'ready',
+      toolchain,
+      preset: 'lean',
+    }),
+  )
+  const baseline = store.configurationFingerprint(projectId, 'alice')
   const candidate = path.join(dataDir, 'candidate')
   await writeConfig(candidate)
   await runtime.inheritDependencies(root, candidate)
@@ -530,6 +546,13 @@ test('changed configuration cannot silently use the old mounted cache, while exi
     runtime.run(root, ['true']),
     /configuration changed.*Prepare the project again/,
   )
+  assert.equal(
+    await store.refreshExternalConfiguration(projectId, 'alice', baseline),
+    true,
+  )
+  assert.equal(store.get(projectId, 'alice').status, 'error')
+  assert.equal(store.get(projectId, 'alice').needsPreparation, true)
+  assert.match(store.get(projectId, 'alice').error, /Retry setup/)
   assert.equal((await runtime.run(candidate, ['true'])).code, 0)
   await runtime.clearInheritedDependencies(root)
   assert.notEqual(runtime.dependencyRoot(root), shared.root)

@@ -34,7 +34,9 @@ Type normally, use the arrow keys for command history, and press **Ctrl+C** to i
 
 The worker includes the Lemex CLI. Run `lemex` to open it, or `lemex --version` to see its version. Configure your own CLI login or provider inside the terminal if needed; the server's assistant credentials stay private. The terminal home is temporary, so save lasting work in `/workspace`.
 
-Closing the terminal, changing workspaces, or disconnecting stops its shell and background processes. An idle terminal closes after 30 minutes without input. **Reconnect terminal** starts a new shell. Close the terminal before preparing again, using source control to change or publish the project, uploading files, or moving project data to Trash. **Stop all processes and move to Trash** also stops the terminal. Terminals share the server's worker capacity with editors, agents, setup, and checks.
+Closing the terminal, changing workspaces, or disconnecting stops its shell and background processes. An idle terminal closes after 30 minutes without input or output. Builds that continue producing output stay connected. **Reconnect terminal** starts a new shell. If terminal commands change Lean or Lake configuration, close the terminal and use **Retry setup** to prepare the updated environment. Close the terminal before preparing again, using source control to change or publish the project, uploading files, or moving project data to Trash. **Stop all processes and move to Trash** also stops the terminal. Terminals share the server's worker capacity with editors, agents, setup, and checks.
+
+Finish a terminal build before starting a Lean check, and finish a check before starting another build in the terminal. Both can write the project's build cache. Git branch labels refresh when you close the terminal.
 
 ## Ask about one proof
 

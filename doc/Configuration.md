@@ -47,6 +47,8 @@ Use the `STUDIO_MAX_*` settings in [`.env.example`](../.env.example) to set edit
 
 Editors, terminals, and agents share worker slots with setup and proof checks. `STUDIO_MAX_TERMINALS` defaults to 2 across the server; `STUDIO_MAX_TERMINALS_PER_PROJECT` defaults to 1. Each terminal uses the worker CPU, RAM, and process limits. Leave spare slots and RAM for interactive work and checks. Apply changes during an idle restart, then check the intended workload and your provider's quotas. A larger server needs its own capacity settings and a load test.
 
+The default limits allow 4 editors, 2 terminals, and 2 agents to share 6 worker slots. These individual limits do not reserve workers. Lower their limits or increase `STUDIO_MAX_WORKERS` with enough CPU and RAM to leave room for checks and setup.
+
 Project setup allows 30 minutes for its own Lake build. Large imported repositories can need longer. Set a bounded timeout in the private environment file, for example 90 minutes:
 
 ```dotenv
