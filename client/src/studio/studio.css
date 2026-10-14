@@ -2807,7 +2807,75 @@ body.panel-resizing iframe {
 
 .setup-editor-details {
   padding: 0 12px;
-  max-height: 180px;
+  font-size: 12px;
+  line-height: 1.5;
+  border-bottom: 1px solid var(--border);
+  max-height: min(180px, 32vh);
   overflow: auto;
   flex-shrink: 0;
+}
+.setup-editor-details > summary {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  padding: 5px 0;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.setup-editor-details[open] > summary {
+  box-shadow: 0 1px 0 var(--border);
+}
+.setup-editor-details > summary > strong {
+  font-weight: 550;
+}
+.setup-status {
+  margin-left: 8px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.setup-digest {
+  margin-left: 8px;
+  color: var(--text);
+  font-size: 11px;
+}
+.setup-editor-content {
+  padding-bottom: 6px;
+}
+.setup-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 12px;
+  margin: 6px 0;
+}
+.setup-facts dt {
+  color: var(--muted);
+}
+.setup-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.setup-facts code,
+.setup-digest code {
+  font-family: var(--mono);
+}
+.setup-output > summary {
+  cursor: pointer;
+  font-size: 12px;
+}
+.setup-editor-details .setup-log {
+  max-height: none;
+  overflow: visible;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 6px 0;
+  padding: 10px 12px;
+}
+.setup-editor-content .setup-repair-notice {
+  margin: 6px 0;
+  padding: 10px 12px;
+  max-width: none;
 }

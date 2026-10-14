@@ -100,16 +100,21 @@ try {
   delete project.error
   await f.page.reload()
   await f.page
-    .getByText('Project opened with build errors', { exact: true })
+    .getByText('Project build needs attention', { exact: true })
     .waitFor()
   await f.page.getByText(project.buildWarning, { exact: true }).waitFor()
   await f.page.getByText('Setup repaired and tested', { exact: true }).waitFor()
-  await f.page.getByText('Setup summary', { exact: true }).waitFor()
   await f.page
-    .getByText('Ready for editing with Lean v4.34.1.', { exact: true })
+    .locator('.setup-status')
+    .getByText('Build warnings', { exact: true })
     .waitFor()
+  assert.equal(
+    await f.page.locator('.setup-digest').innerText(),
+    'Lean v4.34.1 · aaaaaaa',
+  )
   await f.page
-    .getByText('Source revision: ' + project.sourceRevision, { exact: true })
+    .locator('.setup-facts')
+    .getByText(project.sourceRevision, { exact: true })
     .waitFor()
   await f.page.getByText('Setup output', { exact: true }).click()
   assert.match(
@@ -119,14 +124,81 @@ try {
   project.setupBuildStatus = 'passed'
   delete project.buildWarning
   delete project.setupRepair
+  project.log += Array.from(
+    { length: 300 },
+    (_, i) => `Build output line ${i}\n`,
+  ).join('')
+  await f.page.setViewportSize({ width: 1280, height: 720 })
   await f.page.reload()
+  await f.page
+    .locator('.setup-status')
+    .getByText('Build passed', { exact: true })
+    .waitFor()
+  assert(
+    (await f.page.locator('.setup-editor-details').boundingBox()).height < 40,
+  )
+  await f.page.screenshot({ path: path.join(reportDir, 'setup-collapsed.png') })
   await f.page.getByText('Project setup', { exact: true }).click()
-  await f.page.getByText('Project build passed.', { exact: true }).waitFor()
+  const typography = await f.page
+    .locator('.setup-editor-details')
+    .evaluate((element) => ({
+      heading: getComputedStyle(element.querySelector('summary')).fontSize,
+      content: getComputedStyle(element.querySelector('.setup-facts')).fontSize,
+    }))
+  assert.equal(typography.heading, '12px')
+  assert.equal(typography.content, '12px')
+  const heading = f.page.locator('.setup-editor-details > summary')
+  await heading.focus()
+  await f.page.keyboard.press('Enter')
+  assert.equal(
+    await f.page.locator('.setup-editor-details').getAttribute('open'),
+    null,
+  )
+  assert(await f.page.locator('.setup-digest').isVisible())
+  await f.page.keyboard.press('Enter')
+  assert.notEqual(
+    await f.page.locator('.setup-editor-details').getAttribute('open'),
+    null,
+  )
   await f.page.getByText('Setup output', { exact: true }).click()
   assert.match(
     await f.page.locator('.setup-log').innerText(),
     /Verified dependency revision mathlib/,
   )
+  const scrollers = await f.page
+    .locator('.setup-editor-details')
+    .evaluate((element) => {
+      const log = element.querySelector('.setup-log')
+      element.scrollTop = element.scrollHeight
+      return {
+        height: element.getBoundingClientRect().height,
+        panelScrolls: element.scrollHeight > element.clientHeight,
+        logScrolls: log.scrollHeight - log.clientHeight > 1,
+      }
+    })
+  assert(scrollers.height <= 181)
+  assert(scrollers.panelScrolls)
+  assert.equal(scrollers.logScrolls, false)
+  const pinnedHeading = await f.page
+    .locator('.setup-editor-details')
+    .evaluate(async (element) => {
+      await new Promise(requestAnimationFrame)
+      return Math.abs(
+        element.querySelector('summary').getBoundingClientRect().top -
+          element.getBoundingClientRect().top,
+      )
+    })
+  assert(
+    pinnedHeading <= 1,
+    'setup heading stays visible while its output scrolls',
+  )
+  f.report.setupLayout = {
+    typography,
+    ...scrollers,
+    pinnedHeadingOffset: pinnedHeading,
+  }
+  await f.page.screenshot({ path: path.join(reportDir, 'setup-expanded.png') })
+  await f.page.setViewportSize({ width: 1600, height: 1000 })
   const background = {
     id: 'background-setup',
     name: 'Background',

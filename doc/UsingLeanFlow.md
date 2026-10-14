@@ -38,7 +38,7 @@ When available on the server, the specialized Lemex setup agent starts automatic
 
 Setup shows its current stage, from preparing Lean and libraries to testing the environment. If automatic setup needs a configuration repair, **Lemex is repairing setup** appears while Lemex diagnoses the problem. **Testing the setup repair** appears before the checked configuration is accepted and setup retries. You can open another project while this runs.
 
-Open **Project setup** above the editor to see the Lean version, source revision and project build result. **Setup output** names each build or check and reports its elapsed time. It belongs to the latest setup attempt, and long output shows a marked tail. Dependency revision hashes include the package name. Lean errors and linter warnings remain visible; a ready environment can still contain project targets that need repair.
+**Project setup** above the editor shows the setup result, Lean version and a short source revision. Open it for the repository, folder, full revision and any warnings. **Setup output** names each build or check and reports its elapsed time. It belongs to the latest setup attempt, and long output shows a marked tail. The heading stays visible while you scroll the output. Dependency revision hashes include the package name. Lean errors and linter warnings remain visible; a ready environment can still contain project targets that need repair.
 
 Use **Refresh setup** in an open project to recheck its environment. Valid compiled caches are reused. Choose the adjacent info icon for details about cache reuse and automatic repair. Stop active checks and chats, and close the terminal before refreshing.
 

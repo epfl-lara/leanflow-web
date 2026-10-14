@@ -41,7 +41,7 @@ import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
 import { RepositoryCredentialsDialog } from './RepositoryCredentialsDialog'
 import type { RepositoryCredentials } from './RepositoryCredentialsFields'
-import { ProjectSetupDetails } from './ProjectSetupDetails'
+import { ProjectSetupDetails, ProjectSetupPanel } from './ProjectSetupDetails'
 import { UploadModal, type UploadFile } from './UploadFiles'
 import { SingleFileActions } from './SingleFileActions'
 import { WorkspaceList } from './WorkspaceList'
@@ -1999,19 +1999,7 @@ export function Studio() {
                 </button>
               </div>
             )}
-            {!singleFileMode && (
-              <details
-                className="setup-editor-details"
-                open={Boolean(
-                  project.needsPreparation ||
-                  project.buildWarning ||
-                  project.publishingWarning,
-                )}
-              >
-                <summary>Project setup</summary>
-                <ProjectSetupDetails project={project} />
-              </details>
-            )}
+            {!singleFileMode && <ProjectSetupPanel project={project} />}
             <div className="file-toolbar">
               <div className="file-tab">
                 <Icon name="file" size={15} />

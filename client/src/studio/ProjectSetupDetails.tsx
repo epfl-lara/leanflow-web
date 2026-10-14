@@ -1,42 +1,99 @@
 import type { Project } from './api'
 import { ProjectSetupProgress } from './ProjectSetupProgress'
 
+const buildResults = {
+  passed: ['success', 'Build passed'],
+  reused: ['', 'Libraries reused'],
+  warnings: ['', 'Build warnings'],
+} satisfies Record<
+  NonNullable<Project['setupBuildStatus']>,
+  readonly [string, string]
+>
+
+function readyLeanVersion(project: Project) {
+  return project.status === 'ready' && !project.needsPreparation
+    ? project.toolchain?.replace('leanprover/lean4:', '')
+    : undefined
+}
+
+export function ProjectSetupPanel({ project }: { project: Project }) {
+  const needsAttention = Boolean(
+    project.status === 'error' ||
+    project.needsPreparation ||
+    project.dependencyWarning ||
+    project.buildWarning ||
+    project.publishingWarning,
+  )
+  const lean = readyLeanVersion(project)
+  const build =
+    lean && project.setupBuildStatus && buildResults[project.setupBuildStatus]
+  return (
+    <details className="setup-editor-details" open={needsAttention}>
+      <summary>
+        <strong>Project setup</strong>
+        <span className={`tag setup-status ${build ? build[0] : ''}`}>
+          {build
+            ? build[1]
+            : project.status === 'preparing'
+              ? 'Preparing'
+              : needsAttention
+                ? 'Needs attention'
+                : 'Ready'}
+        </span>
+        {lean && (
+          <span className="setup-digest">
+            Lean {lean}
+            {project.sourceRevision && (
+              <>
+                {' · '}
+                <code title={project.sourceRevision}>
+                  {project.sourceRevision.slice(0, 7)}
+                </code>
+              </>
+            )}
+          </span>
+        )}
+      </summary>
+      <div className="setup-editor-content">
+        <ProjectSetupDetails project={project} />
+      </div>
+    </details>
+  )
+}
+
 export function ProjectSetupDetails({ project }: { project: Project }) {
+  const lean = readyLeanVersion(project)
   return (
     <>
       {project.status === 'preparing' && (
         <ProjectSetupProgress project={project} />
       )}
-      {project.status === 'ready' &&
-        !project.needsPreparation &&
-        project.toolchain && (
-          <div className="setup-repair-notice">
-            <strong>Setup summary</strong>
-            <p>
-              Ready for editing with Lean{' '}
-              {project.toolchain.replace('leanprover/lean4:', '')}.
-            </p>
-            {project.setupBuildStatus === 'passed' && (
-              <p>Project build passed.</p>
-            )}
-            {project.setupBuildStatus === 'reused' && (
-              <p>Reused the verified library environment.</p>
-            )}
-            {project.setupBuildStatus === 'warnings' && (
-              <p>
-                Some project targets need attention. See the build messages
-                below.
-              </p>
+      {lean &&
+        (project.repository ||
+          project.sourceRevision ||
+          project.subdirectory) && (
+          <dl className="setup-facts">
+            {project.repository && (
+              <>
+                <dt>Repository</dt>
+                <dd>{project.repository}</dd>
+              </>
             )}
             {project.subdirectory && (
-              <p>Project folder: {project.subdirectory}</p>
+              <>
+                <dt>Folder</dt>
+                <dd>{project.subdirectory}</dd>
+              </>
             )}
             {project.sourceRevision && (
-              <p>
-                Source revision: <code>{project.sourceRevision}</code>
-              </p>
+              <>
+                <dt>Revision</dt>
+                <dd>
+                  <code>{project.sourceRevision}</code>
+                </dd>
+              </>
             )}
-          </div>
+          </dl>
         )}
       {project.publishingWarning && (
         <div className="setup-repair-notice" role="status">
@@ -54,7 +111,7 @@ export function ProjectSetupDetails({ project }: { project: Project }) {
         project.buildWarning &&
         !project.dependencyWarning && (
           <div className="setup-repair-notice" role="status">
-            <strong>Project opened with build errors</strong>
+            <strong>Project build needs attention</strong>
             <p>{project.buildWarning}</p>
             <p>
               Open the affected files to inspect Lean's messages, then use Check
@@ -78,12 +135,14 @@ export function ProjectSetupDetails({ project }: { project: Project }) {
         </div>
       )}
       {project.log && (
-        <details open={project.status === 'error'}>
+        <details className="setup-output" open={project.status === 'error'}>
           <summary>Setup output</summary>
           <pre className="setup-log">{project.log}</pre>
         </details>
       )}
-      {project.repository && <p className="field-help">{project.repository}</p>}
+      {project.repository && !lean && (
+        <p className="field-help">{project.repository}</p>
+      )}
     </>
   )
 }
