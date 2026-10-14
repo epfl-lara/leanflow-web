@@ -33,6 +33,7 @@ const fixture = await chatBrowserFixture({
       name: 'Help tips fixture',
       status: 'ready',
       toolchain: 'leanprover/lean4:v4.34.1',
+      repository: { url: 'https://github.com/fixture/project.git' },
     },
   ],
   files: { [projectId]: { 'Main.lean': 'example : True := by trivial\n' } },
@@ -113,7 +114,11 @@ try {
   const topics = [
     ['Playgrounds', /single Lean file with Mathlib/],
     ['Projects', /multiple files/],
-    ['Goals (Infoview)', /local assumptions/],
+    ['Goals', /local assumptions/],
+    ['Lemex', /review its changes in chat/],
+    ['Terminal', /run commands and inspect their output/],
+    ['Refresh setup', /reuse valid compiled caches/],
+    ['Publish', /pull request or merge request/],
     ['Assistant modes', /preserving its statement/],
     ['Reasoning effort', /next run/],
     ['Edit files live', /review changes before applying/],
@@ -133,7 +138,52 @@ try {
     await dismissHelp()
   }
   report.checks.push(
-    'All eight help topics appear on hover, stay readable under the pointer, and fit the desktop viewport',
+    'All twelve help topics appear on hover, stay readable under the pointer, and fit the desktop viewport',
+  )
+
+  const toolbar = page.locator('.workbench-header')
+  const toolbarLabels = [
+    'Goals',
+    'Lemex',
+    'Terminal',
+    'Refresh setup',
+    'Publish',
+  ]
+  for (const label of toolbarLabels) {
+    const group = toolbar.getByRole('group', { name: label, exact: true })
+    const action = group.getByRole('button', { name: label, exact: true })
+    await action.waitFor()
+    assert.equal(await group.getByRole('button').count(), 2)
+    await group
+      .getByRole('button', { name: `About ${label}`, exact: true })
+      .click()
+    await visibleHelp()
+    assert.equal(await tooltip.locator('strong').innerText(), label)
+    if (await action.getAttribute('aria-pressed')) {
+      const before = await action.getAttribute('aria-pressed')
+      await help(label).click()
+      await tooltip.waitFor({ state: 'hidden' })
+      assert.equal(await action.getAttribute('aria-pressed'), before)
+    } else await dismissHelp()
+  }
+  const goals = toolbar.getByRole('button', { name: 'Goals', exact: true })
+  const selectedBefore = await goals.getAttribute('aria-pressed')
+  await goals.click()
+  assert.notEqual(await goals.getAttribute('aria-pressed'), selectedBefore)
+  await goals.click()
+  assert.equal(await goals.getAttribute('aria-pressed'), selectedBefore)
+  await toolbar.getByRole('button', { name: 'Terminal', exact: true }).focus()
+  await page.keyboard.press('Tab')
+  assert.equal(
+    await help('Terminal').evaluate(
+      (element) => element === document.activeElement,
+    ),
+    true,
+  )
+  await visibleHelp()
+  await dismissHelp()
+  report.checks.push(
+    'Each toolbar action and help button share a named group and matching help title; help preserves panel choices, closes on a second click, and opens on keyboard focus',
   )
 
   const playgrounds = page.locator('details[aria-label="Playgrounds"]')
@@ -217,6 +267,10 @@ try {
     fullPage: true,
   })
   await dismissHelp()
+  await help('Refresh setup').hover()
+  await visibleHelp()
+  await page.screenshot({ path: path.join(reportDir, 'toolbar-desktop.png') })
+  await dismissHelp()
   report.checks.push('Help follows the light and dark themes')
 
   await page.setViewportSize({ width: 390, height: 844 })
@@ -263,6 +317,44 @@ try {
   })
   await tooltip.waitFor({ state: 'hidden' })
   await cdp.detach()
+  await page
+    .getByRole('button', { name: 'Close project sidebar', exact: true })
+    .click({ position: { x: 375, y: 420 } })
+  for (const width of [390, 320, 720, 900]) {
+    await page.setViewportSize({ width, height: 844 })
+    for (const label of toolbarLabels) {
+      const group = toolbar.getByRole('group', { name: label, exact: true })
+      const bounds = await group.boundingBox()
+      assert(
+        bounds && bounds.x >= 0 && bounds.x + bounds.width <= width,
+        `${label} must fit the ${width}px toolbar`,
+      )
+      await help(label).click()
+      await visibleHelp()
+      await assertFits()
+      await dismissHelp()
+    }
+    const headerBounds = await toolbar.boundingBox()
+    const searchBounds = await page.locator('.workspace-search').boundingBox()
+    assert(
+      searchBounds.y + searchBounds.height <=
+        headerBounds.y + headerBounds.height,
+      'Search remains inside the wrapping header',
+    )
+    const assistantBounds = await page.locator('.tools-panel').boundingBox()
+    assert(
+      Math.abs(assistantBounds.y - headerBounds.y - headerBounds.height) < 1,
+      'The assistant starts below the full header after wrapping',
+    )
+  }
+  await page.setViewportSize({ width: 390, height: 844 })
+  await help('Refresh setup').click()
+  await visibleHelp()
+  await page.screenshot({ path: path.join(reportDir, 'toolbar-mobile.png') })
+  await dismissHelp()
+  report.checks.push(
+    'Every toolbar action and explanation fits at 320, 390, 720 and 900 pixels; wrapping keeps search contained and the assistant below the header',
+  )
   assert.equal(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,

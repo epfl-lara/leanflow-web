@@ -586,7 +586,7 @@ textarea {
   justify-content: space-between;
   gap: 10px;
   border-bottom: 1px solid var(--border);
-  height: var(--workbench-header-height);
+  min-height: 96px;
   padding: 10px 18px;
   flex-shrink: 0;
 }
@@ -595,7 +595,7 @@ textarea {
   align-items: center;
   gap: 9px;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 180px;
   font-size: 13px;
 }
 .workspace-title > svg {
@@ -624,8 +624,10 @@ textarea {
 }
 .header-actions {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
-  flex-shrink: 0;
+  max-width: 100%;
 }
 .workspace-alert {
   background: var(--danger-soft);
@@ -2045,7 +2047,8 @@ textarea {
     display: none;
   }
   .header-actions {
-    gap: 2px;
+    flex-basis: 100%;
+    gap: 5px;
   }
   .header-actions .button {
     padding: 7px 8px;

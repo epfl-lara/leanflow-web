@@ -30,6 +30,7 @@ import { CheckControls } from './CheckControls'
 import { TrashDialog } from './TrashDialog'
 import { Icon } from './Icons'
 import { HelpTip } from './HelpTip'
+import { ToolbarAction } from './ToolbarAction'
 import { LeanWorkspace } from './LeanWorkspace'
 import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
@@ -202,9 +203,11 @@ export function Studio() {
     useState<HTMLDivElement | null>(null)
   const [sourceSectionsElement, setSourceSectionsElement] =
     useState<HTMLDivElement | null>(null)
+  const [headerElement, setHeaderElement] = useState<HTMLElement | null>(null)
   const studioSize = useElementSize(studioElement)
   const navigationSize = useElementSize(navigationElement)
   const sourceSectionsSize = useElementSize(sourceSectionsElement)
+  const headerSize = useElementSize(headerElement)
   const mobileLayout = useMediaQuery('(max-width: 720px)')
   const overlayTools = useMediaQuery('(max-width: 1000px)')
   const [sidebarSize, setSidebarSize] = useStoredSize(
@@ -1234,6 +1237,7 @@ export function Studio() {
           '--assistant-width': `${assistantWidth}px`,
           '--files-size': `${filesPercent}%`,
           '--file-tree-size': `${fileTreePercent}%`,
+          '--workbench-header-height': `${headerElement ? headerSize.height : 96}px`,
         } as CSSProperties
       }
     >
@@ -1526,7 +1530,7 @@ export function Studio() {
         />
       )}
       <main className="workbench">
-        <header className="workbench-header">
+        <header ref={setHeaderElement} className="workbench-header">
           <button
             className="icon-button mobile-only"
             title="Open sidebar"
@@ -1547,74 +1551,69 @@ export function Studio() {
             {project?.status === 'ready' &&
               project.repository &&
               !singleFileMode && (
-                <div className="help-label workspace-publish">
-                  <button
-                    className="button small subtle"
-                    onClick={() => setGitOpen('publish')}
-                  >
-                    <Icon name="git" size={14} /> Publish
-                  </button>
-                  <HelpTip label="Publishing changes">
-                    Save and commit your changes, then review a push to the
-                    imported repository or your existing fork. After publishing,
-                    open GitHub or GitLab to finish creating a pull request or
-                    merge request.
-                  </HelpTip>
-                </div>
+                <ToolbarAction
+                  className="workspace-publish"
+                  label="Publish"
+                  icon={<Icon name="git" size={14} />}
+                  onClick={() => setGitOpen('publish')}
+                  help={
+                    <>
+                      Save and commit your changes, then review a push to the
+                      imported repository or your existing fork. After
+                      publishing, open GitHub or GitLab to finish creating a
+                      pull request or merge request.
+                    </>
+                  }
+                />
               )}
           </div>
           <div className="header-actions">
-            <div className="help-label">
-              <button
-                className={`button small ${showInfoview ? 'subtle selected' : 'subtle'}`}
-                onClick={() => setShowInfoview((value) => !value)}
-                aria-pressed={showInfoview}
-              >
-                Goals
-              </button>
-              <HelpTip label="Goals (Infoview)">
-                Show Lean’s goals, local assumptions, and messages at your
-                cursor. Click inside a proof to see what remains to prove.
-              </HelpTip>
-            </div>
-            <button
-              className={`button small ${toolsOpen ? 'subtle selected' : 'subtle'}`}
+            <ToolbarAction
+              label="Goals"
+              onClick={() => setShowInfoview((value) => !value)}
+              pressed={showInfoview}
+              help={
+                <>
+                  Show Lean’s goals, local assumptions, and messages at your
+                  cursor. Click inside a proof to see what remains to prove.
+                </>
+              }
+            />
+            <ToolbarAction
+              label="Lemex"
+              icon={<Icon name="bot" size={15} />}
               onClick={() => setToolsOpen((value) => !value)}
-              aria-pressed={toolsOpen}
-            >
-              <Icon name="bot" size={15} />
-              Lemex
-            </button>
+              pressed={toolsOpen}
+              help="Show or hide your Lemex assistant. Ask questions about the project, work on proofs, and review its changes in chat."
+            />
             {project?.status === 'ready' && (
-              <button
-                className={`button small subtle ${terminalOpen ? 'selected' : ''}`}
-                aria-pressed={terminalOpen}
+              <ToolbarAction
+                label="Terminal"
+                icon={<Icon name="terminal" size={15} />}
+                pressed={terminalOpen}
                 onClick={() => {
                   if (terminalOpen) closeTerminal()
                   else setTerminalOpen(true)
                 }}
-              >
-                <Icon name="terminal" size={15} />
-                Terminal
-              </button>
+                help="Open a terminal in this project to run commands and inspect their output. Commands can change project files; close the terminal before refreshing setup."
+              />
             )}
             {project?.status === 'ready' && !singleFileMode && (
-              <div className="help-label">
-                <button
-                  className="button small subtle"
-                  onClick={retryPrepare}
-                  disabled={saving || !!(job && !terminalJob(job))}
-                >
-                  <Icon name="refresh" size={14} /> Refresh setup
-                </button>
-                <HelpTip label="Refresh setup">
-                  Recheck the project’s Lean environment, reuse valid compiled
-                  caches, and prepare missing libraries. If setup still fails,
-                  Lemex repairs it automatically when enabled. Your files and
-                  pinned versions are preserved. Stop active checks and chats,
-                  and close the terminal first.
-                </HelpTip>
-              </div>
+              <ToolbarAction
+                label="Refresh setup"
+                icon={<Icon name="refresh" size={14} />}
+                onClick={retryPrepare}
+                disabled={saving || !!(job && !terminalJob(job))}
+                help={
+                  <>
+                    Recheck the project’s Lean environment, reuse valid compiled
+                    caches, and prepare missing libraries. If setup still fails,
+                    Lemex repairs it automatically when enabled. Your files and
+                    pinned versions are preserved. Stop active checks and chats,
+                    and close the terminal first.
+                  </>
+                }
+              />
             )}
             <button
               className="icon-button"

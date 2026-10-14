@@ -22,6 +22,31 @@
   align-items: center;
   gap: 5px;
 }
+.toolbar-action {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.toolbar-action.selected {
+  background: var(--surface);
+}
+.toolbar-action > .button {
+  border-radius: 7px 0 0 7px;
+}
+.toolbar-action.selected > .button {
+  color: var(--text);
+}
+.toolbar-action > .help-tip {
+  width: 28px;
+  height: 28px;
+  border-left: 1px solid var(--border);
+  border-radius: 0 7px 7px 0;
+}
 .help-tooltip.MuiTooltip-tooltip {
   max-width: min(310px, calc(100vw - 24px));
   padding: 10px 12px;

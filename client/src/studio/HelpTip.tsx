@@ -67,6 +67,10 @@ export function HelpTip({
             // Keep help inside a section summary from collapsing the section.
             event.preventDefault()
             event.stopPropagation()
+            if (pinned.current) {
+              close()
+              return
+            }
             pinned.current = true
             setOpen(true)
           }}
