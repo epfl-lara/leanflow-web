@@ -535,11 +535,14 @@ try {
     await page.setViewportSize({ width, height: 900 })
     const header = await page.locator('.workbench-header').boundingBox()
     const form = await page.getByRole('search').boundingBox()
+    const row = await page.locator('.workspace-search-row').boundingBox()
+    const docs = await page.locator('.workspace-docs-action').boundingBox()
     const field = await query.boundingBox()
     const results = await page.locator('.search-panel').boundingBox()
     assert(
-      form.width >= header.width - 40,
-      JSON.stringify({ width, header, form }),
+      row.width >= header.width - 40 &&
+        Math.abs(row.width - form.width - docs.width - 8) < 1,
+      JSON.stringify({ width, header, row, form, docs }),
     )
     assert(field.width >= 120, JSON.stringify({ width, field }))
     assert(

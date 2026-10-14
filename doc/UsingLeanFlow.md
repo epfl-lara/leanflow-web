@@ -44,7 +44,7 @@ Use **Refresh setup** in an open project to recheck its environment. Valid compi
 
 ## Read project documents
 
-Choose **Lean docs** in the top bar to read local copies of _Functional Programming in Lean_, _Theorem Proving in Lean 4_, and the _Lean Language Reference_. The reading panel opens below the editor, leaving Lemex available beside it. Choose **Expand** for more reading space, or **Split view** to return. Close and reopen Lean docs to keep your current chapter.
+Choose **Lean docs** beside the search bar to read local copies of _Functional Programming in Lean_, _Theorem Proving in Lean 4_, and the _Lean Language Reference_. On a small screen, use the book icon beside search. The reading panel opens below the editor, leaving Lemex available beside it. Choose **Expand** for more reading space, or **Split view** to return. Close and reopen Lean docs to keep your current chapter.
 
 Choose a book, follow its chapter links, or use **Search this book** to find matching chapters. **Contents** returns to the start. The displayed Lean version belongs to the downloaded book; your project's pinned Lean version stays unchanged.
 

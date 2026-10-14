@@ -131,6 +131,27 @@ const panel = page.getByRole('region', { name: 'Lean docs' })
 const frame = page.frameLocator('iframe[title="Local Lean book"]')
 try {
   await fixture.ready()
+  assert.equal(
+    await page
+      .locator('.header-actions')
+      .getByRole('button', { name: 'Lean docs', exact: true })
+      .count(),
+    0,
+  )
+  assert.equal(
+    await page
+      .locator('.workspace-search-row')
+      .getByRole('button', { name: 'Lean docs', exact: true })
+      .count(),
+    1,
+  )
+  const searchBar = await page.locator('.workspace-search-form').boundingBox()
+  const docsControl = await page.locator('.workspace-docs-action').boundingBox()
+  assert(
+    Math.abs(searchBar.y - docsControl.y) < 1 &&
+      Math.abs(searchBar.height - docsControl.height) < 1,
+    'Lean docs and search share a row and height',
+  )
   await page.locator('.monaco-editor textarea').focus()
   await page.keyboard.press('Control+End')
   await page.keyboard.insertText('\n-- Unsaved doc browsing')

@@ -1749,16 +1749,6 @@ export function Studio() {
           </div>
           <div className="header-actions">
             <ToolbarAction
-              label="Lean docs"
-              icon={<Icon name="book" size={15} />}
-              onClick={() => {
-                setBooksMounted(true)
-                setBooksOpen((value) => !value)
-              }}
-              pressed={booksOpen}
-              help="Browse and search the local Lean books alongside your code. Use Ask Lemex to add the current chapter or selected passage to your message."
-            />
-            <ToolbarAction
               label="Goals"
               onClick={() => setShowInfoview((value) => !value)}
               pressed={showInfoview}
@@ -1822,10 +1812,23 @@ export function Studio() {
               <Icon name="settings" size={17} />
             </button>
           </div>
-          <SearchPanel
-            projectId={project?.status === 'ready' ? project.id : undefined}
-            onOpenSource={setLibrarySource}
-          />
+          <div className="workspace-search-row">
+            <SearchPanel
+              projectId={project?.status === 'ready' ? project.id : undefined}
+              onOpenSource={setLibrarySource}
+            />
+            <ToolbarAction
+              className="workspace-docs-action"
+              label="Lean docs"
+              icon={<Icon name="book" size={15} />}
+              onClick={() => {
+                setBooksMounted(true)
+                setBooksOpen((value) => !value)
+              }}
+              pressed={booksOpen}
+              help="Browse and search the local Lean books alongside your code. Use Ask Lemex to add the current chapter or selected passage to your message."
+            />
+          </div>
         </header>
         {project?.status === 'ready' &&
           project.setupRepair?.status === 'completed' && (

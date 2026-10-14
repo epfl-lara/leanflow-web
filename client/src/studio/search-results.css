@@ -1,7 +1,41 @@
-.workspace-search {
-  position: relative;
+.workspace-search-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
   flex: 0 0 100%;
   min-width: 0;
+}
+
+.workspace-search {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.workspace-docs-action {
+  height: 36px;
+  background: var(--surface);
+}
+
+.workspace-docs-action > .button {
+  height: 100%;
+}
+
+@media (max-width: 720px) {
+  .workspace-search-row .workspace-docs-action > .button {
+    min-width: 34px;
+    padding: 7px 8px;
+    border-radius: 7px;
+    font-size: 0;
+    gap: 0;
+  }
+  .workspace-docs-action > .help-tip {
+    display: none;
+  }
+  .workspace-search-row .workspace-search-form select {
+    max-width: 92px;
+    padding-inline: 6px;
+  }
 }
 
 .workspace-search-form {
