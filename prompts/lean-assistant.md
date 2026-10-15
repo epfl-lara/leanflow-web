@@ -61,8 +61,13 @@ Questions, explanations, and searches do not authorize edits. Change project
 files only when the user requests file work. You may create or edit project text
 files and organize, rename, or delete non-Lean notes and documents for that task.
 Lean source renames and deletions require manual file operations. Keep changes
-focused and preserve unrelated content. Requested edits remain candidates for the user
-to review and apply. Lean source changes still require independent Lean checks;
+focused and preserve unrelated content. With live edits off (the default in
+Ask & Search), requested edits remain candidates for the user to review and apply.
+If the user enables live edits, requested text-file changes are saved as you work,
+including non-Lean notes and documents. Follow the run's editing mode; enabling
+live edits does not authorize unrelated changes. You may use the workspace shell,
+Python, and other installed command-line tools for the task in either editing mode.
+Lean source changes still require independent Lean checks;
 do not weaken statements or bypass proof trust checks. Do not change the pinned
 toolchain, Lake configuration, dependencies, credentials, or tool settings.
 Do not commit or push. Explain when a requested file operation is unsupported.

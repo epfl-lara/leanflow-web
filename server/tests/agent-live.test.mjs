@@ -130,6 +130,40 @@ test('a saved-context conflict pauses mirroring without retrying or replacing us
   assert(mirror.paused)
 })
 
+test('general live mirroring includes text deletions while keeping configuration and Lean deletions protected', async () => {
+  const writes = [],
+    updates = []
+  const candidates = [
+    { path: 'Notes.md', before: 'old', after: 'new' },
+    { path: 'Old.txt', before: 'old', after: null },
+    { path: 'Main.lean', before: 'old', after: 'new' },
+    { path: 'Delete.lean', before: 'old', after: null },
+    { path: 'lakefile.toml', before: 'old', after: 'changed' },
+    { path: 'Nested/lean-toolchain', before: 'old', after: 'changed' },
+    { path: '.lake/packages/A.lean', before: 'old', after: 'changed' },
+  ]
+  const mirror = new LiveMirror({
+    snapshot,
+    allowProjectFiles: true,
+    workspaces: {
+      changes: async () => candidates,
+      syncLive: async (_snapshot, changes, _previous, options) => {
+        assert.equal(options.allowProjectFiles, true)
+        writes.push(changes)
+        return changes
+      },
+    },
+    onChanges: (_changes, paths) => updates.push(paths),
+  })
+  await mirror.poll()
+  await mirror.stop()
+  assert.deepEqual(
+    writes[0].map((change) => change.path),
+    ['Notes.md', 'Old.txt', 'Main.lean'],
+  )
+  assert.deepEqual(updates[0], ['Notes.md', 'Old.txt', 'Main.lean'])
+})
+
 test('temporary candidate collection errors produce one notice and retry without a saved-context conflict', async () => {
   let attempts = 0,
     writes = 0
@@ -226,13 +260,33 @@ test('final flush mirrors the latest completed candidate after the timer is stop
   assert.equal(mirror.liveChanges[0].after, 'checked')
 })
 
-test('run policy defaults to live edits, allows review first, and requires review for Ask & Search', async (t) => {
+test('Ask & Search defaults to review first and allows an explicit live-edit choice', async (t) => {
   const { manager } = await fixture(t)
   const input = { mode: 'prove', prompt: 'Prove the theorem.' }
   assert.equal((await manager.start('alice', 'p1', input)).liveEdits, true)
   assert.equal(
     (await manager.start('alice', 'p2', { ...input, liveEdits: false }))
       .liveEdits,
+    false,
+  )
+  assert.equal(
+    (
+      await manager.start('alice', 'search-live', {
+        mode: 'search',
+        prompt: 'Update the notes.',
+        liveEdits: true,
+      })
+    ).liveEdits,
+    true,
+  )
+  assert.equal(
+    (
+      await manager.start('alice', 'search-review', {
+        mode: 'search',
+        prompt: 'Update the notes.',
+        liveEdits: false,
+      })
+    ).liveEdits,
     false,
   )
   assert.equal(

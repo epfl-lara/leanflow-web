@@ -33,8 +33,22 @@ const fixture = await chatBrowserFixture({
   runs: [],
 })
 const { page, state, report, browser } = fixture
+await page.addInitScript(() => {
+  const key = 'lemex-chat-options:fixture-owner:ask-search-project'
+  if (!localStorage.getItem(key))
+    localStorage.setItem(key, JSON.stringify({ liveEdits: true }))
+})
 state.onCreateRun = ({ body, respond }) => {
   const fileTask = body.prompt.includes('Notes.md')
+  const changes = fileTask
+    ? [
+        {
+          path: 'Notes.md',
+          before: state.files[projectId]['Notes.md'] ?? null,
+          after: body.liveEdits ? '# Updated study notes\n' : '# Study notes\n',
+        },
+      ]
+    : []
   const run = {
     id: `ask-run-${state.runs.length}`,
     projectId,
@@ -44,15 +58,18 @@ state.onCreateRun = ({ body, respond }) => {
     status: 'completed',
     prompt: body.prompt,
     message: fileTask
-      ? 'Prepared Notes.md for review.'
+      ? body.liveEdits
+        ? 'Saved Notes.md as requested.'
+        : 'Prepared Notes.md for review.'
       : 'Here is a simple study schedule.',
     createdAt: '2026-10-14T12:00:00Z',
     eventCursor: 0,
     liveEdits: body.liveEdits,
     followups: [],
-    changes: fileTask
-      ? [{ path: 'Notes.md', before: null, after: '# Study notes\n' }]
-      : [],
+    changes,
+    ...(body.liveEdits
+      ? { liveChanges: changes, liveRevision: changes.length ? 1 : 0 }
+      : {}),
     verification: {
       kind: fileTask ? 'workspace' : 'chat',
       complete: true,
@@ -61,8 +78,19 @@ state.onCreateRun = ({ body, respond }) => {
         : 'Task completed without changing project files.',
     },
   }
+  if (body.liveEdits && fileTask)
+    state.files[projectId]['Notes.md'] = changes[0].after
   state.runs.push(run)
   return respond(run, 201)
+}
+state.onUndo = ({ run, respond }) => {
+  for (const change of run.liveChanges) {
+    if (change.before === null) delete state.files[projectId][change.path]
+    else state.files[projectId][change.path] = change.before
+  }
+  run.liveUndone = true
+  run.liveRevision++
+  return respond(run)
 }
 
 try {
@@ -85,7 +113,7 @@ try {
   await page.locator('.chat-options summary').click()
   assert.equal(
     await page.getByLabel('Edit files live', { exact: true }).isEnabled(),
-    false,
+    true,
   )
   assert.equal(
     await page.getByLabel('Edit files live', { exact: true }).isChecked(),
@@ -155,6 +183,57 @@ try {
     'Reload preserves the conversation result kind',
   )
   assert.equal(state.files[projectId]['Notes.md'], '# Study notes\n')
+  await page.locator('.chat-options summary').click()
+  const liveChoice = page.getByLabel('Edit files live', { exact: true })
+  assert.equal(await liveChoice.isChecked(), false)
+  await liveChoice.check()
+  await page.getByRole('button', { name: 'Proofs', exact: true }).click()
+  assert.equal(await liveChoice.isChecked(), true)
+  await liveChoice.uncheck()
+  await page.getByRole('button', { name: 'Ask & Search', exact: true }).click()
+  assert.equal(
+    await liveChoice.isChecked(),
+    true,
+    'Ask & Search has its own live-edit preference',
+  )
+  await page.reload()
+  await composer.waitFor()
+  await page.locator('.chat-options summary').click()
+  assert.equal(
+    await liveChoice.isChecked(),
+    true,
+    'Explicit opt-in survives reload',
+  )
+  await composer.fill('Update Notes.md with more study notes.')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await page
+    .getByText('Saved Notes.md as requested.', { exact: true })
+    .waitFor()
+  assert.equal(state.runs[2].liveEdits, true)
+  assert.equal(state.files[projectId]['Notes.md'], '# Updated study notes\n')
+  const liveTurn = page.locator('[data-run-id="ask-run-2"]')
+  await liveTurn.getByRole('button', { name: /^View edits/ }).click()
+  await dialog.getByText('Notes.md', { exact: true }).waitFor()
+  assert.equal(
+    await dialog
+      .getByRole('button', { name: 'Apply changes', exact: true })
+      .count(),
+    0,
+  )
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click()
+  await liveTurn
+    .getByRole('button', { name: 'Undo agent edits', exact: true })
+    .click()
+  await until(() => state.runs[2].liveUndone, 'undone live text edits')
+  assert.equal(state.files[projectId]['Notes.md'], '# Study notes\n')
+  await liveChoice.uncheck()
+  await page.getByRole('button', { name: 'Proofs', exact: true }).click()
+  assert.equal(
+    await liveChoice.isChecked(),
+    false,
+    'The other mode preference stays unchanged',
+  )
+  await page.getByRole('button', { name: 'Ask & Search', exact: true }).click()
   await page.setViewportSize({ width: 1280, height: 800 })
   for (const tab of await page.locator('.mode-tabs button').all()) {
     const box = await tab.boundingBox()
@@ -167,7 +246,7 @@ try {
   fixture.assertClean()
   report.passed = true
   console.log(
-    'PASS: Ask & Search first, general questions, review and apply text changes, preserved options and reload status; all backends mocked',
+    'PASS: Ask & Search defaults to review, supports live-edit opt-in and undo, preserves separate mode preferences across reloads; all backends mocked',
   )
 } catch (error) {
   report.passed = false

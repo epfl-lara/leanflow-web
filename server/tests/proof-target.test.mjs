@@ -465,7 +465,7 @@ test('Ask & Search proof focus stays reference context and permits requested fil
   await manager.followups.deliver(job.id)
   assert.match(
     calls[0].params.input[0].text,
-    /edit project files only when the user requests file work, for review before applying/,
+    /edit project files only when the user requests file work, following the run’s editing mode/,
   )
   assert(
     calls[0].params.input[0].text.includes(

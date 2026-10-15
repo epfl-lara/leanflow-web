@@ -118,7 +118,7 @@ Targets belong to their chat. **Ask Lemex** uses the current proof or selection;
 
 Compare optimization's token and heartbeat measurements: a shorter proof can take more elaboration work. Repair invalid proofs first.
 
-**Ask & Search** primarily helps with Lean, but also welcomes general questions, writing, planning, and open-ended tasks. Ask it to create or edit project text files and organize, rename, or delete non-Lean notes and documents. Use the file browser for Lean source renames and deletions. Questions and explanations leave files unchanged. Requested edits always use review first: inspect the diff, then choose **Apply changes**. Lean source edits still receive independent Lean verification; ordinary conversation and non-Lean file tasks do not. Project setup files and dependencies stay protected.
+**Ask & Search** primarily helps with Lean, but also welcomes general questions, writing, planning, and open-ended tasks. Ask it to create or edit project text files and organize, rename, or delete non-Lean notes and documents. Use the file browser for Lean source renames and deletions. Questions and explanations leave files unchanged. Live edits are off by default: inspect the diff, then choose **Apply changes**. To save requested edits as Lemex works, enable **Options → Edit files live** before sending. This choice is saved separately from the other modes. Stop the run before undoing its edits. Lemex can use the workspace shell, Python, and other installed command-line tools in either editing mode. Lean source edits still receive independent Lean verification; ordinary conversation and non-Lean file tasks do not. Project setup files and dependencies stay protected.
 
 ## Follow and steer a chat
 

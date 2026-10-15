@@ -152,7 +152,7 @@ export function runChangePaths(run: Run, live = false): string[] {
 }
 
 export function liveEditStatus(run: Run): string {
-  if (run.mode === 'search')
+  if (run.mode === 'search' && !run.liveEdits)
     return 'Review first · Requested edits need your approval'
   if (run.liveEdits === false)
     return 'Review first · Files update after you accept changes'

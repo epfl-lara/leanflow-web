@@ -261,6 +261,17 @@ test('live edit status distinguishes work without writes, saved edits, review mo
   )
   assert.equal(
     liveEditStatus(
+      run({
+        mode: 'search',
+        liveEdits: true,
+        liveRevision: 1,
+        liveChanges: [{ path: 'Notes.md', before: '', after: 'Notes' }],
+      }),
+    ),
+    'Live edits on · 1 file updated',
+  )
+  assert.equal(
+    liveEditStatus(
       run({ liveEdits: true, liveEditConflict: 'Saved file differs.' }),
     ),
     'Live edits paused · Saved files changed',

@@ -3874,7 +3874,10 @@ export class WorkspaceStore {
       'Project symbolic links changed during the assistant run. Start a new run from the current project.',
     )
     const base = new Map(manifest.files.map((file) => [file.path, file.hash]))
-    for (const change of previous) base.set(change.path, sha(change.after))
+    for (const change of previous) {
+      if (change.after === null) base.delete(change.path)
+      else base.set(change.path, sha(change.after))
+    }
     const current = new Map(
       entries
         .filter((entry) => entry.link === undefined)
@@ -3912,7 +3915,10 @@ export class WorkspaceStore {
         await guarded(project.root, change.path, { write: true }),
         true,
       )
-      if (actual?.hash !== sha(change.after))
+      if (
+        (actual?.hash ?? null) !==
+        (change.after === null ? null : sha(change.after))
+      )
         fail(
           `Project changed during the assistant run: ${change.path}. Undo cannot overwrite your saved changes.`,
           409,
@@ -3961,7 +3967,11 @@ export class WorkspaceStore {
         fail('An assistant change set contains duplicate paths')
       seen.add(filename)
       if (
-        !(allowProjectFiles && change.after === null) &&
+        !(
+          allowProjectFiles &&
+          !filename.endsWith('.lean') &&
+          change.after === null
+        ) &&
         (typeof change.after !== 'string' ||
           Buffer.byteLength(change.after) > sourceFileByteLimit(filename) ||
           change.after.includes('\0'))
@@ -4017,7 +4027,7 @@ export class WorkspaceStore {
     return transition
   }
 
-  async syncLive(snapshot, changes, previousChanges = []) {
+  async syncLive(snapshot, changes, previousChanges = [], options = {}) {
     const { manifest, container } = await this.#manifest(snapshot)
     const initial = this.get(manifest.projectId, manifest.owner)
     return this.#locked(initial.id, async () => {
@@ -4027,8 +4037,14 @@ export class WorkspaceStore {
         manifest,
         container,
         previousChanges,
+        options,
       )
-      const next = await this.#candidateChanges(manifest, container, changes)
+      const next = await this.#candidateChanges(
+        manifest,
+        container,
+        changes,
+        options,
+      )
       await this.#assertLiveCurrent(manifest, project, previous, next)
       await this.#applyLocked(
         project,
@@ -4039,7 +4055,7 @@ export class WorkspaceStore {
     })
   }
 
-  async assertLive(snapshot, liveChanges = []) {
+  async assertLive(snapshot, liveChanges = [], options = {}) {
     const { manifest, container } = await this.#manifest(snapshot)
     const initial = this.get(manifest.projectId, manifest.owner)
     return this.#locked(initial.id, async () => {
@@ -4049,12 +4065,13 @@ export class WorkspaceStore {
         manifest,
         container,
         liveChanges,
+        options,
       )
       return this.#assertLiveCurrent(manifest, project, live)
     })
   }
 
-  async undoLive(snapshot, liveChanges) {
+  async undoLive(snapshot, liveChanges, options = {}) {
     const { manifest, container } = await this.#manifest(snapshot)
     const initial = this.get(manifest.projectId, manifest.owner)
     return this.#locked(initial.id, async () => {
@@ -4064,6 +4081,7 @@ export class WorkspaceStore {
         manifest,
         container,
         liveChanges,
+        options,
       )
       await this.#assertTouched(manifest, project, live)
       return this.#applyLocked(project, this.#liveTransition(live, []), 'undo')
@@ -4085,6 +4103,7 @@ export class WorkspaceStore {
         manifest,
         container,
         liveChanges,
+        { allowProjectFiles: options.allowProjectFiles === true },
       )
       const proposed = await this.#candidateChanges(
         manifest,

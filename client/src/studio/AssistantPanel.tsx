@@ -108,7 +108,8 @@ export function AssistantPanel({
     session.defaultModel || session.models[0]?.id || '',
   )
   const [efforts, setEfforts] = useState<Record<string, string>>({}),
-    [liveEdits, setLiveEdits] = useState(true)
+    [liveEdits, setLiveEdits] = useState(true),
+    [searchLiveEdits, setSearchLiveEdits] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({}),
     [streamError, setStreamError] = useState('')
   const [backgroundErrors, setBackgroundErrors] = useState<
@@ -151,6 +152,7 @@ export function AssistantPanel({
     contextFiles = draft.value.files,
     proofTarget = draft.value.proofTarget
   const currentMode = chatModes.find((item) => item.id === mode)!
+  const currentLiveEdits = mode === 'search' ? searchLiveEdits : liveEdits
   const chatSelectionKey = `lemex-chat:${session.user.id}:${projectId}`
   const preferenceKey = `lemex-chat-options:${session.user.id}:${projectId}`
   const [preferencesLoaded, setPreferencesLoaded] = useState<string | null>(
@@ -493,6 +495,8 @@ export function AssistantPanel({
     // only while this assistant is open.
     setModel(session.defaultModel || session.models[0]?.id || '')
     setEfforts({})
+    setLiveEdits(true)
+    setSearchLiveEdits(false)
     try {
       const preferences = JSON.parse(
         localStorage.getItem(preferenceKey) || 'null',
@@ -500,6 +504,8 @@ export function AssistantPanel({
       if (preferences) {
         if (typeof preferences.liveEdits === 'boolean')
           setLiveEdits(preferences.liveEdits)
+        if (typeof preferences.searchLiveEdits === 'boolean')
+          setSearchLiveEdits(preferences.searchLiveEdits)
       }
     } catch {
       /* Default options remain usable if browser storage is unavailable. */
@@ -509,11 +515,14 @@ export function AssistantPanel({
   useEffect(() => {
     if (preferencesLoaded !== preferenceKey) return
     try {
-      localStorage.setItem(preferenceKey, JSON.stringify({ liveEdits }))
+      localStorage.setItem(
+        preferenceKey,
+        JSON.stringify({ liveEdits, searchLiveEdits }),
+      )
     } catch {
       /* Options remain in memory. */
     }
-  }, [preferenceKey, liveEdits, preferencesLoaded])
+  }, [preferenceKey, liveEdits, searchLiveEdits, preferencesLoaded])
   useEffect(() => {
     const refresh = () => {
       if (document.hidden) return
@@ -587,7 +596,7 @@ export function AssistantPanel({
     const settings = {
       model,
       effort: effort || null,
-      liveEdits: mode !== 'search' && liveEdits,
+      liveEdits: currentLiveEdits,
       file: mode === 'search' ? file : target,
       currentFile: currentFile || null,
       mode,
@@ -845,9 +854,8 @@ export function AssistantPanel({
         onEffort={(value) =>
           setEfforts((previous) => ({ ...previous, [model]: value }))
         }
-        liveEdits={mode !== 'search' && liveEdits}
-        reviewFirst={mode === 'search'}
-        onLiveEdits={setLiveEdits}
+        liveEdits={currentLiveEdits}
+        onLiveEdits={mode === 'search' ? setSearchLiveEdits : setLiveEdits}
         active={hasActive}
       />
       {statusRun && (

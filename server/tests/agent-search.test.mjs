@@ -150,7 +150,6 @@ async function fixture(t, edit = async () => {}, { buildFails = false } = {}) {
     const job = await manager.start('alice', project.id, {
       mode: 'search',
       prompt,
-      liveEdits: true,
       ...selected,
     })
     await new Promise((resolve) =>
@@ -165,8 +164,171 @@ async function fixture(t, edit = async () => {}, { buildFails = false } = {}) {
     await Promise.all([...manager.tasks])
     return events.get(job.id)
   }
-  return { manager, workspaces, project, calls, requests, execute }
+  return { manager, workspaces, project, calls, requests, events, execute }
 }
+
+test(
+  'explicit live editing saves text changes during the turn and can undo creations, renames, and deletions',
+  { timeout: 15000 },
+  async (t) => {
+    let observedLive = false
+    const { manager, workspaces, project, calls, events, requests, execute } =
+      await fixture(t, async (workspace) => {
+        await fs.writeFile(
+          path.join(workspace, 'Notes.md'),
+          '# Updated notes\n',
+        )
+        await fs.rename(
+          path.join(workspace, 'Old.txt'),
+          path.join(workspace, 'Renamed.txt'),
+        )
+        await fs.unlink(path.join(workspace, 'Obsolete.txt'))
+        await fs.writeFile(path.join(workspace, 'Summary.md'), '# Summary\n')
+        const deadline = Date.now() + 5000
+        while (
+          (await workspaces.readFile(project.id, 'alice', 'Notes.md'))
+            .content !== '# Updated notes\n'
+        ) {
+          assert(
+            Date.now() < deadline,
+            'Text edits should reach the saved project while the turn is running',
+          )
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+        assert.equal(events.list('alice', project.id)[0].status, 'running')
+        observedLive = true
+      })
+    for (const file of ['Notes.md', 'Old.txt', 'Obsolete.txt'])
+      await workspaces.writeFile(project.id, 'alice', file, 'Original\n', null)
+    const result = await execute('Update and organize the notes.', {
+      liveEdits: true,
+    })
+    assert.equal(result.status, 'completed', result.error)
+    assert(observedLive)
+    assert.equal(result.liveEdits, true)
+    assert.equal(result.verification.complete, true)
+    assert.equal(result.verification.kind, 'workspace')
+    assert.equal(result.liveChanges.length, 5)
+    assert.equal(
+      calls.length,
+      0,
+      'Text live edits do not need Lean verification',
+    )
+    assert.match(
+      requests.find((request) => request.method === 'thread/start').params
+        .developerInstructions,
+      /Editing mode: live source updates/,
+    )
+    assert.equal(
+      (await workspaces.readFile(project.id, 'alice', 'Summary.md')).content,
+      '# Summary\n',
+    )
+    await manager.apply('alice', result.id)
+    await manager.undo('alice', result.id)
+    for (const file of ['Notes.md', 'Old.txt', 'Obsolete.txt'])
+      assert.equal(
+        (await workspaces.readFile(project.id, 'alice', file)).content,
+        'Original\n',
+      )
+    for (const file of ['Renamed.txt', 'Summary.md'])
+      await assert.rejects(workspaces.readFile(project.id, 'alice', file), {
+        status: 404,
+      })
+  },
+)
+
+test(
+  'live text edits preserve later user writes, including recreation of a deleted file',
+  { timeout: 15000 },
+  async (t) => {
+    for (const deleted of [false, true])
+      await t.test(
+        deleted ? 'recreated deletion' : 'edited notes',
+        async (t) => {
+          const { manager, workspaces, project, execute } = await fixture(
+            t,
+            (workspace) =>
+              deleted
+                ? fs.unlink(path.join(workspace, 'Notes.md'))
+                : fs.writeFile(
+                    path.join(workspace, 'Notes.md'),
+                    'Agent update\n',
+                  ),
+          )
+          await workspaces.writeFile(
+            project.id,
+            'alice',
+            'Notes.md',
+            'Original\n',
+            null,
+          )
+          const result = await execute('Update the notes.', { liveEdits: true })
+          assert.equal(result.verification.complete, true, result.error)
+          await workspaces.writeFile(
+            project.id,
+            'alice',
+            'Notes.md',
+            'User update\n',
+          )
+          await assert.rejects(manager.apply('alice', result.id), {
+            status: 409,
+          })
+          await assert.rejects(manager.undo('alice', result.id), {
+            status: 409,
+          })
+          assert.equal(
+            (await workspaces.readFile(project.id, 'alice', 'Notes.md'))
+              .content,
+            'User update\n',
+          )
+        },
+      )
+  },
+)
+
+test(
+  'live Lean edits still require independent verification and remain undoable when checks fail',
+  { timeout: 15000 },
+  async (t) => {
+    const { manager, workspaces, project, calls, execute } = await fixture(
+      t,
+      async (workspace) => {
+        await fs.writeFile(
+          path.join(workspace, 'Main.lean'),
+          'theorem broken : False := by rfl\n',
+        )
+        await fs.writeFile(
+          path.join(workspace, 'Notes.md'),
+          '# Work in progress\n',
+        )
+      },
+      { buildFails: true },
+    )
+    const original = await workspaces.readFile(project.id, 'alice', 'Main.lean')
+    const result = await execute('Update the proof and notes.', {
+      liveEdits: true,
+    })
+    assert.equal(result.status, 'completed', result.error)
+    assert.equal(result.verification.complete, false)
+    assert.equal(result.liveChanges.length, 2)
+    assert.deepEqual(
+      calls.map((call) => call.args.slice(0, 2)),
+      [
+        ['lake', 'env'],
+        ['lake', 'build'],
+      ],
+    )
+    await assert.rejects(manager.apply('alice', result.id), { status: 409 })
+    await manager.undo('alice', result.id)
+    assert.deepEqual(
+      await workspaces.readFile(project.id, 'alice', 'Main.lean'),
+      original,
+    )
+    await assert.rejects(workspaces.readFile(project.id, 'alice', 'Notes.md'), {
+      status: 404,
+    })
+  },
+)
 
 test(
   'general questions need no proof target or Lean check and leave the saved project unchanged',
@@ -198,6 +360,12 @@ test(
     assert.match(instructions, /primary purpose is helping users/)
     assert.match(instructions, /general questions, writing/)
     assert.doesNotMatch(instructions, /Search mode is read-only/)
+    const thread = requests.find(
+      (request) => request.method === 'thread/start',
+    ).params
+    assert.equal(thread.sandbox, 'danger-full-access')
+    assert.equal(thread.approvalPolicy, 'never')
+    assert.match(instructions, /workspace shell/)
   },
 )
 

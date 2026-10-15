@@ -10,7 +10,7 @@ export const chatModes: {
   {
     id: 'search',
     name: 'Ask & Search',
-    hint: 'Ask questions, understand proofs and definitions, find lemmas, or work on project files. Requested edits are reviewed before applying.',
+    hint: 'Ask questions, understand proofs and definitions, find lemmas, or work on project files. Review requested edits first, or enable live edits in Options.',
     placeholder: 'Ask a question or describe a task for your project…',
     suggestions: [
       {

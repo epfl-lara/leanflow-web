@@ -9,7 +9,6 @@ export function ChatOptions({
   effort,
   onEffort,
   liveEdits,
-  reviewFirst = false,
   onLiveEdits,
   active,
 }: {
@@ -19,7 +18,6 @@ export function ChatOptions({
   effort: string
   onEffort: (value: string) => void
   liveEdits: boolean
-  reviewFirst?: boolean
   onLiveEdits: (value: boolean) => void
   active: boolean
 }) {
@@ -92,26 +90,23 @@ export function ChatOptions({
           <input
             type="checkbox"
             checked={liveEdits}
-            disabled={reviewFirst}
             onChange={(event) => onLiveEdits(event.target.checked)}
           />
           <span>Edit files live</span>
         </label>
         <HelpTip label="Edit files live">
-          Ask & Search keeps requested edits separate until you review and apply
-          them. In other modes, Lemex saves edits as it works when on; stop the
-          run to undo its edits. Turn this off to review changes before applying
-          them. This choice applies to the next run.
+          When on, Lemex saves requested edits as it works; stop the run to undo
+          its edits. Turn this off to review changes before applying them. Ask &
+          Search starts with live edits off. This choice applies to the next
+          run.
         </HelpTip>
       </div>
       <p className="field-help">
         {active
           ? 'Options apply to the next run. Updates guide the current run.'
-          : reviewFirst
-            ? 'Ask & Search edits are reviewed before applying.'
-            : liveEdits
-              ? 'Edits are saved as Lemex works; you can undo them after stopping.'
-              : 'Keep edits separate until you review and apply them.'}{' '}
+          : liveEdits
+            ? 'Edits are saved as Lemex works; you can undo them after stopping.'
+            : 'Keep edits separate until you review and apply them.'}{' '}
         Runs continue until done or stopped.
       </p>
     </details>
