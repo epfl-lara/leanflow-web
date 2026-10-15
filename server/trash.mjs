@@ -3,8 +3,22 @@ function invalid(message, status = 400) {
 }
 
 export class TrashManager {
-  constructor({ workspaces, chats, events, assertIdle, redact = String }) {
-    Object.assign(this, { workspaces, chats, events, assertIdle, redact })
+  constructor({
+    workspaces,
+    chats,
+    events,
+    assertIdle,
+    redact = String,
+    texBuilds,
+  }) {
+    Object.assign(this, {
+      workspaces,
+      chats,
+      events,
+      assertIdle,
+      redact,
+      texBuilds,
+    })
   }
 
   get(owner, id) {
@@ -18,9 +32,14 @@ export class TrashManager {
 
   async deleteForever(owner, id) {
     const entry = this.get(owner, id)
-    if (entry.kind === 'chat') return this.chats.deleteForever(owner, id)
+    if (entry.kind === 'chat') {
+      await this.texBuilds?.removeRuns(owner, this.chats.texRunIds(owner, id))
+      return this.chats.deleteForever(owner, id)
+    }
     const assertIdle = () => this.assertIdle(entry.projectId, owner)
     assertIdle()
+    if (entry.kind === 'project')
+      await this.texBuilds?.removeProject(owner, entry.projectId)
     const result = await this.workspaces.deleteForever(id, owner, {
       assertIdle,
       candidateRunIds:
@@ -30,8 +49,9 @@ export class TrashManager {
               .map((job) => job.id)
           : [],
     })
-    if (entry.kind === 'project')
+    if (entry.kind === 'project') {
       this.chats.deleteProject(owner, entry.projectId)
+    }
     return result
   }
 

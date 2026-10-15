@@ -43,6 +43,22 @@ LeanExplore's local backend requires `lean-explore[local]`, `lean-explore data f
 
 ## Adjust capacity
 
+### LaTeX compilation
+
+Build the optional TeX worker image separately from the Lean worker:
+
+```bash
+bash scripts/build-tex-worker.sh
+```
+
+The default image name is `leanflow-tex:local`. To use another name, set `STUDIO_TEX_IMAGE` when building and in the server environment. The server resolves that tag to an immutable image ID before compiling. A missing TeX image leaves Lean features available and shows an actionable message in the PDF panel. Build a new image tag for an upgrade and change the server setting during an idle restart.
+
+This worker includes latexmk, pdfLaTeX, BibTeX, common LaTeX/math/TikZ packages, and PDF text extraction. Builds run without networking, provider credentials, Lean dependencies, or a shared home directory. Project recipes are ignored and shell escape is disabled. Only bounded source inputs are copied into a disposable working directory. The compiler writes to temporary memory storage; the server validates bounded artifact transfers before saving PDFs, extracted text, and reports outside project sources. Recent build history and the last successful PDF are retained per project. Permanently deleting a chat also deletes its candidate TeX builds.
+
+TeX shares the normal worker pool and its CPU, RAM, and process limits. A project has at most one build at a time. The two-minute build deadline includes waiting for capacity. Leave worker headroom for interactive editing and agents: a compiling assistant already occupies its own worker. The first version supports pdfLaTeX/BibTeX only; unsupported engines are reported instead of silently substituted.
+
+### Worker capacity
+
 Use the `STUDIO_MAX_*` settings in [`.env.example`](../.env.example) to set editor, agent, search, worker, and queue limits. Set `STUDIO_WORKER_CPUS` and `STUDIO_WORKER_MEMORY` for each worker; defaults are 2 CPUs and 4 GiB.
 
 Editors, terminals, and agents share worker slots with setup and proof checks. `STUDIO_MAX_TERMINALS` defaults to 2 across the server; `STUDIO_MAX_TERMINALS_PER_PROJECT` defaults to 1. Each terminal uses the worker CPU, RAM, and process limits. Leave spare slots and RAM for interactive work and checks. Apply changes during an idle restart, then check the intended workload and your provider's quotas. A larger server needs its own capacity settings and a load test.

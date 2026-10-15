@@ -767,3 +767,18 @@
     padding: 6px 7px;
   }
 }
+.assistant-tex-note {
+  padding: 0.35rem 0.65rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.assistant-tex-note button {
+  padding: 0;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}

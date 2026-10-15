@@ -4,14 +4,20 @@ import { apiPdf, errorText, SESSION_RESTORED_EVENT } from './api'
 export function PdfFileViewer({
   projectId,
   path,
+  previewUrl,
+  revision,
 }: {
   projectId: string
   path: string
+  previewUrl?: string
+  revision?: string
 }) {
   const [url, setUrl] = useState('')
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)
-  const previewPath = `/api/projects/${encodeURIComponent(projectId)}/file-preview?path=${encodeURIComponent(path)}`
+  const previewPath =
+    previewUrl ||
+    `/api/projects/${encodeURIComponent(projectId)}/file-preview?path=${encodeURIComponent(path)}`
 
   useEffect(() => {
     const retry = () => setAttempt((current) => current + 1)
@@ -37,7 +43,7 @@ export function PdfFileViewer({
       controller.abort()
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [previewPath, attempt])
+  }, [previewPath, revision, attempt])
 
   return (
     <section className="pdf-file-viewer" aria-label="PDF document">

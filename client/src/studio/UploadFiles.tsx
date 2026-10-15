@@ -8,7 +8,9 @@ import {
 } from '../../../shared/source-limits.mjs'
 import {
   isPdfFile,
+  isBinaryAssetFile,
   MAX_PDF_FILE_BYTES,
+  MAX_IMAGE_FILE_BYTES,
 } from '../../../shared/file-previews.mjs'
 
 export interface UploadFile {
@@ -24,7 +26,7 @@ export async function readSourceFiles(files: { file: File; path: string }[]) {
     (item) => !item.path.split('/').some((part) => excluded.test(part)),
   )
   if (!usable.length)
-    throw new Error('Choose Lean source files or a project folder.')
+    throw new Error('Choose project source files or a project folder.')
   if (usable.length > 5000)
     throw new Error('Choose at most 5,000 source files.')
   if (
@@ -38,15 +40,19 @@ export async function readSourceFiles(files: { file: File; path: string }[]) {
   const stripFolder = usable.every((item) => item.path.startsWith(first + '/'))
   const result: UploadFile[] = []
   for (const item of usable) {
-    const pdf = isPdfFile(item.path)
-    const limit = pdf ? MAX_PDF_FILE_BYTES : sourceFileByteLimit(item.path)
+    const binary = isBinaryAssetFile(item.path)
+    const limit = binary
+      ? isPdfFile(item.path)
+        ? MAX_PDF_FILE_BYTES
+        : MAX_IMAGE_FILE_BYTES
+      : sourceFileByteLimit(item.path)
     if (item.file.size > limit)
       throw new Error(
         `${item.path} is larger than ${limit / (1024 * 1024)} MiB. Choose a smaller file.`,
       )
     const bytes = new Uint8Array(await item.file.arrayBuffer())
     const path = stripFolder ? item.path.slice(first.length + 1) : item.path
-    if (pdf) {
+    if (binary) {
       const chunks: string[] = []
       for (let offset = 0; offset < bytes.length; offset += 32768)
         chunks.push(
@@ -64,7 +70,7 @@ export async function readSourceFiles(files: { file: File; path: string }[]) {
       }).decode(bytes)
     } catch {
       throw new Error(
-        `${item.path} is not a UTF-8 source file or a PDF. Choose supported files.`,
+        `${item.path} is not a UTF-8 source, PDF, PNG, or JPEG file. Choose supported files.`,
       )
     }
     result.push({
@@ -212,9 +218,9 @@ export function UploadFiles({
           }}
         />
         <p>
-          UTF-8 sources up to 8 MiB per file, PDFs up to 16 MiB, and 32 MiB
-          total. Git metadata, build caches, and private settings stay on your
-          computer.
+          UTF-8 sources up to 8 MiB per file, PDFs and PNG/JPEG images up to 16
+          MiB, and 32 MiB total. Git metadata, build caches, and private
+          settings stay on your computer.
         </p>
       </div>
       {!!files.length && (

@@ -207,7 +207,7 @@ export class EventStore extends EventEmitter {
   projectMetadata(owner, projectId) {
     return this.db
       .prepare(
-        "SELECT payload FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=?",
+        "SELECT payload FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? ORDER BY rowid ASC",
       )
       .all(owner, projectId)
       .map((row) => this.#metadata(JSON.parse(row.payload)))

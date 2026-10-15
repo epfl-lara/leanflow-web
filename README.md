@@ -10,6 +10,7 @@ Developed by [EPFL LARA](https://lara.epfl.ch/).
 - **Bring your project:** import a Git repository or upload local files, with prepared Mathlib, CSLib, and Physlib environments.
 - **Work with Lean:** edit code alongside live goals, diagnostics, and declaration search.
 - **Read the Lean books:** browse and search local copies, and share chapters or passages with Lemex.
+- **Write LaTeX:** edit multi-file documents beside their PDF, follow compiler errors, and ask Lemex to edit and compile with the optional TeX worker.
 - **Work with Lemex:** choose a proof or select lines to prove, fix, or optimize. Follow its progress, send updates, and stop it whenever you need.
 - **Stay in control:** review live edits, keep separate chats, and commit or push your changes.
 

@@ -21,6 +21,7 @@ import { connectInfoviewTheme } from './infoviewTheme'
 import { ResizeHandle } from './ResizeHandle'
 import { DEFAULT_LAYOUT, useMediaQuery } from './layout'
 import { isMarkdownPath } from './fileReading'
+import { texLanguage } from './texBuilds'
 import { RenameModels } from './renameModels'
 import { initializeLeanEditor } from './leanEditorServices'
 import { DefinitionPreviewFiles } from './definitionPreviewFiles'
@@ -273,6 +274,7 @@ export function LeanWorkspace({
   const focusedRequest = useRef<number | null>(null)
   const [failure, setFailure] = useState('')
   const [markdownIssue, setMarkdownIssue] = useState('')
+  const [texIssue, setTexIssue] = useState('')
   const [connectionIssue, setConnectionIssue] = useState('')
   const [restarting, setRestarting] = useState(false)
   const [restartIssue, setRestartIssue] = useState('')
@@ -435,6 +437,20 @@ export function LeanWorkspace({
               error,
             )
           }
+          try {
+            const latex =
+              await import('@codingame/monaco-vscode-latex-default-extension')
+            await latex.whenReady()
+          } catch (error) {
+            if (!cancelled)
+              setTexIssue(
+                'TeX highlighting could not load. Your file is still editable. Reload the page to try again.',
+              )
+            console.warn(
+              '[LeanFlow Web] TeX highlighting could not load.',
+              error,
+            )
+          }
         }
       } catch (error) {
         own.definitionPreviewFiles?.dispose()
@@ -560,6 +576,13 @@ export function LeanWorkspace({
           const model = editor.getModel()
           if (model) monacoEditor.setModelLanguage(model, 'markdown')
         }
+        const tex = texLanguage(snapshot.path)
+        if (
+          tex &&
+          languageModel &&
+          languages.getLanguages().some((language) => language.id === tex)
+        )
+          monacoEditor.setModelLanguage(languageModel, tex)
         // The model URI is shared by projects. Set the fetched contents explicitly
         // so a retained VS Code model cannot show a previous project's buffer.
         if (editor.getValue() !== snapshot.content)
@@ -1077,6 +1100,9 @@ export function LeanWorkspace({
       <div className="source-pane proof-source-pane">
         {markdownIssue && isMarkdownPath(file?.path) && (
           <output className="lean-connection-notice">{markdownIssue}</output>
+        )}
+        {texIssue && texLanguage(file?.path) && (
+          <output className="lean-connection-notice">{texIssue}</output>
         )}
         {connectionIssue && (
           <div className="lean-connection-notice" role="alert">

@@ -1,6 +1,13 @@
 export class ProjectActivity {
-  constructor({ events, jobs, agents, workspaces, runtime }) {
-    Object.assign(this, { events, jobs, agents, workspaces, runtime })
+  constructor({ events, jobs, agents, workspaces, runtime, texBuilds }) {
+    Object.assign(this, {
+      events,
+      jobs,
+      agents,
+      workspaces,
+      runtime,
+      texBuilds,
+    })
     this.stopping = new Set()
   }
 
@@ -28,12 +35,16 @@ export class ProjectActivity {
     try {
       const results = await Promise.allSettled([
         this.jobs.stopProject(owner, projectId),
+        this.texBuilds?.stopProject(owner, projectId),
         this.agents.stopProject(owner, projectId),
         this.workspaces.stopPreparation(projectId, owner),
       ])
       // The runtime also owns editors and retains workers whose cleanup failed.
       // A stopped job receipt alone does not prove its container has exited.
-      const roots = new Set([project.root])
+      const roots = new Set([
+        project.root,
+        ...(this.texBuilds?.workerRoots(owner, projectId) || []),
+      ])
       for (const job of this.events.projectMetadata(owner, projectId)) {
         if (job.snapshot?.root) roots.add(job.snapshot.root)
         if (job.verificationRoot) roots.add(job.verificationRoot)

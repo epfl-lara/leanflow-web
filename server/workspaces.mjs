@@ -56,8 +56,20 @@ import {
   sourceFileByteLimit,
   MAX_SOURCE_UPLOAD_BYTES,
 } from '../shared/source-limits.mjs'
-import { MAX_PDF_FILE_BYTES, isPdfFile } from '../shared/file-previews.mjs'
+import {
+  MAX_PDF_FILE_BYTES,
+  isPdfFile,
+  isBinaryAssetFile,
+} from '../shared/file-previews.mjs'
 import { validatePdfBytes } from './pdf-preview.mjs'
+import { validateBinaryAsset } from './binary-assets.mjs'
+import {
+  safeTexPath,
+  isTexInputFile,
+  TEX_SOURCE_MAX_BYTES,
+  TEX_SOURCE_MAX_FILES,
+  TEX_FILE_MAX_BYTES,
+} from '../shared/tex.mjs'
 import { validateSetupBuildTimeout } from './capacity.mjs'
 import { validateGitBranch } from './git-branches.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
@@ -384,8 +396,11 @@ async function workspaceFileBytes(
 async function textFile(filename, missing = false) {
   const file = await workspaceFileBytes(filename, { missing })
   if (!file) return null
-  if (isPdfFile(filename))
-    fail('PDF files are read only. Open the PDF reader to view this file.', 415)
+  if (isBinaryAssetFile(filename))
+    fail(
+      'Binary assets are read only. Upload a new file to replace this asset.',
+      415,
+    )
   const { content, mode } = file
   if (content.includes(0)) fail('Binary files are not editable', 415)
   const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
@@ -485,6 +500,145 @@ async function copyWorkspace(
     }
   }
   await visit(source, target)
+}
+
+// TeX receives a bounded immutable copy, never the editable project or candidate.
+// Descriptor anchors prevent a changing parent directory from redirecting reads.
+async function captureTexInputs(source, target, signal, rootFile = 'main.tex') {
+  const selected = safeTexPath(rootFile)
+  const prefix =
+    path.posix.dirname(selected) === '.' ? '' : path.posix.dirname(selected)
+  const inputRoot = prefix ? await guarded(source, prefix) : source
+  const files = []
+  const stamps = []
+  let bytes = 0
+  let directories = 0
+  const visit = async (directory, destination, prefix = '', depth = 0) => {
+    signal?.throwIfAborted()
+    if (depth > 32 || ++directories > 8192)
+      fail(
+        'TeX input folders exceed the supported nesting or directory count.',
+        413,
+      )
+    const handle = await fs.open(
+      directory,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    )
+    try {
+      if ((await fs.realpath(`/proc/self/fd/${handle.fd}`)) !== directory)
+        fail(
+          'TeX source directory changed during capture. Save and compile again.',
+          409,
+        )
+      if (destination)
+        await fs.mkdir(destination, { recursive: true, mode: 0o700 })
+      for (const entry of (
+        await fs.readdir(`/proc/self/fd/${handle.fd}`, { withFileTypes: true })
+      ).sort((a, b) => a.name.localeCompare(b.name))) {
+        signal?.throwIfAborted()
+        if (
+          entry.name.startsWith('.') ||
+          isSecret(entry.name) ||
+          entry.name === 'node_modules'
+        )
+          continue
+        const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+        const original = path.join(directory, entry.name)
+        const output = destination ? path.join(destination, entry.name) : null
+        if (entry.isSymbolicLink()) continue
+        if (entry.isDirectory())
+          await visit(original, output, relative, depth + 1)
+        else if (entry.isFile() && isTexInputFile(relative)) {
+          safeTexPath(relative)
+          if (files.length >= TEX_SOURCE_MAX_FILES)
+            fail('TeX projects support at most 4,096 input files.', 413)
+          const file = await fs.open(
+            `/proc/self/fd/${handle.fd}/${entry.name}`,
+            constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+          )
+          try {
+            if ((await fs.realpath(`/proc/self/fd/${file.fd}`)) !== original)
+              fail(
+                'TeX input changed during capture. Save and compile again.',
+                409,
+              )
+            const before = await file.stat()
+            if (!before.isFile()) fail('TeX input changed during capture.', 409)
+            if (before.size > TEX_FILE_MAX_BYTES)
+              fail(`TeX inputs must be at most 16 MiB: ${relative}`, 413)
+            stamps.push({
+              path: relative,
+              size: before.size,
+              ino: before.ino,
+              mtime: before.mtimeMs,
+              ctime: before.ctimeMs,
+            })
+            if (!destination) {
+              bytes += before.size
+              if (bytes > TEX_SOURCE_MAX_BYTES)
+                fail('TeX inputs exceed 64 MiB.', 413)
+              files.push({ path: relative, size: before.size })
+              continue
+            }
+            const chunks = []
+            let size = 0
+            while (true) {
+              signal?.throwIfAborted()
+              const chunk = Buffer.allocUnsafe(
+                Math.min(65536, TEX_FILE_MAX_BYTES + 1 - size),
+              )
+              const { bytesRead } = await file.read(
+                chunk,
+                0,
+                chunk.length,
+                null,
+              )
+              if (!bytesRead) break
+              size += bytesRead
+              if (
+                size > TEX_FILE_MAX_BYTES ||
+                bytes + size > TEX_SOURCE_MAX_BYTES
+              )
+                fail(
+                  'TeX input capture exceeds its 64 MiB total or 16 MiB per-file limit.',
+                  413,
+                )
+              chunks.push(chunk.subarray(0, bytesRead))
+            }
+            const after = await file.stat()
+            if (
+              before.size !== after.size ||
+              before.mtimeNs !== after.mtimeNs ||
+              before.mtimeMs !== after.mtimeMs ||
+              before.ctimeMs !== after.ctimeMs
+            )
+              fail(
+                'TeX input changed during capture. Save and compile again.',
+                409,
+              )
+            const content = Buffer.concat(chunks, size)
+            await fs.writeFile(output, content, { flag: 'wx', mode: 0o400 })
+            bytes += size
+            files.push({ path: relative, hash: sha(content), size })
+          } finally {
+            await file.close()
+          }
+        }
+      }
+    } finally {
+      await handle.close()
+    }
+  }
+  await visit(inputRoot, target ? path.join(target, prefix) : null, prefix)
+  files.sort((a, b) => a.path.localeCompare(b.path))
+  return {
+    files,
+    bytes,
+    sourceRevision: sha(JSON.stringify(files)),
+    workspaceRevision: sha(
+      JSON.stringify(stamps.sort((a, b) => a.path.localeCompare(b.path))),
+    ),
+  }
 }
 
 // Node lacks openat(); Linux descriptor paths provide the same stable parent
@@ -3482,9 +3636,9 @@ export class WorkspaceStore {
   async writeFile(id, owner, filename, content, expectedHash) {
     const project = this.get(id, owner)
     this.#ready(project, true)
-    if (isPdfFile(filename))
+    if (isBinaryAssetFile(filename))
       fail(
-        'PDF files are read only. Upload a new PDF with a different name.',
+        'Binary assets are read only. Upload a new file with a different name.',
         415,
       )
     if (
@@ -3624,6 +3778,42 @@ export class WorkspaceStore {
       changes,
       diff: diff.slice(0, 500000),
     }
+  }
+
+  async texSourceVersion(id, owner, rootFile = 'main.tex') {
+    const project = this.get(id, owner)
+    return (await captureTexInputs(project.root, null, undefined, rootFile))
+      .workspaceRevision
+  }
+
+  async captureTexSource(
+    id,
+    owner,
+    destination,
+    { sourceRoot, runId, signal, rootFile = 'main.tex' } = {},
+  ) {
+    const project = this.get(id, owner)
+    const parent = path.dirname(destination)
+    if (
+      path.basename(destination) !== 'source' ||
+      path.dirname(parent) !== path.join(this.dataDir, 'tex-builds') ||
+      (await fs.realpath(parent)) !== parent
+    )
+      fail('Invalid TeX build directory.', 403)
+    let root = project.root
+    if (sourceRoot !== undefined) {
+      const { manifest } = await this.#manifest({ root: sourceRoot, runId })
+      if (
+        manifest.projectId !== id ||
+        manifest.owner !== owner ||
+        manifest.runId !== runId
+      )
+        fail('Invalid TeX candidate workspace.', 403)
+      root = manifest.root
+    }
+    return this.#locked(id, () =>
+      captureTexInputs(root, destination, signal, rootFile),
+    )
   }
 
   async snapshot(id, owner, runId) {
@@ -4221,15 +4411,15 @@ export class WorkspaceStore {
       this.#assertPlaygroundFile(project, filename)
       if (seen.has(filename)) fail('A change set contains duplicate paths')
       seen.add(filename)
-      const pdfUpload =
+      const assetUpload =
         reason === 'uploaded' &&
-        isPdfFile(filename) &&
+        isBinaryAssetFile(filename) &&
         Buffer.isBuffer(change.after) &&
         change.beforeHash === null
-      if (pdfUpload) validatePdfBytes(filename, change.after)
-      else if (isPdfFile(filename))
+      if (assetUpload) validateBinaryAsset(filename, change.after)
+      else if (isBinaryAssetFile(filename))
         fail(
-          'PDF files are read only. Upload a new PDF with a different name.',
+          'Binary assets are read only. Upload a new file with a different name.',
           415,
         )
       else if (
@@ -4246,12 +4436,12 @@ export class WorkspaceStore {
       )
         fail('Every change requires its original file hash')
       const destination = await guarded(project.root, filename, { write: true })
-      if (pdfUpload && (await exists(destination)))
+      if (assetUpload && (await exists(destination)))
         fail(
-          `A file named ${filename} already exists. Rename the PDF before uploading.`,
+          `A file named ${filename} already exists. Rename the asset before uploading.`,
           409,
         )
-      const before = pdfUpload ? null : await textFile(destination, true)
+      const before = assetUpload ? null : await textFile(destination, true)
       if ((before?.hash ?? null) !== change.beforeHash)
         fail(
           reason === 'saved'

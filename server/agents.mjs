@@ -7,6 +7,11 @@ import { proofRisks, verifyCandidate } from './verification.mjs'
 import { createAgentOutputHandler } from './agent-output.mjs'
 import { createHoverLookupGuard } from './agent-hover-guard.mjs'
 import { LiveMirror } from './agent-live.mjs'
+import {
+  createTexAgentTools,
+  texAgentToolSpecs,
+  texAgentInstructions,
+} from './tex-agent-tools.mjs'
 import { FollowupInbox } from './agent-followups.mjs'
 import {
   agentConversationContext,
@@ -37,6 +42,13 @@ const instructions = await fs.readFile(
   new URL('../prompts/lean-assistant.md', import.meta.url),
   'utf8',
 )
+
+function assertAgentJob(job) {
+  if (job.kind !== 'agent')
+    throw Object.assign(new Error('This job is not a Lemex run.'), {
+      status: 400,
+    })
+}
 
 function mcpToml(servers) {
   const scalar = (value) => {
@@ -73,6 +85,7 @@ export class AgentManager {
     settings,
     chats,
     books,
+    texBuilds,
     assertCanStart = () => {},
     optimizationMeasure = async (...args) =>
       (await import('./optimization.mjs')).measureOptimization(...args),
@@ -87,6 +100,7 @@ export class AgentManager {
       settings,
       chats,
       books,
+      texBuilds,
       assertCanStart,
       optimizationMeasure,
       maxConcurrent,
@@ -322,6 +336,7 @@ export class AgentManager {
   }
   async message(owner, id, input) {
     const job = this.events.getMetadata(id, owner)
+    assertAgentJob(job)
     const files = selectedContextFiles(
       { files: input?.files },
       validateWorkspaceFilePath,
@@ -516,6 +531,7 @@ export class AgentManager {
       accepting: null,
       completed: false,
       childClosed: null,
+      texTools: null,
     }
     active.done = new Promise((resolve) => {
       active.resolveDone = resolve
@@ -728,7 +744,32 @@ export class AgentManager {
         onNotice: (text) => this.#log(id, text),
         onFailure: rejectFinished,
       })
+      const withTex = job.mode === 'search' && Boolean(this.texBuilds)
+      if (withTex) {
+        active.texTools = createTexAgentTools({
+          manager: this.texBuilds,
+          job,
+          snapshot,
+          active,
+          rpc,
+          redact: this.config.redact,
+          onBuild: (build) => {
+            this.#log(id, `TeX build ${build.rootFile}: ${build.status}.\n`)
+            this.#progress(
+              id,
+              ['queued', 'running'].includes(build.status)
+                ? 'Compiling LaTeX'
+                : 'Working',
+              `TeX build ${build.rootFile}: ${build.status}.`,
+            )
+          },
+        })
+        rpc.on('closed', () => {
+          void active.texTools.dispose()
+        })
+      }
       rpc.on('request', (request) => {
+        if (active.texTools?.handle(request)) return
         this.#log(
           id,
           `Lemex requested ${request.method}; interactive escalation was declined.\n`,
@@ -815,6 +856,7 @@ export class AgentManager {
           )
       })
       await rpc.call('initialize', {
+        ...(withTex ? { capabilities: { experimentalApi: true } } : {}),
         clientInfo: {
           name: 'lemex_web',
           title: 'LeanFlow Web',
@@ -824,6 +866,7 @@ export class AgentManager {
       rpc.notify('initialized')
       const project = this.workspaces.get(job.projectId, job.owner)
       const thread = await rpc.call('thread/start', {
+        ...(withTex ? { dynamicTools: texAgentToolSpecs } : {}),
         model: job.model,
         cwd: '/workspace',
         approvalPolicy: 'never',
@@ -831,6 +874,7 @@ export class AgentManager {
         developerInstructions:
           instructions +
           bookInstructions +
+          (withTex ? texAgentInstructions : '') +
           (optimizationInstructions ? '\n\n' + optimizationInstructions : '') +
           `\nCurrent mode: ${job.mode}.\nProject toolchain: ${project.toolchain}.\n` +
           (job.liveEdits
@@ -898,6 +942,7 @@ export class AgentManager {
           )
       }
       const result = await finished
+      await active.texTools?.dispose()
       if (active.controller.signal.aborted) return
       this.#progress(
         id,
@@ -1036,6 +1081,7 @@ export class AgentManager {
       clearTimeout(active.timeout)
       active.accepting = false
       active.rpc?.close()
+      await active.texTools?.dispose()
       try {
         await active.childClosed
         let cleanupError
@@ -1065,6 +1111,7 @@ export class AgentManager {
   }
   async stop(owner, id, reason = 'Stopped by the user.') {
     const job = this.events.getMetadata(id, owner)
+    assertAgentJob(job)
     const active = this.active.get(id)
     if (TERMINAL.has(job.status)) {
       await active?.mirror?.stop()
@@ -1128,6 +1175,7 @@ export class AgentManager {
   }
   async apply(owner, id) {
     const job = this.events.get(id, owner)
+    assertAgentJob(job)
     if (job.status === 'applied') return job
     if (job.status !== 'completed' || !job.verification?.complete)
       throw Object.assign(
@@ -1164,6 +1212,7 @@ export class AgentManager {
   }
   async undo(owner, id) {
     const job = this.events.get(id, owner)
+    assertAgentJob(job)
     if (this.active.has(id) || !TERMINAL.has(job.status))
       throw Object.assign(
         new Error('Stop the run before undoing live edits.'),

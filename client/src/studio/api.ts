@@ -228,6 +228,41 @@ export interface OpenFile {
   column?: number
   preview?: 'pdf'
 }
+export interface TexDiagnostic {
+  severity: 'error' | 'warning' | 'info'
+  message: string
+  path?: string
+  line?: number
+}
+export interface TexBuild {
+  id: string
+  projectId: string
+  rootFile: string
+  engine: 'pdflatex'
+  origin?: 'agent' | 'user'
+  cleanupFailed?: boolean
+  status: string
+  sourceRevision: string | null
+  workspaceRevision: string | null
+  createdAt: string
+  updatedAt: string
+  diagnostics: TexDiagnostic[]
+  log: string
+  textAvailable: boolean
+  textTruncated: boolean
+  pageCount?: number
+  error?: string
+  pdf?: { url: string; revision: string; filename: string }
+}
+export interface TexStatus {
+  available: boolean
+  error?: string
+  engines: string[]
+  workspaceRevision: string | null
+  build: TexBuild | null
+  activeBuild?: TexBuild | null
+  lastSuccessful: TexBuild | null
+}
 export interface LibrarySource {
   module: string
   path: string

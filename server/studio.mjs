@@ -12,6 +12,7 @@ import { WorkspaceStore, validateRepository } from './workspaces.mjs'
 import { GitConnections } from './git-connections.mjs'
 import { loadConfig } from './config.mjs'
 import { EventStore, JobManager } from './events.mjs'
+import { TexBuildManager } from './tex-builds.mjs'
 import { AgentManager } from './agents.mjs'
 import { Settings } from './settings.mjs'
 import { ChatStore } from './chats.mjs'
@@ -217,7 +218,16 @@ export async function createStudio({
     titleGenerator: suppliedTitleGenerator || createChatTitleGenerator(config),
   })
   await chats.init()
+  const texBuilds = new TexBuildManager({
+    dataDir,
+    events,
+    runtime,
+    workspaces,
+    assertCanStart: (owner, projectId) => requireNoGit(projectId, owner),
+  })
+  await texBuilds.init()
   const agents = new AgentManager({
+    texBuilds,
     runtime,
     workspaces,
     events,
@@ -251,6 +261,7 @@ export async function createStudio({
     checkTimeoutMs: capacity.checkTimeoutMs,
   })
   const activity = new ProjectActivity({
+    texBuilds,
     events,
     jobs,
     agents,
@@ -306,13 +317,13 @@ export async function createStudio({
     if (
       events.db
         .prepare(
-          "SELECT 1 FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') LIMIT 1",
+          "SELECT 1 FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND (json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') OR json_extract(payload,'$.cleanupFailed')=1) LIMIT 1",
         )
         .get(owner, projectId)
     )
       throw Object.assign(
         new Error(
-          'Stop active Lean checks and Lemex runs before changing the project environment.',
+          'Stop active Lean checks, TeX builds, and Lemex runs before changing the project environment.',
         ),
         { status: 409 },
       )
@@ -326,18 +337,19 @@ export async function createStudio({
     terminals.assertIdle(projectId)
     const active = events.db
       .prepare(
-        "SELECT 1 FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') LIMIT 1",
+        "SELECT 1 FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND (json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') OR json_extract(payload,'$.cleanupFailed')=1) LIMIT 1",
       )
       .get(owner, projectId)
     if (active || workspaces.jobs.has(projectId))
       throw Object.assign(
         new Error(
-          'Stop active checks and Lemex runs, and wait for project preparation, before deleting or restoring project data.',
+          'Stop active Lean checks, TeX builds, and Lemex runs, and wait for project preparation, before deleting or restoring project data.',
         ),
         { status: 409 },
       )
   }
   const trash = new TrashManager({
+    texBuilds,
     workspaces,
     chats,
     events,
@@ -891,6 +903,39 @@ export async function createStudio({
     })
     res.json(await gitInfo(req.params.id, req.user))
   })
+  app.get('/api/projects/:id/tex', async (req, res) =>
+    res.json(
+      await texBuilds.state(req.user.id, req.params.id, {
+        rootFile: req.query.rootFile,
+      }),
+    ),
+  )
+  app.post('/api/projects/:id/tex/build', async (req, res) => {
+    requireNoGit(req.params.id, req.user.id)
+    res
+      .status(202)
+      .json(await texBuilds.start(req.user.id, req.params.id, req.body))
+  })
+  const projectTexBuild = (req) => {
+    const job = texBuilds.get(req.user.id, req.params.buildId)
+    if (job.projectId !== req.params.id)
+      throw Object.assign(new Error('TeX build not found.'), { status: 404 })
+    return job
+  }
+  app.get('/api/projects/:id/tex/builds/:buildId', (req, res) =>
+    res.json(projectTexBuild(req)),
+  )
+  app.post('/api/projects/:id/tex/builds/:buildId/stop', async (req, res) => {
+    projectTexBuild(req)
+    res.json(await texBuilds.stop(req.user.id, req.params.buildId))
+  })
+  app.get('/api/projects/:id/tex/builds/:buildId/pdf', async (req, res) => {
+    projectTexBuild(req)
+    const preview = await texBuilds.readPdf(req.user.id, req.params.buildId)
+    res.type('application/pdf')
+    res.setHeader('Content-Disposition', pdfDisposition(preview.path))
+    res.send(preview.content)
+  })
   app.post('/api/projects/:id/check', (req, res) => {
     requireNoGit(req.params.id, req.user.id)
     const job = jobs.check(req.user.id, req.params.id, req.body.path)
@@ -1244,11 +1289,13 @@ export async function createStudio({
       terminals.close()
       for (const ws of sockets) ws.terminate()
       const checksStopped = jobs.shutdown(),
-        agentsStopped = agents.shutdown()
+        agentsStopped = agents.shutdown(),
+        texStopped = texBuilds.shutdown()
       await runtime.shutdown?.()
       await Promise.allSettled([
         checksStopped,
         agentsStopped,
+        texStopped,
         playgroundPreparation,
         ...workspaces.jobs.values(),
       ])
@@ -1267,6 +1314,7 @@ export async function createStudio({
     workspaces,
     events,
     agents,
+    texBuilds,
     chats,
     config,
     settings,

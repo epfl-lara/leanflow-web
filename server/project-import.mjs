@@ -4,8 +4,8 @@ import {
   sourceFileByteLimit,
   MAX_SOURCE_UPLOAD_BYTES,
 } from '../shared/source-limits.mjs'
-import { isPdfFile } from '../shared/file-previews.mjs'
-import { decodePdfUpload } from './pdf-preview.mjs'
+import { isBinaryAssetFile } from '../shared/file-previews.mjs'
+import { decodeBinaryAsset } from './binary-assets.mjs'
 
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status })
@@ -204,17 +204,17 @@ export function uploadedFiles(input, validatePath) {
         typeof file.path !== 'string' ||
         typeof file.content !== 'string'
       )
-        fail('Upload text or PDF files with relative paths.')
+        fail('Upload text, PDF, PNG, or JPEG files with relative paths.')
       const name = validatePath(file.path)
       if (seen.has(name)) fail(`The upload contains duplicate paths: ${name}`)
       let content
       if (file.encoding === 'base64') {
-        content = decodePdfUpload(name, file.content)
+        content = decodeBinaryAsset(name, file.content)
       } else {
         if (file.encoding !== undefined)
           fail(`Unsupported upload encoding: ${name}`, 415)
-        if (isPdfFile(name))
-          fail(`Upload ${name} as a PDF file, rather than text.`, 415)
+        if (isBinaryAssetFile(name))
+          fail(`Upload ${name} as a binary asset, rather than text.`, 415)
         if (!file.content.isWellFormed())
           fail(`Invalid UTF-8 text in ${name}`, 415)
         if (file.content.includes('\0'))

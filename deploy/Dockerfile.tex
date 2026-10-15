@@ -1,0 +1,12 @@
+FROM ubuntu:24.04
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 latexmk texlive-latex-base texlive-latex-recommended \
+    texlive-latex-extra texlive-fonts-recommended texlive-pictures \
+    texlive-science poppler-utils \
+ && rm -rf /var/lib/apt/lists/*
+COPY deploy/tex-compile-worker.py /opt/tex-compile-worker.py
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 HOME=/tmp/home
+LABEL org.opencontainers.image.title="LeanFlow isolated pdfLaTeX compiler"
+WORKDIR /tmp
+CMD ["python3", "-I", "/opt/tex-compile-worker.py"]

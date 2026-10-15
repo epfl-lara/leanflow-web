@@ -9,5 +9,14 @@ The Apache License, Version 2.0 is retained in LICENSE. Existing copyright
 and third-party notices remain applicable. Included dependency assets retain
 their own licenses, including client/public/fonts/LICENSE-JuliaMono.
 
+LaTeX/BibTeX syntax highlighting uses the MIT-licensed VS Code LaTeX
+grammars through @codingame/monaco-vscode-latex-default-extension:
+https://github.com/CodinGame/monaco-vscode-api
+https://github.com/microsoft/vscode/tree/main/extensions/latex
+The VS Code license notice is retained in
+client/public/licenses/vscode-latex-MIT.txt.
+The separate TeX worker uses TeX Live, latexmk, and Poppler under their
+respective upstream licenses. No Overleaf application code is included.
+
 LeanFlow Web's product mark is distinct from the EPFL and LARA institutional
 marks. The developer attribution does not replace upstream authorship credits.

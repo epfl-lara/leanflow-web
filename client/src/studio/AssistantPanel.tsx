@@ -39,6 +39,7 @@ import type {
   ProofFocusRequest,
 } from './proofTarget'
 import './chat-workbench.css'
+import { texLanguage } from './texBuilds'
 
 const chronological = (values: Run[]) =>
   [...values].sort((a, b) =>
@@ -846,6 +847,17 @@ export function AssistantPanel({
           ))}
         </HelpTip>
       </div>
+      {texLanguage(currentFile) && (
+        <div className="assistant-tex-note">
+          {mode === 'search' ? (
+            'Lemex can read, edit, and compile your LaTeX document here.'
+          ) : (
+            <button type="button" onClick={() => draft.setMode('search')}>
+              Use Ask &amp; Search for LaTeX editing and compilation
+            </button>
+          )}
+        </div>
+      )}
       <ChatOptions
         models={session.models}
         model={model}
@@ -1075,7 +1087,9 @@ export function AssistantPanel({
           placeholder={
             acceptingUpdate
               ? 'Share an observation or change of direction…'
-              : currentMode.placeholder
+              : mode === 'search' && texLanguage(currentFile)
+                ? 'Ask about this document, edit LaTeX, or compile and check its PDF…'
+                : currentMode.placeholder
           }
           value={prompt}
           onChange={draft.setText}

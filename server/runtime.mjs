@@ -9,6 +9,7 @@ import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { PreparedPresetCache } from './prepared-presets.mjs'
 import { fileURLToPath } from 'node:url'
+import { createTexArtifactReceiver } from './tex-artifacts.mjs'
 import {
   SharedDependencyCache,
   configurationDigest,
@@ -152,6 +153,7 @@ export class Runtime {
     docker = 'docker',
     hostToolchainDir = path.join(process.env.HOME || '', '.elan/toolchains'),
     scope = 'helper',
+    texImage = process.env.STUDIO_TEX_IMAGE || 'leanflow-tex:local',
   } = {}) {
     if (!dataDir) throw new Error('Runtime requires an owned dataDir')
     this.dataDir = path.resolve(dataDir)
@@ -167,6 +169,10 @@ export class Runtime {
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(scope))
       throw new Error('Invalid runtime scope')
     this.scope = scope
+    this.texImage = texImage
+    this.texImageId = null
+    this.texInspection = null
+    this.texUnavailable = null
     this.instance = null
     this.reaped = 0
     this.owner = randomUUID()
@@ -638,6 +644,42 @@ export class Runtime {
     }
   }
 
+  async texInfo() {
+    const engine = { engine: 'pdflatex', engines: ['pdflatex'] }
+    if (this.texImageId)
+      return { ...engine, available: true, imageId: this.texImageId }
+    if (this.texUnavailable && this.texUnavailable.until > Date.now())
+      return this.texUnavailable.info
+    this.texInspection ||= this.#host([
+      'image',
+      'inspect',
+      '--format',
+      '{{.Id}}',
+      this.texImage,
+    ])
+      .then((result) => {
+        const id = result.stdout.trim()
+        if (result.code !== 0 || !/^sha256:[a-f0-9]{64}$/.test(id))
+          throw new Error('LaTeX compiler image is unavailable.')
+        this.texImageId = id
+        return { ...engine, available: true, imageId: id }
+      })
+      .catch(() => {
+        const info = {
+          ...engine,
+          available: false,
+          error:
+            'LaTeX compilation is unavailable. Ask the server administrator to run scripts/build-tex-worker.sh. Availability refreshes within 30 seconds.',
+        }
+        this.texUnavailable = { info, until: Date.now() + 30000 }
+        return info
+      })
+      .finally(() => {
+        this.texInspection = null
+      })
+    return this.texInspection
+  }
+
   templates() {
     return presetDefinitions.map((preset) => ({
       ...preset,
@@ -1037,6 +1079,21 @@ export class Runtime {
       }
     }
     dockerArgs.push(this.imageId || this.image, ...args)
+    return this.#launchWorker(root, dockerArgs, {
+      childEnv,
+      home,
+      name,
+      signal,
+      timeoutMs,
+      onOutput,
+    })
+  }
+
+  #launchWorker(
+    root,
+    dockerArgs,
+    { childEnv, home, name, signal, timeoutMs, onOutput },
+  ) {
     const child = spawnChild(this.docker, dockerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
@@ -1128,8 +1185,159 @@ export class Runtime {
     return this.#schedule(root, args, options, false)
   }
 
-  #schedule(root, args, options, spawnOnly) {
-    this.#assertReady()
+  async runTex(sourceRoot, outputRoot, options = {}) {
+    if (options.engine !== undefined && options.engine !== 'pdflatex')
+      throw Object.assign(
+        new Error('Only the pdfLaTeX engine is supported. Select pdfLaTeX.'),
+        { status: 400 },
+      )
+    if (
+      typeof options.rootFile !== 'string' ||
+      options.rootFile.length > 1024 ||
+      !/\.tex$/i.test(options.rootFile) ||
+      path.posix.isAbsolute(options.rootFile) ||
+      options.rootFile.includes('\\') ||
+      [...options.rootFile].some((character) => character.charCodeAt(0) < 32) ||
+      options.rootFile
+        .split('/')
+        .some((part) => !part || part === '.' || part === '..')
+    )
+      throw Object.assign(
+        new Error('Choose a relative .tex main file inside this project.'),
+        { status: 400 },
+      )
+    options.signal?.throwIfAborted()
+    const info = await this.texInfo()
+    options.signal?.throwIfAborted()
+    if (!info.available)
+      throw Object.assign(new Error(info.error), { status: 503 })
+    const timeoutMs = options.timeoutMs ?? 120_000
+    if (
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs <= 0 ||
+      timeoutMs > 10 * 60_000
+    )
+      throw new Error('LaTeX compilation timeout must be at most 10 minutes.')
+    const controller = new AbortController()
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, controller.signal])
+      : controller.signal
+    const token = randomUUID()
+    const receiver = createTexArtifactReceiver(
+      token,
+      options.onOutput,
+      (error) => controller.abort(error),
+    )
+    const worker = { kind: 'tex', outputRoot }
+    const result = await this.#schedule(
+      sourceRoot,
+      ['python3', '-I', '/opt/tex-compile-worker.py', options.rootFile, token],
+      {
+        signal,
+        timeoutMs,
+        onOutput: (text, stream) => receiver.append(text, stream),
+        maxOutputBytes: 512 * 1024,
+      },
+      false,
+      worker,
+    )
+    if (result.cancelled || result.timedOut) {
+      if (controller.signal.aborted) throw controller.signal.reason
+      return { ...result, stdout: '', stderr: '' }
+    }
+    const stdout = await receiver.publish(outputRoot)
+    return { ...result, stdout, stderr: '', truncated: false }
+  }
+
+  #spawnTex(root, args, options, worker) {
+    if (this.stopping) throw new Error('Runtime is shutting down')
+    options.signal?.throwIfAborted()
+    if (this.children.size >= this.maxConcurrent)
+      throw Object.assign(new Error('All workspace workers are busy.'), {
+        status: 503,
+      })
+    const source = this.#root(root),
+      output = this.#root(worker.outputRoot)
+    if (
+      source !== path.resolve(root) ||
+      output !== path.resolve(worker.outputRoot) ||
+      !fs.statSync(source).isDirectory() ||
+      !fs.statSync(output).isDirectory() ||
+      source === this.dataDir ||
+      output === this.dataDir ||
+      source === output ||
+      source.startsWith(output + path.sep) ||
+      output.startsWith(source + path.sep) ||
+      fs.readdirSync(output).length
+    )
+      throw new Error(
+        'LaTeX builds require separate source and empty output directories inside managed storage.',
+      )
+    const name = `lemex-web-${this.owner.slice(0, 8)}-tex-${randomUUID().slice(0, 8)}`
+    const dockerArgs = [
+      'run',
+      '--rm',
+      '--log-driver',
+      'none',
+      '-i',
+      '--init',
+      '--name',
+      name,
+      '--label',
+      `lemex-web.owner=${this.owner}`,
+      '--label',
+      `lemex-web.instance=${this.instance}`,
+      '--label',
+      `lemex-web.scope=${this.scope}`,
+      '--user',
+      `${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`,
+      '--read-only',
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges',
+      '--cpus',
+      String(this.cpus),
+      '--memory',
+      this.memory,
+      '--memory-swap',
+      this.memory,
+      '--pids-limit',
+      String(Math.min(this.pidsLimit, 128)),
+      '--ulimit',
+      'fsize=33554432:33554432',
+      '--network',
+      'none',
+      '--tmpfs',
+      '/tmp:rw,nosuid,nodev,noexec,size=512m',
+      '--tmpfs',
+      `/output:rw,nosuid,nodev,noexec,size=32m,mode=0700,uid=${process.getuid?.() || 1000},gid=${process.getgid?.() || 1000}`,
+      '--workdir',
+      '/tmp',
+      '--mount',
+      `type=bind,src=${source},dst=/workspace,readonly`,
+      '--env',
+      'HOME=/tmp/home',
+      this.texImageId,
+      ...args,
+    ]
+    return this.#launchWorker(root, dockerArgs, {
+      ...options,
+      childEnv: { ...process.env },
+      name,
+    })
+  }
+
+  #spawnScheduled(root, args, options, worker) {
+    return worker?.kind === 'tex'
+      ? this.#spawnTex(root, args, options, worker)
+      : this.spawn(root, args, options)
+  }
+
+  #schedule(root, args, options, spawnOnly, worker) {
+    if (worker?.kind === 'tex') {
+      if (this.stopping) throw new Error('Runtime is shutting down')
+    } else this.#assertReady()
     if (
       options.input !== undefined &&
       typeof options.input !== 'string' &&
@@ -1144,8 +1352,8 @@ export class Runtime {
       )
     if (this.children.size < this.maxConcurrent)
       return spawnOnly
-        ? Promise.resolve(this.spawn(root, args, options))
-        : this.#run(root, args, options)
+        ? Promise.resolve(this.#spawnScheduled(root, args, options, worker))
+        : this.#run(root, args, options, worker)
     if (this.queue.length >= this.maxQueue)
       return Promise.reject(
         Object.assign(new Error('Workspace job queue is full'), {
@@ -1153,7 +1361,7 @@ export class Runtime {
         }),
       )
     return new Promise((resolve, reject) => {
-      const job = { root, args, options, resolve, reject, spawnOnly }
+      const job = { root, args, options, resolve, reject, spawnOnly, worker }
       const abort = () => {
         const index = this.queue.indexOf(job)
         if (index >= 0) {
@@ -1167,11 +1375,11 @@ export class Runtime {
     })
   }
 
-  #run(root, args, options) {
+  #run(root, args, options, worker) {
     return new Promise((resolve, reject) => {
       let child
       try {
-        child = this.spawn(root, args, options)
+        child = this.#spawnScheduled(root, args, options, worker)
         options.onSpawn?.(child)
       } catch (error) {
         child?.kill()
@@ -1234,12 +1442,17 @@ export class Runtime {
       }
       if (job.spawnOnly) {
         try {
-          job.resolve(this.spawn(job.root, job.args, job.options))
+          job.resolve(
+            this.#spawnScheduled(job.root, job.args, job.options, job.worker),
+          )
         } catch (error) {
           job.reject(error)
         }
       } else
-        this.#run(job.root, job.args, job.options).then(job.resolve, job.reject)
+        this.#run(job.root, job.args, job.options, job.worker).then(
+          job.resolve,
+          job.reject,
+        )
     }
   }
 

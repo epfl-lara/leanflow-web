@@ -70,6 +70,18 @@ Choose a `.pdf` file to open a read-only PDF viewer. Use **Download PDF** or **O
 
 Drag the scrollbar inside **Files** to scroll long lists. The separate strip to its right resizes the sidebar. You can also focus a separator and use the arrow keys.
 
+## Edit and compile LaTeX
+
+Open a `.tex` file to edit highlighted LaTeX beside its PDF. Choose the root document in the PDF panel, then choose **Build PDF**. The build saves your open drafts first and stops if a file has a save conflict. Included `.tex` files, local styles, bibliographies, and PDF/PNG/JPEG figures are captured from the root document's folder and its subfolders. Generated files stay outside your project sources.
+
+Enable **Rebuild on save** to update the PDF after saving edits. Unsaved typing does not trigger a build. Changes made through the terminal or Lemex mark an older preview as out of date. Choose **Build PDF** to capture the latest saved files. A failed build keeps the last successful PDF visible; open its reported errors to jump to the source line. **Stop** cancels a queued or running build.
+
+Use **Ask & Search** to ask Lemex to read, edit, and compile a document. It can read the generated PDF's extracted text and use compiler diagnostics to repair LaTeX. Text extraction can omit figures and mathematical layout. Review-first edits remain candidates until accepted; live editing follows the option selected for Ask & Search. A successful TeX build does not verify Lean proofs.
+
+The first version supports pdfLaTeX, automatic reruns through latexmk, and BibTeX. XeLaTeX, LuaLaTeX, Biber, custom compiler recipes, shell escape, and source-to-PDF navigation are not available. The server needs a separate [TeX worker image](Configuration.md#latex-compilation). Existing Lean toolchains stay pinned.
+
+Put the root document at the common parent of its inputs and use paths such as `\input{chapters/introduction}`. Parent paths such as `../chapter.tex` and absolute paths are blocked by the isolated compiler. A root in a subfolder can include files below that subfolder.
+
 ## View evaluation results and stop a check
 
 Put the cursor on a completed `#eval` command to see its output in **Goals & diagnostics**. For example:

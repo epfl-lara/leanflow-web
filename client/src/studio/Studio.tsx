@@ -36,8 +36,10 @@ import { LeanWorkspace } from './LeanWorkspace'
 import { WorkspaceBuffers } from './workspaceBuffers'
 import { PdfFileViewer } from './PdfFileViewer'
 import { MarkdownFilePreview } from './MarkdownFilePreview'
+import { TexPanel } from './TexPanel'
+import { texLanguage } from './texBuilds'
 import { isMarkdownPath } from './fileReading'
-import { isPdfFile } from '../../../shared/file-previews.mjs'
+import { isPdfFile, isBinaryAssetFile } from '../../../shared/file-previews.mjs'
 import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
 import { RepositoryCredentialsDialog } from './RepositoryCredentialsDialog'
@@ -274,6 +276,16 @@ export function Studio() {
   } = useSyncExternalStore(bufferStore.subscribe, bufferStore.getSnapshot)
   const setFile = bufferStore.setFile
   const [markdownPreview, setMarkdownPreview] = useState(false)
+  const [texWorkspaceElement, setTexWorkspaceElement] =
+    useState<HTMLDivElement | null>(null)
+  const texWorkspaceSize = useElementSize(texWorkspaceElement)
+  const texStacked = useMediaQuery('(max-width: 900px)')
+  const [texSourceSize, setTexSourceSize] = useStoredSize(
+    'lemex-layout-tex-source',
+    50,
+    20,
+    80,
+  )
   const [proofFocus, setProofFocus] = useState<ProofFocusRequest | null>(null)
   const [editorProof, setEditorProof] = useState<EditorProofState | null>(null)
   const [focusEditorRequest, setFocusEditorRequest] =
@@ -429,13 +441,21 @@ export function Studio() {
   )
   const dirty = dirtyFiles.length > 0
   const pdfPreview = file?.preview === 'pdf'
+  const texFiles = useMemo(
+    () =>
+      files
+        .filter((entry) => !entry.readOnly && /\.tex$/i.test(entry.path))
+        .map((entry) => entry.path),
+    [files],
+  )
+  const texVisible = !!texLanguage(file?.path) && texFiles.length > 0
   const readingFile =
     pdfPreview || (isMarkdownPath(file?.path) && markdownPreview)
   const assistantFiles = useMemo(
     () =>
       files.filter(
         (entry) =>
-          !isPdfFile(entry.path) &&
+          !isBinaryAssetFile(entry.path) &&
           (!singleFileMode || entry.path === 'Main.lean'),
       ),
     [files, singleFileMode],
@@ -2176,7 +2196,11 @@ export function Studio() {
               </div>
             </div>
             <div
-              className={`file-reading-workspace ${readingFile ? 'reading' : ''}`}
+              ref={setTexWorkspaceElement}
+              className={`file-reading-workspace ${readingFile ? 'reading' : ''} ${texVisible ? 'tex-reading' : ''}`}
+              style={
+                { '--tex-source-size': `${texSourceSize}%` } as CSSProperties
+              }
             >
               {project.status === 'ready' ? (
                 <LeanWorkspace
@@ -2237,6 +2261,44 @@ export function Studio() {
                         : current,
                     )
                   }
+                />
+              )}
+              {texVisible && (
+                <ResizeHandle
+                  label="Resize LaTeX source and PDF"
+                  orientation={texStacked ? 'horizontal' : 'vertical'}
+                  value={texSourceSize}
+                  min={20}
+                  max={80}
+                  onChange={setTexSourceSize}
+                  onReset={() => setTexSourceSize(50)}
+                  pixelsPerUnit={() =>
+                    (texStacked
+                      ? texWorkspaceSize.height
+                      : texWorkspaceSize.width) / 100
+                  }
+                  unit="percent"
+                  className="tex-resize-handle"
+                />
+              )}
+              {texFiles.length > 0 && (
+                <TexPanel
+                  key={project.id}
+                  projectId={project.id}
+                  files={texFiles}
+                  currentPath={file?.path}
+                  visible={texVisible}
+                  buffers={buffers}
+                  saving={saving}
+                  saveVersion={saveVersion}
+                  savedPaths={savedPaths}
+                  save={saveCompletely}
+                  onOpenFile={(path, line) => {
+                    const action = () => openFile(project.id, path, line)
+                    if (bufferStore.getSnapshot().buffers.has(path))
+                      void action().catch((error) => setError(errorText(error)))
+                    else navigate(action)
+                  }}
                 />
               )}
               {pdfPreview && file ? (

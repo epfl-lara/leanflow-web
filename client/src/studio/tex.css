@@ -1,0 +1,146 @@
+.file-reading-workspace.tex-reading {
+  flex-direction: row;
+}
+.file-reading-workspace.tex-reading > .lean-workspace,
+.file-reading-workspace.tex-reading > .setup-file-editor {
+  flex: 0 0 var(--tex-source-size, 50%);
+  width: var(--tex-source-size, 50%);
+  min-width: 0;
+}
+.tex-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--canvas);
+}
+.tex-panel[hidden] {
+  display: none;
+}
+.tex-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.tex-root-label {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 100px;
+  gap: 4px;
+  font-size: 12px;
+}
+.tex-root-label select {
+  width: 100%;
+  min-width: 0;
+  padding: 5px;
+  background: var(--canvas);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+.tex-engine {
+  padding: 6px 0;
+  font-size: 12px;
+}
+.tex-auto-build {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 0;
+  font-size: 12px;
+}
+.tex-build-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.tex-build-status .spinner {
+  display: inline-block;
+  margin-right: 4px;
+}
+.tex-pdf-stale {
+  color: var(--warning, #b56b08);
+}
+.tex-build-error {
+  margin: 0;
+  padding: 8px 10px;
+}
+.tex-diagnostics {
+  margin: 0;
+  padding: 6px 10px 6px 26px;
+  max-height: 140px;
+  overflow: auto;
+  font-size: 12px;
+}
+.tex-diagnostics button {
+  color: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  padding: 3px 0;
+}
+.tex-diagnostics button:hover {
+  text-decoration: underline;
+}
+.tex-diagnostic-error {
+  color: var(--danger);
+}
+.tex-log {
+  padding: 0 6px;
+}
+.tex-log pre {
+  margin: 0;
+  padding: 10px;
+  max-height: 160px;
+  overflow: auto;
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tex-preview-empty {
+  padding: 24px 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.tex-panel .pdf-file-actions {
+  gap: 4px;
+  padding: 6px;
+}
+.tex-panel .pdf-file-actions .button {
+  font-size: 11px;
+}
+.resize-handle.tex-resize-handle {
+  position: relative;
+  flex: 0 0 7px;
+  width: 7px;
+  height: auto;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+@media (max-width: 900px) {
+  .file-reading-workspace.tex-reading {
+    flex-direction: column;
+  }
+  .file-reading-workspace.tex-reading > .lean-workspace,
+  .file-reading-workspace.tex-reading > .setup-file-editor {
+    width: 100%;
+    flex-basis: var(--tex-source-size, 50%);
+    height: var(--tex-source-size, 50%);
+  }
+  .resize-handle.tex-resize-handle {
+    height: 7px;
+    width: auto;
+  }
+}

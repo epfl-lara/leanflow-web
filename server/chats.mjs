@@ -541,6 +541,16 @@ export class ChatStore {
       .run(chat.id, chat.owner)
   }
 
+  texRunIds(owner, trashId) {
+    const receipt = this.getTrash(trashId, owner)
+    const chat = this.#owned(receipt.chatId, owner, {
+      archived: true,
+      project: false,
+    })
+    this.#assertInactive(chat)
+    return this.#runIds(chat)
+  }
+
   deleteForever(owner, trashId) {
     const receipt = this.getTrash(trashId, owner)
     const chat = this.#owned(receipt.chatId, owner, {

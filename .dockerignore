@@ -6,6 +6,8 @@
 !.runtime/lemex-next/**
 !deploy/
 !deploy/Dockerfile.worker
+!deploy/Dockerfile.tex
+!deploy/tex-compile-worker.py
 !deploy/worker-entrypoint
 !deploy/lean-probe-worker
 !deploy/lean-probe-repl-pins.json

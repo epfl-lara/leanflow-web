@@ -11,7 +11,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const output = path.join(root, '.runtime/source-navigation-ui')
 await fs.mkdir(output, { recursive: true })
 const app = express()
-app.use(express.static(path.join(root, 'client/dist')))
+app.use(
+  express.static(
+    process.env.STUDIO_TEST_DIST || path.join(root, 'client/dist'),
+  ),
+)
 const server = await new Promise((resolve) => {
   const listening = app.listen(0, '127.0.0.1', () => resolve(listening))
 })
