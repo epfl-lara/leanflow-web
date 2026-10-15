@@ -23,6 +23,7 @@ import { DEFAULT_LAYOUT, useMediaQuery } from './layout'
 import { isMarkdownPath } from './fileReading'
 import { RenameModels } from './renameModels'
 import { initializeLeanEditor } from './leanEditorServices'
+import { DefinitionPreviewFiles } from './definitionPreviewFiles'
 import type { RenameSource } from './workspaceBuffers'
 import { installLeanRenameMiddleware } from './leanRenameMiddleware'
 import type { ChatMode } from './chatModes'
@@ -180,6 +181,7 @@ interface Runtime {
   outlineCleanup?: () => void
   visibleReadyPath?: string
   renameModels?: RenameModels
+  definitionPreviewFiles?: DefinitionPreviewFiles
 }
 interface ConnectionClient {
   isRunning(): boolean
@@ -345,7 +347,7 @@ export function LeanWorkspace({
       own = {
         lean,
         renameModels: new RenameModels(
-          () => own?.editor?.editor.getModel() ?? null,
+          () => own?.editor?.editor?.getModel() ?? null,
           (sources) => onRenameSourcesRef.current(sources),
           (path, content) => {
             if (!cancelled) onChangeRef.current(path, content)
@@ -359,6 +361,7 @@ export function LeanWorkspace({
         await initializeLeanEditor(
           document.getElementById('root') ?? editorEl.current ?? undefined,
         )
+        own.definitionPreviewFiles = new DefinitionPreviewFiles(projectId)
         await lean.start({
           websocket: {
             url: `${protocol}//${location.host}/websocket/${encodeURIComponent(projectId)}`,
@@ -434,6 +437,7 @@ export function LeanWorkspace({
           }
         }
       } catch (error) {
+        own.definitionPreviewFiles?.dispose()
         lean.dispose()
         if (!cancelled) {
           setFailure(
@@ -450,13 +454,14 @@ export function LeanWorkspace({
     return () => {
       cancelled = true
       void serialize(async () => {
+        own?.definitionPreviewFiles?.dispose()
         own?.subscription?.dispose()
         own?.outlineCleanup?.()
         own?.connectionSubscriptions?.forEach((subscription) =>
           subscription.dispose(),
         )
         own?.restoreOpenEditor?.()
-        const closingModel = own?.editor?.editor.getModel()
+        const closingModel = own?.editor?.editor?.getModel()
         own?.editor?.dispose()
         await own?.renameModels?.dispose()
         if (closingModel && !closingModel.isDisposed()) closingModel.dispose()
@@ -566,6 +571,8 @@ export function LeanWorkspace({
           padding: { top: 16, bottom: 16 },
           fontSize: 14,
           readOnly: !!snapshot.readOnly,
+          // Monaco assigns definition links to the other mouse modifier.
+          multiCursorModifier: 'ctrlCmd',
         })
         if (snapshot.line) {
           const position = {
@@ -1012,7 +1019,7 @@ export function LeanWorkspace({
       return
     }
     const matching =
-      runtime.current?.editor?.editor.getModel()?.uri.path ===
+      runtime.current?.editor?.editor?.getModel()?.uri.path ===
       `/workspace/${file.path}`
     onProofStateChange?.({
       path: file.path,
@@ -1023,7 +1030,7 @@ export function LeanWorkspace({
       disabled: loading || !!failure || !matching,
       readOnly: !!file.readOnly,
       lineCount: matching
-        ? runtime.current?.editor?.editor.getModel()?.getLineCount()
+        ? runtime.current?.editor?.editor?.getModel()?.getLineCount()
         : undefined,
     })
   }, [

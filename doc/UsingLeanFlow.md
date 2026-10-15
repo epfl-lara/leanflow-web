@@ -150,7 +150,7 @@ Results show a **Type** or **Signature** and available documentation/source link
 
 Choose **Open locally** to view a module from the project's pinned Lean installation or installed library packages. The viewer is read only and leaves your editor's unsaved changes intact. It selects the declaration when its signature matches the local file; otherwise it shows the module without guessing a line from another version. **Open source** opens the search index's version on the web.
 
-To jump to a declaration from the editor, put the cursor on its name and press **F12**, or right-click and choose **Go to Definition**. Project files open in the editor; definitions in Lean's installed library open in the scrollable read-only viewer at the position reported by Lean. Navigation between project files uses the usual unsaved-edit prompt.
+To jump to a declaration from the editor, hold **Alt** (**Option** on macOS) and click its name. You can also press **F12** or right-click and choose **Go to Definition**. Project files open in the editor; definitions in Lean's installed library open in the scrollable read-only viewer at the position reported by Lean. Navigation between project files uses the usual unsaved-edit prompt. Use **Ctrl+click** (**Cmd+click** on macOS) to add a cursor for editing.
 
 In **Source control → Changes**, save files, review the diff, and enter a commit message. Use **Create branch** if you need a new branch. An import with publishing enabled already has a working branch.
 
