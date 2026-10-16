@@ -1,6 +1,6 @@
 # Release verification — 2026-10-13
 
-LeanFlow Web is developed by [EPFL LARA](https://lara.epfl.ch/) and derived from lean4web commit `9c4cd4f4ed804b06a24257788894314c93008276`. This document records checks performed on a private Linux deployment with independent application state and a loopback-only user service. It is historical verification evidence, not a claim that every deployment has the same configuration.
+LeanFlow Web is developed by [EPFL LARA](https://epfl-lara.github.io/) and derived from lean4web commit `9c4cd4f4ed804b06a24257788894314c93008276`. This document records checks performed on a private Linux deployment with independent application state and a loopback-only user service. It is historical verification evidence, not a claim that every deployment has the same configuration.
 
 Paths under `.runtime/` and review directories identify private retained evidence and are not included in the public repository. The corresponding `scripts/check-*.mjs` commands are available for reproduction with the documented prerequisites. No live project data, logs, credentials, or machine configuration are published here.
 

@@ -4,7 +4,7 @@
 
 Write, explore, and improve Lean proofs in your browser with a Lemex assistant.
 
-Developed by [EPFL LARA](https://lara.epfl.ch/).
+Developed by [EPFL LARA](https://epfl-lara.github.io/).
 
 - **Start in Mathlib Playground:** open a scratch file or upload a `.lean` file using prepared Mathlib. Your private playgrounds can be renamed, reopened, and deleted.
 - **Bring your project:** import a Git repository or upload local files, with prepared Mathlib, CSLib, and Physlib environments.

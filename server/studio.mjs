@@ -1299,7 +1299,7 @@ if (
     host = process.env.HOST || '127.0.0.1'
   studio.server.listen(port, host, () =>
     console.log(
-      `LeanFlow Web: ${process.env.STUDIO_ORIGIN || `http://${host}:${port}`}\nBackend: http://${host}:${port}\nPublic origin: ${process.env.STUDIO_ORIGIN || 'not configured (set STUDIO_ORIGIN for HTTPS hosting)'}\nDeveloped by EPFL LARA · https://lara.epfl.ch/\nAccess token file: ${path.join(process.env.STUDIO_DATA_DIR || path.join(projectDir, '.data'), 'auth/owner.token')}\nLemex revision: ${studio.config.lemex.revision || 'unknown'}`,
+      `LeanFlow Web: ${process.env.STUDIO_ORIGIN || `http://${host}:${port}`}\nBackend: http://${host}:${port}\nPublic origin: ${process.env.STUDIO_ORIGIN || 'not configured (set STUDIO_ORIGIN for HTTPS hosting)'}\nDeveloped by EPFL LARA · https://epfl-lara.github.io/\nAccess token file: ${path.join(process.env.STUDIO_DATA_DIR || path.join(projectDir, '.data'), 'auth/owner.token')}\nLemex revision: ${studio.config.lemex.revision || 'unknown'}`,
     ),
   )
   studio.server.on('error', (error) => {
