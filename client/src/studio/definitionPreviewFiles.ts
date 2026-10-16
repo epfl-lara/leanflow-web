@@ -34,16 +34,22 @@ export class DefinitionPreviewFiles extends EmptyFileSystemProvider {
       resource.authority ||
       resource.query ||
       resource.fragment ||
-      !resource.path.endsWith('.lean')
+      (!resource.path.endsWith('.lean') &&
+        !(
+          resource.path.startsWith('/workspace/.lake/packages/') &&
+          /\.(md|toml)$/.test(resource.path)
+        ))
     )
       throw FileSystemProviderError.create(
-        'Not a Lean source preview.',
+        'Not a source preview.',
         FileSystemProviderErrorCode.FileNotFound,
       )
     const uri = resource.toString()
     let pending = this.reads.get(uri)
     if (!pending) {
-      const filename = projectPath(resource)
+      const filename = resource.path.startsWith('/workspace/')
+        ? resource.path.slice('/workspace/'.length)
+        : null
       pending = api<{ content: string }>(
         `/api/projects/${encodeURIComponent(this.projectId)}/${filename ? `file?path=${encodeURIComponent(filename)}` : 'library-source'}`,
         {

@@ -1,4 +1,4 @@
-import { LeanMonaco, LeanMonacoEditor } from 'lean4monaco'
+import { LeanMonaco } from 'lean4monaco'
 import { CloseAction, ErrorAction } from 'vscode-languageclient/browser'
 import { getService, ITextFileService } from 'vscode/services'
 import type { CancellationToken } from 'monaco-editor'
@@ -26,6 +26,7 @@ import { texLanguage } from './texBuilds'
 import { RenameModels } from './renameModels'
 import { initializeLeanEditor } from './leanEditorServices'
 import { DefinitionPreviewFiles } from './definitionPreviewFiles'
+import { WorkspaceEditor } from './workspaceEditor'
 import type { RenameSource } from './workspaceBuffers'
 import { installLeanRenameMiddleware } from './leanRenameMiddleware'
 import type { ChatMode } from './chatModes'
@@ -176,7 +177,7 @@ function serialize(task: () => Promise<void> | void) {
 
 interface Runtime {
   lean: BrowserLeanMonaco
-  editor?: LeanMonacoEditor
+  editor?: WorkspaceEditor
   subscription?: { dispose(): void }
   restoreOpenEditor?: () => void
   connectionSubscriptions?: { dispose(): void }[]
@@ -471,7 +472,6 @@ export function LeanWorkspace({
     return () => {
       cancelled = true
       void serialize(async () => {
-        own?.definitionPreviewFiles?.dispose()
         own?.subscription?.dispose()
         own?.outlineCleanup?.()
         own?.connectionSubscriptions?.forEach((subscription) =>
@@ -495,6 +495,7 @@ export function LeanWorkspace({
         const clients = own?.lean.clientProvider?.getClients() || []
         await Promise.allSettled(clients.map((client) => client.stop()))
         own?.lean.dispose()
+        own?.definitionPreviewFiles?.dispose()
         if (runtime.current === own) runtime.current = null
       })
     }
@@ -534,7 +535,7 @@ export function LeanWorkspace({
 
   useEffect(() => {
     let cancelled = false
-    let ownEditor: LeanMonacoEditor | null = null
+    let ownEditor: WorkspaceEditor | null = null
     setLoading(true)
     declarationsRef.current = []
     setRenameIssue('')
@@ -563,10 +564,10 @@ export function LeanWorkspace({
         return
       }
       try {
-        ownEditor = new LeanMonacoEditor()
+        ownEditor = new WorkspaceEditor()
         active.editor = ownEditor
         const uri = `file:///workspace/${snapshot.path.split('/').map(encodeURIComponent).join('/')}`
-        await ownEditor.start(host, uri, snapshot.content)
+        await ownEditor.start(host, uri, snapshot.content, !!snapshot.readOnly)
         if (cancelled || runtime.current !== active || !host.isConnected) {
           ownEditor.dispose()
           return
@@ -792,6 +793,7 @@ export function LeanWorkspace({
         }
         updateFocus()
         void loadOutline()
+        setFailure('')
         setLoading(false)
       } catch (error) {
         if (!cancelled) {
@@ -1169,7 +1171,10 @@ export function LeanWorkspace({
           <div className="editor-failure" role="alert">
             <strong>Editor could not start</strong>
             <p>{failure}</p>
-            <p>Try reopening the project. Your saved files are preserved.</p>
+            <p>
+              Try opening another file or reopening the project. Your saved
+              files are preserved.
+            </p>
           </div>
         )}
         {!file && !loading && (

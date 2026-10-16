@@ -97,7 +97,7 @@ test('definition preview reads coalesce stat and content, use project authentica
   assert(f.released())
 })
 
-test('dependency previews use the existing checked library-source endpoint', async () => {
+test('library previews use authenticated workspace reads or the checked toolchain-source endpoint', async () => {
   const f = fixture(async () => ({
     content: 'theorem libraryLemma : True := by trivial\n',
   }))
@@ -109,13 +109,58 @@ test('dependency previews use the existing checked library-source endpoint', asy
     assert.equal((await f.files.stat(resource)).permissions, 1)
     assert.match(text(await f.files.readFile(resource)), /libraryLemma/)
     const request = f.requests.at(-1)
-    assert.equal(request.url, '/api/projects/preview-project/library-source')
-    assert.equal(request.method, 'POST')
-    assert.deepEqual(JSON.parse(request.body), {
-      uri: resource.toString(),
-      line: 1,
-    })
+    if (path.startsWith('/workspace/')) {
+      assert.equal(
+        request.url,
+        '/api/projects/preview-project/file?path=' +
+          encodeURIComponent('.lake/packages/lib/Main.lean'),
+      )
+      assert.equal(request.method, undefined)
+    } else {
+      assert.equal(request.url, '/api/projects/preview-project/library-source')
+      assert.equal(request.method, 'POST')
+      assert.deepEqual(JSON.parse(request.body), {
+        uri: resource.toString(),
+        line: 1,
+      })
+    }
   }
+  f.files.dispose()
+})
+
+test('dependency documentation and configuration resolve as read-only project files', async () => {
+  const f = fixture(async () => ({ content: '# Library α\n' }))
+  for (const path of [
+    '.lake/packages/lib/README.md',
+    '.lake/packages/lib/lakefile.toml',
+  ]) {
+    const resource = uri('/workspace/' + path)
+    const [stat, bytes] = await Promise.all([
+      f.files.stat(resource),
+      f.files.readFile(resource),
+    ])
+    assert.equal(stat.permissions, 1)
+    assert.equal(stat.size, Buffer.byteLength('# Library α\n'))
+    assert.equal(text(bytes), '# Library α\n')
+    assert.equal(
+      f.requests.at(-1).url,
+      '/api/projects/preview-project/file?path=' + encodeURIComponent(path),
+    )
+    assert.equal(f.requests.at(-1).method, undefined)
+    await assert.rejects(
+      f.files.writeFile(resource, new Uint8Array()),
+      /No permissions/,
+    )
+  }
+  assert.equal(f.requests.length, 2)
+  for (const path of [
+    '/workspace/.lake/packages/lib/.env',
+    '/workspace/.lake/packages/lib/data.bin',
+    '/workspace/README.md',
+    '/opt/toolchain/README.md',
+  ])
+    await assert.rejects(f.files.readFile(uri(path)), { code: 'FileNotFound' })
+  assert.equal(f.requests.length, 2)
   f.files.dispose()
 })
 
