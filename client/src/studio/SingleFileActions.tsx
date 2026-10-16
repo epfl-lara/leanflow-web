@@ -7,6 +7,7 @@ export function SingleFileActions({
   available,
   busy,
   primary = false,
+  compact = false,
   busySource,
   preparationState,
   onRetry,
@@ -16,6 +17,7 @@ export function SingleFileActions({
   available: boolean
   busy: boolean
   primary?: boolean
+  compact?: boolean
   busySource?: 'blank' | 'upload'
   preparationState?: PlaygroundPreparationState
   onRetry?: () => void
@@ -38,34 +40,55 @@ export function SingleFileActions({
     }
   }
   return (
-    <div className="single-file-actions">
+    <div
+      className={`single-file-actions${compact ? ' compact' : ''}`}
+      aria-busy={busy || reading}
+    >
       <button
-        className={`button ${primary ? 'primary' : 'secondary small'}`}
+        className={
+          compact
+            ? 'icon-button'
+            : `button ${primary ? 'primary' : 'secondary small'}`
+        }
         title="New Mathlib playground"
+        aria-label={compact ? 'New playground' : undefined}
         disabled={!available || busy || reading}
         onClick={() => onCreate()}
       >
         {busy && busySource !== 'upload' ? (
           <span className="spinner" />
         ) : (
-          <Icon name="file" size={16} />
+          <Icon name={compact ? 'plus' : 'file'} size={16} />
         )}
-        {busy && busySource !== 'upload'
-          ? 'Opening…'
-          : primary
-            ? 'Mathlib Playground'
-            : 'New playground'}
+        {!compact &&
+          (busy && busySource !== 'upload'
+            ? 'Opening…'
+            : primary
+              ? 'Mathlib Playground'
+              : 'New playground')}
       </button>
       <button
-        className={`button subtle ${primary ? '' : 'small'}`}
+        className={
+          compact ? 'icon-button' : `button subtle ${primary ? '' : 'small'}`
+        }
+        aria-label={compact ? 'Open .lean file' : undefined}
+        title={compact ? 'Open a local .lean file as a playground' : undefined}
         disabled={!available || busy || reading}
         onClick={() => input.current?.click()}
       >
-        {reading
-          ? 'Reading…'
-          : busy && busySource === 'upload'
-            ? 'Opening…'
-            : 'Open .lean file'}
+        {compact ? (
+          reading || (busy && busySource === 'upload') ? (
+            <span className="spinner" />
+          ) : (
+            <Icon name="upload" size={15} />
+          )
+        ) : reading ? (
+          'Reading…'
+        ) : busy && busySource === 'upload' ? (
+          'Opening…'
+        ) : (
+          'Open .lean file'
+        )}
       </button>
       <input
         ref={input}

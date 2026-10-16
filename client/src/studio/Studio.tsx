@@ -52,6 +52,7 @@ import { WorkspaceList } from './WorkspaceList'
 import { RenameWorkspaceDialog } from './RenameWorkspaceDialog'
 import { usePlaygroundPreparation } from './usePlaygroundPreparation'
 import { playgroundDownloadName } from './playgroundNames'
+import { downloadProject, downloadWorkspaceFile } from './downloads'
 import { saveAs } from 'file-saver'
 import { SearchPanel } from './SearchPanel'
 import { BooksPanel, type BookChatRequest } from './BooksPanel'
@@ -809,6 +810,44 @@ export function Studio() {
     openFile,
     setFile,
   ])
+
+  async function downloadFile(item: Project, path: string) {
+    try {
+      const snapshot = bufferStore.getSnapshot()
+      const buffer =
+        snapshot.scope.projectId === item.id
+          ? snapshot.buffers.get(path)
+          : undefined
+      const filename =
+        item.kind === 'single-file' && path === 'Main.lean'
+          ? playgroundDownloadName(item.name)
+          : path.split('/').at(-1) || 'download'
+      if (buffer && buffer.content !== buffer.savedContent) {
+        saveAs(
+          new Blob([buffer.content], { type: 'text/plain;charset=utf-8' }),
+          filename,
+        )
+      } else {
+        await downloadWorkspaceFile(item.id, path, filename)
+      }
+    } catch (error) {
+      setError(errorText(error))
+    }
+  }
+
+  async function downloadArchive(item: Project) {
+    try {
+      await downloadProject(item.id, item.name)
+    } catch (error) {
+      setError(errorText(error))
+    }
+  }
+
+  async function downloadWorkspace(item: Project) {
+    return item.kind === 'single-file'
+      ? downloadFile(item, 'Main.lean')
+      : downloadArchive(item)
+  }
 
   const saveFile = useCallback(async () => {
     if (savePromise.current) return savePromise.current.promise
@@ -1722,6 +1761,12 @@ export function Studio() {
                   filter={fileFilter}
                   ready={workspaceEditable}
                   onSelect={chooseFile}
+                  onDownload={(path) =>
+                    project && void downloadFile(project, path)
+                  }
+                  onDownloadProject={() =>
+                    project && void downloadArchive(project)
+                  }
                   onDelete={(path, kind) =>
                     projectId &&
                     requestDelete({ projectId, path, name: path, kind })
@@ -1798,11 +1843,13 @@ export function Studio() {
               className="navigation-resize-handle"
             />
           )}
-          <section className="sidebar-projects-section" aria-label="Projects">
+          <section className="sidebar-projects-section" aria-label="Workspaces">
             <WorkspaceList
               projects={projects}
               selectedId={projectId}
               disabled={opening || saving}
+              onCreateProject={() => setProjectModal({})}
+              onDownload={(item) => void downloadWorkspace(item)}
               onSelect={(id) =>
                 navigate(async () => {
                   setProjectId(id)
@@ -1820,6 +1867,7 @@ export function Studio() {
               playgroundActions={
                 <SingleFileActions
                   available={mathlibAvailable}
+                  compact
                   busy={creatingSingleFile}
                   busySource={creatingPlaygroundSource}
                   preparationState={playgroundPreparation.state}
@@ -1833,13 +1881,6 @@ export function Studio() {
                 />
               }
             />
-            <button
-              className="import-button"
-              onClick={() => setProjectModal({})}
-            >
-              <Icon name="plus" size={16} />
-              Import or create project
-            </button>
           </section>
         </div>
         {!mobileLayout && (
@@ -1859,27 +1900,28 @@ export function Studio() {
           git.repository !== false &&
           project?.status === 'ready' && (
             <div className="git-sidebar">
-              <div className="git-sidebar-caption">
-                <Icon name="git" size={14} />
-                <span title={git.branch || undefined}>
-                  {git.branch || 'Detached HEAD'}
-                </span>
-                <button
-                  className="icon-button"
-                  aria-label="Refresh Git status"
-                  title="Refresh Git status"
-                  onClick={() => projectId && void loadGit(projectId)}
-                >
-                  <Icon name="refresh" size={13} />
-                </button>
-              </div>
               <button
-                className="button secondary small git-source-entry"
+                className="git-source-entry"
+                aria-label={`Source control, ${git.branch || 'Detached HEAD'}, ${git.changes?.length || 0} changes`}
+                title={`Source control · ${git.branch || 'Detached HEAD'}`}
                 onClick={() => setGitOpen('changes')}
               >
                 <Icon name="git" size={14} />
-                Source control
-                <span>{git.changes?.length || 0}</span>
+                <span className="git-branch">
+                  {git.branch || 'Detached HEAD'}
+                </span>
+                <span className="git-source-label">Source control</span>
+                <span className="git-change-count">
+                  {git.changes?.length || 0}
+                </span>
+              </button>
+              <button
+                className="icon-button"
+                aria-label="Refresh Git status"
+                title="Refresh Git status"
+                onClick={() => projectId && void loadGit(projectId)}
+              >
+                <Icon name="refresh" size={13} />
               </button>
             </div>
           )}

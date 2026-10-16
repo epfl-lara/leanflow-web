@@ -258,13 +258,56 @@
   background: transparent;
   text-decoration: underline;
 }
-.git-source-entry {
-  width: 100%;
-  justify-content: flex-start;
-  margin-top: 7px;
+.git-sidebar .git-source-entry {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 7px;
+  padding: 6px 4px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  font-size: 11px;
+}
+.git-sidebar .git-source-entry:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+.git-source-entry > svg {
+  flex-shrink: 0;
+}
+.git-branch {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.git-source-label {
+  font-size: 10px;
+  white-space: nowrap;
+}
+.git-change-count {
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: var(--surface-hover);
+  color: var(--text);
+  font-size: 10px;
 }
 .git-connection-status {
   overflow-wrap: anywhere;
+}
+.git-sidebar {
+  container-type: inline-size;
+  container-name: git-sidebar;
+}
+@container git-sidebar (max-width: 180px) {
+  .git-source-label {
+    display: none;
+  }
 }
 .studio-dialog:has(.git-connections) {
   width: 560px;

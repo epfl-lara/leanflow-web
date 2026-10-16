@@ -2179,7 +2179,10 @@ textarea {
   overflow: auto;
 }
 .git-sidebar {
-  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
   border-top: 1px solid var(--border);
   font-size: 10px;
   color: var(--muted);
@@ -2340,7 +2343,7 @@ textarea {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  padding-bottom: 12px;
+  padding-bottom: 6px;
   border-top: 1px solid var(--border);
 }
 .sidebar-files-section .file-list {
@@ -2353,22 +2356,53 @@ textarea {
   min-height: 0;
   overflow: auto;
 }
-.sidebar-projects-details > summary {
+.sidebar-projects-header {
   justify-content: flex-start;
-  gap: 7px;
-  cursor: pointer;
-  list-style: none;
+  gap: 4px;
   position: sticky;
   top: 0;
   z-index: 1;
   background: var(--sidebar);
-  padding-right: 46px;
+  padding: 5px 10px;
+  font-size: 9px;
+  letter-spacing: 0.8px;
 }
-.sidebar-projects-details > summary::-webkit-details-marker {
-  display: none;
+.sidebar-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
 }
-.sidebar-projects-details[open] > summary > svg {
-  transform: rotate(90deg);
+.sidebar-section-toggle > svg {
+  flex-shrink: 0;
+}
+.sidebar-section-toggle > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.sidebar-section-actions {
+  margin-left: auto;
+  flex-shrink: 0;
+  align-items: center;
+}
+.sidebar-section-actions > .icon-button {
+  width: 26px;
+  height: 26px;
+  padding: 4px;
+}
+.sidebar-projects-header:has(.field-help) {
+  flex-wrap: wrap;
+}
+.sidebar-section-actions:has(.field-help) {
+  flex-basis: 100%;
 }
 .sidebar-projects-create {
   position: absolute;

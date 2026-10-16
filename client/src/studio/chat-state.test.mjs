@@ -392,6 +392,35 @@ test('inline reply boundaries remove blank spacer lines without changing code in
   )
 })
 
+test('stored reasoning history keeps earlier sections when streamed tails are trimmed', () => {
+  const current = appendRunEvents(
+    run({
+      status: 'running',
+      eventCursor: 0,
+      reasoningHistoryAvailable: true,
+    }),
+    [
+      { seq: 1, type: 'reasoning', data: { text: 'Earlier step.' } },
+      { seq: 2, type: 'message', data: { text: 'First reply.' } },
+      { seq: 3, type: 'reasoning', data: { text: 'x'.repeat(250001) } },
+    ],
+  )
+  assert.equal(current.reasoning.length, 250000)
+  assert.equal(current.reasoningBaseOffset, 'Earlier step.'.length + 1)
+  assert.deepEqual(
+    conversationSegments(current).map((part) => part.kind),
+    ['reasoning', 'assistant', 'reasoning'],
+  )
+  assert.deepEqual(
+    current.reasoningBlocks,
+    reasoningBlocksFromEvents([
+      { seq: 1, type: 'reasoning', data: { text: 'Earlier step.' } },
+      { seq: 2, type: 'message', data: { text: 'First reply.' } },
+      { seq: 3, type: 'reasoning', data: { text: 'x'.repeat(250001) } },
+    ]),
+  )
+})
+
 test('reasoning before and after a user update stays on its own side even without a reply', () => {
   const entry = {
     id: 'update-1',

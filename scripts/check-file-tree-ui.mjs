@@ -9,7 +9,9 @@ import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
 const output = path.resolve('.runtime/file-tree-ui')
 await fs.mkdir(output, { recursive: true })
 const app = express()
-app.use(express.static(path.resolve('client/dist')))
+app.use(
+  express.static(path.resolve(process.env.STUDIO_TEST_DIST || 'client/dist')),
+)
 const server = await new Promise((resolve) => {
   const listening = app.listen(0, '127.0.0.1', () => resolve(listening))
 })

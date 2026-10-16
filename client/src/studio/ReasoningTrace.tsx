@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef, useState } from 'react'
-import { type Run, type ReasoningBlock } from './api'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { api, type Run, type ReasoningBlock, type ReasoningPage } from './api'
 import { OutputText } from './AssistantText'
 
 export function ReasoningTrace({
@@ -15,9 +15,12 @@ export function ReasoningTrace({
 }) {
   const [open, setOpen] = useState(false),
     [loading, setLoading] = useState(false),
-    [error, setError] = useState('')
+    [error, setError] = useState(''),
+    [saved, setSaved] = useState<ReasoningPage | null>(null)
   const summary = useRef<HTMLElement>(null)
   const restoreFocus = useRef(false)
+  const historyRequest = useRef<AbortController | null>(null)
+  useEffect(() => () => historyRequest.current?.abort(), [])
   useLayoutEffect(() => {
     if (open || !restoreFocus.current) return
     restoreFocus.current = false
@@ -44,7 +47,7 @@ export function ReasoningTrace({
   )
     return null
   const active = streaming && run.status === 'running'
-  const reasoning = block
+  const retainedReasoning = block
     ? (run.reasoning || '').slice(
         Math.max(0, block.reasoningOffset - (run.reasoningBaseOffset || 0)),
         Math.max(
@@ -55,7 +58,7 @@ export function ReasoningTrace({
         ),
       )
     : run.reasoning
-  const reasoningSummary = block
+  const retainedSummary = block
     ? (run.reasoningSummary || '').slice(
         Math.max(
           0,
@@ -69,6 +72,75 @@ export function ReasoningTrace({
         ),
       )
     : run.reasoningSummary
+  // A saved prefix can meet the live retained tail without duplicating deltas.
+  // Keep a gap collapsed until the user requests the next history page.
+  const withLiveTail = (
+    field: 'reasoning' | 'reasoningSummary',
+    blockOffset: number,
+    baseOffset: number,
+    retained: string | undefined,
+  ) => {
+    if (!saved) return retained
+    const prefix = saved[field]
+    const tailOffset = baseOffset - blockOffset
+    return (
+      prefix +
+      (tailOffset <= prefix.length
+        ? (retained || '').slice(
+            Math.max(0, prefix.length - Math.max(0, tailOffset)),
+          )
+        : '')
+    )
+  }
+  const reasoning = withLiveTail(
+    'reasoning',
+    block?.reasoningOffset || 0,
+    run.reasoningBaseOffset || 0,
+    retainedReasoning,
+  )
+  const reasoningSummary = withLiveTail(
+    'reasoningSummary',
+    block?.summaryOffset || 0,
+    run.reasoningSummaryBaseOffset || 0,
+    retainedSummary,
+  )
+  const nextOffset =
+    saved?.nextOffset ??
+    (saved &&
+    block &&
+    (block.reasoningLength > (reasoning?.length || 0) ||
+      block.summaryLength > (reasoningSummary?.length || 0))
+      ? 0
+      : null)
+  async function loadPage(offset = 0) {
+    if (!block || historyRequest.current) return
+    const controller = new AbortController()
+    historyRequest.current = controller
+    setLoading(true)
+    setError('')
+    try {
+      const page = await api<ReasoningPage>(
+        `/api/runs/${encodeURIComponent(run.id)}/reasoning/${encodeURIComponent(block.id)}?offset=${offset}`,
+        { signal: controller.signal },
+      )
+      if (controller.signal.aborted) return
+      setSaved((previous) => ({
+        reasoning: (offset ? previous?.reasoning || '' : '') + page.reasoning,
+        reasoningSummary:
+          (offset ? previous?.reasoningSummary || '' : '') +
+          page.reasoningSummary,
+        nextOffset: page.nextOffset,
+      }))
+    } catch (error) {
+      if (!controller.signal.aborted)
+        setError(error instanceof Error ? error.message : String(error))
+    } finally {
+      if (historyRequest.current === controller) {
+        historyRequest.current = null
+        if (!controller.signal.aborted) setLoading(false)
+      }
+    }
+  }
   return (
     <details
       className="reasoning-trace inline-reasoning"
@@ -77,6 +149,16 @@ export function ReasoningTrace({
       onToggle={(event) => {
         const expanded = event.currentTarget.open
         setOpen(expanded)
+        if (!expanded) {
+          historyRequest.current?.abort()
+          historyRequest.current = null
+          setLoading(false)
+          return
+        }
+        if (expanded && block && run.reasoningHistoryAvailable) {
+          if (!saved && !loading) void loadPage()
+          return
+        }
         if (
           expanded &&
           ((!run.reasoning && !run.reasoningSummary) ||
@@ -112,7 +194,8 @@ export function ReasoningTrace({
         <>
           {loading && <p className="field-help">Loading reasoning…</p>}
           {error && <p className="error-message">{error}</p>}
-          {run.reasoningTruncated &&
+          {!run.reasoningHistoryAvailable &&
+            run.reasoningTruncated &&
             (!block ||
               block.reasoningOffset < (run.reasoningBaseOffset || 0)) && (
               <p className="field-help">
@@ -128,6 +211,16 @@ export function ReasoningTrace({
             <div className="markdown-body reasoning-content">
               <OutputText text={reasoning} streaming={active} />
             </div>
+          )}
+          {nextOffset != null && (
+            <button
+              type="button"
+              className="turn-action"
+              disabled={loading}
+              onClick={() => void loadPage(nextOffset)}
+            >
+              Load more reasoning
+            </button>
           )}
           <button
             type="button"

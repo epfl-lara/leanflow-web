@@ -308,6 +308,7 @@ export interface Run {
   messageTruncated?: boolean
   reasoning?: string
   reasoningBlocks?: ReasoningBlock[]
+  reasoningHistoryAvailable?: boolean
   reasoningHistoryCursor?: number
   reasoningBaseOffset?: number
   reasoningSummaryBaseOffset?: number
@@ -328,6 +329,12 @@ export interface Run {
   usage?: unknown
   appliedAt?: string
   [key: string]: unknown
+}
+
+export interface ReasoningPage {
+  reasoning: string
+  reasoningSummary: string
+  nextOffset: number | null
 }
 
 // Polls and steering acknowledge a run without sending full proof previews.
@@ -439,6 +446,30 @@ export async function apiPdf(path: string, signal: AbortSignal): Promise<Blob> {
       'This file could not be opened as a PDF. Choose a PDF document.',
     )
   return response.blob()
+}
+
+export async function apiDownload(
+  path: string,
+): Promise<{ blob: Blob; filename: string | null }> {
+  const response = await request(path)
+  if (!response.ok) await responseData(response)
+  const disposition = response.headers.get('content-disposition') || ''
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1]
+  const quoted = /filename="((?:[^"\\]|\\.)*)"/i.exec(disposition)?.[1]
+  let filename = quoted?.replace(/\\(.)/g, '$1') || null
+  if (encoded) {
+    try {
+      filename = decodeURIComponent(encoded)
+    } catch {
+      // A malformed filename must not prevent downloading the file itself.
+    }
+  }
+  filename =
+    filename
+      ?.split(/[\\/]/)
+      .at(-1)
+      ?.replace(/[\x00-\x1f\x7f]/g, '') || null
+  return { blob: await response.blob(), filename }
 }
 
 export const post = <T>(path: string, body: unknown = {}) =>

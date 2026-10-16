@@ -202,7 +202,7 @@ try {
   report.checks.push(
     'One-click Mathlib single file opens without a project dialog; file tree and Git are hidden; rename/delete controls and Lemex remain available',
   )
-  const playgroundSection = page.locator('details[aria-label="Playgrounds"]')
+  const playgroundSection = page.locator('section[aria-label="Playgrounds"]')
   await playgroundSection
     .getByRole('button', { name: 'New playground', exact: true })
     .waitFor()
@@ -212,20 +212,29 @@ try {
       .count(),
     0,
   )
-  await playgroundSection.locator('summary').click()
+  const playgroundToggle = playgroundSection.getByRole('button', {
+    name: 'Playgrounds',
+    exact: true,
+  })
+  await playgroundToggle.click()
   assert.equal(
     await playgroundSection
       .getByRole('button', { name: 'New playground', exact: true })
       .isVisible(),
+    true,
+  )
+  assert.equal(await playgroundToggle.getAttribute('aria-expanded'), 'false')
+  assert.equal(
+    await playgroundSection.locator('.project-list').isVisible(),
     false,
   )
-  await playgroundSection.locator('summary').click()
+  await playgroundToggle.click()
   await page.screenshot({
     path: path.join(reportDir, 'playground-section-desktop.png'),
     fullPage: true,
   })
   report.checks.push(
-    'Playground creation and file import belong to the collapsible Playgrounds section; the sidebar footer only creates projects',
+    'Playground creation and file import stay reachable in the section header while its workspace list is collapsed',
   )
 
   const savedId = state.projects[0].id

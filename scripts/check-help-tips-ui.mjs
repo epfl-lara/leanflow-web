@@ -187,20 +187,24 @@ try {
     'Each toolbar action and help button share a named group and matching help title; help preserves panel choices, closes on a second click, and opens on keyboard focus',
   )
 
-  const playgrounds = page.locator('details[aria-label="Playgrounds"]')
+  const playgrounds = page.locator('section[aria-label="Playgrounds"]')
+  const playgroundToggle = playgrounds.getByRole('button', {
+    name: 'Playgrounds',
+    exact: true,
+  })
   await help('Playgrounds').click()
   await tooltip.waitFor()
-  assert.equal(await playgrounds.evaluate((element) => element.open), true)
+  assert.equal(await playgroundToggle.getAttribute('aria-expanded'), 'true')
   await dismissHelp()
-  await playgrounds.locator('summary').click()
-  assert.equal(await playgrounds.evaluate((element) => element.open), false)
+  await playgroundToggle.click()
+  assert.equal(await playgroundToggle.getAttribute('aria-expanded'), 'false')
   await help('Playgrounds').click()
   await tooltip.waitFor()
-  assert.equal(await playgrounds.evaluate((element) => element.open), false)
+  assert.equal(await playgroundToggle.getAttribute('aria-expanded'), 'false')
   await dismissHelp()
-  await playgrounds.locator('summary').click()
+  await playgroundToggle.click()
   report.checks.push(
-    'Clicking help preserves both open and collapsed sections; the section summary still toggles normally',
+    'Clicking help preserves both open and collapsed sections; the section button still toggles normally',
   )
 
   const liveEdits = page.getByRole('checkbox', {
@@ -303,7 +307,12 @@ try {
   })
   await visibleHelp()
   await assertFits()
-  assert.equal(await playgrounds.evaluate((element) => element.open), true)
+  assert.equal(
+    await playgrounds
+      .locator('.sidebar-section-toggle')
+      .getAttribute('aria-expanded'),
+    'true',
+  )
   await page.screenshot({
     path: path.join(reportDir, 'help-mobile.png'),
     fullPage: true,

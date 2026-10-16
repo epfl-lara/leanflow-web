@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useState } from 'react'
 import type { FileEntry } from './api'
 import { Icon } from './Icons'
 import { parentFolders } from './projectPaths'
+import { ContextMenu, useContextMenu } from './ContextMenu'
 
 const MAX_VISIBLE = 200
 const TREE_INDENT = 16
@@ -66,6 +67,8 @@ export const FileBrowser = memo(function FileBrowser({
   ready,
   onSelect,
   onDelete,
+  onDownload,
+  onDownloadProject,
 }: {
   files: FileEntry[]
   folders: string[]
@@ -79,9 +82,17 @@ export const FileBrowser = memo(function FileBrowser({
   ready: boolean
   onSelect: (path: string) => void
   onDelete: (path: string, kind: 'file' | 'folder') => void
+  onDownload: (path: string) => void
+  onDownloadProject?: () => void
 }) {
   const [librariesOpen, setLibrariesOpen] = useState(false)
   const [openFolders, setOpenFolders] = useState<Set<string>>(new Set())
+  const context = useContextMenu<
+    { kind: 'file'; file: FileEntry } | { kind: 'project' }
+  >()
+  useEffect(() => {
+    if (disabled) context.close()
+  }, [disabled, context.close])
   const filtered = useMemo(() => {
     const query = filter.trim().toLowerCase()
     const project: FileEntry[] = []
@@ -166,10 +177,12 @@ export const FileBrowser = memo(function FileBrowser({
       key={file.path}
       className={`file-row ${selectedPath === file.path ? 'selected' : ''}`}
       style={depth ? { paddingLeft: depth * TREE_INDENT } : undefined}
+      {...context.triggerProps({ kind: 'file', file }, disabled)}
     >
       <button
         className={`file-item ${selectedPath === file.path ? 'selected' : ''}`}
         aria-current={selectedPath === file.path ? 'true' : undefined}
+        aria-haspopup={disabled ? undefined : 'menu'}
         title={file.path}
         disabled={disabled}
         onClick={() => {
@@ -195,6 +208,23 @@ export const FileBrowser = memo(function FileBrowser({
           : selectedPath === file.path && dirty) && (
           <span className="dirty-dot" aria-label="Unsaved changes" />
         )}
+      </button>
+      <button
+        className="icon-button row-menu-button"
+        type="button"
+        title={`Actions for file ${file.path}`}
+        aria-label={`Actions for file ${file.path}`}
+        aria-haspopup="menu"
+        aria-expanded={
+          context.menu?.target.kind === 'file' &&
+          context.menu.target.file.path === file.path
+        }
+        disabled={disabled}
+        onClick={(event) =>
+          context.open({ kind: 'file', file }, event.currentTarget)
+        }
+      >
+        <Icon name="more" size={15} />
       </button>
       {!dependency && !file.readOnly && !file.path.startsWith('.lake/') && (
         <button
@@ -280,14 +310,24 @@ export const FileBrowser = memo(function FileBrowser({
   return (
     <div className="file-list">
       {projectName && (
-        <div
+        <button
           className="project-root-label"
+          type="button"
           title={`Project root — ${projectName}`}
+          disabled={disabled || !onDownloadProject}
+          aria-expanded={context.menu?.target.kind === 'project'}
+          onClick={(event) =>
+            context.open({ kind: 'project' }, event.currentTarget)
+          }
+          {...context.triggerProps(
+            { kind: 'project' },
+            disabled || !onDownloadProject,
+          )}
         >
           <Icon name="folder" size={15} />
           <strong>{projectName}</strong>
           <span>Project root</span>
-        </div>
+        </button>
       )}
       {folderRows(projectTree, projectName ? 1 : 0)}
       {filtered.project.length > MAX_VISIBLE && (
@@ -347,6 +387,51 @@ export const FileBrowser = memo(function FileBrowser({
             No files or folders match this filter.
           </p>
         )}
+      {context.menu && (
+        <ContextMenu
+          position={context.menu}
+          label={
+            context.menu.target.kind === 'project'
+              ? `Actions for ${projectName}`
+              : `Actions for ${context.menu.target.file.path}`
+          }
+          onClose={context.close}
+          items={
+            context.menu.target.kind === 'project'
+              ? [
+                  {
+                    label: 'Download project ZIP',
+                    description: 'Saved files only. Save edits first.',
+                    icon: <Icon name="download" size={15} />,
+                    disabled: disabled || !onDownloadProject,
+                    onSelect: () => onDownloadProject?.(),
+                  },
+                ]
+              : (() => {
+                  const file = context.menu.target.file
+                  return [
+                    {
+                      label: 'Download file',
+                      icon: <Icon name="download" size={15} />,
+                      disabled,
+                      onSelect: () => onDownload(file.path),
+                    },
+                    ...(!file.readOnly && !file.path.startsWith('.lake/')
+                      ? [
+                          {
+                            label: 'Move to trash',
+                            icon: <Icon name="trash" size={15} />,
+                            danger: true,
+                            disabled: disabled || !ready,
+                            onSelect: () => onDelete(file.path, 'file'),
+                          },
+                        ]
+                      : []),
+                  ]
+                })()
+          }
+        />
+      )}
     </div>
   )
 })

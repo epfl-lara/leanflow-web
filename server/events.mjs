@@ -9,7 +9,6 @@ import {
 } from './pinned-lake.mjs'
 import {
   recordReasoningBlock,
-  retainedReasoningBlocks,
   reasoningBlocksFromEvents,
 } from '../shared/reasoning-timeline.mjs'
 
@@ -153,10 +152,20 @@ export class EventStore extends EventEmitter {
     // Both reads are synchronous: no event producer can run between reading the
     // accumulated fields and the replay cursor in this server process.
     const eventCursor = this.cursor(job.id)
-    return { ...job, reasoningBlocks: this.reasoningBlocks(job), eventCursor }
+    return {
+      ...job,
+      reasoningBlocks: this.reasoningBlocks(job),
+      reasoningHistoryAvailable: true,
+      eventCursor,
+    }
   }
   reasoningBlocks(job) {
-    if (Array.isArray(job.reasoningBlocks)) return job.reasoningBlocks
+    if (
+      Array.isArray(job.reasoningBlocks) &&
+      (job.reasoningHistoryAvailable ||
+        (!job.reasoningBaseOffset && !job.reasoningSummaryBaseOffset))
+    )
+      return job.reasoningBlocks
     if (!job.reasoning && !job.reasoningSummary) return []
     const cursor = this.cursor(job.id)
     const cached = this.reasoningCache.get(job.id)
@@ -166,21 +175,65 @@ export class EventStore extends EventEmitter {
         "SELECT payload FROM events WHERE job=? AND json_extract(payload,'$.type') IN ('message','reasoning','reasoning-summary','followup') ORDER BY seq",
       )
       .iterate(job.id)
-    const blocks = retainedReasoningBlocks(
-      reasoningBlocksFromEvents(
-        (function* () {
-          for (const row of rows) yield JSON.parse(row.payload)
-        })(),
-      ),
-      {
-        reasoning: job.reasoningBaseOffset || 0,
-        reasoningSummary: job.reasoningSummaryBaseOffset || 0,
-      },
+    const blocks = reasoningBlocksFromEvents(
+      (function* () {
+        for (const row of rows) yield JSON.parse(row.payload)
+      })(),
     )
     if (this.reasoningCache.size >= 128)
       this.reasoningCache.delete(this.reasoningCache.keys().next().value)
     this.reasoningCache.set(job.id, { cursor, blocks })
     return blocks
+  }
+  reasoningPage(id, owner, blockId, offset = 0) {
+    const job = this.getMetadata(id, owner)
+    const blocks = this.reasoningBlocks(job)
+    const index = blocks.findIndex((block) => block.id === blockId)
+    if (index < 0)
+      throw Object.assign(new Error('Reasoning step not found.'), {
+        status: 404,
+      })
+    const block = blocks[index]
+    if (
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      offset > Math.max(block.reasoningLength, block.summaryLength)
+    )
+      throw Object.assign(new Error('Invalid reasoning position.'), {
+        status: 400,
+      })
+    const limit = 250_000
+    const result = { reasoning: '', reasoningSummary: '', nextOffset: null }
+    const lengths = { reasoning: 0, reasoningSummary: 0 }
+    const start = Number(block.id.slice('reasoning-'.length))
+    const end = blocks[index + 1]
+      ? Number(blocks[index + 1].id.slice('reasoning-'.length))
+      : this.cursor(id) + 1
+    for (const row of this.db
+      .prepare(
+        "SELECT payload FROM events WHERE job=? AND seq>=? AND seq<? AND json_extract(payload,'$.type') IN ('reasoning','reasoning-summary') ORDER BY seq",
+      )
+      .iterate(id, start, end)) {
+      const event = JSON.parse(row.payload)
+      const field =
+        event.type === 'reasoning' ? 'reasoning' : 'reasoningSummary'
+      const text = typeof event.data?.text === 'string' ? event.data.text : ''
+      const position = lengths[field]
+      lengths[field] += text.length
+      result[field] += text.slice(
+        Math.max(0, offset - position),
+        Math.max(0, offset + limit - position),
+      )
+      if (
+        lengths.reasoning >= Math.min(block.reasoningLength, offset + limit) &&
+        lengths.reasoningSummary >=
+          Math.min(block.summaryLength, offset + limit)
+      )
+        break
+    }
+    if (Math.max(block.reasoningLength, block.summaryLength) > offset + limit)
+      result.nextOffset = offset + limit
+    return result
   }
   cursor(id) {
     return Number(
@@ -356,16 +409,8 @@ export class EventStore extends EventEmitter {
       ...(truncated ? { [field + 'Truncated']: true } : {}),
       ...(tracksOutput
         ? {
-            reasoningBlocks: retainedReasoningBlocks(blocks, {
-              reasoning:
-                field === 'reasoning'
-                  ? baseOffset
-                  : job.reasoningBaseOffset || 0,
-              reasoningSummary:
-                field === 'reasoningSummary'
-                  ? baseOffset
-                  : job.reasoningSummaryBaseOffset || 0,
-            }),
+            reasoningBlocks: blocks,
+            reasoningHistoryAvailable: true,
           }
         : {}),
     })

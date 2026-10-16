@@ -29,6 +29,7 @@ import { repairProjectSetup, withSetupRepairDeadline } from './setup-repair.mjs'
 import { GitPublisher } from './git-publish.mjs'
 import { validateGitBranch } from './git-branches.mjs'
 import { pdfDisposition } from './pdf-preview.mjs'
+import { installProjectDownloadRoutes } from './project-downloads.mjs'
 import { proofTargetReference } from './proof-target.mjs'
 import { loadCapacity } from './capacity.mjs'
 import { LeanBooks, installBookRoutes } from './lean-books.mjs'
@@ -117,6 +118,7 @@ const chatTranscript = (job, eventCursor, reasoningBlocks) => ({
   messageBaseOffset: job.messageBaseOffset || 0,
   messageTruncated: !!job.messageTruncated,
   reasoningBlocks,
+  reasoningHistoryAvailable: true,
   followups: (job.followups || []).map((entry) => ({
     ...entry,
     ...(entry.proofTarget
@@ -589,6 +591,7 @@ export async function createStudio({
       await workspaces.readFile(req.params.id, req.user.id, req.query.path),
     ),
   )
+  installProjectDownloadRoutes(app, workspaces)
   app.get('/api/projects/:id/file-preview', async (req, res) => {
     const preview = await workspaces.readPdfPreview(
       req.params.id,
@@ -1017,6 +1020,23 @@ export async function createStudio({
         : publicJob(events.snapshot(req.params.id, req.user.id)),
     ),
   )
+  app.get('/api/runs/:id/reasoning/:blockId', (req, res) => {
+    const position = req.query.offset
+    const offset =
+      position === undefined
+        ? 0
+        : typeof position === 'string' && position.trim()
+          ? Number(position)
+          : NaN
+    res.json(
+      events.reasoningPage(
+        req.params.id,
+        req.user.id,
+        req.params.blockId,
+        offset,
+      ),
+    )
+  })
   app.post('/api/runs/:id/messages', async (req, res) => {
     await agents.message(req.user.id, req.params.id, req.body)
     res.json(

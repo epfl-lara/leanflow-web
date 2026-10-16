@@ -498,6 +498,67 @@ test('HTTP history retains reasoning step positions without trace bodies, includ
   assert.deepEqual(continued.reasoningBlocks, full.reasoningBlocks)
 })
 
+test('earlier reasoning survives tail trimming and loads in bounded owned pages for older runs', async (t) => {
+  const f = await httpFixture(t),
+    chat = f.chats.create('owner', f.project.id)
+  const job = f.events.create('owner', {
+    kind: 'agent',
+    projectId: f.project.id,
+    chatId: chat.id,
+  })
+  f.chats.appendRun(chat.id, 'owner', job)
+  const earlier = 'EARLY_REASONING: ' + 'x'.repeat(249983) + '🔎' + ' ending.'
+  f.events.append(job.id, 'reasoning', earlier, 'reasoning')
+  f.events.append(
+    job.id,
+    'reasoningSummary',
+    'Earlier summary.',
+    'reasoning-summary',
+  )
+  f.events.append(job.id, 'message', 'The first check passed.', 'message')
+  f.events.append(job.id, 'reasoning', 'y'.repeat(250001), 'reasoning')
+  f.events.update(job.id, { status: 'completed' })
+  const snapshot = await (await f.request(`/api/runs/${job.id}`)).json()
+  assert.equal(snapshot.reasoning.length, 250000)
+  assert.equal(snapshot.reasoningBlocks.length, 2)
+  assert.equal(snapshot.reasoningHistoryAvailable, true)
+  // Older versions discarded early positions from metadata, but kept events.
+  f.events.db
+    .prepare(
+      "UPDATE jobs SET payload=json_set(json_remove(payload,'$.reasoningHistoryAvailable'),'$.reasoningBlocks',json(?)) WHERE id=?",
+    )
+    .run(JSON.stringify(snapshot.reasoningBlocks.slice(-1)), job.id)
+  const history = (await (await f.request(`/api/chats/${chat.id}`)).json())
+    .runs[0]
+  assert.deepEqual(history.reasoningBlocks, snapshot.reasoningBlocks)
+  assert.equal(history.reasoningHistoryAvailable, true)
+  assert.equal(history.reasoning, undefined)
+  const base = `/api/runs/${job.id}/reasoning/${history.reasoningBlocks[0].id}`
+  const first = await (await f.request(base)).json()
+  assert.equal(first.reasoning.length, 250000)
+  assert.equal(first.reasoningSummary, 'Earlier summary.')
+  assert.equal(first.nextOffset, 250000)
+  const last = await (
+    await f.request(`${base}?offset=${first.nextOffset}`)
+  ).json()
+  assert.equal(first.reasoning + last.reasoning, earlier)
+  assert.equal(last.reasoningSummary, '')
+  assert.equal(last.nextOffset, null)
+  assert.equal((await f.request(base, { access: f.bobToken })).status, 404)
+  assert.equal(
+    (await f.request(`/api/runs/${job.id}/reasoning/unknown`)).status,
+    404,
+  )
+  for (const offset of ['-1', '1.5', 'Infinity', '500000', '', '1&offset=2'])
+    assert.equal((await f.request(`${base}?offset=${offset}`)).status, 400)
+  f.events.append(job.id, 'message', 'Another reply.', 'message')
+  assert.deepEqual(
+    f.events.snapshot(job.id).reasoningBlocks,
+    snapshot.reasoningBlocks,
+  )
+  assert.equal(f.events.getMetadata(job.id).reasoningHistoryAvailable, true)
+})
+
 test('project run and check creation return initial snapshots with replay cursors', async (t) => {
   const f = await httpFixture(t)
   const response = await f.request(`/api/projects/${f.project.id}/runs`, {

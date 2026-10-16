@@ -11,6 +11,19 @@
   flex-basis: 100%;
   margin: 0;
 }
+.single-file-actions.compact {
+  gap: 2px;
+}
+.single-file-actions.compact > .icon-button {
+  width: 26px;
+  height: 26px;
+  padding: 4px;
+}
+.single-file-actions.compact .field-help {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: normal;
+}
 .welcome-state > .single-file-actions {
   margin-bottom: 12px;
 }
@@ -65,5 +78,63 @@
   .project-actions {
     opacity: 1;
     pointer-events: auto;
+  }
+}
+
+.row-menu-button {
+  flex-shrink: 0;
+  width: 24px;
+  height: 28px;
+  padding: 4px;
+  opacity: 0;
+  pointer-events: none;
+}
+.file-row > .file-delete,
+.project-actions > .icon-button {
+  width: 24px;
+  height: 28px;
+  padding: 4px;
+}
+.file-row:hover > .row-menu-button,
+.file-row:focus-within > .row-menu-button,
+.project-row:hover .row-menu-button,
+.project-row:focus-within .row-menu-button,
+.row-menu-button[aria-expanded='true'] {
+  opacity: 1;
+  pointer-events: auto;
+}
+.project-row .project-item {
+  padding-right: 58px;
+}
+.project-row:has(.playground-actions) .project-item {
+  padding-right: 84px;
+}
+.project-row:has(.row-menu-button[aria-expanded='true']) .project-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+button.project-root-label {
+  width: 100%;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  text-align: left;
+}
+button.project-root-label:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+@media (hover: none), (pointer: coarse) {
+  .row-menu-button,
+  .project-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+.file-list {
+  container: file-tree / inline-size;
+}
+@container file-tree (max-width: 200px) {
+  .file-row > .file-delete {
+    display: none;
   }
 }

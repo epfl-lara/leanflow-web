@@ -99,10 +99,12 @@ export function appendRunEvents(previous: Run, events: RunEvent[]): Run {
             : (next[baseField] || 0) +
               Math.max(0, combined.length - OUTPUT_LIMIT)
       }
-      next.reasoningBlocks = retainedReasoningBlocks(blocks, {
-        reasoning: next.reasoningBaseOffset || 0,
-        reasoningSummary: next.reasoningSummaryBaseOffset || 0,
-      })
+      next.reasoningBlocks = next.reasoningHistoryAvailable
+        ? blocks
+        : retainedReasoningBlocks(blocks, {
+            reasoning: next.reasoningBaseOffset || 0,
+            reasoningSummary: next.reasoningSummaryBaseOffset || 0,
+          })
       if (field === 'message') {
         next.messageBaseOffset =
           Number.isSafeInteger(data.baseOffset) && Number(data.baseOffset) >= 0

@@ -346,6 +346,8 @@ async function workspaceFileBytes(
     missing = false,
     byteLimit = sourceFileByteLimit(filename),
     tooLargeMessage = `Files larger than ${byteLimit / (1024 * 1024)} MiB are not editable. Reduce the file or split Lean sources into smaller modules.`,
+    signal,
+    requireUnchanged = false,
   } = {},
 ) {
   let handle
@@ -376,6 +378,7 @@ async function workspaceFileBytes(
     const chunks = []
     let size = 0
     while (true) {
+      signal?.throwIfAborted()
       // Read at most one byte beyond the limit, even when a worker grows the
       // file after stat(). Never allocate an unbounded preview or source read.
       const chunk = Buffer.allocUnsafe(
@@ -386,6 +389,19 @@ async function workspaceFileBytes(
       size += bytesRead
       if (size > byteLimit) fail(tooLargeMessage, 413)
       chunks.push(chunk.subarray(0, bytesRead))
+    }
+    if (requireUnchanged) {
+      const after = await handle.stat()
+      if (
+        size !== stat.size ||
+        after.size !== stat.size ||
+        after.mtimeMs !== stat.mtimeMs ||
+        after.ctimeMs !== stat.ctimeMs
+      )
+        fail(
+          'This file changed during download. Try downloading it again.',
+          409,
+        )
     }
     return { content: Buffer.concat(chunks, size), mode: stat.mode & 0o777 }
   } finally {
@@ -3483,6 +3499,25 @@ export class WorkspaceStore {
       : project.root
     const { content, hash } = await textFile(await guarded(root, filename))
     return { content, hash }
+  }
+
+  async readDownloadFile(id, owner, filename, { byteLimit, signal } = {}) {
+    const project = this.get(id, owner)
+    const relative = relativeFile(filename)
+    const root = relative.startsWith('.lake/packages/')
+      ? (await this.runtime.dependencyRoot?.(project.root)) || project.root
+      : project.root
+    const { content, mode } = await workspaceFileBytes(
+      await guarded(root, relative),
+      {
+        byteLimit: byteLimit ?? 32 * 1024 * 1024,
+        tooLargeMessage:
+          'This file is too large to download here. Download it from the project’s Git repository instead.',
+        signal,
+        requireUnchanged: true,
+      },
+    )
+    return { content, mode, path: relative }
   }
 
   async readPdfPreview(id, owner, filename) {
