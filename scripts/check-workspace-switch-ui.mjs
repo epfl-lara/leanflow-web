@@ -35,6 +35,7 @@ const projectFiles = (key) => ({
         'lean-toolchain': 'leanprover/lean4:v4.35.0-rc4\n',
         'lakefile.toml': 'name = "scratch_fixture"\n',
         'lake-manifest.json': '{"version":"1.2.0","packages":[]}\n',
+        '.gitignore': '.lake/\n',
       }
     : {}),
   ...(key === 'b'
@@ -43,6 +44,13 @@ const projectFiles = (key) => ({
         'main.tex': `\\documentclass{article}\n\\begin{document}\n${marker[key]} document.\n\\end{document}\n`,
         [`${key}-only.md`]: `# ${marker[key]}\n`,
       }),
+  ...(key === 'c'
+    ? {
+        'README.md':
+          '# GAMMA_ONLY notes\n\n## Reading files\n\n[Lean source](Main.lean) · [TeX source](main.tex) · [PDF file](paper.pdf)\n',
+        'paper.pdf': 'Fixture PDF file',
+      }
+    : {}),
 })
 const held = new Map()
 const releaseAll = () => {
@@ -57,9 +65,18 @@ let fixture
 try {
   fixture = await chatBrowserFixture({
     base: `http://127.0.0.1:${server.address().port}`,
+    // Use the full browser so screenshots exercise Chromium's native PDF viewer.
+    launchOptions: { channel: 'chromium' },
     session: {
       user: { id: 'fixture-owner', name: 'Fixture owner' },
-      templates: [],
+      templates: [
+        {
+          id: 'mathlib',
+          name: 'Mathlib',
+          ready: true,
+          toolchain: 'leanprover/lean4:v4.35.0-rc4',
+        },
+      ],
       models: [{ id: 'fixture', name: 'Fixture' }],
       defaultModel: 'fixture',
       runtime: { ready: true },
@@ -90,6 +107,30 @@ try {
   let delayWrite = null
   let delayPdf = null
   let delayStatus = null
+  let rejectNextSave = false
+  let creationCount = 0
+  await page.route('**/api/playground', (route) =>
+    route.fulfill({ json: { state: 'ready' } }),
+  )
+  await page.route('**/api/projects', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    assert.equal(route.request().postDataJSON().kind, 'single-file')
+    const number = ++creationCount
+    await hold(`creation:${number}`)
+    const project = {
+      id: `new-playground-${number}`,
+      name: `Created playground ${number}`,
+      kind: 'single-file',
+      preset: 'mathlib',
+      status: 'ready',
+      toolchain: 'leanprover/lean4:v4.35.0-rc4',
+    }
+    state.projects.push(project)
+    state.files[project.id] = {
+      'Main.lean': `import Mathlib\n-- CREATED_${number}\n`,
+    }
+    return route.fulfill({ status: 201, json: project })
+  })
   const completed = Object.fromEntries(
     ['a', 'c'].map((key) => {
       const projectId = ids[key]
@@ -159,6 +200,16 @@ try {
         input.expectedHash,
         previous === undefined ? null : hash(previous),
       )
+      if (rejectNextSave) {
+        rejectNextSave = false
+        return route.fulfill({
+          status: 409,
+          json: {
+            error:
+              'The saved file changed. Reload it before saving your edits.',
+          },
+        })
+      }
       writes.push({ projectId, path: filename, ...input })
       if (delayWrite === projectId) {
         delayWrite = null
@@ -177,6 +228,14 @@ try {
       const project = state.projects.find((entry) => entry.id === projectId)
       project.kind = 'project'
       return route.fulfill({ json: project })
+    }
+    if (suffix === '/file-preview') {
+      assert.equal(filename, 'paper.pdf')
+      assert.equal(projectId, ids.c)
+      return route.fulfill({
+        contentType: 'application/pdf',
+        body: fixturePdf(),
+      })
     }
     if (suffix.startsWith('/tex')) {
       if (suffix.endsWith('/pdf')) {
@@ -297,6 +356,29 @@ try {
     assert.equal(terminals.at(-1), ids[key])
   }
 
+  const waitPdfRendered = async (iframe) => {
+    await until(async () => {
+      const element = await iframe.elementHandle()
+      const documentFrame = await element?.contentFrame()
+      if (!documentFrame) return false
+      const descendants = (frame) => [
+        frame,
+        ...frame.childFrames().flatMap(descendants),
+      ]
+      for (const frame of descendants(documentFrame)) {
+        if (!frame.url().startsWith('chrome-extension://')) continue
+        const loaded = await frame
+          .evaluate(
+            () =>
+              document.querySelector('pdf-viewer')?.loadState_ === 'success',
+          )
+          .catch(() => false)
+        if (loaded) return true
+      }
+      return false
+    }, 'native PDF document rendered')
+  }
+
   await fixture.ready()
   await open('main.tex', marker.a)
   await panel.waitFor()
@@ -335,6 +417,10 @@ try {
   await page
     .getByText('This playground has additional files.', { exact: false })
     .waitFor()
+  assert.equal(
+    await page.getByRole('button', { name: 'New folder', exact: true }).count(),
+    0,
+  )
   assert.equal(
     state.projects.find((entry) => entry.id === ids.b).kind,
     'single-file',
@@ -546,6 +632,348 @@ try {
   assert((await editorText()).includes(marker.a))
   report.checks.push(
     'Returning to the same project starts a new visit: an earlier listing cannot hide files added before the return.',
+  )
+
+  await switchTo('c', 'main.tex')
+  await panel.locator('iframe[title="PDF preview"]').waitFor()
+  const pdfBounds = await panel
+    .locator('iframe[title="PDF preview"]')
+    .boundingBox()
+  const texBounds = await panel.boundingBox()
+  await waitPdfRendered(panel.locator('iframe[title="PDF preview"]'))
+  assert(
+    pdfBounds.height > texBounds.height * 0.8,
+    'The compact PDF controls leave most panel height for reading',
+  )
+  await page.screenshot({
+    path: path.join(output, 'multi-file-tex-desktop.png'),
+    fullPage: true,
+  })
+  for (const width of [1140, 1100]) {
+    await page.setViewportSize({ width, height: 900 })
+    await until(
+      async () =>
+        (
+          await page.locator('.file-reading-workspace').getAttribute('class')
+        ).includes('tex-stacked'),
+      'narrow center workspace stacks source and PDF',
+    )
+    assert.equal(
+      await page
+        .getByRole('separator', {
+          name: 'Resize LaTeX source and PDF',
+          exact: true,
+        })
+        .getAttribute('aria-orientation'),
+      'horizontal',
+    )
+    assert.equal(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+      true,
+    )
+    await page.screenshot({
+      path: path.join(output, `multi-file-tex-assistant-stacked-${width}.png`),
+      fullPage: true,
+    })
+  }
+  await page.getByRole('button', { name: 'Lemex', exact: true }).click()
+  await page.setViewportSize({ width: 960, height: 900 })
+  assert(await panel.isVisible())
+  assert.equal(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+    true,
+  )
+  await page.screenshot({
+    path: path.join(output, 'multi-file-tex-narrow.png'),
+    fullPage: true,
+  })
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  await open('README.md', marker.c)
+  assert.equal(await panel.isVisible(), false)
+  await page
+    .getByRole('button', { name: 'Preview Markdown', exact: true })
+    .click()
+  const markdown = page.getByRole('region', {
+    name: 'Markdown preview',
+    exact: true,
+  })
+  await markdown
+    .getByRole('heading', { name: 'GAMMA_ONLY notes', exact: true })
+    .waitFor()
+  await page.screenshot({
+    path: path.join(output, 'multi-file-markdown-preview.png'),
+    fullPage: true,
+  })
+  await markdown.getByRole('link', { name: 'PDF file', exact: true }).click()
+  await until(
+    async () =>
+      (await page.locator('.file-tab').innerText()).includes('paper.pdf'),
+    'linked PDF file',
+  )
+  const projectPdf = page.locator('.file-reading-workspace > .pdf-file-viewer')
+  await projectPdf.locator('iframe[title="PDF preview"]').waitFor()
+  await waitPdfRendered(projectPdf.locator('iframe[title="PDF preview"]'))
+  assert.equal(await page.locator('.monaco-editor:visible').count(), 0)
+  assert.equal(await panel.isVisible(), false)
+  await page.screenshot({
+    path: path.join(output, 'multi-file-project-pdf.png'),
+    fullPage: true,
+  })
+  await open('Main.lean', marker.c)
+  await until(
+    () => page.locator('.infoview-pane').isVisible(),
+    'Lean goals after document reading',
+  )
+  assert.equal(await projectPdf.count(), 0)
+  assert.equal(await panel.isVisible(), false)
+  await page.screenshot({
+    path: path.join(output, 'multi-file-lean-return.png'),
+    fullPage: true,
+  })
+  await open('main.tex', marker.c)
+  await panel.locator('iframe[title="PDF preview"]').waitFor()
+  assert.equal(await page.locator('.monaco-editor').count(), 1)
+  assert.equal(await save.isDisabled(), true)
+  report.checks.push(
+    'Mixed Lean, TeX, Markdown and PDF navigation preserves one editor and correct readers/goals; compact PDFs leave reading space in desktop and narrow layouts without horizontal overflow.',
+  )
+  await switchTo('a', 'main.tex')
+
+  await append('\n% SAVE_CONFLICT_DRAFT\n')
+  await select('c').click()
+  await unsaved.waitFor()
+  rejectNextSave = true
+  await unsaved
+    .getByRole('button', { name: 'Save & continue', exact: true })
+    .click()
+  await unsaved
+    .getByRole('alert')
+    .filter({
+      hasText: 'The saved file changed. Reload it before saving your edits.',
+    })
+    .waitFor()
+  await page.screenshot({
+    path: path.join(output, 'save-conflict-dialog.png'),
+    fullPage: true,
+  })
+  assert.equal(await select('a').getAttribute('aria-current'), 'page')
+  assert((await editorText()).includes('SAVE_CONFLICT_DRAFT'))
+  await unsaved.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await save.click()
+  await until(() => save.isDisabled(), 'draft saved after conflict retry')
+  report.checks.push(
+    'A save conflict is visible inside the navigation dialog, keeps the current project and draft, and permits cancellation and retry.',
+  )
+
+  const startHeldPlayground = async (number) => {
+    await page
+      .getByRole('button', { name: 'New playground', exact: true })
+      .click()
+    await until(
+      () => held.has(`creation:${number}`),
+      'pending playground creation',
+    )
+  }
+  await startHeldPlayground(1)
+  await append('\n% EDIT_DURING_CREATION\n')
+  held.get('creation:1')()
+  await unsaved.waitFor()
+  assert.equal(await select('a').getAttribute('aria-current'), 'page')
+  assert((await editorText()).includes('EDIT_DURING_CREATION'))
+  await unsaved.getByRole('button', { name: 'Cancel', exact: true }).click()
+  assert.equal(await select('a').getAttribute('aria-current'), 'page')
+  assert((await editorText()).includes('EDIT_DURING_CREATION'))
+  await save.click()
+  await until(
+    () => save.isDisabled(),
+    'source saved after cancelling created playground',
+  )
+  report.checks.push(
+    'Edits made while a playground is being created trigger the normal unsaved-work prompt when the response arrives; cancelling preserves the original workspace and draft.',
+  )
+
+  await startHeldPlayground(2)
+  await switchTo('c', 'main.tex')
+  await append('\n% OTHER_PROJECT_DURING_CREATION\n')
+  held.get('creation:2')()
+  await until(() => !held.has('creation:2'), 'old creation response released')
+  await until(
+    () =>
+      page
+        .getByRole('button', { name: 'New playground', exact: true })
+        .isEnabled(),
+    'creation request finished',
+  )
+  await sleep(150)
+  assert.equal(await select('c').getAttribute('aria-current'), 'page')
+  assert((await editorText()).includes('OTHER_PROJECT_DURING_CREATION'))
+  assert.equal(await unsaved.count(), 0)
+  await save.click()
+  await until(() => save.isDisabled(), 'new project draft saved')
+  report.checks.push(
+    'A playground creation response from an earlier project does not select itself, open a navigation prompt, or discard the current project’s newer edits.',
+  )
+
+  await startHeldPlayground(3)
+  await page.getByRole('button', { name: 'Upload', exact: true }).click()
+  const upload = page.getByRole('dialog', {
+    name: 'Add local files',
+    exact: true,
+  })
+  await upload.waitFor()
+  await upload
+    .getByLabel('Upload source files', { exact: true })
+    .setInputFiles({
+      name: 'keep-picker.md',
+      mimeType: 'text/markdown',
+      buffer: Buffer.from('# Keep this selection\n'),
+    })
+  await upload.getByText('keep-picker.md', { exact: true }).waitFor()
+  held.get('creation:3')()
+  await until(
+    () => state.projects.some((project) => project.id === 'new-playground-3'),
+    'created playground response while uploading',
+  )
+  await sleep(200)
+  assert(await upload.isVisible())
+  assert(await upload.getByText('keep-picker.md', { exact: true }).isVisible())
+  assert.equal(await select('c').getAttribute('aria-current'), 'page')
+  assert((await editorText()).includes(marker.c))
+  assert.equal(
+    traffic.filter(
+      (entry) => entry.suffix === '/upload' && entry.method === 'POST',
+    ).length,
+    0,
+  )
+  report.checks.push(
+    'A playground creation response preserves an open upload dialog, its selected files and the current project, without rebinding or uploading to another workspace.',
+  )
+  await upload.getByRole('button', { name: 'Cancel', exact: true }).click()
+
+  const waitCreated = async (number) => {
+    await until(
+      () =>
+        state.projects.some(
+          (project) => project.id === `new-playground-${number}`,
+        ),
+      'created playground response',
+    )
+    await sleep(150)
+  }
+  await startHeldPlayground(4)
+  await openTerminal('c')
+  held.get('creation:4')()
+  await waitCreated(4)
+  assert.equal(await select('c').getAttribute('aria-current'), 'page')
+  assert(await terminal.isVisible())
+  assert((await terminalText()).includes(`Workspace: ${ids.c}`))
+  await terminal.getByText('Connected', { exact: true }).waitFor()
+  await terminal
+    .getByRole('button', { name: 'Close terminal', exact: true })
+    .click()
+  report.checks.push(
+    'A playground creation response preserves a terminal opened while waiting, its connection and the selected workspace.',
+  )
+
+  await startHeldPlayground(5)
+  await page.getByRole('button', { name: /^Source control/ }).click()
+  const sourceControl = page.getByRole('dialog', {
+    name: 'Source control',
+    exact: true,
+  })
+  await sourceControl
+    .getByLabel('Commit message', { exact: true })
+    .fill('Keep this unsubmitted commit message')
+  held.get('creation:5')()
+  await waitCreated(5)
+  assert(await sourceControl.isVisible())
+  assert.equal(
+    await sourceControl
+      .getByLabel('Commit message', { exact: true })
+      .inputValue(),
+    'Keep this unsubmitted commit message',
+  )
+  assert.equal(await select('c').getAttribute('aria-current'), 'page')
+  await sourceControl
+    .getByRole('button', { name: 'Close dialog', exact: true })
+    .click()
+  report.checks.push(
+    'A playground creation response preserves an open source-control dialog and its unsubmitted commit message.',
+  )
+
+  await startHeldPlayground(6)
+  await append('\n% SAVE_DURING_CREATION\n')
+  delayWrite = ids.c
+  await save.click()
+  await until(
+    () => held.has(`write:${ids.c}`),
+    'save active when creation finishes',
+  )
+  held.get('creation:6')()
+  await waitCreated(6)
+  assert.equal(await select('c').getAttribute('aria-current'), 'page')
+  assert((await editorText()).includes('SAVE_DURING_CREATION'))
+  assert(held.has(`write:${ids.c}`))
+  assert(!state.files[ids.c]['main.tex'].includes('SAVE_DURING_CREATION'))
+  held.get(`write:${ids.c}`)()
+  await until(() => save.isDisabled(), 'original in-flight save completes')
+  assert(state.files[ids.c]['main.tex'].includes('SAVE_DURING_CREATION'))
+  report.checks.push(
+    'A creation response during a source save leaves that workspace selected and lets the original hash-checked save finish in the correct project.',
+  )
+
+  const beforeSaveHash = hash(state.files[ids.c]['main.tex'])
+  await startHeldPlayground(7)
+  await append('\n% SAVE_AND_OPEN_CREATED\n')
+  held.get('creation:7')()
+  await unsaved.waitFor()
+  assert((await unsaved.innerText()).includes('Created playground 7'))
+  await unsaved
+    .getByRole('button', { name: 'Save & continue', exact: true })
+    .click()
+  await waitFile('Main.lean', 'CREATED_7')
+  assert.equal(
+    await page
+      .getByTitle('Created playground 7', { exact: true })
+      .getAttribute('aria-current'),
+    'page',
+  )
+  assert(state.files[ids.c]['main.tex'].includes('SAVE_AND_OPEN_CREATED'))
+  assert.equal(writes.at(-1).projectId, ids.c)
+  assert.equal(writes.at(-1).expectedHash, beforeSaveHash)
+  assert(
+    !state.files['new-playground-7']['Main.lean'].includes(
+      'SAVE_AND_OPEN_CREATED',
+    ),
+  )
+  report.checks.push(
+    'Save & continue names the created destination, saves the old project with its original expected hash, and then opens the new playground.',
+  )
+
+  const savedSeventh = state.files['new-playground-7']['Main.lean']
+  await startHeldPlayground(8)
+  await append('\n-- DISCARD_AND_OPEN_CREATED\n')
+  held.get('creation:8')()
+  await unsaved.waitFor()
+  assert((await unsaved.innerText()).includes('Created playground 8'))
+  await unsaved
+    .getByRole('button', { name: 'Discard edits', exact: true })
+    .click()
+  await waitFile('Main.lean', 'CREATED_8')
+  assert.equal(state.files['new-playground-7']['Main.lean'], savedSeventh)
+  assert(!writes.some((entry) => entry.projectId === 'new-playground-7'))
+  assert.equal(
+    await page
+      .getByTitle('Created playground 8', { exact: true })
+      .getAttribute('aria-current'),
+    'page',
+  )
+  report.checks.push(
+    'Discard edits opens the named created playground while preserving the previous playground’s saved source and issuing no save for the discarded draft.',
   )
   fixture.assertClean()
   report.passed = true

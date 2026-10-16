@@ -390,7 +390,68 @@ try {
   await page.screenshot({ path: path.join(output, 'tex-compact-narrow.png') })
   await page.setViewportSize({ width: 1600, height: 1000 })
   await page.getByRole('button', { name: 'Lemex', exact: true }).click()
+  await page.setViewportSize({ width: 1001, height: 1000 })
+  await until(
+    async () =>
+      (await divider.getAttribute('aria-orientation')) === 'horizontal',
+    'narrow workbench stacks the PDF',
+  )
+  for (const orientation of ['horizontal', 'vertical', 'horizontal']) {
+    if (orientation === 'vertical')
+      await page
+        .getByRole('button', { name: 'Close tools panel', exact: true })
+        .click()
+    else if ((await divider.getAttribute('aria-orientation')) === 'vertical')
+      await page.getByRole('button', { name: 'Lemex', exact: true }).click()
+    await until(
+      async () =>
+        (await divider.getAttribute('aria-orientation')) === orientation,
+      `available-width ${orientation} split`,
+    )
+    const source = await page.locator('.lean-workspace').boundingBox()
+    const preview = await panel.boundingBox()
+    if (orientation === 'horizontal') {
+      assert(source.y + source.height <= preview.y)
+      assert(Math.abs(source.width - preview.width) < 2)
+      assert(
+        preview.width > 350,
+        'A cramped workbench gives the PDF its full width',
+      )
+    } else assert(source.x + source.width <= preview.x)
+    const workspace = await page
+      .locator('.file-reading-workspace')
+      .boundingBox()
+    const handle = await divider.boundingBox()
+    const value = Number(await divider.getAttribute('aria-valuenow'))
+    const stacked = orientation === 'horizontal'
+    const x = handle.x + handle.width / 2
+    const y = handle.y + handle.height / 2
+    await page.mouse.move(x, y)
+    await page.mouse.down()
+    await page.mouse.move(x + (stacked ? 0 : 30), y + (stacked ? 30 : 0))
+    await page.mouse.up()
+    const expected =
+      value + 3000 / (stacked ? workspace.height : workspace.width)
+    assert(
+      Math.abs(Number(await divider.getAttribute('aria-valuenow')) - expected) <
+        1.1,
+      'The divider uses the visible axis and workspace dimensions',
+    )
+    await divider.dblclick()
+  }
+  assert.equal(await page.locator('.monaco-editor').count(), 1)
+  await page.screenshot({
+    path: path.join(output, 'tex-compact-available-width.png'),
+  })
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  await until(
+    async () => (await divider.getAttribute('aria-orientation')) === 'vertical',
+    'wide horizontal layout restored',
+  )
   await optionsButton.click()
+  report.checks.push(
+    'At a 1001px viewport the available workbench width stacks source and PDF; closing and reopening the assistant changes layout and divider drag dimensions together without duplicating Monaco.',
+  )
   report.checks.push(
     'The PDF opens with one compact control row on wide and narrow screens; keyboard-accessible Options reveal root, automatic builds, logs, warnings, and PDF actions while preserving document space.',
   )

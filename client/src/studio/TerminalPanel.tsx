@@ -191,7 +191,12 @@ export function TerminalPanel({
             <span className="terminal-project" title={projectName}>
               {projectName}
             </span>
-            <span className="terminal-location">/workspace</span>
+            <span
+              className="terminal-location"
+              title="Run pwd to see this project's folder."
+            >
+              Project folder
+            </span>
           </div>
           <output className="terminal-status" data-connected={connected}>
             <span className="terminal-status-dot" aria-hidden="true" />
@@ -221,8 +226,8 @@ export function TerminalPanel({
         <p className="terminal-help">
           <Icon name="info" size={13} />
           <span>
-            Commands edit saved project files. Save editor changes first.{' '}
-            <kbd>Ctrl+C</kbd> stops a command.
+            These are the same saved files as in the file browser. Save editor
+            changes first. <kbd>Ctrl+C</kbd> stops a command.
           </span>
         </p>
         <div className="terminal-screen" ref={host} />

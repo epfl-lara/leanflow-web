@@ -1,6 +1,6 @@
 import { LeanMonaco } from 'lean4monaco'
 import { CloseAction, ErrorAction } from 'vscode-languageclient/browser'
-import { getService, ITextFileService } from 'vscode/services'
+import { getService, IFileService, ITextFileService } from 'vscode/services'
 import type { CancellationToken } from 'monaco-editor'
 import type { WebSocketConfigOptionsUrl } from 'monaco-editor-wrapper'
 import { FileUri } from 'lean4monaco/dist/vscode-lean4/vscode-lean4/src/utils/exturi'
@@ -8,6 +8,7 @@ import type { SourceRequest } from './LibrarySourceDialog'
 import {
   CancellationTokenSource,
   KeyCode,
+  Uri,
   editor as monacoEditor,
   languages,
 } from 'monaco-editor'
@@ -179,6 +180,7 @@ function serialize(task: () => Promise<void> | void) {
 
 interface Runtime {
   lean: BrowserLeanMonaco
+  virtualFiles: Set<string>
   editor?: WorkspaceEditor
   subscription?: { dispose(): void }
   restoreOpenEditor?: () => void
@@ -348,11 +350,13 @@ export function LeanWorkspace({
         async (sources, token) => {
           if (cancelled || !own?.renameModels)
             throw new Error('Rename cancelled.')
+          for (const source of sources) own.virtualFiles.add(source.uri)
           await own.renameModels.prepare(sources, token)
         },
       )
       own = {
         lean,
+        virtualFiles: new Set(),
         renameModels: new RenameModels(
           () => own?.editor?.editor?.getModel() ?? null,
           (sources) => onRenameSourcesRef.current(sources),
@@ -499,7 +503,29 @@ export function LeanWorkspace({
         const clients = own?.lean.clientProvider?.getClients() || []
         await Promise.allSettled(clients.map((client) => client.stop()))
         own?.lean.dispose()
+        if (own?.virtualFiles.size) {
+          const textFiles = await getService(ITextFileService)
+          // Finish managed model activity while its project reader is available.
+          for (const uri of own.virtualFiles) {
+            const model = textFiles.files.get(Uri.parse(uri))
+            if (model) {
+              await model.revert({ soft: true })
+              await textFiles.files.canDispose(model)
+              model.dispose()
+            }
+          }
+        }
         own?.definitionPreviewFiles?.dispose()
+        if (own?.virtualFiles.size) {
+          const files = await getService(IFileService)
+          // Only explicit browser copies are removed. Project sources and
+          // read-only library files stay behind their authenticated readers.
+          for (const uri of own.virtualFiles) {
+            const resource = Uri.parse(uri)
+            if (await files.exists(resource)) await files.del(resource)
+          }
+          own.virtualFiles.clear()
+        }
         if (runtime.current === own) runtime.current = null
       })
     }
@@ -573,6 +599,7 @@ export function LeanWorkspace({
         ownEditor = new WorkspaceEditor()
         active.editor = ownEditor
         const uri = `file:///workspace/${snapshot.path.split('/').map(encodeURIComponent).join('/')}`
+        if (!snapshot.readOnly) active.virtualFiles.add(uri)
         await ownEditor.start(host, uri, snapshot.content, !!snapshot.readOnly)
         if (cancelled || runtime.current !== active || !host.isConnected) {
           ownEditor.dispose()

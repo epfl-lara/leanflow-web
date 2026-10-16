@@ -10,6 +10,7 @@ const reportDir = path.resolve('.runtime/single-file-ui')
 await fs.mkdir(reportDir, { recursive: true })
 const projectId = 'single-file-existing'
 const f = await chatBrowserFixture({
+  launchOptions: { channel: 'chromium' },
   session: {
     user: { id: 'single-file-owner', name: 'Single file fixture' },
     templates: [
@@ -112,6 +113,8 @@ await page.route('**/api/projects', async (route) => {
       input.file?.content || 'import Mathlib\n\n-- Write a proof here.\n',
     'lakefile.toml': 'name = "ProofWorkspace"\n',
     'lean-toolchain': project.toolchain + '\n',
+    'lake-manifest.json': '{"version":"1.2.0","packages":[]}\n',
+    '.gitignore': '.lake/\n',
   }
   await route.fulfill({ status: 201, json: project })
 })

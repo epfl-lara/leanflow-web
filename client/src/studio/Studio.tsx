@@ -281,7 +281,8 @@ export function Studio() {
   const [texWorkspaceElement, setTexWorkspaceElement] =
     useState<HTMLDivElement | null>(null)
   const texWorkspaceSize = useElementSize(texWorkspaceElement)
-  const texStacked = useMediaQuery('(max-width: 900px)')
+  const texNarrowViewport = useMediaQuery('(max-width: 900px)')
+  const texStacked = texNarrowViewport || texWorkspaceSize.width < 650
   const [texSourceSize, setTexSourceSize] = useStoredSize(
     'lemex-layout-tex-source',
     50,
@@ -306,7 +307,7 @@ export function Studio() {
   const [projectModal, setProjectModal] = useState<{ preset?: string } | null>(
     null,
   )
-  const [uploadModal, setUploadModal] = useState(false)
+  const [uploadProjectId, setUploadProjectId] = useState<string | null>(null)
   const [repositoryAccessId, setRepositoryAccessId] = useState<string | null>(
     null,
   )
@@ -363,10 +364,33 @@ export function Studio() {
   const [pendingAction, setPendingAction] = useState<
     (() => Promise<void>) | null
   >(null)
+  const [navigationError, setNavigationError] = useState('')
+  const [navigationTarget, setNavigationTarget] = useState('')
+  const workspaceInUse = useRef(false)
   const [job, setJob] = useState<Job | null>(null)
   const [jobOpen, setJobOpen] = useState(false)
   const [startingCheck, setStartingCheck] = useState(false)
   const [stoppingCheck, setStoppingCheck] = useState(false)
+  workspaceInUse.current = !!(
+    uploadProjectId ||
+    projectModal ||
+    newEntryKind ||
+    pendingAction ||
+    reloadTarget ||
+    terminalProjectId ||
+    gitOpen ||
+    deleteTarget ||
+    renameTarget ||
+    repositoryAccessId ||
+    trashOpen ||
+    settingsModal ||
+    gitConnectionsOpen ||
+    setupDetails ||
+    booksOpen ||
+    opening ||
+    startingCheck ||
+    (job && !terminalJob(job))
+  )
   const checkRequest = useRef(false)
   const fileRef = useRef(file)
   const filesRef = useRef(files)
@@ -398,6 +422,7 @@ export function Studio() {
       (entry) =>
         !entry.readOnly &&
         entry.path !== 'Main.lean' &&
+        entry.path !== '.gitignore' &&
         !PROJECT_CONFIGURATION_FILES.includes(entry.path),
     )
   const playgroundPreparation = usePlaygroundPreparation(
@@ -490,6 +515,7 @@ export function Studio() {
       setFoldersAvailable(null)
       setCreatedFolder(null)
       setNewEntryKind(null)
+      setUploadProjectId(null)
       setLibrarySource(null)
       setProofFocus(null)
       setEditorProof(null)
@@ -507,6 +533,8 @@ export function Studio() {
       setReloadBusy(false)
       setAgentPendingFile(null)
       setPendingAction(null)
+      setNavigationError('')
+      setNavigationTarget('')
       setError('')
       setNotice('')
       bufferStore.selectProject(id)
@@ -863,6 +891,11 @@ export function Studio() {
       )
   }, [saveFile, bufferStore, requireScope])
 
+  const saveWorkspace = useCallback(async () => {
+    requireScope(scope)
+    await saveCompletely()
+  }, [requireScope, scope, saveCompletely])
+
   const beforeApply = useCallback(async () => {
     if (savePromise.current)
       throw new Error(
@@ -912,7 +945,9 @@ export function Studio() {
   }, [notice])
 
   const navigate = useCallback(
-    (action: () => Promise<void>) => {
+    (action: () => Promise<void>, destination = '') => {
+      setNavigationError('')
+      setNavigationTarget(destination)
       if (bufferStore.dirty().length) setPendingAction(() => action)
       else void action().catch((error) => setError(errorText(error)))
     },
@@ -932,19 +967,24 @@ export function Studio() {
     [navigate, openFile, bufferStore],
   )
 
-  function acceptCreatedProject(created: Project) {
+  function rememberCreatedProject(created: Project) {
     if (created.kind === 'single-file')
       localStorage.setItem(`lemex-file-${created.id}`, 'Main.lean')
     setProjects((previous) => [
       created,
       ...previous.filter((item) => item.id !== created.id),
     ])
+  }
+
+  function acceptCreatedProject(created: Project) {
+    rememberCreatedProject(created)
     setProjectId(created.id)
     setSidebarOpen(false)
   }
 
   function startSingleFile(source?: UploadFile) {
     navigate(async () => {
+      const expected = bufferStore.getSnapshot().scope
       setCreatingSingleFile(true)
       setCreatingPlaygroundSource(source ? 'upload' : 'blank')
       try {
@@ -952,7 +992,22 @@ export function Studio() {
           kind: 'single-file',
           ...(source ? { file: source } : {}),
         })
-        acceptCreatedProject(created)
+        rememberCreatedProject(created)
+        // Creation can take time. Keep the workspace the user has moved to,
+        // and ask about edits made since the original click before leaving.
+        if (
+          !bufferStore.isCurrent(expected) ||
+          savePromise.current ||
+          workspaceInUse.current
+        ) {
+          setNotice(`${created.name} is ready. Open it from Playgrounds.`)
+          return
+        }
+        navigate(async () => {
+          requireScope(expected)
+          setProjectId(created.id)
+          setSidebarOpen(false)
+        }, created.name)
       } catch (error) {
         if (error instanceof ApiError && error.status === 503)
           void playgroundPreparation.refresh().catch(() => {})
@@ -983,11 +1038,17 @@ export function Studio() {
 
   async function continueNavigation(save: boolean) {
     if (!pendingAction) return
+    setNavigationError('')
     try {
       if (save) await saveCompletely()
       else await discardUnsavedEdits()
-      const action = pendingAction
-      setPendingAction(null)
+    } catch (error) {
+      setNavigationError(errorText(error))
+      return
+    }
+    const action = pendingAction
+    setPendingAction(null)
+    try {
       await action()
     } catch (error) {
       setError(errorText(error))
@@ -1097,6 +1158,10 @@ export function Studio() {
     if (!projectId) throw new Error('Choose a project first.')
     const expected = scope
     requireScope(expected)
+    if (singleFileMode && kind === 'folder')
+      throw new Error(
+        'Convert this playground to a project to create an empty folder.',
+      )
     if (files.some((file) => file.path === path) || folders.includes(path)) {
       throw new Error(
         'A file or folder with this name already exists. Choose another name.',
@@ -1575,7 +1640,7 @@ export function Studio() {
                   <div>
                     <button
                       className="button small subtle"
-                      onClick={() => setUploadModal(true)}
+                      onClick={() => setUploadProjectId(projectId)}
                       disabled={project?.status !== 'ready'}
                       title="Upload local files or a folder"
                     >
@@ -1590,31 +1655,33 @@ export function Studio() {
                     >
                       <Icon name="filePlus" size={16} />
                     </button>
-                    <button
-                      className="icon-button"
-                      onClick={() => {
-                        setCreatedFolder(null)
-                        setNewEntryKind('folder')
-                      }}
-                      disabled={
-                        !workspaceEditable ||
-                        opening ||
-                        saving ||
-                        !foldersAvailable
-                      }
-                      title={
-                        !workspaceEditable
-                          ? 'Choose a ready project to create a folder.'
-                          : foldersAvailable === null
-                            ? 'Loading folders…'
-                            : foldersAvailable
-                              ? 'New folder'
-                              : 'Folder creation is unavailable. Refresh files to try again.'
-                      }
-                      aria-label="New folder"
-                    >
-                      <Icon name="folderPlus" size={16} />
-                    </button>
+                    {!singleFileMode && (
+                      <button
+                        className="icon-button"
+                        onClick={() => {
+                          setCreatedFolder(null)
+                          setNewEntryKind('folder')
+                        }}
+                        disabled={
+                          !workspaceEditable ||
+                          opening ||
+                          saving ||
+                          !foldersAvailable
+                        }
+                        title={
+                          !workspaceEditable
+                            ? 'Choose a ready project to create a folder.'
+                            : foldersAvailable === null
+                              ? 'Loading folders…'
+                              : foldersAvailable
+                                ? 'New folder'
+                                : 'Folder creation is unavailable. Refresh files to try again.'
+                        }
+                        aria-label="New folder"
+                      >
+                        <Icon name="folderPlus" size={16} />
+                      </button>
+                    )}
                     <button
                       className="icon-button"
                       onClick={() =>
@@ -2003,8 +2070,8 @@ export function Studio() {
           <div className="workspace-alert">
             <span>
               This playground has additional files. They share its terminal
-              workspace. Use Convert to project to include them in Lemex
-              requests.
+              workspace. Use Convert to project for empty folders and multi-file
+              Lemex requests.
             </span>
           </div>
         )}
@@ -2299,7 +2366,7 @@ export function Studio() {
             </div>
             <div
               ref={setTexWorkspaceElement}
-              className={`file-reading-workspace ${readingFile ? 'reading' : ''} ${texVisible ? 'tex-reading' : ''}`}
+              className={`file-reading-workspace ${readingFile ? 'reading' : ''} ${texVisible ? 'tex-reading' : ''} ${texVisible && texStacked ? 'tex-stacked' : ''}`}
               style={
                 { '--tex-source-size': `${texSourceSize}%` } as CSSProperties
               }
@@ -2406,10 +2473,7 @@ export function Studio() {
                   saving={saving}
                   saveVersion={saveVersion}
                   savedPaths={savedPaths}
-                  save={async () => {
-                    requireScope(scope)
-                    await saveCompletely()
-                  }}
+                  save={saveWorkspace}
                   onOpenFile={(path, line) => {
                     if (!bufferStore.isCurrent(scope)) return
                     const action = () => openFile(project.id, path, line)
@@ -2609,10 +2673,7 @@ export function Studio() {
                 session={session}
                 dirty={dirty}
                 dirtyFileCount={dirtyFiles.length}
-                beforeRun={async () => {
-                  requireScope(scope)
-                  await saveCompletely()
-                }}
+                beforeRun={saveWorkspace}
                 beforeApply={async () => {
                   requireScope(scope)
                   await beforeApply()
@@ -2785,17 +2846,21 @@ export function Studio() {
           }}
         />
       )}
-      {uploadModal && projectId && (
+      {uploadProjectId && uploadProjectId === projectId && (
         <UploadModal
-          projectId={projectId}
-          onClose={() => setUploadModal(false)}
+          key={uploadProjectId}
+          projectId={uploadProjectId}
+          onClose={() => setUploadProjectId(null)}
           onUploaded={async () => {
+            if (!bufferStore.isCurrent(scope)) return
             const updated = await loadProjects()
+            if (!bufferStore.isCurrent(scope)) return
             if (
-              updated.find((item) => item.id === projectId)?.status === 'ready'
+              updated.find((item) => item.id === uploadProjectId)?.status ===
+              'ready'
             )
-              await loadFiles(projectId)
-            setNotice('Local files uploaded')
+              await loadFiles(uploadProjectId)
+            if (bufferStore.isCurrent(scope)) setNotice('Local files uploaded')
           }}
         />
       )}
@@ -2919,8 +2984,16 @@ export function Studio() {
           busy={saving}
         >
           <p className="dialog-body">
-            Save all changed files before continuing, or discard these edits.
+            {navigationTarget
+              ? `Save all changed files before opening ${navigationTarget}, or discard these edits.`
+              : 'Save all changed files before continuing, or discard these edits.'}
           </p>
+          {navigationError && (
+            <p className="error-message" role="alert">
+              {navigationError} Your edits are still in the editor. Cancel to
+              keep editing.
+            </p>
+          )}
           <footer className="dialog-actions">
             <button
               className="button secondary"
@@ -2951,18 +3024,23 @@ export function Studio() {
           </footer>
         </Dialog>
       )}
-      {newEntryKind && project && (
-        <CreateEntryDialog
-          kind={newEntryKind}
-          projectName={project.name}
-          presetProject={
-            !!project.preset && !project.repository && !project.uploaded
-          }
-          folders={folders}
-          onCreate={(path) => createEntry(path, newEntryKind)}
-          onClose={() => setNewEntryKind(null)}
-        />
-      )}
+      {newEntryKind &&
+        project &&
+        (newEntryKind === 'file' || !singleFileMode) && (
+          <CreateEntryDialog
+            kind={newEntryKind}
+            projectName={project.name}
+            presetProject={
+              !singleFileMode &&
+              !!project.preset &&
+              !project.repository &&
+              !project.uploaded
+            }
+            folders={folders}
+            onCreate={(path) => createEntry(path, newEntryKind)}
+            onClose={() => setNewEntryKind(null)}
+          />
+        )}
       {authRequired && <SessionRecovery user={session.user} />}
     </div>
   )

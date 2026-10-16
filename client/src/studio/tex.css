@@ -160,18 +160,20 @@
   border-left: 1px solid var(--border);
   border-right: 1px solid var(--border);
 }
-@media (max-width: 900px) {
-  .file-reading-workspace.tex-reading {
-    flex-direction: column;
-  }
-  .file-reading-workspace.tex-reading > .lean-workspace,
-  .file-reading-workspace.tex-reading > .setup-file-editor {
-    width: 100%;
-    flex-basis: var(--tex-source-size, 50%);
-    height: var(--tex-source-size, 50%);
-  }
-  .resize-handle.tex-resize-handle {
-    height: 7px;
-    width: auto;
-  }
+.file-reading-workspace.tex-reading.tex-stacked {
+  flex-direction: column;
+}
+.file-reading-workspace.tex-reading.tex-stacked > .lean-workspace,
+.file-reading-workspace.tex-reading.tex-stacked > .setup-file-editor {
+  width: 100%;
+  flex-basis: var(--tex-source-size, 50%);
+  height: var(--tex-source-size, 50%);
+}
+.file-reading-workspace.tex-stacked > .resize-handle.tex-resize-handle {
+  height: 7px;
+  width: auto;
+  border-left: 0;
+  border-right: 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
 }
