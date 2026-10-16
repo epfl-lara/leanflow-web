@@ -33,6 +33,25 @@ export function currentEditorFile(input, validatePath) {
   return validatePath(file)
 }
 
+// PDFs reach the isolated workspace as files, never through the text editor API.
+// Explicit attachments must exist; automatic editor context remains optional.
+export async function readSelectedContextFile(
+  workspaces,
+  projectId,
+  owner,
+  file,
+) {
+  if (!isPdfFile(file)) return workspaces.readFile(projectId, owner, file)
+  if (!(await workspaces.validateEditorContextFile(projectId, owner, file)))
+    throw Object.assign(
+      new Error(
+        'A selected PDF is unavailable. Restore it or remove it from context.',
+      ),
+      { status: 404 },
+    )
+  return null
+}
+
 export function currentEditorContext(file) {
   return file
     ? 'Open file in the user’s editor (included automatically; relative path):\n' +
@@ -124,6 +143,21 @@ export function agentConversationContext(
     job.currentFile === undefined ? job.file : job.currentFile,
   )
   if (editorContext) sections.push(editorContext)
+  if (job.mode === 'formalize') {
+    const destination =
+      job.file?.endsWith('.lean') &&
+      !job.file.startsWith('.lake/') &&
+      !job.file.endsWith('lakefile.lean')
+        ? job.file
+        : null
+    sections.push(
+      destination
+        ? 'Lean output destination for this request (relative path):\n' +
+            JSON.stringify(destination) +
+            '\nWrite the formalization here, preserving unrelated declarations.'
+        : 'No existing Lean output destination was selected. Create a suitable Lean source file inside this project and report its path.',
+    )
+  }
   if (job.proofTarget)
     sections.push(proofTargetContext(job.proofTarget, job.mode))
   return agentMessageContext(

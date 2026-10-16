@@ -165,6 +165,12 @@ export const ConversationTurn = memo(function ConversationTurn({
           </button>
         </div>
       )}
+      {runStatusLabel(run) === 'Checked with Lean' && (
+        <p className="field-help">
+          Lean checked the code. Review whether its statement and assumptions
+          match your source.
+        </p>
+      )}
       {active &&
         run.liveEdits &&
         !run.liveRevision &&

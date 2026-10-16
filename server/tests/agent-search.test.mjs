@@ -167,6 +167,125 @@ async function fixture(t, edit = async () => {}, { buildFails = false } = {}) {
   return { manager, workspaces, project, calls, requests, events, execute }
 }
 
+test('Formalize receives open or attached documents and independently verifies new Lean output', async (t) => {
+  for (const document of [
+    'Paper.PDF',
+    'paper.tex',
+    'notes.txt',
+    'notes.md',
+    'notes.rst',
+  ])
+    for (const attached of [false, true])
+      await t.test(`${document}, attached=${attached}`, async (t) => {
+        const source = document.endsWith('.PDF')
+          ? Buffer.from('%PDF-1.7\n\0binary reference\n%%EOF\n')
+          : Buffer.from('Theorem: True. Proof: trivial.\n')
+        const lean = 'theorem from_document : True := by trivial\n'
+        const { manager, workspaces, project, calls, requests, execute } =
+          await fixture(t, async (workspace) => {
+            assert.deepEqual(
+              await fs.readFile(path.join(workspace, document)),
+              source,
+            )
+            await fs.writeFile(path.join(workspace, 'Main.lean'), lean)
+          })
+        await fs.writeFile(path.join(project.root, document), source)
+        await fs.unlink(path.join(project.root, 'Main.lean'))
+        const result = await execute('Formalize the theorem in the document.', {
+          mode: 'formalize',
+          currentFile: document,
+          files: attached ? [document] : [],
+          liveEdits: false,
+        })
+        assert.equal(result.status, 'completed', result.error)
+        assert.equal(result.file, null)
+        assert.equal(result.currentFile, document)
+        assert.equal(result.verification.complete, true)
+        assert.equal(result.verification.kernelChecked, true)
+        assert.deepEqual(
+          result.changes.map((change) => change.path),
+          ['Main.lean'],
+        )
+        assert.equal(result.changes[0].before, null)
+        assert.equal(
+          calls.length,
+          3,
+          'Lean output must run the independent verification pipeline',
+        )
+        const envelope = JSON.parse(
+          requests.find((request) => request.method === 'turn/start').params
+            .input[0].text,
+        )
+        assert(
+          envelope.leanflowContext.sections
+            .join('\n')
+            .includes(JSON.stringify(document)),
+        )
+        assert(!JSON.stringify(envelope).includes('binary reference'))
+        await assert.rejects(fs.access(path.join(project.root, 'Main.lean')), {
+          code: 'ENOENT',
+        })
+        await manager.apply('alice', result.id)
+        assert.equal(
+          (await workspaces.readFile(project.id, 'alice', 'Main.lean')).content,
+          lean,
+        )
+        assert.deepEqual(
+          await fs.readFile(path.join(project.root, document)),
+          source,
+        )
+      })
+})
+
+test('Formalize without Lean output never certifies an unchanged project as a completed formalization', async (t) => {
+  for (const file of [undefined, 'Main.lean'])
+    await t.test(file || 'no Lean target', async (t) => {
+      const { manager, workspaces, calls, execute } = await fixture(t)
+      workspaces.verificationCopy = () =>
+        assert.fail('No-output runs must not copy the project for verification')
+      const result = await execute('Formalize the source.', {
+        mode: 'formalize',
+        file,
+        currentFile: null,
+        files: [],
+        liveEdits: false,
+      })
+      assert.equal(result.status, 'completed', result.error)
+      assert.equal(result.verification.complete, false)
+      assert.equal(result.verification.compiled, false)
+      assert.match(
+        result.verification.reason,
+        /No Lean formalization was written/,
+      )
+      assert.equal(calls.length, 0)
+      await assert.rejects(manager.apply('alice', result.id), { status: 409 })
+    })
+})
+
+test('Formalize explains unexpected document or scratch changes and blocks applying them', async (t) => {
+  const { manager, calls, execute } = await fixture(t, async (workspace) => {
+    await fs.writeFile(
+      path.join(workspace, 'Main.lean'),
+      'theorem from_document : True := by trivial\n',
+    )
+    await fs.writeFile(
+      path.join(workspace, 'paper.txt'),
+      'Extraction scratch text\n',
+    )
+  })
+  const result = await execute('Formalize the paper.', {
+    mode: 'formalize',
+    liveEdits: false,
+  })
+  assert.equal(result.verification.complete, false)
+  assert.match(
+    result.verification.errors[0],
+    /Keep paper.txt unchanged.*scratch output outside the project/,
+  )
+  assert.equal(calls.length, 0)
+  await assert.rejects(manager.apply('alice', result.id), { status: 409 })
+})
+
 test(
   'explicit live editing saves text changes during the turn and can undo creations, renames, and deletions',
   { timeout: 15000 },

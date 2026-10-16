@@ -2,7 +2,7 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git python3 python3-venv ripgrep nodejs npm xz-utils zstd \
-    build-essential libgmp-dev libssl-dev bubblewrap \
+    build-essential libgmp-dev libssl-dev bubblewrap poppler-utils \
  && rm -rf /var/lib/apt/lists/*
 ENV ELAN_HOME=/opt/elan
 RUN curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
@@ -39,6 +39,7 @@ RUN chmod 755 /usr/local/bin/worker-entrypoint \
  && /opt/elan/bin/elan --version \
  && /opt/tools/bin/lean-lsp-mcp --help \
  && /opt/tools/bin/lean-explore --help \
- && /opt/tools/bin/lean-probe --help
+ && /opt/tools/bin/lean-probe --help \
+ && pdftotext -v
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/worker-entrypoint"]

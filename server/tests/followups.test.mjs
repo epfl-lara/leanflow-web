@@ -467,6 +467,21 @@ test('switching editor files reaches native guidance without manual attachments 
   )
   assert(!calls[2].params.input[0].text.includes('%PDF-1.7'))
   assert.equal(reads.at(-1), 'Lecture.PDF')
+  const attachedPdf = {
+    ...pdfInput,
+    id: randomUUID(),
+    files: ['Lecture.PDF'],
+  }
+  const attached = await manager.message('alice', job.id, attachedPdf)
+  assert.equal(attached.followups.at(-1).status, 'accepted')
+  assert.deepEqual(attached.followups.at(-1).files, ['Lecture.PDF'])
+  assert.equal(calls.length, 4)
+  const pdfContext = calls[3].params.input[0].text
+  assert(pdfContext.includes('Lecture.PDF'))
+  assert(pdfContext.includes('referenceOnly'))
+  assert(!pdfContext.includes('%PDF-1.7'))
+  await manager.message('alice', job.id, attachedPdf)
+  assert.equal(calls.length, 4, 'Retry must not deliver duplicate PDF guidance')
   manager.active.delete(job.id)
   events.updateMetadata(job.id, { status: 'completed' })
   await manager.shutdown()

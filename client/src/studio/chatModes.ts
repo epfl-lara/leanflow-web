@@ -56,7 +56,7 @@ export const chatModes: {
   {
     id: 'formalize',
     name: 'Formalize',
-    hint: 'Turn a mathematical statement or argument into Lean.',
+    hint: 'Turn a mathematical statement or argument into Lean from PDF, LaTeX, Markdown, or other text sources.',
     placeholder: 'Describe the statement and argument you want to formalize…',
     suggestions: [
       {

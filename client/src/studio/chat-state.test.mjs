@@ -119,6 +119,29 @@ test('Ask & Search reports conversation and file review separately from Lean ver
   )
 })
 
+test('formalization status distinguishes Lean checks from source fidelity and explains missing output', () => {
+  assert.equal(
+    runStatusLabel(
+      run({
+        mode: 'formalize',
+        verification: { complete: true, kernelChecked: true },
+      }),
+    ),
+    'Checked with Lean',
+  )
+  const reason =
+    'No Lean formalization was written. There is no Lean output to verify.'
+  assert.equal(
+    finalVerificationIssue(
+      run({
+        mode: 'formalize',
+        verification: { complete: false, errors: [], reason },
+      }),
+    ),
+    reason,
+  )
+})
+
 test('usage shows current context first and keeps cumulative request totals collapsed', () => {
   const html = renderToStaticMarkup(
     React.createElement(UsageSummary, {

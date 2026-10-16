@@ -189,6 +189,12 @@ export function AssistantPanel({
             !path.startsWith('.lake/') &&
             !files.find((item) => item.path === path)?.readOnly,
         ))
+  const requiresLeanTarget = mode === 'proofs' || mode === 'optimize'
+  const formalizingDocument =
+    mode === 'formalize' &&
+    [currentFile, ...contextFiles].some(
+      (path) => path && !path.endsWith('.lean'),
+    )
   useEffect(() => {
     if (
       !focusRequest ||
@@ -847,9 +853,11 @@ export function AssistantPanel({
           ))}
         </HelpTip>
       </div>
-      {texLanguage(currentFile) && (
+      {(texLanguage(currentFile) || formalizingDocument) && (
         <div className="assistant-tex-note">
-          {mode === 'search' ? (
+          {formalizingDocument ? (
+            'Use your source document to formalize mathematics in Lean.'
+          ) : mode === 'search' ? (
             'Lemex can read, edit, and compile your LaTeX document here.'
           ) : (
             <button type="button" onClick={() => draft.setMode('search')}>
@@ -1064,6 +1072,17 @@ export function AssistantPanel({
             <span className="tag">Saves before sending</span>
           )}
         </div>
+        {mode === 'formalize' && (
+          <div className="composer-context">
+            <Icon name="file" size={13} />
+            <span
+              title={target}
+              aria-label={`Lean output: ${target || 'new file'}`}
+            >
+              Lean output: {target || 'new file'}
+            </span>
+          </div>
+        )}
         <label className="sr-only" htmlFor="assistant-prompt">
           Message Lemex
         </label>
@@ -1118,7 +1137,7 @@ export function AssistantPanel({
                 : activeHere
                   ? 'Checking or stopping; your next draft is kept.'
                   : 'Open the active chat to send an update.'
-              : mode !== 'search' && !target
+              : requiresLeanTarget && !target
                 ? 'Select a writable Lean file to begin.'
                 : 'Ctrl / ⌘ + Enter to send'}
           </span>
@@ -1131,7 +1150,7 @@ export function AssistantPanel({
               busy ||
               (hasActive
                 ? !acceptingUpdate
-                : (mode !== 'search' && !target) || !model)
+                : (requiresLeanTarget && !target) || !model)
             }
           >
             {busy ? (

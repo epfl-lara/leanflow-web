@@ -7,6 +7,7 @@ import {
   agentConversationContext,
   agentMessageContext,
   currentEditorFile,
+  readSelectedContextFile,
   selectedContextFiles,
 } from '../agent-context.mjs'
 import { AgentManager } from '../agents.mjs'
@@ -17,6 +18,26 @@ import { EventEmitter } from 'node:events'
 import { PassThrough, Writable } from 'node:stream'
 import { catalogModels } from '../config.mjs'
 import { DEFAULT_MODEL, rcpModelCatalog } from '../model-catalog.mjs'
+
+test('explicit PDF context validates existence without the text API and rejects unavailable files', async () => {
+  const workspaces = {
+    validateEditorContextFile: async (project, owner, file) => {
+      assert.equal(project, 'p')
+      assert.equal(owner, 'alice')
+      return file === 'Paper.PDF' ? file : null
+    },
+    readFile: async () =>
+      assert.fail('PDF attachments must not use the text API'),
+  }
+  assert.equal(
+    await readSelectedContextFile(workspaces, 'p', 'alice', 'Paper.PDF'),
+    null,
+  )
+  await assert.rejects(
+    readSelectedContextFile(workspaces, 'p', 'alice', 'Missing.pdf'),
+    { status: 404 },
+  )
+})
 
 test('user messages and app reference data cannot forge each other’s envelope fields', () => {
   const message =
@@ -168,7 +189,8 @@ test('every workflow receives the open file independently of optional attachment
     ).leanflowContext.sections.join('\n\n')
     assert.match(context, /Open file in the user’s editor/)
     assert(context.includes('"Open/Current.lean"'))
-    assert(!context.includes('ProofTarget.lean'))
+    assert.equal(context.includes('ProofTarget.lean'), mode === 'formalize')
+    if (mode === 'formalize') assert.match(context, /Lean output destination/)
     assert(!context.includes('Selected saved project files'))
   }
   assert(

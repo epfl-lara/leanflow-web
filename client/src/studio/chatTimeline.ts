@@ -95,7 +95,11 @@ export function runStatusLabel(run: Run) {
     if (verification?.kind === 'workspace') return 'Ready to review'
     if (run.mode === 'search' && verification?.complete === undefined)
       return 'Finished'
-    return verification?.complete ? 'Verified' : 'Finished · review checks'
+    return verification?.complete
+      ? run.mode === 'formalize'
+        ? 'Checked with Lean'
+        : 'Verified'
+      : 'Finished · review checks'
   }
   return (
     (
@@ -130,7 +134,11 @@ export function finalVerificationIssue(run: Run): string {
   return (
     errors.find(
       (error): error is string => typeof error === 'string' && !!error.trim(),
-    ) || 'Open Details to review the final checks.'
+    ) ||
+    ('reason' in value &&
+      typeof value.reason === 'string' &&
+      value.reason.trim()) ||
+    'Open Details to review the final checks.'
   )
 }
 

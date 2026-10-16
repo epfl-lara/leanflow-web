@@ -78,6 +78,12 @@ export function declarationNames(source) {
 export function proofRisks(changes, mode) {
   const problems = []
   for (const change of changes) {
+    if (mode === 'formalize' && !change.path.endsWith('.lean')) {
+      problems.push(
+        `Formalize writes Lean files only. Keep ${change.path} unchanged and put extraction or scratch output outside the project.`,
+      )
+      continue
+    }
     if (
       change.path
         .split('/')
@@ -460,6 +466,15 @@ export async function verifyCandidate(
       files: [],
       reason:
         'Project file changes are ready to review. No Lean source changes to check.',
+    }
+  if (!entries.length && mode === 'formalize')
+    return {
+      compiled: false,
+      complete: false,
+      files: [],
+      errors: [],
+      reason:
+        'No Lean formalization was written. There is no Lean output to verify.',
     }
   if (!entries.length)
     return {

@@ -16,6 +16,7 @@ import { FollowupInbox } from './agent-followups.mjs'
 import {
   agentConversationContext,
   currentEditorFile,
+  readSelectedContextFile,
   selectedContextFiles,
 } from './agent-context.mjs'
 import { validateWorkspaceFilePath } from './workspaces.mjs'
@@ -367,7 +368,20 @@ export class AgentManager {
     const saved = []
     let size = 0
     for (const file of files) {
-      const source = await this.workspaces.readFile(job.projectId, owner, file)
+      const source = await readSelectedContextFile(
+        this.workspaces,
+        job.projectId,
+        owner,
+        file,
+      )
+      if (!source) {
+        saved.push({
+          path: file,
+          referenceOnly: true,
+          note: 'PDF path only. Contents are not attached or refreshed in the isolated working copy.',
+        })
+        continue
+      }
       size += source.content.length
       if (size > 64_000)
         throw Object.assign(
@@ -560,7 +574,12 @@ export class AgentManager {
         ),
       )
       for (const file of requiredFiles)
-        await this.workspaces.readFile(job.projectId, job.owner, file)
+        await readSelectedContextFile(
+          this.workspaces,
+          job.projectId,
+          job.owner,
+          file,
+        )
       if (job.currentFile && !requiredFiles.has(job.currentFile))
         if (
           !(await this.workspaces.validateEditorContextFile(
@@ -967,19 +986,22 @@ export class AgentManager {
       if (active.controller.signal.aborted) return
       this.events.updateMetadata(id, { changes })
       this.#emit(id, 'changes', { changes })
-      if (job.mode === 'search' && !changes.length) {
-        const verification = {
-          complete: true,
-          files: [],
-          reason:
-            'Task completed without changing project files. No Lean verification was run.',
-          kind: 'chat',
-        }
+      if (['search', 'formalize'].includes(job.mode) && !changes.length) {
+        const verification =
+          job.mode === 'formalize'
+            ? await verifyCandidate(this.runtime, snapshot.root, [], job.mode)
+            : {
+                complete: true,
+                files: [],
+                reason:
+                  'Task completed without changing project files. No Lean verification was run.',
+                kind: 'chat',
+              }
         this.events.updateMetadata(id, { verification, status: 'completed' })
         this.#progress(
           id,
-          'Completed',
-          'Task finished without changing project files.',
+          job.mode === 'formalize' ? 'No Lean output' : 'Completed',
+          verification.reason,
         )
         this.#emit(id, 'verification', verification)
         return
@@ -1020,7 +1042,7 @@ export class AgentManager {
       })
       this.events.updateMetadata(id, { verificationRoot: clean.root })
       let checks = changes
-      if (!changes.length && job.mode !== 'search') {
+      if (!changes.length && !['search', 'formalize'].includes(job.mode)) {
         const targets = new Set(
           [job.file, ...(job.files || [])].filter(
             (file) =>

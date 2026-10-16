@@ -130,6 +130,8 @@ Targets belong to their chat. **Ask Lemex** uses the current proof or selection;
 
 Compare optimization's token and heartbeat measurements: a shorter proof can take more elaboration work. Repair invalid proofs first.
 
+To formalize a document, open its PDF, TeX, Markdown, plain text, or other readable source, choose **Formalize**, and describe the statement or argument to translate. Use **Select files** or **@** to add other sources. You do not need to select an existing Lean file: Lemex can create one for the formalization. Source documents stay unchanged, and Lean output still receives independent verification. The standard worker can extract PDF text. If extraction is unavailable on an older worker or loses essential mathematics, provide the relevant passage or TeX source. Scanned pages may need OCR.
+
 **Ask & Search** primarily helps with Lean, but also welcomes general questions, writing, planning, and open-ended tasks. Ask it to create or edit project text files and organize, rename, or delete non-Lean notes and documents. Use the file browser for Lean source renames and deletions. Questions and explanations leave files unchanged. Live edits are off by default: inspect the diff, then choose **Apply changes**. To save requested edits as Lemex works, enable **Options → Edit files live** before sending. This choice is saved separately from the other modes. Stop the run before undoing its edits. Lemex can use the workspace shell, Python, and other installed command-line tools in either editing mode. Lean source edits still receive independent Lean verification; ordinary conversation and non-Lean file tasks do not. Project setup files and dependencies stay protected.
 
 ## Follow and steer a chat
