@@ -21,7 +21,7 @@ export class WorkspaceEditor {
       // provider. Its lifetime also covers previews and retained VS Code models.
       this.modelRef = await createModelReference(
         resource,
-        readOnly ? undefined : content,
+        readOnly || editor.getModel(resource) ? undefined : content,
       )
       this.editor = editor.create(element, {
         model: this.modelRef.object.textEditorModel,

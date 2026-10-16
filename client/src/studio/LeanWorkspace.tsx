@@ -19,7 +19,7 @@ import {
   useState,
   type CSSProperties,
 } from 'react'
-import type { OpenFile } from './api'
+import type { FileEntry, OpenFile } from './api'
 import { connectInfoviewTheme } from './infoviewTheme'
 import { ResizeHandle } from './ResizeHandle'
 import { DEFAULT_LAYOUT, useMediaQuery } from './layout'
@@ -29,6 +29,7 @@ import { RenameModels } from './renameModels'
 import { initializeLeanEditor } from './leanEditorServices'
 import { DefinitionPreviewFiles } from './definitionPreviewFiles'
 import { WorkspaceEditor } from './workspaceEditor'
+import { LeanModelCache } from './leanModelCache'
 import type { RenameSource } from './workspaceBuffers'
 import { installLeanRenameMiddleware } from './leanRenameMiddleware'
 import { LEAN_EDIT_DISABLED_MESSAGE } from '../../../shared/lean-edit-policy.mjs'
@@ -57,6 +58,7 @@ class BrowserLeanMonaco extends LeanMonaco {
     private readonly renameContext: () => {
       uri: string | null
       hiddenDirty: boolean
+      retained?: (uri: string) => boolean
     },
     private readonly prepareRenameSources: (
       sources: RenameSource[],
@@ -188,6 +190,7 @@ interface Runtime {
   outlineCleanup?: () => void
   visibleReadyPath?: string
   renameModels?: RenameModels
+  modelCache: LeanModelCache
   disabledRenameAction?: { dispose(): void }
   definitionPreviewFiles?: DefinitionPreviewFiles
 }
@@ -200,6 +203,7 @@ interface ConnectionClient {
 
 export function LeanWorkspace({
   projectId,
+  files,
   file,
   buffers,
   bufferDiscardVersion,
@@ -223,6 +227,7 @@ export function LeanWorkspace({
   onFocusEditorHandled,
 }: {
   projectId: string
+  files: readonly FileEntry[]
   file: OpenFile | null
   buffers: ReadonlyMap<string, OpenFile>
   bufferDiscardVersion: number
@@ -345,6 +350,7 @@ export function LeanWorkspace({
               (buffer) =>
                 buffer.path !== path && buffer.content !== buffer.savedContent,
             ),
+            retained: (uri) => own?.modelCache.has(uri) ?? false,
           }
         },
         async (sources, token) => {
@@ -357,6 +363,12 @@ export function LeanWorkspace({
       own = {
         lean,
         virtualFiles: new Set(),
+        modelCache: new LeanModelCache(() => {
+          void serialize(async () => {
+            if (!cancelled && runtime.current === own)
+              await lean.closeHiddenDocuments()
+          }).catch(() => undefined)
+        }),
         renameModels: new RenameModels(
           () => own?.editor?.editor?.getModel() ?? null,
           (sources) => onRenameSourcesRef.current(sources),
@@ -365,6 +377,10 @@ export function LeanWorkspace({
           },
         ),
       }
+      own.modelCache.reconcile(
+        buffersRef.current,
+        fileRef.current?.path ?? null,
+      )
       runtime.current = own
       lean.setInfoviewElement(infoEl.current)
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -496,6 +512,7 @@ export function LeanWorkspace({
         }
         const closingModel = own?.editor?.editor?.getModel()
         own?.editor?.dispose()
+        own?.modelCache.dispose()
         await own?.renameModels?.dispose()
         if (closingModel && !closingModel.isDisposed()) closingModel.dispose()
         // The upstream provider calls stop() without awaiting it. Finish socket
@@ -532,17 +549,39 @@ export function LeanWorkspace({
   }, [projectId])
 
   useLayoutEffect(() => {
+    runtime.current?.modelCache.reconcile(buffers, file?.path ?? null)
+  }, [buffers, file?.path])
+
+  useLayoutEffect(() => {
+    // Listings refresh after terminal/agent changes, even when the visible
+    // source is unchanged. Their importers must reopen against new sources.
+    runtime.current?.modelCache.clear()
+  }, [projectId, files])
+
+  useLayoutEffect(() => {
     runtime.current?.renameModels?.synchronize(buffersRef.current)
   }, [bufferDiscardVersion])
 
   useEffect(() => {
     let cancelled = false
-    void serialize(() => {
+    void serialize(async () => {
       if (cancelled) return
       const active = runtime.current
       const path = fileRef.current?.path
-      // One visible worker is enough. Only another saved Lean module can
-      // invalidate its imports; saving this proof or a document needs no restart.
+      if (
+        savedPaths.some(
+          (saved) =>
+            saved.endsWith('.lean') ||
+            ['lean-toolchain', 'lakefile.toml', 'lake-manifest.json'].includes(
+              saved,
+            ),
+        )
+      ) {
+        active?.modelCache.invalidate()
+        await active?.lean.closeHiddenDocuments()
+      }
+      // Another saved Lean module can invalidate the visible file's imports.
+      // Saving this proof still preserves its own incremental snapshots.
       if (
         path?.endsWith('.lean') &&
         savedPaths.some((saved) => saved.endsWith('.lean') && saved !== path)
@@ -560,6 +599,7 @@ export function LeanWorkspace({
   }, [bufferSaveVersion, projectId, savedPaths])
 
   useEffect(() => {
+    runtime.current?.modelCache.removePaths(removedPaths)
     void runtime.current?.renameModels?.remove(removedPaths)
   }, [bufferRemoveVersion, removedPaths])
 
@@ -577,6 +617,10 @@ export function LeanWorkspace({
       if (cancelled) return
       const active = runtime.current
       if (!active || active.lean.disposed) return
+      const uri = snapshot
+        ? `file:///workspace/${snapshot.path.split('/').map(encodeURIComponent).join('/')}`
+        : null
+      active.modelCache.select(uri)
       active.subscription?.dispose()
       active.outlineCleanup?.()
       active.outlineCleanup = undefined
@@ -591,14 +635,13 @@ export function LeanWorkspace({
       active.editor?.dispose()
       active.editor = undefined
       const host = editorEl.current
-      if (!snapshot || !host) {
+      if (!snapshot || !host || !uri) {
         setLoading(false)
         return
       }
       try {
         ownEditor = new WorkspaceEditor()
         active.editor = ownEditor
-        const uri = `file:///workspace/${snapshot.path.split('/').map(encodeURIComponent).join('/')}`
         if (!snapshot.readOnly) active.virtualFiles.add(uri)
         await ownEditor.start(host, uri, snapshot.content, !!snapshot.readOnly)
         if (cancelled || runtime.current !== active || !host.isConnected) {
@@ -633,6 +676,8 @@ export function LeanWorkspace({
         // so a retained VS Code model cannot show a previous project's buffer.
         if (editor.getValue() !== snapshot.content)
           editor.setValue(snapshot.content)
+        if (!snapshot.readOnly) await active.modelCache.retain(uri)
+        if (cancelled || runtime.current !== active) return
         active.visibleReadyPath = snapshot.path
         pendingLocalChange.current = null
         editor.updateOptions({

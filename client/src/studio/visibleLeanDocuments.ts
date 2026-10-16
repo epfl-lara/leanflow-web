@@ -4,8 +4,8 @@ import type {
 } from 'vscode-languageclient/browser'
 export type LeanTextDocument = Parameters<NonNullable<Middleware['didOpen']>>[0]
 
-// Native browser models can remain alive for workspace undo without keeping
-// their Lean workers alive. This bridge owns the one visible LSP document.
+// Hidden rename/preview models never launch Lean workers. The visible document
+// and a bounded recent-file cache may retain workers for incremental reuse.
 export class VisibleLeanDocuments {
   private opened = new Map<
     string,
@@ -19,6 +19,7 @@ export class VisibleLeanDocuments {
     private visible: () => string | null,
     private documents: () => readonly LeanTextDocument[],
     issue: (message: string) => void,
+    private retained: (uri: string) => boolean = () => false,
   ) {
     this.previous = client.clientOptions.middleware
     this.middleware = {
@@ -90,7 +91,8 @@ export class VisibleLeanDocuments {
     return this.enqueue(async () => {
       const uri = this.visible()
       for (const [other, record] of this.opened)
-        if (other !== uri) await this.close(record.document)
+        if (other !== uri && !this.retained(other))
+          await this.close(record.document)
       if (!uri?.startsWith('file:///workspace/') || !this.client.isRunning())
         return
       const current =
@@ -120,10 +122,10 @@ export class VisibleLeanDocuments {
       const send = async (document: LeanTextDocument) => {
         const params =
           this.client.code2ProtocolConverter.asOpenTextDocumentParams(document)
-        await this.client.sendNotification(
-          'textDocument/didOpen',
-          force ? { ...params, dependencyBuildMode: 'once' } : params,
-        )
+        await this.client.sendNotification('textDocument/didOpen', {
+          ...params,
+          dependencyBuildMode: 'always',
+        })
         this.opened.set(uri, { document, version: params.textDocument.version })
       }
       await (this.previous?.didOpen
@@ -134,7 +136,8 @@ export class VisibleLeanDocuments {
   closeHidden() {
     return this.enqueue(async () => {
       for (const [uri, record] of this.opened)
-        if (uri !== this.visible()) await this.close(record.document)
+        if (uri !== this.visible() && !this.retained(uri))
+          await this.close(record.document)
     })
   }
 }

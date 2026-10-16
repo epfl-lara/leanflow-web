@@ -290,4 +290,42 @@ test('typing during an import refresh is included once in the new document, with
     f.notifications.at(-1).params.textDocument.version,
     f.main.version,
   )
+  assert(
+    f.notifications
+      .filter((entry) => entry.method === 'textDocument/didOpen')
+      .every((entry) => entry.params.dependencyBuildMode === 'always'),
+    'normal and refreshed workers must still build imports after later header edits',
+  )
+})
+
+test('returning to a retained document reuses its worker and protocol version', async () => {
+  const f = fixture(async () => ({}))
+  const retained = new Set([f.main.uri.toString()])
+  f.context.retained = (uri) => retained.has(uri)
+  await f.controller.showVisible()
+  f.foreign.uri.toString = () => 'file:///workspace/Use.lean'
+  f.context.uri = f.foreign.uri.toString()
+  await f.controller.closeHidden()
+  await f.controller.showVisible()
+  retained.add(f.foreign.uri.toString())
+  f.context.uri = f.main.uri.toString()
+  await f.controller.closeHidden()
+  await f.controller.showVisible()
+  assert.deepEqual(
+    f.notifications.map((entry) => [
+      entry.method,
+      entry.params.textDocument.uri,
+    ]),
+    [
+      ['textDocument/didOpen', 'file:///workspace/Main.lean'],
+      ['textDocument/didOpen', 'file:///workspace/Use.lean'],
+    ],
+  )
+  retained.delete(f.foreign.uri.toString())
+  await f.controller.closeHidden()
+  assert.equal(f.notifications.at(-1).method, 'textDocument/didClose')
+  assert.equal(
+    f.notifications.at(-1).params.textDocument.uri,
+    'file:///workspace/Use.lean',
+  )
 })

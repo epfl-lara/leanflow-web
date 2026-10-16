@@ -12,7 +12,7 @@ const { outputText } = ts.transpileModule(
     },
   },
 )
-function fixture(createReference, current = () => null) {
+function fixture(createReference, current = () => null, cached = () => null) {
   const module = { exports: {} }
   new Function('exports', 'module', 'require', outputText)(
     module.exports,
@@ -21,7 +21,7 @@ function fixture(createReference, current = () => null) {
       if (name === 'monaco-editor')
         return {
           Uri: { parse: (uri) => uri },
-          editor: { setModelLanguage: () => {} },
+          editor: { setModelLanguage: () => {}, getModel: cached },
         }
       if (name === 'vscode/monaco')
         return { createModelReference: createReference }
@@ -99,6 +99,28 @@ test('preparing an owned unsaved rename model never writes or reloads its virtua
   await f.models.dispose()
   assert(ref.released())
   assert(current.isDisposed())
+})
+
+test('rename preloads reuse a warm hidden model and reject changed text without writing it', async () => {
+  const ref = reference(source.content),
+    requests = []
+  const f = fixture(
+    async (...args) => {
+      requests.push(args)
+      return ref
+    },
+    () => null,
+    () => ref.object.textEditorModel,
+  )
+  await assert.rejects(
+    f.models.prepare([{ ...source, content: 'stale text' }], token),
+    /changed while Lean prepared/,
+  )
+  assert.equal(requests.length, 0)
+  await f.models.prepare([source], token)
+  assert.equal(requests[0][1], undefined)
+  assert.equal(ref.object.textEditorModel.getValue(), source.content)
+  await f.models.dispose()
 })
 
 test('project disposal waits for in-flight model loading and releases it before the next project starts', async () => {

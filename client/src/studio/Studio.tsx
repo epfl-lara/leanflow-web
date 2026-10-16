@@ -2417,6 +2417,7 @@ export function Studio() {
                 <LeanWorkspace
                   key={`editor:${project.id}`}
                   projectId={project.id}
+                  files={files}
                   file={pdfPreview ? null : file}
                   buffers={buffers}
                   bufferDiscardVersion={discardVersion}

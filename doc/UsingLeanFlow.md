@@ -162,6 +162,8 @@ Choose **Open locally** to view a module from the project's pinned Lean installa
 
 To jump to a declaration from the editor, hold **Alt** (**Option** on macOS) and click its name. You can also press **F12** or right-click and choose **Go to Definition**. Project files open in the editor; definitions in Lean's installed library open in the scrollable read-only viewer at the position reported by Lean. Navigation between project files uses the usual unsaved-edit prompt. Use **Ctrl+click** (**Cmd+click** on macOS) to add a cursor for editing.
 
+Returning to a recently opened Lean file can reuse its proof-checking state. The editor keeps one recent project source warm for up to a minute. Saving source changes and refreshing file listings invalidate cached imports; switching projects releases the cache. Large files are excluded. While **Terminal** is open, its automatic file refreshes also clear the cache.
+
 In **Source control → Changes**, save files, review the diff, and enter a commit message. Use **Create branch** if you need a new branch. An import with publishing enabled already has a working branch.
 
 Choose **Publish** in the project header, or the **Publish** tab in Source control. If publishing was disabled during import, choose **Enable publishing**. The imported repository is filled in automatically. You can replace it with an existing fork where you have write access.

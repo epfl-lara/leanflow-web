@@ -14,7 +14,11 @@ import {
 
 export function installLeanRenameMiddleware(
   client: BaseLanguageClient,
-  context: () => { uri: string | null; hiddenDirty: boolean },
+  context: () => {
+    uri: string | null
+    hiddenDirty: boolean
+    retained?: (uri: string) => boolean
+  },
   issue: (message: string) => void,
   _prepare: (
     sources: RenameSource[],
@@ -27,6 +31,7 @@ export function installLeanRenameMiddleware(
     () => context().uri,
     () => lean.leanDocuments.map((entry) => entry.doc),
     issue,
+    (uri) => context().retained?.(uri) ?? false,
   )
   const disabled = () => {
     issue(LEAN_EDIT_DISABLED_MESSAGE)

@@ -146,6 +146,7 @@ export async function chatBrowserFixture({
     onUndo: null,
     onCreateRun: null,
     onCreateChat: null,
+    onLeanMessage: null,
   }
   const report = {
     requests: [],
@@ -369,6 +370,7 @@ export async function chatBrowserFixture({
     report.sockets.push(socket.url())
     socket.onMessage((raw) => {
       const message = JSON.parse(String(raw))
+      state.onLeanMessage?.(message, socket.url(), socket)
       if (!('id' in message)) return
       let result = null
       if (message.method === 'initialize')

@@ -60,7 +60,9 @@ export class RenameModels {
       const current = this.currentModel()
       const owned =
         entry?.reference.object.textEditorModel ??
-        (current?.uri.toString() === source.uri ? current : null)
+        (current?.uri.toString() === source.uri
+          ? current
+          : editor.getModel(Uri.parse(source.uri)))
       if (owned && owned.getValue() !== source.content)
         throw new Error(
           `${source.path} changed while Lean prepared the rename. Try again.`,
