@@ -22,8 +22,7 @@ import { searchDeclarations } from './search.mjs'
 import { LspFrames, frame, validateClientUris } from './rpc.mjs'
 import { LeanRequests } from './lean-requests.mjs'
 import { LeanProgress } from './lean-progress.mjs'
-import { LeanRenames } from './lean-renames.mjs'
-import { LeanProjectIndex } from './lean-project-index.mjs'
+import { LeanEditPolicy } from './lean-edit-policy.mjs'
 import { ProjectActivity } from './project-activity.mjs'
 import { acquireServerLease } from './lease.mjs'
 import { repairProjectSetup, withSetupRepairDeadline } from './setup-repair.mjs'
@@ -1133,10 +1132,7 @@ export async function createStudio({
     let child,
       alive = true,
       lastActivity = Date.now()
-    let requests,
-      progress,
-      renames,
-      indexBusy = false
+    let requests, progress, editPolicy
     try {
       child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
         network: 'none',
@@ -1153,19 +1149,14 @@ export async function createStudio({
       const forward = (message) => {
         if (requests.receive(message)) sendToClient(message)
       }
-      renames = new LeanRenames({
-        readFile: async (filename) =>
-          workspaces.readFile(project.id, project.owner, filename),
+      editPolicy = new LeanEditPolicy({
         sendToClient: forward,
-      })
-      const renameIndex = new LeanProjectIndex({
-        root: project.root,
-        files: () => workspaces.renameFiles(project.id, project.owner),
+        sendToLean: (message) => child.stdin.write(frame(message)),
       })
       progress = new LeanProgress(sendToClient)
       const frames = new LspFrames((message) => {
         progress.server(message)
-        if (renames.receive(message)) forward(message)
+        if (editPolicy.server(message)) forward(message)
       })
       child.stdout.on('data', (chunk) => {
         try {
@@ -1191,62 +1182,7 @@ export async function createStudio({
           const message = validateClientUris(JSON.parse(data.toString()))
           requests.track(message)
           progress.client(message)
-          renames.track(message)
-          if (
-            ['textDocument/prepareRename', 'textDocument/rename'].includes(
-              message.method,
-            ) &&
-            'id' in message
-          ) {
-            if (indexBusy) {
-              renames.receive({
-                jsonrpc: '2.0',
-                id: message.id,
-                error: {
-                  code: -32803,
-                  message:
-                    'Lean is finishing another rename request. Try again in a moment.',
-                },
-              })
-              return
-            }
-            indexBusy = true
-            void (async () => {
-              try {
-                const snapshot = await renameIndex.capture(
-                  new Set(renames.documents.keys()),
-                  () => !renames.pending.has(message.id),
-                )
-                const pending = renames.pending.get(message.id)
-                if (!pending) return
-                pending.index = snapshot
-                if (snapshot.changes.length)
-                  child.stdin.write(
-                    frame({
-                      jsonrpc: '2.0',
-                      method: 'workspace/didChangeWatchedFiles',
-                      params: { changes: snapshot.changes },
-                    }),
-                  )
-                snapshot.commit()
-                child.stdin.write(frame(message))
-              } catch (error) {
-                renames.receive({
-                  jsonrpc: '2.0',
-                  id: message.id,
-                  error: {
-                    code: -32803,
-                    message:
-                      error.code === -32803
-                        ? error.message
-                        : 'Lean could not refresh this project index. Use Check Project, then rename again.',
-                  },
-                })
-              } finally {
-                indexBusy = false
-              }
-            })()
-          } else child.stdin.write(frame(message))
+          if (editPolicy.client(message)) child.stdin.write(frame(message))
         } catch (error) {
           if (error.sourceTooLarge) ws.close(1009, error.message)
           else ws.close(1008, 'Invalid Lean message or workspace path.')
@@ -1268,7 +1204,7 @@ export async function createStudio({
       clearInterval(heartbeat)
       requests?.dispose()
       progress?.dispose()
-      renames?.dispose()
+      editPolicy?.dispose()
       child?.kill()
       sockets.delete(ws)
       socketProjects.delete(ws)

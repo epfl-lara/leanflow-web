@@ -3401,14 +3401,6 @@ export class WorkspaceStore {
     return this.#walk(project.root, { dependencies: true, dependencyRoot })
   }
 
-  async renameFiles(id, owner) {
-    const project = this.get(id, owner)
-    const files = await this.#walk(project.root, { limit: 10001 })
-    if (files.length > 10000)
-      fail('This project has too many files to index safely for rename.', 413)
-    return files
-  }
-
   async folders(id, owner) {
     const project = this.get(id, owner)
     return (await this.#walk(project.root, { foldersOnly: true })).map(

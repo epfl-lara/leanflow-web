@@ -162,6 +162,8 @@ async function altDefinition(
   name = 'localValue',
   previewAvailable = true,
 ) {
+  await page.locator('.editor-loading').waitFor({ state: 'hidden' })
+  await editor().focus()
   state.definitionLocations = locations
   const previous = report.requests.filter((r) => r.method === 'LSP').length
   const point = await identifierPoint(name)

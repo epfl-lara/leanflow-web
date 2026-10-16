@@ -84,6 +84,12 @@ export class AgentRpc extends EventEmitter {
   }
 }
 
+function lspMessageObject(message) {
+  if (!message || typeof message !== 'object' || Array.isArray(message))
+    throw new Error('Lean messages must be JSON objects.')
+  return message
+}
+
 export class LspFrames {
   constructor(onMessage, maxBytes = 64 * 1024 * 1024) {
     this.buffer = Buffer.alloc(0)
@@ -110,7 +116,7 @@ export class LspFrames {
       if (this.buffer.length < end + 4 + length) return
       const body = this.buffer.subarray(end + 4, end + 4 + length)
       this.buffer = this.buffer.subarray(end + 4 + length)
-      this.onMessage(JSON.parse(body.toString('utf8')))
+      this.onMessage(lspMessageObject(JSON.parse(body.toString('utf8'))))
     }
   }
 }
@@ -121,6 +127,7 @@ export function frame(message) {
 }
 
 export function validateClientUris(message) {
+  lspMessageObject(message)
   // The JSON envelope may be larger than the source because of escaping. Keep
   // decoded didOpen/didChange text bounded before passing it to the Lean worker.
   const texts =

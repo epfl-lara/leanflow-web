@@ -7,6 +7,7 @@ import { FileUri } from 'lean4monaco/dist/vscode-lean4/vscode-lean4/src/utils/ex
 import type { SourceRequest } from './LibrarySourceDialog'
 import {
   CancellationTokenSource,
+  KeyCode,
   editor as monacoEditor,
   languages,
 } from 'monaco-editor'
@@ -29,6 +30,7 @@ import { DefinitionPreviewFiles } from './definitionPreviewFiles'
 import { WorkspaceEditor } from './workspaceEditor'
 import type { RenameSource } from './workspaceBuffers'
 import { installLeanRenameMiddleware } from './leanRenameMiddleware'
+import { LEAN_EDIT_DISABLED_MESSAGE } from '../../../shared/lean-edit-policy.mjs'
 import type { ChatMode } from './chatModes'
 import {
   proofDeclarations,
@@ -184,6 +186,7 @@ interface Runtime {
   outlineCleanup?: () => void
   visibleReadyPath?: string
   renameModels?: RenameModels
+  disabledRenameAction?: { dispose(): void }
   definitionPreviewFiles?: DefinitionPreviewFiles
 }
 interface ConnectionClient {
@@ -478,6 +481,7 @@ export function LeanWorkspace({
           subscription.dispose(),
         )
         own?.restoreOpenEditor?.()
+        own?.disabledRenameAction?.dispose()
         const closingFile = own?.editor?.modelRef?.object
         if (closingFile) {
           // Virtual file changes can still be reloading this managed model.
@@ -552,6 +556,8 @@ export function LeanWorkspace({
       active.outlineCleanup = undefined
       active.restoreOpenEditor?.()
       active.restoreOpenEditor = undefined
+      active.disabledRenameAction?.dispose()
+      active.disabledRenameAction = undefined
       active.visibleReadyPath = undefined
       await active.lean.closeHiddenDocuments()
       if (cancelled || runtime.current !== active || active.lean.disposed)
@@ -610,6 +616,16 @@ export function LeanWorkspace({
           // Monaco assigns definition links to the other mouse modifier.
           multiCursorModifier: 'ctrlCmd',
         })
+        if (snapshot.path.endsWith('.lean'))
+          active.disabledRenameAction = editor.addAction({
+            id: 'leanflow.renameDisabled',
+            label: 'Rename Symbol (unavailable)',
+            keybindings: [KeyCode.F2],
+            keybindingContext: 'editorTextFocus',
+            contextMenuGroupId: '1_modification',
+            contextMenuOrder: 1,
+            run: () => setRenameIssue(LEAN_EDIT_DISABLED_MESSAGE),
+          })
         if (snapshot.line) {
           const position = {
             lineNumber: snapshot.line,

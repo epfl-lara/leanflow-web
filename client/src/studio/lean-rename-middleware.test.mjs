@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import ts from 'typescript'
+import * as editPolicy from '../../../shared/lean-edit-policy.mjs'
 
 const code = ts.transpileModule(
   fs.readFileSync(
@@ -65,10 +66,11 @@ function fixture(sendRequest) {
       if (name === 'monaco-editor')
         return { CancellationTokenSource: Cancellation }
       if (name === 'vscode-languageserver-protocol')
-        return { RenameRequest: { type: 'textDocument/rename' } }
+        return { CancellationToken: { None: new Cancellation().token } }
       if (name.includes('leanEditorProvider'))
         return { lean: { leanDocuments: [{ doc: foreign }, { doc: main }] } }
       if (name === './workspaceBuffers') return {}
+      if (name === '../../../shared/lean-edit-policy.mjs') return editPolicy
       if (name === './visibleLeanDocuments') {
         const visibleModule = { exports: {} }
         new Function('exports', 'module', visibleCode)(
@@ -112,7 +114,6 @@ function fixture(sendRequest) {
     () => context,
     (text) => issues.push(text),
     async () => {},
-    { indexTimeoutMs: 20 },
   )
   return {
     client,
@@ -127,7 +128,7 @@ function fixture(sendRequest) {
   }
 }
 
-test('only the visible document is opened or changed in Lean, including during rename preload', async () => {
+test('only the visible document is opened or changed in Lean while rename is disabled', async () => {
   const f = fixture(async () => ({})),
     token = new Cancellation().token
   const sent = []
@@ -136,66 +137,102 @@ test('only the visible document is opened or changed in Lean, including during r
   await f.middleware.didChange({ document: f.foreign }, async () =>
     sent.push('hidden change'),
   )
-  await f.middleware.prepareRename(f.main, {}, token, async () => ({
-    prepared: true,
-  }))
+  await assert.rejects(
+    async () =>
+      f.middleware.prepareRename(f.main, {}, token, () => assert.fail()),
+    /disabled/,
+  )
   assert.deepEqual(sent, [])
   assert.deepEqual(
     f.notifications.map((n) => [n.method, n.params.textDocument.uri]),
     [['textDocument/didOpen', f.main.uri.toString()]],
   )
-  assert.equal(f.calls.length, 1)
-  assert.equal(f.calls[0][1].uri, f.main.uri.toString())
+  assert.equal(f.calls.length, 0)
 })
 
-test('a crashed index worker times out with a useful error and never opens the rename box', async () => {
-  let requestToken
-  const f = fixture((_method, _params, token) => {
-    requestToken = token
-    return new Promise(() => {})
-  })
-  let prepared = false
-  await assert.rejects(
-    f.middleware.prepareRename(
-      f.main,
-      {},
-      new Cancellation().token,
-      async () => {
-        prepared = true
-      },
-    ),
-    /Restart Lean/,
+test('rename cannot prepare or apply edits, including when Lean or an older client advertised support', async () => {
+  const f = fixture(async () =>
+    assert.fail('No rename or index request may reach Lean'),
   )
-  assert.equal(prepared, false)
-  assert.equal(requestToken.isCancellationRequested, true)
-})
-
-test('older pinned servers without an index barrier keep their native rename preparation', async () => {
-  const f = fixture(async () => {
-    throw Object.assign(new Error('method not found'), { code: -32601 })
-  })
   const token = new Cancellation().token
-  assert.equal(
-    await f.middleware.prepareRename(f.main, {}, token, async () => 'prepared'),
-    'prepared',
-  )
-  assert.equal(
-    await f.middleware.prepareRename(f.main, {}, token, async () => 'again'),
-    'again',
-  )
-  assert.equal(f.calls.length, 1)
-})
-
-test('a second rename cannot silently omit other unsaved hidden buffers', async () => {
-  const f = fixture(async () => ({}))
-  f.context.hiddenDirty = true
   await assert.rejects(
-    f.middleware.prepareRename(f.main, {}, new Cancellation().token, async () =>
+    async () =>
+      f.middleware.prepareRename(f.main, {}, token, () => assert.fail()),
+    /disabled/,
+  )
+  assert.equal(
+    await f.middleware.provideRenameEdits(f.main, {}, 'blankC', token, () =>
       assert.fail(),
     ),
-    /Save all/,
+    null,
   )
   assert.equal(f.calls.length, 0)
+  assert.match(f.issues.at(-1), /program meaning/)
+})
+
+test('cancelled rename neither edits buffers nor presents an error', async () => {
+  const f = fixture(async () => assert.fail()),
+    cancellation = new Cancellation()
+  cancellation.cancel()
+  assert.equal(
+    await f.middleware.prepareRename(f.main, {}, cancellation.token, () =>
+      assert.fail(),
+    ),
+    null,
+  )
+  assert.equal(
+    await f.middleware.provideRenameEdits(
+      f.main,
+      {},
+      'blankC',
+      cancellation.token,
+      () => assert.fail(),
+    ),
+    null,
+  )
+  assert.equal(f.calls.length, 0)
+  assert.deepEqual(f.issues, [])
+})
+
+test('code actions and command-backed refactors cannot bypass the disabled rename path', async () => {
+  const f = fixture(async () => assert.fail()),
+    token = new Cancellation().token
+  assert.deepEqual(
+    await f.middleware.provideCodeActions(f.main, {}, {}, token, () =>
+      assert.fail(),
+    ),
+    [],
+  )
+  assert.throws(
+    () => f.middleware.resolveCodeAction({}, token, () => assert.fail()),
+    /disabled/,
+  )
+  assert.throws(
+    () =>
+      f.middleware.executeCommand('unsafe.refactor', [], () => assert.fail()),
+    /disabled/,
+  )
+  assert.equal(f.calls.length, 0)
+})
+
+test('dynamic capabilities keep navigation but cannot re-enable edit providers', async () => {
+  const f = fixture(async () => assert.fail())
+  let forwarded
+  await f.middleware.handleRegisterCapability(
+    {
+      registrations: [
+        { id: 'rename', method: 'textDocument/rename' },
+        { id: 'action', method: 'textDocument/codeAction' },
+        { id: 'hover', method: 'textDocument/hover' },
+      ],
+    },
+    async (params) => {
+      forwarded = params
+    },
+  )
+  assert.deepEqual(forwarded.registrations, [
+    { id: 'hover', method: 'textDocument/hover' },
+  ])
 })
 
 test('switching files explicitly closes the old document before opening the new one', async () => {

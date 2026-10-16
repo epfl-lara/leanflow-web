@@ -432,6 +432,28 @@ test('Lean framing handles byte splits, coalesced messages, and UTF-8 byte lengt
   )
 })
 
+test('non-object and batched Lean messages are refused in both directions', () => {
+  for (const message of [
+    null,
+    false,
+    1,
+    'message',
+    [],
+    [{ id: 1, method: 'textDocument/rename' }],
+  ]) {
+    assert.throws(() => validateClientUris(message), /JSON objects/)
+    const received = []
+    assert.throws(
+      () =>
+        new LspFrames((value) => received.push(value)).push(
+          Buffer.from(frame(message)),
+        ),
+      /JSON objects/,
+    )
+    assert.deepEqual(received, [])
+  }
+})
+
 test('LSP URI checks cover nested locations, targetUri, encoded traversal, roots, and secrets', () => {
   const good = {
     params: {
@@ -1575,87 +1597,108 @@ test('authorized WebSocket relays Lean frames and closes on forbidden client fil
   assert.equal(child.requests.length, 0)
 })
 
-test('Lean WebSocket rename preserves qualified references in unsaved and saved project sources', async (t) => {
+test('Lean WebSocket disables unsafe refactors for old clients and refuses server workspace edits without breaking navigation', async (t) => {
   const { url, token, project, runtime, workspaces } = await fixture(t)
-  const file = await workspaces.readFile(project.id, 'owner', 'Main.lean')
-  await workspaces.writeFile(
-    project.id,
-    'owner',
-    'Main.lean',
-    '#check Saved.blank',
-    file.hash,
-  )
-  const build = path.join(project.root, '.lake/build/lib/lean')
-  await fs.mkdir(build, { recursive: true })
-  await fs.writeFile(path.join(build, 'Main.ilean'), '{}')
-  await fs.writeFile(
-    path.join(build, 'Main.trace'),
-    JSON.stringify({ inputs: [['/workspace/Main.lean', 'fake build hash']] }),
-  )
+  const original = await workspaces.readFile(project.id, 'owner', 'Main.lean')
   const ws = new WebSocket(
     url.replace('http:', 'ws:') + '/websocket/' + project.id,
-    {
-      headers: { Authorization: `Bearer ${token}` },
-    },
+    { headers: { Authorization: `Bearer ${token}` } },
   )
   t.after(() => ws.terminate())
   await new Promise((resolve, reject) => {
     ws.once('open', resolve)
     ws.once('error', reject)
   })
-  const child = runtime.spawned[0]
-  const uri = 'file:///workspace/Main.lean'
-  const client = async (message) => {
-    const received = new Promise((resolve) => child.stdin.once('data', resolve))
-    ws.send(JSON.stringify(message))
-    await received
-  }
-  await client({
-    method: 'textDocument/didOpen',
-    params: { textDocument: { uri, version: 1, text: '#check Unsaved.blank' } },
-  })
-  for (const [id, prefix] of [
-    [1, 'Unsaved'],
-    [2, 'Saved'],
-  ]) {
-    if (id === 2)
-      await client({
-        method: 'textDocument/didClose',
-        params: { textDocument: { uri } },
-      })
-    await client({
-      id,
-      method: 'textDocument/rename',
-      params: {
-        textDocument: { uri },
-        position: { line: 0, character: 15 },
-        newName: 'blankC',
-      },
-    })
-    const reply = new Promise((resolve) =>
+  const child = runtime.spawned[0],
+    received = []
+  ws.on('message', (data) => received.push(JSON.parse(data)))
+  const reply = () =>
+    new Promise((resolve) =>
       ws.once('message', (data) => resolve(JSON.parse(data))),
     )
-    child.stdout.write(
-      frame({
+  for (const [id, method] of [
+    'textDocument/prepareRename',
+    'textDocument/rename',
+    'textDocument/codeAction',
+    'codeAction/resolve',
+    'workspace/executeCommand',
+    'workspace/willRenameFiles',
+  ].entries()) {
+    const response = reply()
+    ws.send(
+      JSON.stringify({
         id,
-        result: {
+        method,
+        params: {
+          textDocument: { uri: 'file:///workspace/Main.lean' },
+          position: { line: 0, character: 5 },
+          newName: 'blankC',
+        },
+      }),
+    )
+    const result = await response
+    assert.equal(result.error.code, -32803)
+    assert.match(result.error.message, /disabled/)
+    assert.equal(
+      child.requests.length,
+      0,
+      'A stale client cannot send editing requests to Lean',
+    )
+  }
+  const refused = new Promise((resolve) =>
+    child.stdin.once('data', (data) =>
+      resolve(JSON.parse(data.toString().split('\r\n\r\n')[1])),
+    ),
+  )
+  child.stdout.write(
+    frame({
+      id: 'server-edit',
+      method: 'workspace/applyEdit',
+      params: {
+        edit: {
           changes: {
-            [uri]: [
+            'file:///workspace/Main.lean': [
               {
                 range: {
-                  start: { line: 0, character: 7 },
-                  end: { line: 0, character: 7 + prefix.length + 6 },
+                  start: { line: 0, character: 0 },
+                  end: { line: 0, character: 0 },
                 },
-                newText: 'blankC',
+                newText: 'unsafe edit',
               },
             ],
           },
         },
-      }),
-    )
-    const received = await reply
-    assert.equal(received.result.changes[uri][0].newText, `${prefix}.blankC`)
-  }
+      },
+    }),
+  )
+  const rejected = await refused
+  assert.equal(rejected.id, 'server-edit')
+  assert.equal(rejected.result.applied, false)
+  assert.equal(
+    received.some((message) => message.method === 'workspace/applyEdit'),
+    false,
+  )
+  const hoverReply = reply(),
+    relayed = new Promise((resolve) => child.stdin.once('data', resolve))
+  ws.send(
+    JSON.stringify({
+      id: 20,
+      method: 'textDocument/hover',
+      params: {
+        textDocument: { uri: 'file:///workspace/Main.lean' },
+        position: { line: 0, character: 5 },
+      },
+    }),
+  )
+  await relayed
+  child.stdout.write(
+    frame({ id: 20, result: { contents: 'hover still works' } }),
+  )
+  assert.deepEqual((await hoverReply).result, { contents: 'hover still works' })
+  assert.deepEqual(
+    await workspaces.readFile(project.id, 'owner', 'Main.lean'),
+    original,
+  )
 })
 
 test('configuration saves close only that project editor and expose setup retry before new runs', async (t) => {
