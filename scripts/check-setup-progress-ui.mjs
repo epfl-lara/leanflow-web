@@ -116,7 +116,8 @@ try {
     .locator('.setup-facts')
     .getByText(project.sourceRevision, { exact: true })
     .waitFor()
-  await f.page.getByText('Setup output', { exact: true }).click()
+  assert.equal(await f.page.locator('.setup-editor-details summary').count(), 1)
+  assert(await f.page.locator('.setup-log').isVisible())
   assert.match(
     await f.page.locator('.setup-log').innerText(),
     /Building dependency mathlib/,
@@ -154,13 +155,15 @@ try {
     await f.page.locator('.setup-editor-details').getAttribute('open'),
     null,
   )
+  assert.equal(await f.page.locator('.setup-log').isVisible(), false)
   assert(await f.page.locator('.setup-digest').isVisible())
   await f.page.keyboard.press('Enter')
   assert.notEqual(
     await f.page.locator('.setup-editor-details').getAttribute('open'),
     null,
   )
-  await f.page.getByText('Setup output', { exact: true }).click()
+  assert(await f.page.locator('.setup-log').isVisible())
+  assert.equal(await f.page.locator('.setup-editor-details details').count(), 0)
   assert.match(
     await f.page.locator('.setup-log').innerText(),
     /Verified dependency revision mathlib/,
@@ -208,7 +211,7 @@ try {
   f.state.files[background.id] = {}
   await f.page.reload()
   await f.page.getByText('Project setup', { exact: true }).click()
-  await f.page.getByText('Setup output', { exact: true }).waitFor()
+  await f.page.locator('.setup-log').waitFor()
   const initialDetails = detailRequests
   const initialLists = listRequests
   await until(() => listRequests >= initialLists + 2, 'background setup polls')
@@ -220,7 +223,6 @@ try {
   project.setupEventAfter = 200
   project.setupStartedAt = new Date().toISOString()
   project.log = 'Refreshed setup output from a new attempt.\n'
-  await f.page.getByText('Setup output', { exact: true }).click()
   await until(
     async () =>
       (await f.page.locator('.setup-log').innerText()).includes(
@@ -261,12 +263,13 @@ try {
   await f.page.getByText('Preparing libraries', { exact: true }).waitFor()
   project.status = 'ready'
   f.state.session.lemex = { configured: false }
-  await f.page.reload()
+  await f.ready()
   await f.page
     .getByRole('button', { name: 'Import or create project', exact: true })
     .first()
     .click()
   const dialog = f.page.getByRole('dialog')
+  await dialog.waitFor()
   const repairChoice = dialog.getByRole('checkbox', {
     name: /Let Lemex repair setup if needed/,
   })

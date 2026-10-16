@@ -55,14 +55,21 @@ export function ProjectSetupPanel({ project }: { project: Project }) {
         )}
       </summary>
       <div className="setup-editor-content">
-        <ProjectSetupDetails project={project} />
+        <ProjectSetupDetails project={project} collapsibleOutput={false} />
       </div>
     </details>
   )
 }
 
-export function ProjectSetupDetails({ project }: { project: Project }) {
+export function ProjectSetupDetails({
+  project,
+  collapsibleOutput = true,
+}: {
+  project: Project
+  collapsibleOutput?: boolean
+}) {
   const lean = readyLeanVersion(project)
+  const output = project.log && <pre className="setup-log">{project.log}</pre>
   return (
     <>
       {project.status === 'preparing' && (
@@ -134,12 +141,15 @@ export function ProjectSetupDetails({ project }: { project: Project }) {
           )}
         </div>
       )}
-      {project.log && (
-        <details className="setup-output" open={project.status === 'error'}>
-          <summary>Setup output</summary>
-          <pre className="setup-log">{project.log}</pre>
-        </details>
-      )}
+      {output &&
+        (collapsibleOutput ? (
+          <details className="setup-output" open={project.status === 'error'}>
+            <summary>Setup output</summary>
+            {output}
+          </details>
+        ) : (
+          output
+        ))}
       {project.repository && !lean && (
         <p className="field-help">{project.repository}</p>
       )}
