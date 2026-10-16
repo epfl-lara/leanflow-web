@@ -9,6 +9,11 @@ export interface RenameSource {
   unsaved: boolean
 }
 
+// Identity is per visit, so a response from A cannot apply after A → B → A.
+export interface WorkspaceScope {
+  readonly projectId: string | null
+}
+
 export function renameSources(value: unknown): RenameSource[] {
   if (!Array.isArray(value) || !value.length || value.length > 1000)
     throw new Error('Lean returned an invalid set of rename files.')
@@ -57,6 +62,7 @@ export function renameSources(value: unknown): RenameSource[] {
 // stays unsaved until one Save commits every dirty buffer, or Discard resets all.
 export class WorkspaceBuffers {
   private state: {
+    scope: WorkspaceScope
     file: OpenFile | null
     buffers: ReadonlyMap<string, OpenFile>
     discardVersion: number
@@ -65,6 +71,7 @@ export class WorkspaceBuffers {
     removeVersion: number
     removedPaths: readonly string[]
   } = {
+    scope: { projectId: null },
     file: null,
     buffers: new Map(),
     discardVersion: 0,
@@ -75,6 +82,18 @@ export class WorkspaceBuffers {
   }
   private retained = new Set<string>()
   private listeners = new Set<() => void>()
+  selectProject = (projectId: string | null) => {
+    if (this.state.scope.projectId === projectId) return
+    this.retained.clear()
+    this.state = {
+      ...this.state,
+      scope: { projectId },
+      savedPaths: [],
+      removedPaths: [],
+    }
+    this.publish(null, new Map())
+  }
+  isCurrent = (scope: WorkspaceScope) => this.state.scope === scope
   getSnapshot = () => this.state
   subscribe = (listener: () => void) => {
     this.listeners.add(listener)

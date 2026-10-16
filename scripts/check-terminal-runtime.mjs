@@ -15,6 +15,9 @@ const root = path.join(dataDir, 'project')
 const scratchRoot = path.join(dataDir, 'scratch')
 const previousSource = '-- previous full project\n'
 const scratchSource = '-- private Scratch proof\nexample : 2 = 2 := rfl\n'
+const previousTex = '% previous full project TeX\n'
+const scratchTex =
+  '\\documentclass{article}\n\\begin{document}Scratch TeX\\end{document}\n'
 const projects = new Map([
   ['/', { id: 'fixture', root }],
   ['/scratch', { id: 'scratch', kind: 'single-file', root: scratchRoot }],
@@ -77,6 +80,7 @@ try {
     path.join(root, 'escape'),
   )
   await fs.writeFile(path.join(root, 'Main.lean'), previousSource)
+  await fs.writeFile(path.join(root, 'test.tex'), previousTex)
   server.on('upgrade', (req, stream, head) =>
     terminals.upgrade(req, stream, head, projects.get(req.url)),
   )
@@ -189,6 +193,7 @@ try {
       path.join(scratchRoot, filename),
     )
   await fs.writeFile(path.join(scratchRoot, 'Main.lean'), scratchSource)
+  await fs.writeFile(path.join(scratchRoot, 'test.tex'), scratchTex)
   await runtime.inheritDependencies(dependencies, scratchRoot)
   output = ''
   socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/scratch`)
@@ -222,6 +227,39 @@ try {
     previousSource,
   )
   assert(!output.includes('previous full project'))
+  input("test -f Main.lean && cat test.tex && printf 'TEX_SAME_ROOT_OK\\n'\r")
+  await until(
+    () => output.includes('Scratch TeX') && output.includes('TEX_SAME_ROOT_OK'),
+    'saved TeX and Lean in the same terminal directory',
+  )
+  assert(!output.includes('previous full project TeX'))
+  // Match the editor's atomic save while the directory is already mounted.
+  const editorTex = scratchTex + '% saved after terminal startup\n'
+  await fs.writeFile(path.join(scratchRoot, '.tex-save-fixture'), editorTex)
+  await fs.rename(
+    path.join(scratchRoot, '.tex-save-fixture'),
+    path.join(scratchRoot, 'test.tex'),
+  )
+  input(
+    "cat test.tex; printf '%s\\n' '% terminal TeX edit' >> test.tex; printf 'TEX_EDIT_DONE\\n'\r",
+  )
+  await until(
+    () =>
+      output.includes('saved after terminal startup') &&
+      output.includes('TEX_EDIT_DONE'),
+    'editor TeX save visible to the existing terminal',
+  )
+  assert.equal(
+    await fs.readFile(path.join(scratchRoot, 'test.tex'), 'utf8'),
+    editorTex + '% terminal TeX edit\n',
+  )
+  assert.equal(
+    await fs.readFile(path.join(root, 'test.tex'), 'utf8'),
+    previousTex,
+  )
+  report.checks.push(
+    'Saved Lean and TeX share /workspace; an existing terminal sees atomic TeX saves and its TeX edits reach the same source file without changing another project.',
+  )
   await terminals.closeProject('scratch')
   await until(() => runtime.children.size === 0, 'Scratch worker cleanup')
   report.checks.push(

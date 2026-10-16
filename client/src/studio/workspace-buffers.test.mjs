@@ -30,6 +30,45 @@ const source = (path, content, hash = hashA, unsaved = false) => ({
   unsaved,
 })
 
+test('project selection clears visible and retained files before notifying subscribers', () => {
+  const store = new WorkspaceBuffers()
+  store.selectProject('alpha')
+  store.setFile(file('main.tex', 'alpha source'))
+  store.register([source('Use.lean', '#check alpha')])
+  store.change('main.tex', 'unsaved alpha')
+  const observed = []
+  store.subscribe(() => observed.push(store.getSnapshot()))
+  store.selectProject('scratch')
+  assert.equal(observed.length, 1)
+  assert.equal(observed[0].scope.projectId, 'scratch')
+  assert.equal(observed[0].file, null)
+  assert.equal(observed[0].buffers.size, 0)
+  assert.deepEqual(store.dirty(), [])
+})
+
+test('returning to a project invalidates requests from its previous visit', async () => {
+  const store = new WorkspaceBuffers()
+  store.selectProject('alpha')
+  const firstVisit = store.getSnapshot().scope
+  let resolve
+  const response = new Promise((done) => {
+    resolve = done
+  })
+  const pending = response.then(() => {
+    if (store.isCurrent(firstVisit)) store.setFile(file('main.tex', 'stale'))
+  })
+  store.selectProject('beta')
+  store.selectProject('alpha')
+  store.setFile(file('main.tex', 'fresh'))
+  resolve()
+  await pending
+  assert.equal(store.getSnapshot().file.content, 'fresh')
+  assert.equal(store.isCurrent(firstVisit), false)
+  const currentVisit = store.getSnapshot().scope
+  store.selectProject('alpha')
+  assert.equal(store.isCurrent(currentVisit), true)
+})
+
 test('workspace rename keeps every changed buffer and a save response preserves later typing', () => {
   const store = new WorkspaceBuffers()
   store.setFile(file())

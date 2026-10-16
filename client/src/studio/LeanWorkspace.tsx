@@ -1,5 +1,6 @@
 import { LeanMonaco, LeanMonacoEditor } from 'lean4monaco'
 import { CloseAction, ErrorAction } from 'vscode-languageclient/browser'
+import { getService, ITextFileService } from 'vscode/services'
 import type { CancellationToken } from 'monaco-editor'
 import type { WebSocketConfigOptionsUrl } from 'monaco-editor-wrapper'
 import { FileUri } from 'lean4monaco/dist/vscode-lean4/vscode-lean4/src/utils/exturi'
@@ -477,6 +478,14 @@ export function LeanWorkspace({
           subscription.dispose(),
         )
         own?.restoreOpenEditor?.()
+        const closingFile = own?.editor?.modelRef?.object
+        if (closingFile) {
+          // Virtual file changes can still be reloading this managed model.
+          // Finish them before disposing its text model and reusing the URI.
+          await closingFile.revert({ soft: true })
+          const textFiles = await getService(ITextFileService)
+          await textFiles.files.canDispose(closingFile)
+        }
         const closingModel = own?.editor?.editor?.getModel()
         own?.editor?.dispose()
         await own?.renameModels?.dispose()
@@ -544,9 +553,12 @@ export function LeanWorkspace({
       active.restoreOpenEditor = undefined
       active.visibleReadyPath = undefined
       await active.lean.closeHiddenDocuments()
+      if (cancelled || runtime.current !== active || active.lean.disposed)
+        return
       active.editor?.dispose()
       active.editor = undefined
-      if (!snapshot || !editorEl.current) {
+      const host = editorEl.current
+      if (!snapshot || !host) {
         setLoading(false)
         return
       }
@@ -554,8 +566,8 @@ export function LeanWorkspace({
         ownEditor = new LeanMonacoEditor()
         active.editor = ownEditor
         const uri = `file:///workspace/${snapshot.path.split('/').map(encodeURIComponent).join('/')}`
-        await ownEditor.start(editorEl.current, uri, snapshot.content)
-        if (cancelled) {
+        await ownEditor.start(host, uri, snapshot.content)
+        if (cancelled || runtime.current !== active || !host.isConnected) {
           ownEditor.dispose()
           return
         }

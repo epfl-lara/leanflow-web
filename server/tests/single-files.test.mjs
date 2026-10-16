@@ -651,7 +651,7 @@ test('large single-file uploads retain the prepared Mathlib environment and hash
   assert.equal(f.providerCalls(), 0)
 })
 
-test('playground terminals select their own root and Main.lean after a different workspace was opened', async (t) => {
+test('project and playground terminals share saved Lean and TeX files with the editor after switching workspaces', async (t) => {
   const f = await fixture(t)
   const previous = await f.create({
     name: 'Previous full project',
@@ -663,6 +663,36 @@ test('playground terminals select their own root and Main.lean after a different
   const second = await f.create({
     file: { path: 'Scratch2.lean', content: '-- second playground\n' },
   })
+  const texSources = new Map()
+  for (const project of [previous, first, second]) {
+    const content = `\\documentclass{article}\n\\begin{document}${project.id}\\end{document}\n`
+    const saved = await f.request(
+      `/api/projects/${project.id}/file?path=test.tex`,
+      { content, expectedHash: null },
+      undefined,
+      'PUT',
+    )
+    assert.equal(saved.status, 200, await saved.clone().text())
+    texSources.set(project.id, content)
+    const listing = await f.request(
+      `/api/projects/${project.id}/files`,
+      undefined,
+      undefined,
+      'GET',
+    )
+    assert((await listing.json()).some((file) => file.path === 'test.tex'))
+  }
+  assert.equal(
+    (
+      await f.request(
+        `/api/projects/${first.id}/file?path=test.tex`,
+        undefined,
+        f.otherToken,
+        'GET',
+      )
+    ).status,
+    404,
+  )
   const spawned = []
   f.runtime.spawn = (root, args, options) => {
     const child = new EventEmitter()
@@ -739,6 +769,38 @@ test('playground terminals select their own root and Main.lean after a different
       await fs.readFile(path.join(child.root, 'Main.lean'), 'utf8'),
       saved.content,
     )
+    assert.equal(
+      await fs.readFile(path.join(child.root, 'test.tex'), 'utf8'),
+      texSources.get(project.id),
+      'TeX is in the same selected directory as Main.lean',
+    )
+    const updatedTex = `${texSources.get(project.id)}% edited with the terminal open\n`
+    const editorSave = await f.request(
+      `/api/projects/${project.id}/file?path=test.tex`,
+      {
+        content: updatedTex,
+        expectedHash: createHash('sha256')
+          .update(texSources.get(project.id))
+          .digest('hex'),
+      },
+      undefined,
+      'PUT',
+    )
+    assert.equal(editorSave.status, 200)
+    assert.equal(
+      await fs.readFile(path.join(child.root, 'test.tex'), 'utf8'),
+      updatedTex,
+    )
+    const terminalTex = `${updatedTex}% terminal edit\n`
+    await fs.writeFile(path.join(child.root, 'test.tex'), terminalTex)
+    const editorRead = await f.request(
+      `/api/projects/${project.id}/file?path=test.tex`,
+      undefined,
+      undefined,
+      'GET',
+    )
+    assert.equal((await editorRead.json()).content, terminalTex)
+    texSources.set(project.id, terminalTex)
     if (project.kind === 'single-file')
       assert.equal(
         saved.content,
@@ -758,6 +820,14 @@ test('playground terminals select their own root and Main.lean after a different
   assert.deepEqual(
     spawned.map((child) => child.root),
     [previous.root, first.root, second.root, first.root],
+  )
+  const converted = await f.request(`/api/projects/${first.id}/convert`, {})
+  assert.equal(converted.status, 200)
+  assert.equal(f.workspaces.get(first.id, 'owner').root, first.root)
+  assert.equal(
+    (await f.workspaces.readFile(first.id, 'owner', 'test.tex')).content,
+    texSources.get(first.id),
+    'converting a playground retains the same saved TeX files and directory',
   )
   assert.equal(f.providerCalls(), 0)
 })

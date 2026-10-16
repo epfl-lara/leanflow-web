@@ -6,18 +6,30 @@ export function PdfFileViewer({
   path,
   previewUrl,
   revision,
+  showActions = true,
+  fitWidth = false,
 }: {
   projectId: string
   path: string
   previewUrl?: string
   revision?: string
+  showActions?: boolean
+  fitWidth?: boolean
 }) {
-  const [url, setUrl] = useState('')
-  const [error, setError] = useState('')
+  const [loaded, setLoaded] = useState<{
+    key: string
+    url?: string
+    error?: string
+  } | null>(null)
   const [attempt, setAttempt] = useState(0)
   const previewPath =
     previewUrl ||
     `/api/projects/${encodeURIComponent(projectId)}/file-preview?path=${encodeURIComponent(path)}`
+  const requestKey = JSON.stringify([projectId, previewPath, revision, attempt])
+  // Effects run after rendering. A new project or build must never render the
+  // previous request's document while its replacement begins loading.
+  const url = loaded?.key === requestKey ? loaded.url : undefined
+  const error = loaded?.key === requestKey ? loaded.error : undefined
 
   useEffect(() => {
     const retry = () => setAttempt((current) => current + 1)
@@ -28,28 +40,28 @@ export function PdfFileViewer({
   useEffect(() => {
     const controller = new AbortController()
     let objectUrl = ''
-    setUrl('')
-    setError('')
+    setLoaded(null)
     void apiPdf(previewPath, controller.signal)
       .then((blob) => {
         if (controller.signal.aborted) return
         objectUrl = URL.createObjectURL(blob)
-        setUrl(objectUrl)
+        setLoaded({ key: requestKey, url: objectUrl })
       })
       .catch((error: unknown) => {
-        if (!controller.signal.aborted) setError(errorText(error))
+        if (!controller.signal.aborted)
+          setLoaded({ key: requestKey, error: errorText(error) })
       })
     return () => {
       controller.abort()
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [previewPath, revision, attempt])
+  }, [previewPath, requestKey])
 
   return (
     <section className="pdf-file-viewer" aria-label="PDF document">
       {url ? (
         <>
-          <div className="pdf-file-actions">
+          <div className="pdf-file-actions" hidden={!showActions}>
             <button
               className="button small secondary"
               onClick={() => setAttempt((current) => current + 1)}
@@ -72,7 +84,10 @@ export function PdfFileViewer({
               Open PDF in new tab
             </a>
           </div>
-          <iframe title="PDF preview" src={url} />
+          <iframe
+            title="PDF preview"
+            src={fitWidth ? `${url}#view=FitH&navpanes=0` : url}
+          />
         </>
       ) : error ? (
         <div className="file-preview-error">

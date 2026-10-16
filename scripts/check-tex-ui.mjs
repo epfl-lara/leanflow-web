@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import express from 'express'
 import { isTexInputFile } from '../shared/tex.mjs'
+import { fixturePdf } from './lib/pdf-fixture.mjs'
 import {
   chatBrowserFixture,
   sleep,
@@ -71,6 +72,7 @@ const pdfRequests = []
 try {
   fixture = await chatBrowserFixture({
     base: `http://127.0.0.1:${server.address().port}`,
+    launchOptions: { channel: 'chromium' },
     session: {
       user: { id: 'fixture-owner', name: 'Fixture owner' },
       templates: [],
@@ -105,9 +107,7 @@ try {
       pdfRequests.push(url.pathname)
       return route.fulfill({
         contentType: 'application/pdf',
-        body: Buffer.from(
-          '%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n',
-        ),
+        body: fixturePdf(),
       })
     }
     if (url.pathname.endsWith('/stop')) {
@@ -228,6 +228,10 @@ try {
     name: 'Build PDF',
     exact: true,
   })
+  const optionsButton = panel.getByRole('button', {
+    name: 'PDF options',
+    exact: true,
+  })
   const save = page.getByRole('button', { name: 'Save', exact: true })
   const editor = () => page.locator('.monaco-editor textarea').first()
   const open = async (filename) => {
@@ -281,6 +285,9 @@ try {
   await open('main.tex')
   await panel.waitFor()
   await until(() => buildButton.isEnabled(), 'TeX worker availability')
+  assert.equal(await optionsButton.getAttribute('aria-expanded'), 'false')
+  assert.equal(await panel.getByLabel('LaTeX root document').isVisible(), false)
+  await optionsButton.click()
   assert.equal(
     await panel.getByLabel('LaTeX root document').inputValue(),
     'main.tex',
@@ -311,11 +318,82 @@ try {
   await divider.focus()
   await page.keyboard.press('ArrowRight')
   assert.equal(Number(await divider.getAttribute('aria-valuenow')), before + 2)
-  finish('completed')
+  finish('completed', [
+    { severity: 'warning', message: 'Fixture warning kept in Options.' },
+  ])
   const frame = panel.locator('iframe[title="PDF preview"]')
   await frame.waitFor()
   const firstPdf = await frame.getAttribute('src')
   assert(firstPdf.startsWith('blob:'))
+  assert(firstPdf.endsWith('#view=FitH&navpanes=0'))
+  await optionsButton.click()
+  assert.equal(await optionsButton.getAttribute('aria-expanded'), 'false')
+  assert.equal(
+    await panel.getByRole('button', { name: 'Reload PDF' }).isVisible(),
+    false,
+  )
+  assert.equal(
+    await panel.getByText('Fixture warning kept in Options.').isVisible(),
+    false,
+  )
+  const compactPanel = await panel.boundingBox()
+  const compactFrame = await frame.boundingBox()
+  assert(
+    compactFrame.y - compactPanel.y <= 52,
+    'Collapsed controls use one compact row',
+  )
+  assert(
+    compactFrame.height >= compactPanel.height - 52,
+    'The PDF receives the remaining panel height',
+  )
+  await sleep(500)
+  await page.screenshot({ path: path.join(output, 'tex-compact.png') })
+  await optionsButton.focus()
+  await page.keyboard.press('Enter')
+  assert.equal(await optionsButton.getAttribute('aria-expanded'), 'true')
+  assert.equal(await panel.getByLabel('LaTeX root document').isVisible(), true)
+  assert.equal(
+    await panel.getByRole('button', { name: 'Reload PDF' }).isVisible(),
+    true,
+  )
+  assert.equal(
+    await panel.getByText('Fixture warning kept in Options.').isVisible(),
+    true,
+  )
+  const expandedFrame = await frame.boundingBox()
+  assert(
+    expandedFrame.height < compactFrame.height - 50,
+    'Options collapse restores document space',
+  )
+  await page
+    .getByRole('button', { name: 'Close tools panel', exact: true })
+    .click()
+  await page.setViewportSize({ width: 700, height: 900 })
+  await sleep(200)
+  const narrowPanel = await panel.boundingBox()
+  const narrowOptions = await optionsButton.boundingBox()
+  assert(narrowOptions.x >= narrowPanel.x)
+  assert(
+    narrowOptions.x + narrowOptions.width <= narrowPanel.x + narrowPanel.width,
+  )
+  assert(
+    (await frame.boundingBox()).height > 80,
+    'Expanded controls leave the PDF usable on narrow screens',
+  )
+  await optionsButton.click()
+  const narrowFrame = await frame.boundingBox()
+  assert(
+    narrowFrame.y - narrowPanel.y <= 52,
+    'Narrow screens also use one collapsed row',
+  )
+  assert(narrowFrame.height >= narrowPanel.height - 52)
+  await page.screenshot({ path: path.join(output, 'tex-compact-narrow.png') })
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  await page.getByRole('button', { name: 'Lemex', exact: true }).click()
+  await optionsButton.click()
+  report.checks.push(
+    'The PDF opens with one compact control row on wide and narrow screens; keyboard-accessible Options reveal root, automatic builds, logs, warnings, and PDF actions while preserving document space.',
+  )
   report.checks.push(
     'Root selection, mounted editable Monaco, save-before-build, hidden Lean goals, accessible split resizing and PDF completion work together.',
   )
@@ -344,6 +422,7 @@ try {
       message: 'Undefined control sequence.',
     },
   ])
+  await optionsButton.click()
   await panel
     .getByRole('button', {
       name: 'chapter.tex:2 · Undefined control sequence.',
@@ -370,6 +449,8 @@ try {
       ).trim() === '2',
     'diagnostic line 2',
   )
+  assert.equal(await optionsButton.getAttribute('aria-expanded'), 'false')
+  await optionsButton.click()
   await panel
     .getByRole('button', { name: 'Show build log', exact: true })
     .click()

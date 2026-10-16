@@ -33,12 +33,13 @@ import { Icon } from './Icons'
 import { HelpTip } from './HelpTip'
 import { ToolbarAction } from './ToolbarAction'
 import { LeanWorkspace } from './LeanWorkspace'
-import { WorkspaceBuffers } from './workspaceBuffers'
+import { WorkspaceBuffers, type WorkspaceScope } from './workspaceBuffers'
 import { PdfFileViewer } from './PdfFileViewer'
 import { MarkdownFilePreview } from './MarkdownFilePreview'
 import { TexPanel } from './TexPanel'
 import { texLanguage } from './texBuilds'
 import { isMarkdownPath } from './fileReading'
+import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configuration.mjs'
 import { isPdfFile, isBinaryAssetFile } from '../../../shared/file-previews.mjs'
 import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
@@ -259,13 +260,14 @@ export function Studio() {
   const [authRequired, setAuthRequired] = useState(false)
   const [startupError, setStartupError] = useState('')
   const [projects, setProjects] = useState<Project[]>([])
-  const [projectId, setProjectId] = useState<string | null>(null)
+  const [projectId, setSelectedProjectId] = useState<string | null>(null)
   const [files, setFiles] = useState<FileEntry[]>([])
   const [folders, setFolders] = useState<string[]>([])
   const [foldersAvailable, setFoldersAvailable] = useState<boolean | null>(null)
   const [createdFolder, setCreatedFolder] = useState<string | null>(null)
   const [bufferStore] = useState(() => new WorkspaceBuffers())
   const {
+    scope,
     file,
     buffers,
     discardVersion,
@@ -378,7 +380,10 @@ export function Studio() {
   } | null>(null)
   const openRequest = useRef(0)
   const generation = useRef(0)
-  const savePromise = useRef<Promise<void> | null>(null)
+  const savePromise = useRef<{
+    scope: WorkspaceScope
+    promise: Promise<void>
+  } | null>(null)
   fileRef.current = file
   filesRef.current = files
   projectIdRef.current = projectId
@@ -387,7 +392,14 @@ export function Studio() {
   const projectKindRef = useRef(project?.kind)
   projectKindRef.current = project?.kind
   const singleFileMode = project?.kind === 'single-file'
-  const singleFileView = singleFileMode
+  const singleFileView =
+    singleFileMode &&
+    !files.some(
+      (entry) =>
+        !entry.readOnly &&
+        entry.path !== 'Main.lean' &&
+        !PROJECT_CONFIGURATION_FILES.includes(entry.path),
+    )
   const playgroundPreparation = usePlaygroundPreparation(
     session?.templates.find((preset) => preset.id === 'mathlib'),
     session?.user.id,
@@ -397,7 +409,6 @@ export function Studio() {
     project?.status === 'ready' ||
     (project?.status === 'error' &&
       (singleFileMode || project.needsPreparation === true))
-  const loadedProjectId = useRef<string | null>(null)
   const currentEditorProof =
     editorProof?.path === file?.path ? editorProof : null
   const sidebarMaximum = Math.min(
@@ -455,13 +466,70 @@ export function Studio() {
     () =>
       files.filter(
         (entry) =>
-          !isBinaryAssetFile(entry.path) &&
+          (isPdfFile(entry.path) || !isBinaryAssetFile(entry.path)) &&
           (!singleFileMode || entry.path === 'Main.lean'),
       ),
     [files, singleFileMode],
   )
 
   useEffect(() => setMarkdownPreview(false), [projectId, file?.path])
+
+  const setProjectId = useCallback(
+    (id: string | null) => {
+      if (bufferStore.getSnapshot().scope.projectId === id) return
+      // Clear the whole workspace in the selection event, before a new project
+      // can mount editors or start requests with the previous project's files.
+      setSelectedProjectId(id)
+      projectIdRef.current = id
+      fileRef.current = null
+      filesRef.current = []
+      ++openRequest.current
+      savePromise.current = null
+      setFiles([])
+      setFolders([])
+      setFoldersAvailable(null)
+      setCreatedFolder(null)
+      setNewEntryKind(null)
+      setLibrarySource(null)
+      setProofFocus(null)
+      setEditorProof(null)
+      setFocusEditorRequest(null)
+      setRevealProof(null)
+      setGit(null)
+      setGitOpen(null)
+      setTerminalProjectId(null)
+      setJob(null)
+      setFileFilter('')
+      setLeanState('')
+      setOpening(false)
+      setSaving(false)
+      setReloadTarget(null)
+      setReloadBusy(false)
+      setAgentPendingFile(null)
+      setPendingAction(null)
+      setError('')
+      setNotice('')
+      bufferStore.selectProject(id)
+    },
+    [bufferStore],
+  )
+
+  const requireScope = useCallback(
+    (expected: WorkspaceScope) => {
+      if (!bufferStore.isCurrent(expected))
+        throw new Error(
+          'The workspace changed. Try again in the selected workspace.',
+        )
+    },
+    [bufferStore],
+  )
+
+  const acceptEditorProof = useCallback(
+    (state: EditorProofState | null) => {
+      if (bufferStore.isCurrent(scope)) setEditorProof(state)
+    },
+    [bufferStore, scope],
+  )
 
   const loadSession = useCallback(async () => {
     setStartupError('')
@@ -551,7 +619,7 @@ export function Studio() {
     return () => {
       cancelled = true
     }
-  }, [session])
+  }, [session, setProjectId])
 
   const preparing = projects.some((item) => item.status === 'preparing')
   useEffect(() => {
@@ -567,53 +635,67 @@ export function Studio() {
     return () => clearInterval(timer)
   }, [session, preparing, loadProjects])
 
-  const loadFiles = useCallback(async (id: string) => {
-    const base = `/api/projects/${encodeURIComponent(id)}`
-    const [value, directories] = await Promise.all([
-      api<FileEntry[]>(`${base}/files`),
-      api<string[]>(`${base}/folders`).catch(() => null),
-    ])
-    if (projectIdRef.current === id) {
-      setFiles(value)
-      setFoldersAvailable(directories !== null)
-      // A server being updated or an unavailable folder listing must not hide files.
-      const parents = new Set<string>()
-      if (!directories) {
-        for (const file of value) {
-          if (file.readOnly || file.path.startsWith('.lake/')) continue
-          for (const folder of parentFolders(file.path)) parents.add(folder)
+  const loadFiles = useCallback(
+    async (id: string) => {
+      const expected = bufferStore.getSnapshot().scope
+      const base = `/api/projects/${encodeURIComponent(id)}`
+      const [value, directories] = await Promise.all([
+        api<FileEntry[]>(`${base}/files`),
+        api<string[]>(`${base}/folders`).catch(() => null),
+      ])
+      if (bufferStore.isCurrent(expected) && expected.projectId === id) {
+        setFiles(value)
+        setFoldersAvailable(directories !== null)
+        // A server being updated or an unavailable folder listing must not hide files.
+        const parents = new Set<string>()
+        if (!directories) {
+          for (const file of value) {
+            if (file.readOnly || file.path.startsWith('.lake/')) continue
+            for (const folder of parentFolders(file.path)) parents.add(folder)
+          }
         }
+        setFolders(directories ?? [...parents].sort())
       }
-      setFolders(directories ?? [...parents].sort())
-    }
-    return value
-  }, [])
+      return value
+    },
+    [bufferStore],
+  )
 
-  const loadGit = useCallback(async (id: string) => {
-    if (projectIdRef.current === id && projectKindRef.current === 'single-file')
-      return
-    try {
-      const value = await api<GitInfo>(
-        `/api/projects/${encodeURIComponent(id)}/git`,
+  const loadGit = useCallback(
+    async (id: string) => {
+      const expected = bufferStore.getSnapshot().scope
+      if (expected.projectId !== id) return
+      if (
+        projectIdRef.current === id &&
+        projectKindRef.current === 'single-file'
       )
-      if (projectIdRef.current === id) setGit(value)
-    } catch {
-      if (projectIdRef.current === id) setGit(null)
-    }
-  }, [])
+        return
+      try {
+        const value = await api<GitInfo>(
+          `/api/projects/${encodeURIComponent(id)}/git`,
+        )
+        if (bufferStore.isCurrent(expected)) setGit(value)
+      } catch {
+        if (bufferStore.isCurrent(expected)) setGit(null)
+      }
+    },
+    [bufferStore],
+  )
   useEffect(() => {
     if (project?.status === 'ready' && project.kind !== 'single-file')
       void loadGit(project.id)
   }, [project?.id, project?.status, project?.kind, loadGit])
   const acceptGit = useCallback(
     (value: GitInfo) => {
-      if (projectIdRef.current === projectId) setGit(value)
+      if (bufferStore.isCurrent(scope)) setGit(value)
     },
-    [projectId],
+    [bufferStore, scope],
   )
 
   const openFile = useCallback(
     async (id: string, path: string, line?: number, column?: number) => {
+      const expected = bufferStore.getSnapshot().scope
+      if (expected.projectId !== id) return
       const request = ++openRequest.current
       setOpening(true)
       setError('')
@@ -632,7 +714,7 @@ export function Studio() {
                 }>(
                   `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
                 )
-        if (request !== openRequest.current || projectIdRef.current !== id)
+        if (request !== openRequest.current || !bufferStore.isCurrent(expected))
           return
         setFile({
           path,
@@ -661,42 +743,26 @@ export function Studio() {
   )
 
   useEffect(() => {
-    if (loadedProjectId.current !== projectId) {
-      loadedProjectId.current = projectId
-      setFiles([])
-      setFolders([])
-      setFoldersAvailable(null)
-      setCreatedFolder(null)
-      setNewEntryKind(null)
-      setFile(null)
-      setLibrarySource(null)
-      setProofFocus(null)
-      setEditorProof(null)
-      setFocusEditorRequest(null)
-      setRevealProof(null)
-      setGit(null)
-      setGitOpen(null)
-      setTerminalProjectId(null)
-      setJob(null)
-      setFileFilter('')
-      setLeanState('')
-      ++openRequest.current
-    }
     if (!projectId) return
     localStorage.setItem('lemex-project', projectId)
     if (!workspaceEditable) return
+    const expected = scope
     let cancelled = false
     void loadFiles(projectId)
       .then((value) => {
-        if (cancelled || projectIdRef.current !== projectId) return
+        if (cancelled || !bufferStore.isCurrent(expected)) return
         const savedPath = localStorage.getItem(`lemex-file-${projectId}`)
         const first =
           value.find((item) => item.path === savedPath) ||
           value.find((item) => item.path === 'Main.lean') ||
           value.find((item) => item.path.endsWith('.lean')) ||
           value[0]
-        if (first && (project?.status === 'ready' || !fileRef.current))
-          void openFile(projectId, fileRef.current?.path || first.path)
+        if (first && (project?.status === 'ready' || !fileRef.current)) {
+          const currentPath = value.find(
+            (entry) => entry.path === fileRef.current?.path,
+          )?.path
+          void openFile(projectId, currentPath || first.path)
+        }
       })
       .catch((error) => {
         if (!cancelled) setError(errorText(error))
@@ -706,6 +772,8 @@ export function Studio() {
     }
   }, [
     projectId,
+    scope,
+    bufferStore,
     project?.status,
     workspaceEditable,
     loadFiles,
@@ -715,7 +783,8 @@ export function Studio() {
   ])
 
   const saveFile = useCallback(async () => {
-    if (savePromise.current) return savePromise.current
+    if (savePromise.current) return savePromise.current.promise
+    const expected = bufferStore.getSnapshot().scope
     const snapshots = bufferStore.dirty()
     const snapshot = snapshots[0]
     const id = projectIdRef.current
@@ -738,8 +807,8 @@ export function Studio() {
               })),
             }),
           })
-          if (projectIdRef.current === id)
-            bufferStore.saved(snapshots, value.files)
+          if (!bufferStore.isCurrent(expected)) return
+          bufferStore.saved(snapshots, value.files)
           setNotice(`Saved ${snapshots.length} files`)
           if (value.requiresPreparation) await loadProjects()
           else void loadGit(id)
@@ -759,34 +828,40 @@ export function Studio() {
             }),
           },
         )
-        if (projectIdRef.current === id)
-          bufferStore.saved(snapshots, [
-            { path: snapshot.path, hash: value.hash },
-          ])
+        if (!bufferStore.isCurrent(expected)) return
+        bufferStore.saved(snapshots, [
+          { path: snapshot.path, hash: value.hash },
+        ])
         setNotice('File saved')
         if (value.requiresPreparation) await loadProjects()
         else void loadGit(id)
       } finally {
-        setSaving(false)
-        savePromise.current = null
+        if (savePromise.current?.scope === expected) {
+          setSaving(false)
+          savePromise.current = null
+        }
       }
     })()
-    savePromise.current = task
+    savePromise.current = { scope: expected, promise: task }
     return task
   }, [loadGit, loadProjects, bufferStore])
 
   const saveCompletely = useCallback(async () => {
+    const expected = bufferStore.getSnapshot().scope
     // Saving is optimistic: preserve edits made during the request and save them
     // before handing a snapshot to an assistant or changing the current file.
     await saveFile()
+    requireScope(expected)
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    requireScope(expected)
     if (bufferStore.dirty().length) await saveFile()
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    requireScope(expected)
     if (bufferStore.dirty().length)
       throw new Error(
         'Files are still being edited. Save them before continuing.',
       )
-  }, [saveFile, bufferStore])
+  }, [saveFile, bufferStore, requireScope])
 
   const beforeApply = useCallback(async () => {
     if (savePromise.current)
@@ -1007,17 +1082,21 @@ export function Studio() {
   }, [job?.id, job?.status])
 
   async function refreshAfterApply() {
-    if (!projectId) return
+    if (!projectId || !bufferStore.isCurrent(scope)) return
     const updated = await loadProjects()
+    if (!bufferStore.isCurrent(scope)) return
     if (updated.find((item) => item.id === projectId)?.status !== 'ready')
       return
     await loadFiles(projectId)
+    if (!bufferStore.isCurrent(scope)) return
     if (fileRef.current) await openFile(projectId, fileRef.current.path)
     await loadGit(projectId)
   }
 
   async function createEntry(path: string, kind: EntryKind) {
     if (!projectId) throw new Error('Choose a project first.')
+    const expected = scope
+    requireScope(expected)
     if (files.some((file) => file.path === path) || folders.includes(path)) {
       throw new Error(
         'A file or folder with this name already exists. Choose another name.',
@@ -1027,6 +1106,7 @@ export function Studio() {
       await post(`/api/projects/${encodeURIComponent(projectId)}/folders`, {
         path,
       })
+      if (!bufferStore.isCurrent(expected)) return
       setFileFilter('')
       setCreatedFolder(path)
       setFolders((current) =>
@@ -1035,6 +1115,7 @@ export function Studio() {
       try {
         await loadFiles(projectId)
       } catch {
+        if (!bufferStore.isCurrent(expected)) return
         setError(
           `Created folder ${path}, but the file list could not refresh. Use Refresh files to try again.`,
         )
@@ -1044,6 +1125,7 @@ export function Studio() {
     setOpening(true)
     try {
       await saveCompletely()
+      requireScope(expected)
       const saved = await api<{ requiresPreparation: boolean }>(
         `/api/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}`,
         {
@@ -1051,6 +1133,7 @@ export function Studio() {
           body: JSON.stringify({ content: '', expectedHash: null }),
         },
       )
+      if (!bufferStore.isCurrent(expected)) return
       setFiles((current) =>
         current.some((entry) => entry.path === path)
           ? current
@@ -1061,24 +1144,31 @@ export function Studio() {
         if (saved.requiresPreparation) await loadProjects()
         else {
           await loadFiles(projectId)
+          if (!bufferStore.isCurrent(expected)) return
           await openFile(projectId, path)
         }
       } catch {
+        if (!bufferStore.isCurrent(expected)) return
         setError(
           `Created file ${path}, but the project could not refresh. Use Refresh files to try again.`,
         )
       }
     } finally {
-      setOpening(false)
+      if (bufferStore.isCurrent(expected)) setOpening(false)
     }
   }
 
   const refreshLiveFiles = useCallback(
-    async (paths: string[], source: 'agent' | 'terminal' = 'agent') => {
-      const id = projectIdRef.current
+    async (
+      paths: string[],
+      source: 'agent' | 'terminal' = 'agent',
+      expected = bufferStore.getSnapshot().scope,
+    ) => {
+      if (!bufferStore.isCurrent(expected)) return
+      const id = expected.projectId
       if (!id) return
       const listing = await loadFiles(id)
-      if (projectIdRef.current !== id) return
+      if (!bufferStore.isCurrent(expected)) return
       if (source === 'agent') void loadGit(id)
       const current = fileRef.current
       if (!current || (paths.length && !paths.includes(current.path))) return
@@ -1097,7 +1187,7 @@ export function Studio() {
       )
       const now = fileRef.current
       if (
-        projectIdRef.current !== id ||
+        !bufferStore.isCurrent(expected) ||
         now?.path !== current.path ||
         now.generation !== current.generation
       )
@@ -1127,7 +1217,7 @@ export function Studio() {
           : 'Agent edits updated live',
       )
     },
-    [loadFiles, loadGit, openFile, setFile],
+    [bufferStore, loadFiles, loadGit, openFile, setFile],
   )
 
   useEffect(() => {
@@ -1136,7 +1226,7 @@ export function Studio() {
     let timer: ReturnType<typeof setTimeout>
     const refresh = async () => {
       try {
-        await refreshLiveFiles([], 'terminal')
+        await refreshLiveFiles([], 'terminal', scope)
         if (!disposed) await loadProjects()
       } catch (error) {
         if (!disposed) setError(errorText(error))
@@ -1150,6 +1240,7 @@ export function Studio() {
     }
   }, [
     terminalOpen,
+    scope,
     project?.id,
     project?.status,
     refreshLiveFiles,
@@ -1164,7 +1255,7 @@ export function Studio() {
       await post(`/api/projects/${encodeURIComponent(id)}/terminal/stop`)
       await loadProjects()
       if (projectIdRef.current !== id) return
-      await refreshLiveFiles([], 'terminal')
+      await refreshLiveFiles([], 'terminal', scope)
       void loadGit(id)
     } catch (error) {
       if (projectIdRef.current === id) setError(errorText(error))
@@ -1908,6 +1999,15 @@ export function Studio() {
               </button>
             </div>
           )}
+        {singleFileMode && !singleFileView && (
+          <div className="workspace-alert">
+            <span>
+              This playground has additional files. They share its terminal
+              workspace. Use Convert to project to include them in Lemex
+              requests.
+            </span>
+          </div>
+        )}
         {agentPendingFile && file?.path === agentPendingFile && (
           <div className="workspace-alert live-edit-alert" role="status">
             <span>
@@ -2128,21 +2228,23 @@ export function Studio() {
                 )}
                 {singleFileMode && (
                   <>
-                    <button
-                      className="button small subtle"
-                      disabled={!file || opening}
-                      onClick={() =>
-                        file &&
-                        saveAs(
-                          new Blob([file.content], {
-                            type: 'text/plain;charset=utf-8',
-                          }),
-                          playgroundDownloadName(project.name),
-                        )
-                      }
-                    >
-                      Download .lean
-                    </button>
+                    {(!file || file.path === 'Main.lean') && (
+                      <button
+                        className="button small subtle"
+                        disabled={!file || opening}
+                        onClick={() =>
+                          file &&
+                          saveAs(
+                            new Blob([file.content], {
+                              type: 'text/plain;charset=utf-8',
+                            }),
+                            playgroundDownloadName(project.name),
+                          )
+                        }
+                      >
+                        Download .lean
+                      </button>
+                    )}
                     <button
                       className="button small subtle"
                       disabled={
@@ -2204,7 +2306,7 @@ export function Studio() {
             >
               {project.status === 'ready' ? (
                 <LeanWorkspace
-                  key={project.id}
+                  key={`editor:${project.id}`}
                   projectId={project.id}
                   file={pdfPreview ? null : file}
                   buffers={buffers}
@@ -2213,13 +2315,16 @@ export function Studio() {
                   savedPaths={savedPaths}
                   bufferRemoveVersion={removeVersion}
                   removedPaths={removedPaths}
-                  onRenameSources={bufferStore.register}
+                  onRenameSources={(sources) => {
+                    requireScope(scope)
+                    bufferStore.register(sources)
+                  }}
                   theme={theme}
                   showInfoview={showInfoview && !!file?.path.endsWith('.lean')}
                   goalsSize={goalsSize}
                   onGoalsSizeChange={setGoalsSize}
                   revealTarget={revealProof || undefined}
-                  onProofStateChange={setEditorProof}
+                  onProofStateChange={acceptEditorProof}
                   focusEditorRequest={focusEditorRequest}
                   onFocusEditorHandled={(id) =>
                     setFocusEditorRequest((current) =>
@@ -2227,6 +2332,7 @@ export function Studio() {
                     )
                   }
                   onFocusProof={(target, mode) => {
+                    if (!bufferStore.isCurrent(scope)) return
                     setProofFocus({
                       id: ++proofRequestId.current,
                       projectId: project.id,
@@ -2236,16 +2342,24 @@ export function Studio() {
                     setToolsOpen(true)
                     setSidebarOpen(false)
                   }}
-                  onState={setLeanState}
-                  onChange={bufferStore.change}
+                  onState={(state) => {
+                    if (bufferStore.isCurrent(scope)) setLeanState(state)
+                  }}
+                  onChange={(path, content) => {
+                    if (bufferStore.isCurrent(scope))
+                      bufferStore.change(path, content)
+                  }}
                   onOpenFile={(path, line, column) => {
+                    if (!bufferStore.isCurrent(scope)) return
                     const action = () =>
                       openFile(project.id, path, line, column)
                     if (bufferStore.getSnapshot().buffers.has(path))
                       void action().catch((error) => setError(errorText(error)))
                     else navigate(action)
                   }}
-                  onOpenLibrary={setLibrarySource}
+                  onOpenLibrary={(source) => {
+                    if (bufferStore.isCurrent(scope)) setLibrarySource(source)
+                  }}
                 />
               ) : (
                 <textarea
@@ -2283,7 +2397,7 @@ export function Studio() {
               )}
               {texFiles.length > 0 && (
                 <TexPanel
-                  key={project.id}
+                  key={`tex:${project.id}`}
                   projectId={project.id}
                   files={texFiles}
                   currentPath={file?.path}
@@ -2292,8 +2406,12 @@ export function Studio() {
                   saving={saving}
                   saveVersion={saveVersion}
                   savedPaths={savedPaths}
-                  save={saveCompletely}
+                  save={async () => {
+                    requireScope(scope)
+                    await saveCompletely()
+                  }}
                   onOpenFile={(path, line) => {
+                    if (!bufferStore.isCurrent(scope)) return
                     const action = () => openFile(project.id, path, line)
                     if (bufferStore.getSnapshot().buffers.has(path))
                       void action().catch((error) => setError(errorText(error)))
@@ -2303,13 +2421,13 @@ export function Studio() {
               )}
               {pdfPreview && file ? (
                 <PdfFileViewer
-                  key={`${project.id}:${file.path}:${file.generation}`}
+                  key={`pdf:${project.id}:${file.path}:${file.generation}`}
                   projectId={project.id}
                   path={file.path}
                 />
               ) : readingFile && file ? (
                 <MarkdownFilePreview
-                  key={file.path}
+                  key={`markdown:${project.id}:${file.path}`}
                   path={file.path}
                   content={file.content}
                   files={files}
@@ -2491,11 +2609,24 @@ export function Studio() {
                 session={session}
                 dirty={dirty}
                 dirtyFileCount={dirtyFiles.length}
-                beforeRun={saveCompletely}
-                beforeApply={beforeApply}
-                onDiscard={discardUnsavedEdits}
-                onApplied={refreshAfterApply}
-                onFilesUpdated={refreshLiveFiles}
+                beforeRun={async () => {
+                  requireScope(scope)
+                  await saveCompletely()
+                }}
+                beforeApply={async () => {
+                  requireScope(scope)
+                  await beforeApply()
+                }}
+                onDiscard={async () => {
+                  requireScope(scope)
+                  await discardUnsavedEdits()
+                }}
+                onApplied={async () => {
+                  if (bufferStore.isCurrent(scope)) await refreshAfterApply()
+                }}
+                onFilesUpdated={(paths) =>
+                  refreshLiveFiles(paths, 'agent', scope)
+                }
               />
             ) : (
               <div className="tool-idle">
@@ -2738,14 +2869,20 @@ export function Studio() {
               disabled={reloadBusy}
               onClick={() =>
                 void (async () => {
-                  const id = projectIdRef.current
-                  if (!id || savePromise.current) return
+                  const expected = scope
+                  const id = expected.projectId
+                  if (
+                    !id ||
+                    savePromise.current ||
+                    !bufferStore.isCurrent(expected)
+                  )
+                    return
                   setReloadBusy(true)
                   try {
                     const latest = await api<{ content: string; hash: string }>(
                       `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(reloadTarget)}`,
                     )
-                    if (projectIdRef.current !== id) return
+                    if (!bufferStore.isCurrent(expected)) return
                     setFile({
                       path: reloadTarget,
                       ...latest,
@@ -2755,10 +2892,12 @@ export function Studio() {
                     setReloadTarget(null)
                     setAgentPendingFile(null)
                   } catch (error) {
-                    setError(errorText(error))
-                    setReloadTarget(null)
+                    if (bufferStore.isCurrent(expected)) {
+                      setError(errorText(error))
+                      setReloadTarget(null)
+                    }
                   } finally {
-                    setReloadBusy(false)
+                    if (bufferStore.isCurrent(expected)) setReloadBusy(false)
                   }
                 })()
               }

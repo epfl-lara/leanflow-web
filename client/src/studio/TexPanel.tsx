@@ -1,5 +1,5 @@
 /* eslint-disable jsx-a11y/no-noninteractive-tabindex -- Keyboard users need to focus and scroll compiler output. */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { OpenFile } from './api'
 import { PdfFileViewer } from './PdfFileViewer'
 import { defaultTexRoot, texPdfIsStale, texInputInRoot } from './texBuilds'
@@ -63,10 +63,42 @@ export function TexPanel({
     saveVersion: inputSaveVersion,
     save,
   })
+  const optionsId = useId()
+  const [showOptions, setShowOptions] = useState(false)
   const [showLog, setShowLog] = useState(false)
   const build = tex.activeBuild || tex.status?.build
   const successful = tex.status?.lastSuccessful
   const stale = texPdfIsStale(tex.status, rootFile, dirty, tex.savedSinceBuild)
+  const errors = build?.diagnostics?.filter(
+    (diagnostic) => diagnostic.severity === 'error',
+  )
+  const warnings = build?.diagnostics?.filter(
+    (diagnostic) => diagnostic.severity !== 'error',
+  )
+  const diagnostics = (items: NonNullable<typeof errors>) => (
+    <ul className="tex-diagnostics" aria-label="LaTeX diagnostics">
+      {items.slice(0, 100).map((diagnostic, index) => (
+        <li
+          key={`${index}:${diagnostic.path}:${diagnostic.line}`}
+          className={`tex-diagnostic-${diagnostic.severity}`}
+        >
+          {diagnostic.path ? (
+            <button
+              onClick={() =>
+                diagnostic.path && onOpenFile(diagnostic.path, diagnostic.line)
+              }
+            >
+              {diagnostic.path}
+              {diagnostic.line ? `:${diagnostic.line}` : ''} ·{' '}
+              {diagnostic.message}
+            </button>
+          ) : (
+            <span>{diagnostic.message}</span>
+          )}
+        </li>
+      ))}
+    </ul>
+  )
   useEffect(() => {
     if (!selectedRoot && rootFile) setSelectedRoot(rootFile)
     if (rootFile) {
@@ -85,30 +117,6 @@ export function TexPanel({
       hidden={!visible}
     >
       <div className="tex-toolbar">
-        <label className="tex-root-label">
-          Root document
-          <select
-            aria-label="LaTeX root document"
-            value={rootFile}
-            onChange={(event) => setSelectedRoot(event.target.value)}
-            disabled={saving || tex.active || tex.starting}
-          >
-            <option value="" disabled>
-              Choose a .tex root…
-            </option>
-            {files.map((path) => (
-              <option key={path} value={path}>
-                {path}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span
-          className="tex-engine"
-          title="This release supports pdfLaTeX with BibTeX."
-        >
-          pdfLaTeX
-        </span>
         <button
           className="button small primary"
           disabled={
@@ -120,7 +128,7 @@ export function TexPanel({
           }
           onClick={() => void tex.start(true)}
         >
-          {tex.starting ? 'Saving and building…' : 'Build PDF'}
+          {tex.starting ? 'Starting…' : 'Build PDF'}
         </button>
         {tex.active && (
           <button
@@ -131,50 +139,111 @@ export function TexPanel({
             {tex.stopping ? 'Stopping…' : 'Stop build'}
           </button>
         )}
-        <label className="tex-auto-build">
-          <input
-            type="checkbox"
-            checked={tex.autoBuild}
-            onChange={(event) => tex.setAutoBuild(event.target.checked)}
-          />{' '}
-          Rebuild on save
-        </label>
+        <output className="tex-build-status" title={rootFile || undefined}>
+          {tex.active ? (
+            <span>
+              <span className="spinner" />{' '}
+              {tex.activeBuild?.cleanupFailed
+                ? 'Compiler cleanup needs retry'
+                : tex.activeBuild?.origin === 'agent'
+                  ? 'Lemex is compiling…'
+                  : build?.status === 'queued'
+                    ? 'Build queued'
+                    : 'Building PDF'}
+              {tex.queued ? ' · New save queued' : ''}
+            </span>
+          ) : build ? (
+            <span>
+              {build.status === 'completed'
+                ? 'PDF built'
+                : build.status === 'cancelled'
+                  ? 'Build stopped'
+                  : build.status === 'failed'
+                    ? 'Build failed'
+                    : build.status}
+            </span>
+          ) : (
+            <span>
+              {rootFile
+                ? 'Ready to build'
+                : 'Choose a root document in Options'}
+            </span>
+          )}
+          {successful?.pdf && stale && (
+            <span className="tex-pdf-stale">PDF may be out of date</span>
+          )}
+        </output>
+        <button
+          className="button small secondary tex-options-toggle"
+          aria-label="PDF options"
+          aria-expanded={showOptions}
+          aria-controls={optionsId}
+          title="Root document, rebuild on save, build log, and PDF actions"
+          onClick={() => setShowOptions((value) => !value)}
+        >
+          Options{warnings?.length ? ` (${warnings.length})` : ''}{' '}
+          <span aria-hidden="true">{showOptions ? '▴' : '▾'}</span>
+        </button>
       </div>
-      <output className="tex-build-status">
-        {tex.active ? (
-          <span>
-            <span className="spinner" />{' '}
-            {tex.activeBuild?.cleanupFailed
-              ? 'Compiler cleanup needs retry'
-              : tex.activeBuild?.origin === 'agent'
-                ? 'Lemex is compiling…'
-                : build?.status === 'queued'
-                  ? 'Build queued'
-                  : 'Building PDF'}
-            {tex.queued ? ' · New save queued' : ''}
+      <div id={optionsId} className="tex-options" hidden={!showOptions}>
+        <div className="tex-build-options">
+          <label className="tex-root-label">
+            Root document
+            <select
+              aria-label="LaTeX root document"
+              value={rootFile}
+              onChange={(event) => setSelectedRoot(event.target.value)}
+              disabled={saving || tex.active || tex.starting}
+            >
+              <option value="" disabled>
+                Choose a .tex root…
+              </option>
+              {files.map((path) => (
+                <option key={path} value={path}>
+                  {path}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span
+            className="tex-engine"
+            title="This release supports pdfLaTeX with BibTeX."
+          >
+            pdfLaTeX
           </span>
-        ) : build ? (
-          <span>
-            {build.status === 'completed'
-              ? 'PDF built'
-              : build.status === 'cancelled'
-                ? 'Build stopped'
-                : build.status === 'failed'
-                  ? 'Build failed'
-                  : build.status}
-          </span>
-        ) : (
-          <span>
-            Choose the root document, then build its saved project files.
-          </span>
-        )}
+          <label className="tex-auto-build">
+            <input
+              type="checkbox"
+              checked={tex.autoBuild}
+              onChange={(event) => tex.setAutoBuild(event.target.checked)}
+            />{' '}
+            Rebuild on save
+          </label>
+        </div>
         {successful?.pdf && (
-          <span className={stale ? 'tex-pdf-stale' : ''}>
-            {stale ? 'PDF may be out of date' : 'PDF from saved snapshot'} ·{' '}
+          <p className={`tex-snapshot-status ${stale ? 'tex-pdf-stale' : ''}`}>
+            {stale ? 'Saved snapshot' : 'PDF from saved snapshot'} ·{' '}
             {successful.rootFile}
-          </span>
+          </p>
         )}
-      </output>
+        {!!warnings?.length && diagnostics(warnings)}
+        {build && (
+          <div className="tex-log">
+            <button
+              className="button small subtle"
+              aria-expanded={showLog}
+              onClick={() => setShowLog((value) => !value)}
+            >
+              {showLog ? 'Hide build log' : 'Show build log'}
+            </button>
+            {showLog && (
+              <pre tabIndex={0} aria-label="LaTeX build log">
+                {build.log?.slice(-64000) || 'Waiting for compiler output…'}
+              </pre>
+            )}
+          </div>
+        )}
+      </div>
       {tex.status?.available === false && !tex.status.error && (
         <p className="tex-build-error error-message" role="alert">
           LaTeX builds are unavailable. Ask the server administrator to enable
@@ -196,53 +265,15 @@ export function TexPanel({
           {build.error}
         </p>
       )}
-      {!!build?.diagnostics?.length && (
-        <ul className="tex-diagnostics" aria-label="LaTeX diagnostics">
-          {build.diagnostics.slice(0, 100).map((diagnostic, index) => (
-            <li
-              key={`${index}:${diagnostic.path}:${diagnostic.line}`}
-              className={`tex-diagnostic-${diagnostic.severity}`}
-            >
-              {diagnostic.path ? (
-                <button
-                  onClick={() =>
-                    diagnostic.path &&
-                    onOpenFile(diagnostic.path, diagnostic.line)
-                  }
-                >
-                  {diagnostic.path}
-                  {diagnostic.line ? `:${diagnostic.line}` : ''} ·{' '}
-                  {diagnostic.message}
-                </button>
-              ) : (
-                <span>{diagnostic.message}</span>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-      {build && (
-        <div className="tex-log">
-          <button
-            className="button small subtle"
-            aria-expanded={showLog}
-            onClick={() => setShowLog((value) => !value)}
-          >
-            {showLog ? 'Hide build log' : 'Show build log'}
-          </button>
-          {showLog && (
-            <pre tabIndex={0} aria-label="LaTeX build log">
-              {build.log?.slice(-64000) || 'Waiting for compiler output…'}
-            </pre>
-          )}
-        </div>
-      )}
+      {!!errors?.length && diagnostics(errors)}
       {successful?.pdf ? (
         <PdfFileViewer
           projectId={projectId}
           path={successful.pdf.filename}
           previewUrl={successful.pdf.url}
           revision={successful.pdf.revision}
+          showActions={showOptions}
+          fitWidth
         />
       ) : (
         <div className="tex-preview-empty">

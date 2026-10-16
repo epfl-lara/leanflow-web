@@ -62,6 +62,9 @@
   padding: 8px 13px;
   border-bottom: 1px solid var(--border);
 }
+.pdf-file-actions[hidden] {
+  display: none;
+}
 .pdf-file-viewer iframe {
   flex: 1;
   min-height: 0;

@@ -526,7 +526,7 @@ try {
     exact: true,
   })
   await deleteDialog.waitFor()
-  await deleteDialog.getByText(/Unsaved changes/).waitFor()
+  await deleteDialog.getByText(/Save or discard unsaved edits/).waitFor()
   await deleteDialog
     .getByRole('button', { name: 'Cancel', exact: true })
     .click()
