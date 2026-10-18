@@ -8,7 +8,7 @@ export function Brand() {
       <div className="brand-links">
         <a
           className="brand-credit"
-          href="https://lara.epfl.ch/"
+          href="https://epfl-lara.github.io/"
           target="_blank"
           rel="noopener noreferrer"
         >
