@@ -6,6 +6,7 @@ import express from 'express'
 import compression from 'compression'
 import { WebSocketServer } from 'ws'
 import { Auth, sameOrigin } from './auth.mjs'
+import { authRequestJson, isPublicAuthRequest } from './auth-request-limits.mjs'
 import { Runtime } from './runtime.mjs'
 import { Terminals } from './terminals.mjs'
 import { WorkspaceStore, validateRepository } from './workspaces.mjs'
@@ -26,6 +27,7 @@ import { LspFrames, frame, validateClientUris } from './rpc.mjs'
 import { LeanRequests } from './lean-requests.mjs'
 import { LeanProgress } from './lean-progress.mjs'
 import { LeanEditPolicy } from './lean-edit-policy.mjs'
+import { LeanWidgetPolicy } from './lean-widget-policy.mjs'
 import { ProjectActivity } from './project-activity.mjs'
 import { acquireServerLease } from './lease.mjs'
 import { repairProjectSetup, withSetupRepairDeadline } from './setup-repair.mjs'
@@ -395,11 +397,11 @@ export async function createStudio({
     }
     next()
   })
+  // Public account requests have their own small, bounded parser.
+  app.use(authRequestJson())
   // Protected requests authenticate before allocating a source/upload body.
-  // Login and logout keep their public routes and the ordinary JSON limit.
   app.use('/api', (req, res, next) => {
-    if (req.method === 'POST' && ['/login', '/logout'].includes(req.path))
-      return next()
+    if (isPublicAuthRequest(req)) return next()
     req.user = auth.identify(req)
     if (!req.user)
       return res
@@ -419,6 +421,7 @@ export async function createStudio({
     }),
   )
   app.use((req, res, next) => {
+    if (isPublicAuthRequest(req)) return next()
     const kind = sourceBodyKind(req)
     const parser =
       !kind || isSmallSourceBody(req)
@@ -1244,7 +1247,7 @@ export async function createStudio({
     let child,
       alive = true,
       lastActivity = Date.now()
-    let requests, progress, editPolicy
+    let requests, progress, editPolicy, widgetPolicy
     try {
       child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
         network: 'none',
@@ -1265,10 +1268,15 @@ export async function createStudio({
         sendToClient: forward,
         sendToLean: (message) => child.stdin.write(frame(message)),
       })
+      widgetPolicy = new LeanWidgetPolicy({
+        sendToClient: forward,
+        sendToLean: (message) => child.stdin.write(frame(message)),
+      })
       progress = new LeanProgress(sendToClient)
       const frames = new LspFrames((message) => {
         progress.server(message)
-        if (editPolicy.server(message)) forward(message)
+        if (widgetPolicy.server(message) && editPolicy.server(message))
+          forward(message)
       })
       child.stdout.on('data', (chunk) => {
         try {
@@ -1294,7 +1302,8 @@ export async function createStudio({
           const message = validateClientUris(JSON.parse(data.toString()))
           requests.track(message)
           progress.client(message)
-          if (editPolicy.client(message)) child.stdin.write(frame(message))
+          if (widgetPolicy.client(message) && editPolicy.client(message))
+            child.stdin.write(frame(message))
         } catch (error) {
           if (error.sourceTooLarge) ws.close(1009, error.message)
           else ws.close(1008, 'Invalid Lean message or workspace path.')

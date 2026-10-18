@@ -370,7 +370,14 @@ test('writable Lake cache is opt-in and requires a read-only workspace', async (
   assert.equal(defaultRun.code, 0, defaultRun.stderr)
   const defaultMounts = mounts(JSON.parse(defaultRun.stdout))
   assert(defaultMounts.includes(`type=bind,src=${root},dst=/workspace`))
-  assert(!defaultMounts.some((value) => value.includes('dst=/workspace/.lake')))
+  assert(
+    defaultMounts.includes(`type=bind,src=${root}/.lake,dst=/workspace/.lake`),
+  )
+  assert(
+    defaultMounts.includes(
+      `type=bind,src=${root}/.lake/packages,dst=/workspace/.lake/packages`,
+    ),
+  )
   const readonly = await runtime.run(root, ['true'], {
     readOnlyWorkspace: true,
   })
@@ -379,7 +386,9 @@ test('writable Lake cache is opt-in and requires a read-only workspace', async (
     readonlyMounts.includes(`type=bind,src=${root},dst=/workspace,readonly`),
   )
   assert(
-    !readonlyMounts.some((value) => value.includes('dst=/workspace/.lake')),
+    readonlyMounts.includes(
+      `type=bind,src=${root}/.lake,dst=/workspace/.lake,readonly`,
+    ),
   )
 })
 
@@ -537,5 +546,204 @@ test('detaching a changed preset environment preserves the dependency mounts of 
         `src=${template}/.lake/packages,dst=/workspace/.lake/packages,readonly`,
       ),
     ),
+  )
+})
+
+test('worker home preparation rejects a settings FIFO race without blocking the server', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  const home = await runtime.home(root)
+  const { spawnSync } = await import('node:child_process')
+  const script = `
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import {spawnSync} from 'node:child_process'
+import {Runtime} from ${JSON.stringify(new URL('../runtime.mjs', import.meta.url).href)}
+const [dataDir, root, home] = process.argv.slice(1)
+const runtime = new Runtime({dataDir})
+const target = home + '/.elan/settings.toml'
+const original = fs.lstatSync
+let swapped = false
+fs.lstatSync = (...args) => {
+  const stat = original(...args)
+  if (!swapped && args[0] === target) {
+    swapped = true
+    fs.unlinkSync(target)
+    assert.equal(spawnSync('mkfifo', [target]).status, 0)
+  }
+  return stat
+}
+try {
+  await assert.rejects(runtime.home(root))
+  assert.equal(swapped, true)
+  console.log('FIFO race rejected')
+} finally { fs.lstatSync = original }
+`
+  const result = spawnSync(
+    process.execPath,
+    ['--input-type=module', '-e', script, dataDir, root, home],
+    { encoding: 'utf8', timeout: 5000 },
+  )
+  assert.equal(result.error, undefined, result.error?.message)
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /FIFO race rejected/)
+})
+
+test('worker toolchain link replacement stays within the pinned home parent', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  const home = await runtime.home(root)
+  const version = 'leanprover/lean4:v4.34.1'
+  const name = 'leanprover--lean4---v4.34.1'
+  const outside = path.join(dataDir, 'protected-toolchains')
+  const old = path.join(home, 'original-toolchains')
+  await fs.mkdir(path.join(outside, name), { recursive: true })
+  await fs.writeFile(path.join(outside, name, 'private'), 'protected')
+  await fs.symlink(
+    '/opt/stale-toolchain',
+    path.join(home, '.elan/toolchains', name),
+  )
+  runtime.toolchains.set(version, path.join(outside, name))
+  const syncFs = (await import('node:fs')).default
+  const readlink = syncFs.readlinkSync
+  let swapped = false
+  const mock = t.mock.method(syncFs, 'readlinkSync', (...args) => {
+    if (!swapped && String(args[0]).endsWith('/' + name)) {
+      swapped = true
+      syncFs.renameSync(path.join(home, '.elan/toolchains'), old)
+      syncFs.symlinkSync(outside, path.join(home, '.elan/toolchains'))
+    }
+    return readlink(...args)
+  })
+  try {
+    await runtime.home(root)
+  } finally {
+    mock.mock.restore()
+  }
+  assert.equal(swapped, true)
+  assert.equal(
+    await fs.readFile(path.join(outside, name, 'private'), 'utf8'),
+    'protected',
+  )
+  assert.equal(
+    await fs.readlink(path.join(old, name)),
+    '/opt/lean-toolchains/' + name,
+  )
+})
+
+test('worker home cache reuse copies exact lookup bytes and keeps artifact archives read only', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  const source = path.join(dataDir, 'source-cache-project')
+  await fs.mkdir(path.join(source, '.lake/packages/mathlib'), {
+    recursive: true,
+  })
+  const sourceHome = await runtime.home(source)
+  const cache = path.join(sourceHome, '.cache/lake')
+  await fs.mkdir(path.join(cache, 'artifacts'))
+  await fs.mkdir(path.join(cache, 'outputs/nested'), { recursive: true })
+  await fs.mkdir(path.join(cache, 'revisions'))
+  const bytes = Buffer.from([0, 255, 128, 65])
+  await fs.writeFile(path.join(cache, 'artifacts/fixture.ltar'), 'artifact')
+  await fs.writeFile(path.join(cache, 'outputs/nested/map'), bytes)
+  await fs.writeFile(path.join(cache, 'revisions/map'), bytes)
+  await runtime.inheritDependencies(source, root)
+  const home = await runtime.home(root)
+  assert.deepEqual(
+    await fs.readFile(path.join(home, '.cache/lake/outputs/nested/map')),
+    bytes,
+  )
+  assert.deepEqual(
+    await fs.readFile(path.join(home, '.cache/lake/revisions/map')),
+    bytes,
+  )
+  assert.equal(
+    await fs.readlink(path.join(home, '.cache/lake/artifacts/fixture.ltar')),
+    '/opt/dependency-lake-cache/artifacts/fixture.ltar',
+  )
+})
+
+test('all writable future mount sources and their home ancestors are separate mountpoints', async (t) => {
+  const { runtime, root } = await fixture(t)
+  const argv = JSON.parse((await runtime.run(root, ['true'])).stdout)
+  const actual = mounts(argv)
+  const home = actual
+    .find((mount) => mount.endsWith('dst=/home/worker'))
+    .split(',src=')[1]
+    .split(',dst=')[0]
+  for (const relative of ['.cache', '.cache/lake'])
+    assert(
+      actual.includes(
+        `type=bind,src=${home}/${relative},dst=/home/worker/${relative}`,
+      ),
+    )
+  for (const relative of ['.lake', '.lake/packages'])
+    assert(
+      actual.includes(
+        `type=bind,src=${root}/${relative},dst=/workspace/${relative}`,
+      ),
+    )
+})
+
+test('the initial fixed Git clone can keep an empty destination without disabling later cache pinning', async (t) => {
+  const { runtime, root } = await fixture(t)
+  const clone = JSON.parse(
+    (
+      await runtime.run(
+        root,
+        ['git', 'clone', '--', 'https://example.com/fixture.git', '.'],
+        { emptyRepositoryClone: true },
+      )
+    ).stdout,
+  )
+  assert(!mounts(clone).some((mount) => mount.includes('dst=/workspace/.lake')))
+  assert.deepEqual(await fs.readdir(root), [])
+  await fs.writeFile(
+    path.join(root, 'Main.lean'),
+    'example : True := by trivial\n',
+  )
+  const existing = JSON.parse(
+    (
+      await runtime.run(
+        root,
+        ['git', 'clone', '--', 'https://example.com/fixture.git', '.'],
+        { emptyRepositoryClone: true },
+      )
+    ).stdout,
+  )
+  assert(
+    mounts(existing).includes(
+      `type=bind,src=${root}/.lake,dst=/workspace/.lake`,
+    ),
+  )
+})
+
+test('writable cache inspection rejects a nested directory replaced by a host symlink', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  await fs.mkdir(path.join(root, '.lake/build'), { recursive: true })
+  const outside = path.join(dataDir, 'private-cache-fixture')
+  await fs.mkdir(outside)
+  await fs.writeFile(path.join(outside, 'private'), 'protected')
+  const syncFs = (await import('node:fs')).default
+  const readdir = syncFs.readdirSync
+  let swapped = false
+  const mock = t.mock.method(syncFs, 'readdirSync', (...args) => {
+    const entries = readdir(...args)
+    if (!swapped && syncFs.realpathSync(args[0]) === path.join(root, '.lake')) {
+      swapped = true
+      syncFs.renameSync(
+        path.join(root, '.lake/build'),
+        path.join(root, '.lake/original-build'),
+      )
+      syncFs.symlinkSync(outside, path.join(root, '.lake/build'))
+    }
+    return entries
+  })
+  try {
+    await assert.rejects(runtime.run(root, ['true'], cacheOptions))
+  } finally {
+    mock.mock.restore()
+  }
+  assert.equal(swapped, true)
+  assert.equal(
+    await fs.readFile(path.join(outside, 'private'), 'utf8'),
+    'protected',
   )
 })

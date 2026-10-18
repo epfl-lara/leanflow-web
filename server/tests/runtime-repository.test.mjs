@@ -113,3 +113,28 @@ test('terminal checkout mounts reject unrelated, broader, symlinked and missing 
   )
   assert.equal(f.runtime.children.size, 0)
 })
+
+test('nested repository aliases pin every selected ancestor and each writable cache path', async (t) => {
+  const f = await fixture(t)
+  const root = path.join(f.checkout, 'Nested/Lean')
+  await fs.mkdir(root, { recursive: true })
+  const argv = JSON.parse(
+    (await f.runtime.run(root, ['true'], { repositoryRoot: f.checkout }))
+      .stdout,
+  )
+  const mounted = mounts(argv)
+  for (const relative of ['Nested', 'Nested/Lean'])
+    assert(
+      mounted.includes(
+        `type=bind,src=${f.checkout}/${relative},dst=/repository/${relative}`,
+      ),
+    )
+  for (const alias of ['/workspace', '/repository/Nested/Lean']) {
+    assert(mounted.includes(`type=bind,src=${root}/.lake,dst=${alias}/.lake`))
+    assert(
+      mounted.includes(
+        `type=bind,src=${root}/.lake/packages,dst=${alias}/.lake/packages`,
+      ),
+    )
+  }
+})

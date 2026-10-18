@@ -15,6 +15,7 @@ export async function runAuthenticatedRepositoryGit({
   credentials,
   signal,
   timeoutMs = 900000,
+  emptyRepositoryClone = false,
 }) {
   let child
   try {
@@ -27,6 +28,7 @@ export async function runAuthenticatedRepositoryGit({
         signal,
         timeoutMs,
         network: 'bridge',
+        emptyRepositoryClone,
         freshHome: true,
         cleanHome: true,
         readOnlyHome: true,

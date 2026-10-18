@@ -75,6 +75,11 @@ test('hover recovery keeps answering, while a persistent loop stops without veri
                               : {},
                     })
                     if (request.method === 'turn/start') {
+                      child.stderr.write('ERROR fixture-')
+                      child.stderr.write('secret\n')
+                      child.stderr.write(
+                        'ERROR ' + 'x'.repeat(1980) + 'fixture-secret\n',
+                      )
                       send({
                         method: 'turn/started',
                         params: { turn: { id: 'turn' } },
@@ -168,6 +173,10 @@ test('hover recovery keeps answering, while a persistent loop stops without veri
       )
       await manager.shutdown()
       const result = events.get(job.id)
+      assert.match(result.log, /internal diagnostic/)
+      assert(!result.log.includes('fixture-'))
+      assert(!result.log.includes('secret'))
+      assert(!result.log.includes('xxxx'))
       assert.equal(
         result.status,
         recovers ? 'completed' : 'failed',

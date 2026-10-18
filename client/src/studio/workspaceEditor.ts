@@ -31,7 +31,19 @@ export class WorkspaceEditor {
         lineDecorationsWidth: 5,
         readOnly,
       })
-      this.editor.focus()
+      const document = element.ownerDocument
+      const focused = document.activeElement
+      // Loading Lean can finish after the user starts a message or opens a
+      // dialog. Only take focus from an idle page or explicit file navigation.
+      if (
+        element.isConnected &&
+        !document.querySelector('dialog[open]') &&
+        (!focused ||
+          focused === document.body ||
+          element.contains(focused) ||
+          focused.matches('.file-item'))
+      )
+        this.editor.focus()
     } catch (error) {
       this.dispose()
       throw error

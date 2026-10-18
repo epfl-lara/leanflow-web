@@ -10,6 +10,7 @@ import { AgentRpc } from './rpc.mjs'
 import { TERMINAL } from './events.mjs'
 import { proofRisks, verifyCandidate } from './verification.mjs'
 import { createAgentOutputHandler } from './agent-output.mjs'
+import { createNativeDiagnosticHandler } from './native-diagnostics.mjs'
 import { createHoverLookupGuard } from './agent-hover-guard.mjs'
 import { LiveMirror } from './agent-live.mjs'
 import {
@@ -768,12 +769,10 @@ export class AgentManager {
       })
       active.workerStopped = child.workerStopped
       const rpc = (active.rpc = new AgentRpc(child))
-      child.stderr.on('data', (text) => {
-        // Runtime debug messages stay server-side; only bounded useful failures are surfaced.
-        const value = this.config.redact(text.toString())
-        if (/ERROR|failed|error:/i.test(value))
-          this.#log(id, value.slice(0, 2000))
-      })
+      child.stderr.on(
+        'data',
+        createNativeDiagnosticHandler((text) => this.#log(id, text)),
+      )
       const output = (active.output = createAgentOutputHandler({
         append: (field, text, type) =>
           this.events.append(id, field, text, type),

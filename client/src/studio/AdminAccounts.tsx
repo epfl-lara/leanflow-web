@@ -3,7 +3,15 @@ import { api, errorText, type Account, type ProviderStatus } from './api'
 
 type ManagedAccount = Account & { lemex: ProviderStatus }
 
-export function AdminAccounts({ user }: { user: Account }) {
+export function AdminAccounts({
+  user,
+  onBusyChange,
+  disabled = false,
+}: {
+  user: Account
+  onBusyChange?: (busy: boolean) => void
+  disabled?: boolean
+}) {
   const [users, setUsers] = useState<ManagedAccount[]>([])
   const [name, setName] = useState('')
   const [role, setRole] = useState<'user' | 'admin'>('user')
@@ -15,9 +23,12 @@ export function AdminAccounts({ user }: { user: Account }) {
       .then(setUsers)
       .catch((error) => setError(errorText(error)))
   }, [])
+  const locked = busy || disabled
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (locked) return
     setBusy(true)
+    onBusyChange?.(true)
     setError('')
     setToken('')
     try {
@@ -35,6 +46,7 @@ export function AdminAccounts({ user }: { user: Account }) {
       setError(errorText(error))
     } finally {
       setBusy(false)
+      onBusyChange?.(false)
     }
   }
   return (
@@ -63,7 +75,7 @@ export function AdminAccounts({ user }: { user: Account }) {
           onChange={(event) => setName(event.target.value)}
           maxLength={80}
           required
-          disabled={busy}
+          disabled={locked}
         />
         {user.role === 'owner' && (
           <>
@@ -76,7 +88,7 @@ export function AdminAccounts({ user }: { user: Account }) {
               onChange={(event) =>
                 setRole(event.target.value === 'admin' ? 'admin' : 'user')
               }
-              disabled={busy}
+              disabled={locked}
             >
               <option value="user">User</option>
               <option value="admin">Admin</option>
@@ -89,7 +101,10 @@ export function AdminAccounts({ user }: { user: Account }) {
           </p>
         )}
         <div className="dialog-actions">
-          <button className="button secondary" disabled={busy || !name.trim()}>
+          <button
+            className="button secondary"
+            disabled={locked || !name.trim()}
+          >
             {busy ? 'Creating…' : 'Create account and token'}
           </button>
         </div>

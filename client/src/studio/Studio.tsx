@@ -233,6 +233,8 @@ export function Studio() {
   const [session, setSession] = useState<Session | null>(null)
   const [authRequired, setAuthRequired] = useState(false)
   const [startupError, setStartupError] = useState('')
+  const [sessionRefreshing, setSessionRefreshing] = useState(false)
+  const sessionRequest = useRef(0)
   const [projects, setProjects] = useState<Project[]>([])
   const [projectId, setSelectedProjectId] = useState<string | null>(null)
   const [files, setFiles] = useState<FileEntry[]>([])
@@ -534,16 +536,22 @@ export function Studio() {
   )
 
   const loadSession = useCallback(async () => {
+    const request = ++sessionRequest.current
+    setSessionRefreshing(true)
     setStartupError('')
     try {
       const value = await api<Session>('/api/session')
+      if (request !== sessionRequest.current) return
       setRunEventTransport(value.eventTransport)
       setSession(value)
       setAuthRequired(false)
     } catch (error) {
+      if (request !== sessionRequest.current) return
       if (error instanceof ApiError && error.status === 401)
         setAuthRequired(true)
       else setStartupError(errorText(error))
+    } finally {
+      if (request === sessionRequest.current) setSessionRefreshing(false)
     }
   }, [])
 
@@ -1572,6 +1580,9 @@ export function Studio() {
     return (
       <AccountSetup
         session={session}
+        refreshError={startupError}
+        refreshing={sessionRefreshing}
+        onRetry={() => void loadSession()}
         onSaved={() => {
           void loadSession()
         }}
@@ -2173,6 +2184,18 @@ export function Studio() {
         {trashError && !trashOpen && (
           <div className="workspace-alert" role="alert">
             {trashError}
+          </div>
+        )}
+        {startupError && (
+          <div className="workspace-alert" role="alert">
+            <span>Could not refresh your workspace. {startupError}</span>
+            <button
+              className="button small secondary"
+              disabled={sessionRefreshing}
+              onClick={() => void loadSession()}
+            >
+              {sessionRefreshing ? 'Refreshing…' : 'Retry workspace refresh'}
+            </button>
           </div>
         )}
         {error && (

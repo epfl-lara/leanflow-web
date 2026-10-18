@@ -33,6 +33,9 @@ export function SettingsModal({
   const [provider, setProvider] = useState<ProviderStatus | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [providerBusy, setProviderBusy] = useState(false)
+  const [accountBusy, setAccountBusy] = useState(false)
+  const pending = busy || providerBusy || accountBusy
   useEffect(() => {
     let cancelled = false
     void api<ProviderStatus>('/api/provider')
@@ -55,7 +58,7 @@ export function SettingsModal({
   }, [])
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (!settings) return
+    if (!settings || pending) return
     setBusy(true)
     setError('')
     try {
@@ -79,7 +82,7 @@ export function SettingsModal({
       title="Assistant settings"
       subtitle="Your instructions and tool choices apply to new Lemex runs."
       onClose={onClose}
-      busy={busy}
+      busy={pending}
     >
       <h3>
         {user.name} · {user.role === 'owner' ? 'Owner / admin' : user.role}
@@ -87,6 +90,8 @@ export function SettingsModal({
       {provider && (
         <ProviderKeyForm
           initial={provider}
+          onBusyChange={setProviderBusy}
+          disabled={busy || accountBusy}
           onSaved={(value) => {
             setProvider(value)
             onProviderSaved()
@@ -125,7 +130,7 @@ export function SettingsModal({
                 extraInstructions: event.target.value,
               })
             }
-            disabled={busy}
+            disabled={pending}
           />
           <p className="field-help">
             Added to the workspace proof guidance. Verification requirements
@@ -142,7 +147,7 @@ export function SettingsModal({
                     showReasoning: event.target.checked,
                   })
                 }
-                disabled={busy}
+                disabled={pending}
               />
               <span>
                 <strong>Reasoning traces</strong>
@@ -196,7 +201,7 @@ export function SettingsModal({
                       },
                     })
                   }
-                  disabled={busy}
+                  disabled={pending}
                 />
                 <span>
                   <strong>{tool.title}</strong>
@@ -216,11 +221,11 @@ export function SettingsModal({
               type="button"
               className="button secondary"
               onClick={onClose}
-              disabled={busy}
+              disabled={pending}
             >
               Cancel
             </button>
-            <button className="button primary" disabled={busy}>
+            <button className="button primary" disabled={pending}>
               {busy ? (
                 <span className="spinner" />
               ) : (
@@ -231,7 +236,13 @@ export function SettingsModal({
           </footer>
         </form>
       )}
-      {['owner', 'admin'].includes(user.role) && <AdminAccounts user={user} />}
+      {['owner', 'admin'].includes(user.role) && (
+        <AdminAccounts
+          user={user}
+          onBusyChange={setAccountBusy}
+          disabled={busy || providerBusy}
+        />
+      )}
     </Dialog>
   )
 }

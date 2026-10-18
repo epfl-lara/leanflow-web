@@ -7,6 +7,7 @@ import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { AgentRpc } from './rpc.mjs'
 import { createAgentOutputHandler } from './agent-output.mjs'
+import { createNativeDiagnosticHandler } from './native-diagnostics.mjs'
 import { agentMessageContext } from './agent-context.mjs'
 
 export async function withSetupRepairDeadline(
@@ -103,10 +104,12 @@ export async function repairProjectSetup({
     child.once('error', resolve)
   })
   const rpc = new AgentRpc(child)
-  const log = (text) => onOutput(config.redact(String(text)))
+  const redact = (text) =>
+    config.redact(String(text)).split(provider.LEMEX_API_KEY).join('[redacted]')
+  const log = (text) => onOutput(redact(text))
   const output = createAgentOutputHandler({
     append: (_field, text) => log(text),
-    redact: config.redact,
+    redact,
     secrets: [provider.LEMEX_API_KEY],
     showReasoning: false,
   })
@@ -117,10 +120,7 @@ export async function repairProjectSetup({
   })
   finished.catch(() => {})
   rpc.on('closed', rejectFinished)
-  child.stderr.on('data', (value) => {
-    if (/ERROR|failed|error:/i.test(value.toString()))
-      log(value.toString().slice(0, 2000))
-  })
+  child.stderr.on('data', createNativeDiagnosticHandler(log))
   rpc.on('request', (request) => {
     try {
       if (/requestApproval$/.test(request.method))
@@ -141,7 +141,9 @@ export async function repairProjectSetup({
   rpc.on('notification', ({ method, params }) => {
     if (output.handle(method, params)) return
     if (method === 'item/started' && params.item?.type === 'commandExecution') {
-      const command = String(params.item.command || '')
+      const command = redact(
+        params.item.command || 'checking project configuration',
+      )
       onActivity(
         /cache.*get/.test(command)
           ? 'Fetching compiled library files'
@@ -151,9 +153,7 @@ export async function repairProjectSetup({
               ? 'Checking pinned dependency revisions'
               : 'Inspecting project configuration',
       )
-      log(
-        `Setup repair: ${String(params.item.command || 'checking project configuration').slice(0, 500)}\n`,
-      )
+      log(`Setup repair: ${command.slice(0, 500)}\n`)
     }
     if (method === 'turn/completed') {
       output.flush()

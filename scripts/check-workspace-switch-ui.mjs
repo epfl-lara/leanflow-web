@@ -66,7 +66,9 @@ try {
   fixture = await chatBrowserFixture({
     base: `http://127.0.0.1:${server.address().port}`,
     // Use the full browser so screenshots exercise Chromium's native PDF viewer.
-    launchOptions: { channel: 'chromium' },
+    launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
+      ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
+      : { channel: 'chromium' },
     session: {
       user: { id: 'fixture-owner', name: 'Fixture owner' },
       templates: [

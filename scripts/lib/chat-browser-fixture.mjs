@@ -155,7 +155,13 @@ export async function chatBrowserFixture({
     sockets: [],
     checks: [],
   }
-  const browser = await chromium.launch({ headless: true, ...launchOptions })
+  const browser = await chromium.launch({
+    headless: true,
+    ...launchOptions,
+    ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
+      ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
+      : {}),
+  })
   const page = await browser.newPage({ viewport })
   page.on('pageerror', (error) =>
     report.errors.push(error.stack || error.message),

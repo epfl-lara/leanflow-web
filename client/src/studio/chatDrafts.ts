@@ -169,10 +169,13 @@ export function useChatDraft(
     }
     render((value) => value + 1)
   }
-  const value = get(key)
   return {
     key,
-    value,
+    // Async recovery can run after a write but before React commits its next
+    // render. Read the cache so it sees the user's newest draft immediately.
+    get value() {
+      return get(key)
+    },
     setText: (text: string) =>
       write(key, { ...get(key), text, revision: get(key).revision + 1 }),
     setFiles: (files: string[]) =>

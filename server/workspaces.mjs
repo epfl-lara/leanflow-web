@@ -433,7 +433,7 @@ async function textFile(filename, missing = false) {
 async function fileHash(filename, signal) {
   const handle = await fs.open(
     filename,
-    constants.O_RDONLY | constants.O_NOFOLLOW,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   )
   try {
     if (
@@ -494,7 +494,7 @@ async function copyWorkspace(
         else if (entry.isFile()) {
           const file = await fs.open(
             anchored,
-            constants.O_RDONLY | constants.O_NOFOLLOW,
+            constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
           )
           try {
             if ((await fs.realpath(`/proc/self/fd/${file.fd}`)) !== original)
@@ -2682,7 +2682,16 @@ export class WorkspaceStore {
 
   async #repositoryCommand(project, args, credentials) {
     if (!credentials.token)
-      return this.#command(project, [...GIT_ARGS, ...args], 900000, 'bridge')
+      return this.#command(
+        project,
+        [...GIT_ARGS, ...args],
+        900000,
+        'bridge',
+        {},
+        {
+          emptyRepositoryClone: args[0] === 'clone',
+        },
+      )
     const { pin } = await gitHttpsDestination(project.repository, {
       validateRepository,
       resolveHost: this.resolveHost,
@@ -2698,6 +2707,7 @@ export class WorkspaceStore {
           root: this.repositoryRoot(project),
           args: [...pin, ...args],
           credentials,
+          emptyRepositoryClone: args[0] === 'clone',
           signal,
         }),
       { onOutput, signal },
@@ -2741,6 +2751,7 @@ export class WorkspaceStore {
     timeoutMs = 900000,
     network = 'none',
     env = {},
+    { emptyRepositoryClone = false } = {},
   ) {
     const label = setupCommandLabel(args, { gitCommand: args[GIT_ARGS.length] })
     const onOutput = (output) =>
@@ -2761,6 +2772,7 @@ export class WorkspaceStore {
           {
             timeoutMs,
             network,
+            emptyRepositoryClone,
             signal: this.preparationControllers.get(project.id)?.signal,
             ...(args[0] !== 'git' && project.repairedConfiguration
               ? { readOnlyWorkspace: true, writeLakeCache: true }
@@ -3313,73 +3325,80 @@ export class WorkspaceStore {
     } = {},
   ) {
     const result = []
-    const visit = async (directory, prefix = '') => {
+    const visit = async (directory, prefix = '', depth = 0) => {
       signal?.throwIfAborted()
-      let entries
-      if (foldersOnly) {
-        let handle
-        try {
-          handle = await fs.open(
-            directory,
-            constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-          )
-          if (
-            (await fs.realpath(`/proc/self/fd/${handle.fd}`)) !==
-            path.resolve(directory)
-          )
-            fail(
-              'Folder changed during access. Refresh the file tree and try again.',
-              409,
-            )
-          entries = await fs.readdir(`/proc/self/fd/${handle.fd}`, {
-            withFileTypes: true,
-          })
-        } catch (error) {
-          if (error.code === 'ENOTDIR' || error.code === 'ELOOP')
-            fail(
-              'Folder changed during access. Refresh the file tree and try again.',
-              409,
-            )
-          throw error
-        } finally {
-          await handle?.close()
-        }
-      } else entries = await fs.readdir(directory, { withFileTypes: true })
-      entries.sort((a, b) => a.name.localeCompare(b.name))
-      for (const entry of entries) {
-        signal?.throwIfAborted()
-        if (result.length >= limit) break
-        if (
-          isSecret(entry.name) ||
-          entry.name === '.ready.json' ||
-          entry.name === 'node_modules' ||
-          entry.name === '.lake'
+      if (depth > 64) fail('Project directory nesting exceeds 64 levels', 413)
+      let handle
+      try {
+        // Files and folders share the same descriptor boundary. A worker can
+        // rename a listed directory before recursion; never follow its replacement.
+        handle = await fs.open(
+          directory,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
         )
-          continue
-        const relative = prefix ? `${prefix}/${entry.name}` : entry.name
-        const full = path.join(directory, entry.name)
-        if (entry.isSymbolicLink()) {
-          if (includeLinks)
-            result.push({
-              path: relative,
-              size: 0,
-              link: await fs.readlink(full),
-            })
-        } else if (entry.isDirectory()) {
-          if (foldersOnly) {
-            try {
-              relativeFile(relative, { write: true })
-            } catch (error) {
-              if (error instanceof WorkspaceError) continue
-              throw error
+        if (
+          (await fs.realpath(`/proc/self/fd/${handle.fd}`)) !==
+          path.resolve(directory)
+        )
+          fail(
+            'Folder changed during access. Refresh the file tree and try again.',
+            409,
+          )
+        const anchor = `/proc/self/fd/${handle.fd}`
+        const entries = await fs.readdir(anchor, { withFileTypes: true })
+        entries.sort((a, b) => a.name.localeCompare(b.name))
+        for (const entry of entries) {
+          signal?.throwIfAborted()
+          if (result.length >= limit) break
+          if (
+            isSecret(entry.name) ||
+            entry.name === '.ready.json' ||
+            entry.name === 'node_modules' ||
+            entry.name === '.lake'
+          )
+            continue
+          const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+          const full = path.join(directory, entry.name)
+          const anchored = `${anchor}/${entry.name}`
+          if (entry.isSymbolicLink()) {
+            if (includeLinks)
+              result.push({
+                path: relative,
+                size: 0,
+                link: await fs.readlink(anchored),
+              })
+          } else if (entry.isDirectory()) {
+            if (foldersOnly) {
+              try {
+                relativeFile(relative, { write: true })
+              } catch (error) {
+                if (error instanceof WorkspaceError) continue
+                throw error
+              }
+              result.push({ path: relative })
             }
-            result.push({ path: relative })
+            await visit(full, relative, depth + 1)
+          } else if (!foldersOnly && entry.isFile()) {
+            // lstat on the pinned parent cannot expose metadata through a
+            // symlink swapped in after readdir returned its directory entries.
+            const stat = await fs.lstat(anchored)
+            if (!stat.isFile())
+              fail(
+                'File changed during access. Refresh the file tree and try again.',
+                409,
+              )
+            result.push({ path: relative, size: stat.size })
           }
-          await visit(full, relative)
-        } else if (!foldersOnly && entry.isFile()) {
-          const stat = await fs.stat(full)
-          result.push({ path: relative, size: stat.size })
         }
+      } catch (error) {
+        if (error.code === 'ENOTDIR' || error.code === 'ELOOP')
+          fail(
+            'Folder changed during access. Refresh the file tree and try again.',
+            409,
+          )
+        throw error
+      } finally {
+        await handle?.close()
       }
     }
     await visit(root)

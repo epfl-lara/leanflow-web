@@ -4,9 +4,13 @@ import { api, errorText, type ProviderStatus } from './api'
 export function ProviderKeyForm({
   initial,
   onSaved,
+  onBusyChange,
+  disabled = false,
 }: {
   initial: ProviderStatus
   onSaved: (status: ProviderStatus) => void
+  onBusyChange?: (busy: boolean) => void
+  disabled?: boolean
 }) {
   const [status, setStatus] = useState(initial)
   const [key, setKey] = useState('')
@@ -19,9 +23,12 @@ export function ProviderKeyForm({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState(false)
+  const locked = busy || disabled
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (locked) return
     setBusy(true)
+    onBusyChange?.(true)
     setError('')
     setSaved(false)
     try {
@@ -41,6 +48,7 @@ export function ProviderKeyForm({
       setError(errorText(error))
     } finally {
       setBusy(false)
+      onBusyChange?.(false)
     }
   }
   return (
@@ -51,7 +59,7 @@ export function ProviderKeyForm({
       <select
         id="lemex-provider"
         value={provider}
-        disabled={busy}
+        disabled={locked}
         onChange={(event) => {
           setProvider(event.target.value === 'custom' ? 'custom' : 'rcp')
           setKey('')
@@ -71,7 +79,7 @@ export function ProviderKeyForm({
             id="lemex-base-url"
             type="url"
             value={baseUrl}
-            disabled={busy}
+            disabled={locked}
             onChange={(event) => {
               setBaseUrl(event.target.value)
               setKey('')
@@ -117,7 +125,7 @@ export function ProviderKeyForm({
         spellCheck={false}
         value={key}
         onChange={(event) => setKey(event.target.value)}
-        disabled={busy}
+        disabled={locked}
         placeholder={status.configured ? 'New API key' : 'Paste your API key'}
         required
         maxLength={4096}
@@ -134,7 +142,7 @@ export function ProviderKeyForm({
         </p>
       )}
       <div className="dialog-actions">
-        <button className="button primary" disabled={busy || !key.trim()}>
+        <button className="button primary" disabled={locked || !key.trim()}>
           {busy
             ? 'Checking key…'
             : status.configured

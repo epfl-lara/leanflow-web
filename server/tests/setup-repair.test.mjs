@@ -39,7 +39,8 @@ test('repair writes the normalized model catalog and sends the exact configured 
     models: catalogModels(modelCatalog, DEFAULT_MODEL),
     redact: String,
   }
-  const requests = []
+  const requests = [],
+    output = []
   const child = new EventEmitter()
   for (const stream of ['stdin', 'stdout', 'stderr'])
     child[stream] = new PassThrough()
@@ -58,7 +59,22 @@ test('repair writes the normalized model catalog and sends the exact configured 
           ? { thread: { id: 'repair-thread' } }
           : {}
       child.stdout.write(JSON.stringify({ id: request.id, result }) + '\n')
-      if (request.method === 'turn/start')
+      if (request.method === 'turn/start') {
+        const secret = 'alice-personal-fixture-key'
+        child.stderr.write('ERROR ' + secret.slice(0, 12))
+        child.stderr.write(secret.slice(12) + '\n')
+        child.stderr.write('ERROR ' + 'x'.repeat(1980) + secret + '\n')
+        child.stdout.write(
+          JSON.stringify({
+            method: 'item/started',
+            params: {
+              item: {
+                type: 'commandExecution',
+                command: 'echo ' + 'x'.repeat(480) + ' ' + secret,
+              },
+            },
+          }) + '\n',
+        )
         queueMicrotask(() =>
           child.stdout.write(
             JSON.stringify({
@@ -67,6 +83,7 @@ test('repair writes the normalized model catalog and sends the exact configured 
             }) + '\n',
           ),
         )
+      }
     }
   })
   await repairProjectSetup({
@@ -82,7 +99,16 @@ test('repair writes the normalized model catalog and sends the exact configured 
       },
     },
     config,
+    onOutput: (text) => output.push(text),
   })
+  assert(output.some((text) => text.includes('internal diagnostic')))
+  assert(output.some((text) => text.includes('[redacted]')))
+  for (const fragment of [
+    'alice-personal-fixture-key',
+    'alice-person',
+    'al-fixture-key',
+  ])
+    assert(!output.join('').includes(fragment))
   assert.deepEqual(
     JSON.parse(
       await fs.readFile(path.join(home, '.lemex/models.json'), 'utf8'),

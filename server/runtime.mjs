@@ -8,6 +8,11 @@ import fs from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { PreparedPresetCache } from './prepared-presets.mjs'
+import {
+  managedWorkerDirectory,
+  managedWorkerFile,
+  copyManagedWorkerTree,
+} from './managed-worker-files.mjs'
 import { fileURLToPath } from 'node:url'
 import {
   LeanCheckSupport,
@@ -43,29 +48,28 @@ const forbiddenEnv = new Set([
 ])
 
 function ensurePrivateDirectory(base, relative) {
-  let directory = base
-  for (const segment of relative.split(path.sep).filter(Boolean)) {
-    if (segment === '..' || segment === '.')
-      throw new Error('Invalid managed directory')
-    directory = path.join(directory, segment)
-    try {
-      const stat = fs.lstatSync(directory)
-      if (stat.isSymbolicLink() || !stat.isDirectory())
-        throw new Error(
-          'A managed worker directory was replaced by a symlink or file',
-        )
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error
-      fs.mkdirSync(directory, { mode: 0o700 })
-    }
+  try {
+    managedWorkerDirectory(base, relative, () => {}, { create: true })
+  } catch (error) {
+    if (error.code === 'ENOTDIR' || error.code === 'ELOOP')
+      throw new Error(
+        'A managed worker directory was replaced by a symlink or file',
+        { cause: error },
+      )
+    throw error
   }
-  return directory
+  return path.join(base, relative)
 }
 
 function rejectSymlink(filename) {
   try {
-    if (fs.lstatSync(filename).isSymbolicLink())
+    const stat = fs.lstatSync(filename)
+    if (stat.isSymbolicLink())
       throw new Error('A managed worker file was replaced by a symlink')
+    if (!stat.isFile() || stat.nlink !== 1)
+      throw new Error(
+        'A managed worker file must be a regular file without hardlinks',
+      )
   } catch (error) {
     if (error.code !== 'ENOENT') throw error
   }
@@ -73,21 +77,37 @@ function rejectSymlink(filename) {
 
 function writableLakeCache(root, { mountedPackages = false } = {}) {
   const cache = ensurePrivateDirectory(root, '.lake')
-  // A writable alias of a source inode would bypass the read-only workspace
-  // mount. Symlinks remain governed by the destination mount permissions; do
-  // not follow them or inspect dependencies that receive a read-only mount.
-  const pending = [cache]
+  // A writable alias of a source inode would bypass the read-only workspace.
+  // Pin each inspected directory; arbitrary build subfolders remain mutable.
+  const pending = ['.lake']
+  let entries = 0
   while (pending.length) {
-    const directory = pending.pop()
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      if (mountedPackages && directory === cache && entry.name === 'packages')
-        continue
-      const filename = path.join(directory, entry.name)
-      const stat = fs.lstatSync(filename)
-      if (stat.isDirectory()) pending.push(filename)
-      else if (stat.isFile() && stat.nlink > 1)
-        throw new Error('Writable Lake cache must not contain hardlinked files')
-    }
+    const relative = pending.pop()
+    if (relative.split('/').length > 65)
+      throw new Error('Writable Lake cache nesting exceeds 64 levels')
+    managedWorkerDirectory(root, relative, (directory) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (++entries > 200000)
+          throw new Error('Writable Lake cache contains too many entries')
+        if (
+          mountedPackages &&
+          relative === '.lake' &&
+          entry.name === 'packages'
+        )
+          continue
+        const stat = fs.lstatSync(`${directory}/${entry.name}`)
+        if (
+          (entry.isDirectory() && !stat.isDirectory()) ||
+          (entry.isFile() && !stat.isFile())
+        )
+          throw new Error('Writable Lake cache changed during inspection')
+        if (stat.isDirectory()) pending.push(`${relative}/${entry.name}`)
+        else if (stat.isFile() && stat.nlink > 1)
+          throw new Error(
+            'Writable Lake cache must not contain hardlinked files',
+          )
+      }
+    })
   }
   return cache
 }
@@ -844,34 +864,35 @@ export class Runtime {
     rejectSymlink(path.join(lemex, 'config.toml'))
     rejectSymlink(path.join(lemex, 'models.json'))
     rejectSymlink(path.join(elan, 'settings.toml'))
-    if (!clean && !fs.existsSync(path.join(lemex, 'config.toml'))) {
+    if (!clean && managedWorkerFile(home, '.lemex/config.toml') === null) {
       for (const filename of ['config.toml', 'models.json']) {
         const source = path.join(projectDir, '.runtime/lemex', filename)
         if (fs.existsSync(source))
-          fs.copyFileSync(source, path.join(lemex, filename))
+          managedWorkerFile(home, `.lemex/${filename}`, {
+            content: fs.readFileSync(source, 'utf8'),
+          })
       }
     }
-    for (const toolchain of this.toolchains.keys()) {
-      const name = toolchainName(toolchain)
-      const link = path.join(elan, 'toolchains', name)
-      const target = `/opt/lean-toolchains/${name}`
-      try {
-        if (fs.readlinkSync(link) === target) continue
-      } catch {
-        /* Replace stale links. */
+    managedWorkerDirectory(home, '.elan/toolchains', (directory) => {
+      for (const toolchain of this.toolchains.keys()) {
+        const name = toolchainName(toolchain)
+        const link = `${directory}/${name}`
+        const target = `/opt/lean-toolchains/${name}`
+        try {
+          if (fs.readlinkSync(link) === target) continue
+        } catch {
+          /* Replace stale links. */
+        }
+        // Unexpected directories are preserved; recursively deleting arbitrary
+        // worker content here could block the server.
+        fs.rmSync(link, { force: true })
+        fs.symlinkSync(target, link)
       }
-      try {
-        fs.rmSync(link, { recursive: true, force: true })
-      } catch {
-        /* Missing link. */
-      }
-      fs.symlinkSync(target, link)
-    }
-    fs.writeFileSync(
-      path.join(elan, 'settings.toml'),
-      'version = "12"\ntelemetry = false\n',
-      { mode: 0o600 },
-    )
+    })
+    managedWorkerFile(home, '.elan/settings.toml', {
+      content: 'version = "12"\ntelemetry = false\n',
+      maxBytes: 16384,
+    })
     const dependencySource = this.#dependencySource(actual)
     if (dependencySource && dependencySource !== actual) {
       const sourceCache = this.#dependencyArtifactCache(dependencySource)
@@ -891,47 +912,62 @@ export class Runtime {
         let current = ''
         rejectSymlink(path.join(privateCache, '.dependency-source'))
         try {
-          current = fs.readFileSync(
-            path.join(privateCache, '.dependency-source'),
-            'utf8',
-          )
-        } catch {}
+          current =
+            managedWorkerFile(home, '.cache/lake/.dependency-source', {
+              maxBytes: 8192,
+            }) || ''
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error
+        }
         if (stamp !== current) {
-          ensurePrivateDirectory(home, path.join('.cache', 'lake', 'artifacts'))
-          for (const file of fs.readdirSync(artifactDir, {
-            withFileTypes: true,
-          })) {
-            if (!file.isFile()) continue
-            const destination = path.join(privateCache, 'artifacts', file.name)
-            try {
-              fs.lstatSync(destination)
-              continue
-            } catch {}
-            fs.symlinkSync(
-              `/opt/dependency-lake-cache/artifacts/${file.name}`,
-              destination,
-            )
-          }
-          // Copy only small mutable lookup maps. Content-addressed artifacts
-          // remain symlinks into a read-only mount; newly built artifacts go
-          // into this workspace's private cache directory.
-          for (const directory of ['outputs', 'revisions']) {
-            if (fs.existsSync(path.join(sourceCache, directory))) {
-              ensurePrivateDirectory(sourceCache, directory)
-              ensurePrivateDirectory(privateCache, directory)
-              fs.cpSync(
-                path.join(sourceCache, directory),
-                path.join(privateCache, directory),
-                { recursive: true },
+          managedWorkerDirectory(
+            home,
+            '.cache/lake/artifacts',
+            (directory) => {
+              managedWorkerDirectory(
+                this.runtimeDir,
+                path.relative(this.runtimeDir, artifactDir),
+                (sourceDirectory) => {
+                  for (const file of fs.readdirSync(sourceDirectory, {
+                    withFileTypes: true,
+                  })) {
+                    if (!file.isFile()) continue
+                    const destination = `${directory}/${file.name}`
+                    try {
+                      fs.lstatSync(destination)
+                      continue
+                    } catch (error) {
+                      if (error.code !== 'ENOENT') throw error
+                    }
+                    fs.symlinkSync(
+                      `/opt/dependency-lake-cache/artifacts/${file.name}`,
+                      destination,
+                    )
+                  }
+                },
               )
-            }
+            },
+            { create: true },
+          )
+          // Lookup maps retain exact bytes. Content-addressed artifacts stay
+          // links into the read-only dependency mount; new artifacts are private.
+          for (const directory of ['outputs', 'revisions']) {
+            if (fs.existsSync(path.join(sourceCache, directory)))
+              copyManagedWorkerTree(
+                this.runtimeDir,
+                path.relative(
+                  this.runtimeDir,
+                  path.join(sourceCache, directory),
+                ),
+                home,
+                `.cache/lake/${directory}`,
+              )
           }
           rejectSymlink(path.join(privateCache, '.dependency-source'))
-          fs.writeFileSync(
-            path.join(privateCache, '.dependency-source'),
-            stamp,
-            { mode: 0o600 },
-          )
+          managedWorkerFile(home, '.cache/lake/.dependency-source', {
+            content: stamp,
+            maxBytes: 8192,
+          })
         }
       }
     }
@@ -986,6 +1022,7 @@ export class Runtime {
       readOnlyHome = false,
       cleanHome = false,
       kernelCheck = false,
+      emptyRepositoryClone = false,
       repositoryRoot,
     } = {},
   ) {
@@ -1006,6 +1043,7 @@ export class Runtime {
         readOnlyHome,
         cleanHome,
         kernelCheck,
+        emptyRepositoryClone,
       ].some((value) => typeof value !== 'boolean')
     )
       throw new Error('Worker mount options must be booleans')
@@ -1053,11 +1091,17 @@ export class Runtime {
     const repository = this.#repositoryMount(actual, repositoryRoot)
     const dependencySource = this.#dependencySource(actual)
     this.#checkSharedBinding(actual, dependencySource)
-    const lakeCache = writeLakeCache
-      ? writableLakeCache(actual, {
-          mountedPackages: Boolean(dependencySource),
-        })
+    // Only a fixed initial Git clone may keep its empty destination empty.
+    // Ready projects always pin cache paths before any project code can run.
+    const initialClone =
+      emptyRepositoryClone && fs.readdirSync(actual).length === 0
+    const lakeCache = initialClone
+      ? null
+      : ensurePrivateDirectory(actual, '.lake')
+    const privatePackages = lakeCache
+      ? ensurePrivateDirectory(actual, '.lake/packages')
       : null
+    if (writeLakeCache) writableLakeCache(actual, { mountedPackages: true })
     const home = this.#prepareHome(actual, {
       fresh: freshHome,
       clean: cleanHome,
@@ -1140,22 +1184,44 @@ export class Runtime {
           `type=bind,src=${path.join(projectDir, 'server/lean-project-check')},dst=/opt/leanflow-project-check,readonly`,
         )
     }
-    if (repository)
+    if (repository) {
       dockerArgs.push(
         '--mount',
         `type=bind,src=${repository.root},dst=/repository${readOnlyWorkspace ? ',readonly' : ''}`,
       )
-    // Place this after the read-only workspace and before the read-only
-    // dependency overlay so only project-local build artifacts are writable.
-    if (lakeCache) {
-      dockerArgs.push(
-        '--mount',
-        `type=bind,src=${lakeCache},dst=/workspace/.lake`,
-      )
-      if (repository)
+      // A directory containing a mount can still be renamed. Pin each exposed
+      // ancestor as well as the selected root in this second workspace alias.
+      const parts = path
+        .relative(repository.root, actual)
+        .split(path.sep)
+        .filter(Boolean)
+      for (let index = 1; index <= parts.length; index++)
         dockerArgs.push(
           '--mount',
-          `type=bind,src=${lakeCache},dst=${repository.selected}/.lake`,
+          `type=bind,src=${path.join(repository.root, ...parts.slice(0, index))},dst=/repository/${parts.slice(0, index).join('/')}${readOnlyWorkspace ? ',readonly' : ''}`,
+        )
+    }
+    // These are future daemon bind sources. Mountpoints cannot be renamed by
+    // project code, including through another workspace/repository alias.
+    for (const relative of ['.cache', '.cache/lake'])
+      dockerArgs.push(
+        '--mount',
+        `type=bind,src=${path.join(home, relative)},dst=/home/worker/${relative}${readOnlyHome ? ',readonly' : ''}`,
+      )
+    if (kernelTemp)
+      dockerArgs.push(
+        '--mount',
+        `type=bind,src=${kernelTemp},dst=/home/worker/kernel-check-tmp`,
+      )
+    if (lakeCache) {
+      const readonly = readOnlyWorkspace && !writeLakeCache ? ',readonly' : ''
+      for (const alias of [
+        '/workspace',
+        ...(repository ? [repository.selected] : []),
+      ])
+        dockerArgs.push(
+          '--mount',
+          `type=bind,src=${lakeCache},dst=${alias}/.lake${readonly}`,
         )
     }
     for (const [toolchain, source] of this.toolchains) {
@@ -1164,20 +1230,22 @@ export class Runtime {
         `type=bind,src=${source},dst=/opt/lean-toolchains/${toolchainName(toolchain)},readonly`,
       )
     }
-    if (dependencySource) {
-      const directory = this.#dependencyPackages(dependencySource)
+    if (lakeCache) {
+      const directory = dependencySource
+        ? this.#dependencyPackages(dependencySource)
+        : privatePackages
       if (!directory)
         throw new Error('Selected dependency packages are unavailable')
-      dockerArgs.push(
-        '--mount',
-        `type=bind,src=${directory},dst=/workspace/.lake/packages,readonly`,
-      )
-      if (repository)
+      const readonly = dependencySource || readOnlyWorkspace ? ',readonly' : ''
+      for (const alias of [
+        '/workspace',
+        ...(repository ? [repository.selected] : []),
+      ])
         dockerArgs.push(
           '--mount',
-          `type=bind,src=${directory},dst=${repository.selected}/.lake/packages,readonly`,
+          `type=bind,src=${directory},dst=${alias}/.lake/packages${readonly}`,
         )
-      if (dependencySource !== actual) {
+      if (dependencySource && dependencySource !== actual) {
         const cache = this.#dependencyArtifactCache(dependencySource)
         if (fs.existsSync(path.join(cache, 'artifacts')))
           dockerArgs.push(
