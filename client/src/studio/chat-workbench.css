@@ -70,8 +70,7 @@
 .chat-options-fields .help-label {
   min-height: 24px;
 }
-.chat-options-fields select,
-.chat-options-fields input[type='search'] {
+.chat-options-fields select {
   font-size: 12px;
   line-height: 1.4;
   height: 34px;
@@ -82,12 +81,76 @@
 .chat-options-fields select {
   margin-top: 5px;
 }
-.chat-model-search {
-  grid-column: 1 / -1;
+.chat-add-models {
+  border: 0;
+  padding: 6px 0 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
 }
-.chat-model-search input[type='search'] {
-  margin: 0;
-  appearance: none;
+.chat-add-models:hover {
+  text-decoration: underline;
+}
+.chat-add-models:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.model-library input[type='search'] {
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  min-height: 36px;
+  width: 100%;
+  padding: 7px 10px;
+}
+.model-library-list {
+  max-height: min(360px, 42dvh);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 12px 0;
+}
+.model-library output {
+  display: block;
+  margin-top: 7px;
+}
+.model-library-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.model-library-choice + .model-library-choice {
+  border-top: 1px solid var(--border);
+}
+.model-library-choice:hover {
+  background: var(--surface);
+}
+.model-library-choice input {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+.model-library-choice > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.model-library-choice strong,
+.model-library-choice small {
+  display: block;
+  line-height: 1.5;
+}
+.model-library-choice strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+.model-library-choice small {
+  font-size: 11px;
+  color: var(--muted);
 }
 .chat-live-choice {
   display: flex;

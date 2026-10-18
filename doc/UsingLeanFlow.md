@@ -140,6 +140,8 @@ Check **Current file** above your message. Its path is supplied automatically wh
 
 Type **@** or use **Select files** to attach extra files. **Options** controls model, reasoning effort, and live edits. Drafts and selections stay with their chats.
 
+The **Model** dropdown shows your saved models. Choose **Add models…** to browse everything available with your API key, select or remove models, then choose **Save models**. This list is saved to your account across projects, browsers, and sign-ins. Editing it keeps your current model, reasoning effort, and default. Models that your key no longer allows stay marked unavailable until you remove them. You can also edit the list in **Assistant settings → Edit saved models**.
+
 Use **Send update** for extra instructions or **Stop** to interrupt. Updates show whether they were accepted. Runs continue until finished or stopped; send another message afterward to continue.
 
 Scroll up freely; **Jump to latest** resumes following output. Reasoning appears between replies in separate Show/Hide sections. Files and chat drafts remain available during a run.

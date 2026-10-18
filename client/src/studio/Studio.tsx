@@ -2722,6 +2722,13 @@ export function Studio() {
                 }
                 readOnly={file?.readOnly}
                 session={session}
+                onModelsUpdated={(access) =>
+                  setSession((current) =>
+                    current?.user.id === session.user.id
+                      ? { ...current, ...access }
+                      : current,
+                  )
+                }
                 dirty={dirty}
                 dirtyFileCount={dirtyFiles.length}
                 beforeRun={saveWorkspace}

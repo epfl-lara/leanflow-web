@@ -30,7 +30,11 @@ const fixture = await chatBrowserFixture({
   session: {
     user: { id: 'model-options-user', name: 'Fixture' },
     templates: [],
-    models: catalogModels(catalog, DEFAULT_MODEL),
+    models: [
+      ...catalogModels(catalog, DEFAULT_MODEL),
+      { id: 'provider/extra', name: 'Extra available model' },
+    ],
+    savedModels: catalog.models.map((model) => model.slug),
     defaultModel: DEFAULT_MODEL,
     runtime: { ready: true },
     lemex: { available: true },
@@ -93,6 +97,18 @@ try {
     return respond(run, 201)
   }
   await fixture.ready()
+  await page.route('**/api/models/preferences', async (route) => {
+    const body = route.request().postDataJSON()
+    state.session.savedModels = body.savedModels
+    return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        models: state.session.models,
+        savedModels: body.savedModels,
+        defaultModel: DEFAULT_MODEL,
+      }),
+    })
+  })
   await openOptions()
   assert.equal(await model.inputValue(), DEFAULT_MODEL)
   assert.equal(await effort.inputValue(), 'max')
@@ -103,6 +119,47 @@ try {
   )
   report.checks.push(
     'DeepSeek max opens even with an old saved model/effort; edit preference is preserved',
+  )
+
+  assert.equal(
+    await page.locator('.chat-options').getByRole('searchbox').count(),
+    0,
+  )
+  assert.equal(await model.locator('option').count(), 4)
+  assert.equal(await model.locator('option[value="provider/extra"]').count(), 0)
+  await page.getByRole('button', { name: 'Add models…', exact: true }).click()
+  const library = page.getByRole('dialog', { name: 'Your models', exact: true })
+  const search = library.getByRole('searchbox', {
+    name: 'Search all available models',
+  })
+  await search.fill('Extra')
+  assert.equal(await library.getByRole('checkbox').count(), 1)
+  await library
+    .getByRole('checkbox', {
+      name: 'Extra available model provider/extra',
+      exact: true,
+    })
+    .check()
+  await library
+    .getByRole('button', { name: 'Save models', exact: true })
+    .click()
+  await library.waitFor({ state: 'hidden' })
+  assert.equal(await model.inputValue(), DEFAULT_MODEL)
+  assert.equal(await effort.inputValue(), 'max')
+  assert.equal(await model.locator('option[value="provider/extra"]').count(), 1)
+  assert.equal(await model.locator('option').count(), 5)
+  report.checks.push(
+    'Main picker only shows saved models; adding from the searchable library preserves model and effort',
+  )
+
+  await page.getByRole('button', { name: 'Add models…', exact: true }).click()
+  await library.getByRole('searchbox').fill('DeepSeek')
+  await library.getByRole('checkbox').uncheck()
+  await library.getByRole('button', { name: 'Cancel', exact: true }).click()
+  assert(state.session.savedModels.includes(DEFAULT_MODEL))
+  assert.equal(await model.inputValue(), DEFAULT_MODEL)
+  report.checks.push(
+    'Cancelling model list edits leaves saved choices unchanged',
   )
 
   for (const selectedEffort of ['max', 'low']) {
@@ -143,6 +200,26 @@ try {
   assert.equal(await effort.inputValue(), 'max')
   report.checks.push(
     'Reload returns to DeepSeek max after temporary model/effort choices',
+  )
+  assert(state.session.savedModels.includes('provider/extra'))
+  assert.equal(await model.locator('option[value="provider/extra"]').count(), 1)
+  await page.getByRole('button', { name: 'Add models…', exact: true }).click()
+  await library.getByRole('searchbox').fill('DeepSeek')
+  await library.getByRole('checkbox').uncheck()
+  await library
+    .getByRole('button', { name: 'Save models', exact: true })
+    .click()
+  await library.waitFor({ state: 'hidden' })
+  assert.equal(await model.inputValue(), DEFAULT_MODEL)
+  assert.equal(await effort.inputValue(), 'max')
+  assert.match(await model.locator('option:checked').innerText(), /current/)
+  await model.selectOption('Qwen/Qwen3.8-27B')
+  assert.equal(
+    await model.locator(`option[value="${DEFAULT_MODEL}"]`).count(),
+    0,
+  )
+  report.checks.push(
+    'Saved list survives reload; removing the current model preserves its session choice until an explicit switch',
   )
   await page.screenshot({ path: path.join(reportDir.pathname, 'default.png') })
   fixture.assertClean()

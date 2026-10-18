@@ -17,6 +17,7 @@ import { AgentManager } from './agents.mjs'
 import { Settings } from './settings.mjs'
 import { Providers } from './providers.mjs'
 import { ModelDiscovery } from './model-discovery.mjs'
+import { ModelPreferences } from './model-preferences.mjs'
 import { ChatStore } from './chats.mjs'
 import { TrashManager } from './trash.mjs'
 import { createChatTitleGenerator } from './chat-titles.mjs'
@@ -178,6 +179,7 @@ export async function createStudio({
     ...(modelDiscoverer ? { discover: modelDiscoverer } : {}),
   })
   config.modelsForUser = (owner, options) => modelDiscovery.get(owner, options)
+  const modelPreferences = new ModelPreferences(dataDir)
   const runtime =
     suppliedRuntime ||
     new Runtime({
@@ -478,6 +480,7 @@ export async function createStudio({
       capacity,
       runtime: runtime.info(),
       models: modelAccess.models,
+      savedModels: await modelPreferences.get(req.user.id, modelAccess),
       defaultModel: modelAccess.defaultModel,
       modelsUpdatedAt: modelAccess.modelsUpdatedAt || null,
       templates: runtime.templates(),
@@ -488,19 +491,30 @@ export async function createStudio({
       },
     })
   })
-  const publicModels = ({ models, defaultModel, modelsUpdatedAt }) => ({
-    models,
-    defaultModel,
-    modelsUpdatedAt,
+  const publicModels = async (owner, access) => ({
+    models: access.models,
+    defaultModel: access.defaultModel,
+    modelsUpdatedAt: access.modelsUpdatedAt,
+    savedModels: await modelPreferences.get(owner, access),
   })
   app.get('/api/models', async (req, res) =>
-    res.json(publicModels(await modelDiscovery.get(req.user.id))),
+    res.json(
+      await publicModels(req.user.id, await modelDiscovery.get(req.user.id)),
+    ),
   )
   app.post('/api/models/refresh', async (req, res) =>
     res.json(
-      publicModels(await modelDiscovery.get(req.user.id, { refresh: true })),
+      await publicModels(
+        req.user.id,
+        await modelDiscovery.get(req.user.id, { refresh: true }),
+      ),
     ),
   )
+  app.put('/api/models/preferences', async (req, res) => {
+    const access = await modelDiscovery.get(req.user.id)
+    await modelPreferences.save(req.user.id, req.body?.savedModels, access)
+    res.json(await publicModels(req.user.id, access))
+  })
   app.get('/api/provider', (req, res) =>
     res.json(providers.status(req.user.id)),
   )
@@ -1350,6 +1364,7 @@ export async function createStudio({
     settings,
     providers,
     modelDiscovery,
+    modelPreferences,
     gitConnections,
     publisher,
     close,

@@ -7,6 +7,7 @@ import {
   type Run,
   type RunReceipt,
   type Session,
+  type ModelAccess,
   type FileEntry,
   type RunProofTarget,
 } from './api'
@@ -62,6 +63,7 @@ export function AssistantPanel({
   files,
   onDeleteChat,
   session,
+  onModelsUpdated,
   beforeRun,
   beforeApply,
   onDiscard,
@@ -84,6 +86,7 @@ export function AssistantPanel({
   files: FileEntry[]
   onDeleteChat: (chat: { id: string; title: string }) => void
   session: Session
+  onModelsUpdated: (access: ModelAccess) => void
   beforeRun: () => Promise<void>
   beforeApply: () => Promise<void>
   onDiscard: () => Promise<void>
@@ -876,6 +879,8 @@ export function AssistantPanel({
       )}
       <ChatOptions
         models={session.models}
+        savedModels={session.savedModels}
+        onModelsUpdated={onModelsUpdated}
         model={model}
         onModel={setModel}
         effort={effort}

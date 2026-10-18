@@ -1,9 +1,12 @@
-import type { Session } from './api'
+import type { ModelAccess, Session } from './api'
 import { useId, useState } from 'react'
 import { HelpTip } from './HelpTip'
+import { ModelLibrary } from './ModelLibrary'
 
 export function ChatOptions({
   models,
+  savedModels,
+  onModelsUpdated,
   model,
   onModel,
   effort,
@@ -13,6 +16,8 @@ export function ChatOptions({
   active,
 }: {
   models: Session['models']
+  savedModels?: string[]
+  onModelsUpdated: (access: ModelAccess) => void
   model: string
   onModel: (value: string) => void
   effort: string
@@ -24,15 +29,9 @@ export function ChatOptions({
   const selected = models.find((item) => item.id === model)
   const levels = selected?.reasoningEfforts || []
   const modelId = useId()
-  const searchId = useId()
-  const [query, setQuery] = useState('')
-  const matching = models.filter(
-    (item) =>
-      item.id === model ||
-      `${item.id} ${item.name}`
-        .toLowerCase()
-        .includes(query.toLowerCase().trim()),
-  )
+  const [libraryOpen, setLibraryOpen] = useState(false)
+  const saved = savedModels ?? models.slice(0, 6).map((item) => item.id)
+  const choices = [...new Set([...saved, ...(model ? [model] : [])])]
   const effortId = useId()
   return (
     <details className="chat-options">
@@ -40,20 +39,6 @@ export function ChatOptions({
         Options <span>{selected?.name || 'Choose model'}</span>
       </summary>
       <div className="chat-options-fields">
-        {models.length > 10 && (
-          <div className="chat-model-search">
-            <label className="sr-only" htmlFor={searchId}>
-              Search available models
-            </label>
-            <input
-              id={searchId}
-              type="search"
-              placeholder="Search available models…"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </div>
-        )}
         <div>
           <div className="help-label">
             <label htmlFor={modelId}>Model</label>
@@ -64,19 +49,30 @@ export function ChatOptions({
             onChange={(event) => onModel(event.target.value)}
             disabled={!models.length}
           >
-            {!selected && model ? (
-              <option value={model} disabled>
-                Unavailable: {model}
+            {!model && (
+              <option value="" disabled>
+                {models.length ? 'Choose a saved model' : 'No model available'}
               </option>
-            ) : (
-              !models.length && <option value="">No model available</option>
             )}
-            {matching.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name || item.id}
-              </option>
-            ))}
+            {choices.map((id) => {
+              const item = models.find((item) => item.id === id)
+              return (
+                <option key={id} value={id} disabled={!item}>
+                  {item
+                    ? `${item.name || id}${!saved.includes(id) ? ' (current)' : ''}`
+                    : `Unavailable: ${id}`}
+                </option>
+              )
+            })}
           </select>
+          <button
+            type="button"
+            className="chat-add-models"
+            disabled={!models.length}
+            onClick={() => setLibraryOpen(true)}
+          >
+            Add models…
+          </button>
         </div>
         <div>
           <div className="help-label">
@@ -121,6 +117,14 @@ export function ChatOptions({
           )}
         </div>
       </div>
+      {libraryOpen && (
+        <ModelLibrary
+          models={models}
+          savedModels={saved}
+          onSaved={onModelsUpdated}
+          onClose={() => setLibraryOpen(false)}
+        />
+      )}
       <div className="chat-live-choice">
         <label className="help-label">
           <input

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, errorText, type ModelAccess as ModelAccessStatus } from './api'
+import { ModelLibrary } from './ModelLibrary'
 
 export function ModelAccess({
   revision,
@@ -11,6 +12,7 @@ export function ModelAccess({
   const [access, setAccess] = useState<ModelAccessStatus | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [libraryOpen, setLibraryOpen] = useState(false)
   useEffect(() => {
     let cancelled = false
     setAccess(null)
@@ -47,12 +49,13 @@ export function ModelAccess({
       <h3>Models available with your key</h3>
       {access ? (
         <p className="field-help">
-          {access.models.length} models available. Default:{' '}
+          {access.savedModels.length} saved models · {access.models.length}{' '}
+          available with your key. Default:{' '}
           {access.models.find((model) => model.id === access.defaultModel)
             ?.name ||
             access.defaultModel ||
             'No model available'}
-          . Choose a model and reasoning effort in Lemex → Options.
+          . Your saved models appear in Lemex → Options.
         </p>
       ) : (
         !error && <p className="field-help">Loading model access…</p>
@@ -61,6 +64,27 @@ export function ModelAccess({
         <p role="alert" className="error-message">
           {error}
         </p>
+      )}
+      {access && (
+        <button
+          type="button"
+          className="button secondary"
+          disabled={busy || !access.models.length}
+          onClick={() => setLibraryOpen(true)}
+        >
+          Edit saved models
+        </button>
+      )}
+      {access && libraryOpen && (
+        <ModelLibrary
+          models={access.models}
+          savedModels={access.savedModels}
+          onSaved={(value) => {
+            setAccess(value)
+            onUpdated()
+          }}
+          onClose={() => setLibraryOpen(false)}
+        />
       )}
       <button
         type="button"

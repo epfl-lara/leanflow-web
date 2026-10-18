@@ -296,6 +296,59 @@ test('API key updates validate once, stay within the authenticated account, and 
   )
 })
 
+test('model preferences endpoints stay within the signed-in account and preserve the default and key', async (t) => {
+  const f = await fixture(t)
+  const other = await f.auth.createUser({ id: 'owner' }, { name: 'Other' })
+  await f.providers.save('owner', 'owner-fixture-key')
+  await f.providers.save(other.user.id, 'other-fixture-key')
+  assert.equal(
+    (
+      await f.request('/api/models/preferences', 'invalid-token', 'PUT', {
+        savedModels: [],
+      })
+    ).status,
+    401,
+  )
+  const initial = await (await f.request('/api/models')).json()
+  assert.deepEqual(initial.savedModels, ['deepseek-test'])
+  assert.equal(
+    (
+      await f.request('/api/models/preferences', other.token, 'PUT', {
+        savedModels: [],
+        owner: 'owner',
+      })
+    ).status,
+    200,
+  )
+  assert.deepEqual(
+    (await (await f.request('/api/models', other.token)).json()).savedModels,
+    [],
+  )
+  assert.deepEqual(
+    (await (await f.request('/api/session')).json()).savedModels,
+    ['deepseek-test'],
+  )
+  assert.equal(
+    (
+      await f.request('/api/models/preferences', other.token, 'PUT', {
+        savedModels: ['unavailable-model'],
+      })
+    ).status,
+    400,
+  )
+  const refreshed = await (
+    await f.request('/api/models/refresh', other.token, 'POST', {})
+  ).json()
+  assert.deepEqual(refreshed.savedModels, [])
+  assert.equal(refreshed.defaultModel, initial.defaultModel)
+  assert.deepEqual(refreshed.models, initial.models)
+  assert.equal(
+    f.providers.provider(other.user.id).LEMEX_API_KEY,
+    'other-fixture-key',
+  )
+  assert.deepEqual(await f.modelPreferences.get(other.user.id, initial), [])
+})
+
 test('agent runs, setup repairs, and chat titles cannot fall back to a shared key', async (t) => {
   const f = await fixture(t)
   const manager = new AgentManager({

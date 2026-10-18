@@ -61,6 +61,7 @@ export interface Session {
     defaultReasoningEffort?: string | null
   }[]
   defaultModel?: string | null
+  savedModels?: string[]
   modelsUpdatedAt?: string | null
   runtime?: Record<string, unknown>
   capacity?: {
@@ -93,6 +94,7 @@ export interface Session {
 export interface ModelAccess {
   models: Session['models']
   defaultModel: string | null
+  savedModels: string[]
   modelsUpdatedAt?: string | null
 }
 
