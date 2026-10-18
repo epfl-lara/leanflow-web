@@ -56,6 +56,10 @@ Lake's own sandbox stays enabled; no `--inadvisably-no-sandbox` flag is used.
 One full check runs at a time. It reserves up to three worker slots and their
 combined RAM/CPU allowance; other jobs can use the remaining slots. Exports use
 disposable disk storage rather than the ordinary worker's small RAM filesystem.
+To keep full checks available while every editor is connected, provision at
+least `STUDIO_MAX_EDITORS + 3` worker slots and budget their memory allowance
+plus headroom for the server and operating system. Otherwise full checks queue
+until an editor or another worker releases enough slots.
 The export file is capped at 8 GiB by default, with free-space admission before
 launch, and removed after confirmed worker teardown. Adjust
 `STUDIO_KERNEL_EXPORT_MAX_BYTES` only with sufficient free space. The filesystem
