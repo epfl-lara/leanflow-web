@@ -10,12 +10,74 @@ import { AgentManager } from '../agents.mjs'
 import { repairProjectSetup } from '../setup-repair.mjs'
 import { createChatTitleGenerator } from '../chat-titles.mjs'
 import { loadConfig } from '../config.mjs'
+import { createCipheriv, createHash, randomBytes } from 'node:crypto'
+import { RCP_BASE_URL } from '../provider-endpoint.mjs'
 
 async function temp(t) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-accounts-'))
   t.after(() => fs.rm(dir, { recursive: true, force: true }))
   return dir
 }
+
+test('legacy RCP keys remain unchanged; custom endpoints and keys persist as one authenticated encrypted connection', async (t) => {
+  const dir = await temp(t),
+    session = 'fixture-session-key'
+  const store = await new Providers(dir, session, RCP_BASE_URL).init()
+  const iv = randomBytes(12),
+    cipher = createCipheriv(
+      'aes-256-gcm',
+      createHash('sha256')
+        .update('leanflow-provider-v1\0' + session)
+        .digest(),
+      iv,
+    )
+  cipher.setAAD(Buffer.from('alice'))
+  const encrypted = Buffer.concat([
+    cipher.update('legacy-rcp-fixture-key', 'utf8'),
+    cipher.final(),
+  ])
+  const legacy = JSON.stringify({
+    version: 1,
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    value: encrypted.toString('base64'),
+  })
+  await fs.writeFile(store.filename('alice'), legacy)
+  const restarted = await new Providers(dir, session, RCP_BASE_URL).init()
+  assert.equal(restarted.provider('alice').LEMEX_BASE_URL, RCP_BASE_URL)
+  assert.equal(
+    restarted.provider('alice').LEMEX_API_KEY,
+    'legacy-rcp-fixture-key',
+  )
+  assert.equal(await fs.readFile(store.filename('alice'), 'utf8'), legacy)
+  const base = restarted.selection('alice', {
+    provider: 'custom',
+    baseUrl: 'https://api.example.com/v1/',
+  })
+  await restarted.save('alice', 'custom-provider-fixture-key', base)
+  const ciphertext = await fs.readFile(store.filename('alice'), 'utf8')
+  assert(!ciphertext.includes(base))
+  assert(!ciphertext.includes('custom-provider-fixture-key'))
+  const again = await new Providers(dir, session, RCP_BASE_URL).init()
+  assert.equal(again.provider('alice').LEMEX_BASE_URL, base)
+  assert.equal(again.status('alice').provider, 'custom')
+  assert.equal(again.selection('alice', {}), base)
+  assert.equal(again.selection('alice', { provider: 'rcp' }), RCP_BASE_URL)
+  assert.equal(again.status('bob').provider, 'rcp')
+  for (const input of [
+    { provider: 'other' },
+    { provider: 'custom', baseUrl: 'http://localhost/v1' },
+  ])
+    assert.throws(() => again.selection('alice', input), { status: 400 })
+  const tampered = JSON.parse(ciphertext)
+  tampered.version = 1
+  await fs.writeFile(store.filename('alice'), JSON.stringify(tampered))
+  assert.equal(
+    (await new Providers(dir, session, RCP_BASE_URL).init()).status('alice')
+      .configured,
+    false,
+  )
+})
 
 test('account keys are encrypted, private, persistent, isolated and replaceable', async (t) => {
   const dir = await temp(t),
@@ -249,6 +311,91 @@ test('tokens identify roles; only owner appoints admins; users cannot list or cr
     f.auth.users.find((u) => u.id === admin.user.id).role = 'user'
   })
   assert.equal((await f.request('/api/admin/users', admin.token)).status, 403)
+})
+
+test('provider selection validates the new endpoint and never forwards the saved key to another provider', async (t) => {
+  const f = await fixture(t)
+  await f.providers.save('owner', 'original-rcp-key')
+  const other = await f.auth.createUser({ id: 'owner' }, { name: 'Other' })
+  await f.providers.save(other.user.id, 'other-fixture-key')
+  const sent = []
+  f.providers.validate = async (key, _fetch, base) => {
+    f.providers.parseKey(key)
+    sent.push({ key, base })
+    if (key === 'rejected-fixture-key')
+      throw Object.assign(new Error('Rejected'), { status: 400 })
+    return key
+  }
+  assert.equal(
+    (
+      await f.request('/api/provider', f.token, 'PUT', {
+        provider: 'custom',
+        baseUrl: 'https://custom.example/v1',
+      })
+    ).status,
+    400,
+  )
+  assert.equal(sent.length, 0)
+  assert.equal(
+    (
+      await f.request('/api/provider', f.token, 'PUT', {
+        provider: 'custom',
+        baseUrl: 'https://custom.example/v1',
+        apiKey: 'custom-fixture-key',
+      })
+    ).status,
+    200,
+  )
+  assert.deepEqual(sent, [
+    { key: 'custom-fixture-key', base: 'https://custom.example/v1' },
+  ])
+  assert.equal(
+    f.providers.provider(other.user.id).LEMEX_BASE_URL,
+    'https://provider.example/v1',
+  )
+  assert.equal(
+    (
+      await f.request('/api/provider', f.token, 'PUT', {
+        provider: 'custom',
+        baseUrl: 'https://different.example/v1',
+        apiKey: 'rejected-fixture-key',
+      })
+    ).status,
+    400,
+  )
+  assert.equal(
+    f.providers.provider('owner').LEMEX_BASE_URL,
+    'https://custom.example/v1',
+  )
+  assert.equal(
+    f.providers.provider('owner').LEMEX_API_KEY,
+    'custom-fixture-key',
+  )
+  assert.equal(
+    (
+      await f.request('/api/provider', f.token, 'PUT', {
+        apiKey: 'new-custom-fixture-key',
+      })
+    ).status,
+    200,
+  )
+  assert.equal(
+    f.providers.provider('owner').LEMEX_BASE_URL,
+    'https://custom.example/v1',
+  )
+  assert.equal(
+    (
+      await f.request('/api/provider', f.token, 'PUT', {
+        provider: 'rcp',
+        apiKey: 'return-default-fixture-key',
+      })
+    ).status,
+    200,
+  )
+  assert.equal(
+    f.providers.provider('owner').LEMEX_BASE_URL,
+    f.providers.baseUrl,
+  )
 })
 
 test('API key updates validate once, stay within the authenticated account, and survive a store restart', async (t) => {

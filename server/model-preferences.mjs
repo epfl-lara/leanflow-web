@@ -20,18 +20,25 @@ export class ModelPreferences {
     if (!/^[a-zA-Z0-9_-]{1,80}$/.test(owner)) throw invalid('Invalid account.')
     return path.join(this.directory, owner + '.json')
   }
-  async get(owner, { models, defaultModel }) {
+  async get(owner, { models, defaultModel, providerId = 'rcp', isRcp = true }) {
     try {
       const value = JSON.parse(await fs.readFile(this.filename(owner), 'utf8'))
-      if (!validIds(value.savedModels))
-        throw new Error('Invalid saved model list.')
-      return [...new Set(value.savedModels)]
+      const selected =
+        value.providers?.[providerId]?.savedModels ??
+        (isRcp ? value.savedModels : undefined)
+      if (selected === undefined)
+        throw Object.assign(new Error(), { code: 'ENOENT' })
+      if (!validIds(selected)) throw new Error('Invalid saved model list.')
+      return [...new Set(selected)]
     } catch (error) {
       if (error.code !== 'ENOENT') throw error
     }
     const available = new Set(models.map((model) => model.id))
     return [
-      ...new Set([defaultModel, ...profiles.models.map((model) => model.slug)]),
+      ...new Set([
+        defaultModel,
+        ...(isRcp ? profiles.models.map((model) => model.slug) : []),
+      ]),
     ]
       .filter((id) => available.has(id))
       .slice(0, 6)
@@ -53,7 +60,20 @@ export class ModelPreferences {
     const target = this.filename(owner)
     const temporary = target + '.' + randomUUID() + '.tmp'
     try {
-      await fs.writeFile(temporary, JSON.stringify({ savedModels }), {
+      const current = await fs
+        .readFile(target, 'utf8')
+        .then(JSON.parse)
+        .catch((error) => {
+          if (error.code === 'ENOENT') return {}
+          throw error
+        })
+      const providerId = access.providerId || 'rcp'
+      const value = {
+        ...current,
+        providers: { ...current.providers, [providerId]: { savedModels } },
+      }
+      if (access.isRcp !== false) value.savedModels = savedModels
+      await fs.writeFile(temporary, JSON.stringify(value), {
         mode: 0o600,
         flag: 'wx',
       })

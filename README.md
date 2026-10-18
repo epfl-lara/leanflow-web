@@ -16,7 +16,7 @@ Developed by [EPFL LARA](https://epfl-lara.github.io/).
 
 ## Get started
 
-LeanFlow Web is self-hosted for you and trusted collaborators. You'll need Linux, Node.js 24+, Python 3.11+, Git, Docker, and a native Lemex installation.
+LeanFlow Web is self-hosted for you and trusted collaborators. You'll need Linux, Node.js 24+, Python 3.11+, Git, and Docker. Worker setup downloads the precompiled Lemex npm release; no Rust build is needed.
 
 ```bash
 git clone https://github.com/epfl-lara/leanflow-web.git

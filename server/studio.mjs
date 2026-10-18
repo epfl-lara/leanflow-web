@@ -446,8 +446,9 @@ export async function createStudio({
           'This token belongs to a different account. Use the access token for the workspace you have open.',
       })
     if (req.body.apiKey !== undefined) {
-      const key = await providers.validate(req.body.apiKey)
-      await providers.save(user.id, key)
+      const base = providers.selection(user.id, req.body)
+      const key = await providers.validate(req.body.apiKey, undefined, base)
+      await providers.save(user.id, key, base)
     }
     res.setHeader(
       'Set-Cookie',
@@ -496,6 +497,8 @@ export async function createStudio({
     defaultModel: access.defaultModel,
     modelsUpdatedAt: access.modelsUpdatedAt,
     savedModels: await modelPreferences.get(owner, access),
+    providerId: access.providerId,
+    isRcp: access.isRcp,
   })
   app.get('/api/models', async (req, res) =>
     res.json(
@@ -519,8 +522,9 @@ export async function createStudio({
     res.json(providers.status(req.user.id)),
   )
   app.put('/api/provider', async (req, res) => {
-    const key = await providers.validate(req.body?.apiKey)
-    res.json(await providers.save(req.user.id, key))
+    const base = providers.selection(req.user.id, req.body)
+    const key = await providers.validate(req.body?.apiKey, undefined, base)
+    res.json(await providers.save(req.user.id, key, base))
   })
   app.get('/api/admin/users', async (req, res) => {
     auth.requireAdmin(req.user)

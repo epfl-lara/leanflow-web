@@ -20,6 +20,21 @@ const access = {
   defaultModel: DEFAULT_MODEL,
 }
 
+test('provider switches retain the RCP shortlist and keep other provider lists separate', async (t) => {
+  const { store } = await fixture(t)
+  await store.save('alice', ['Qwen/Qwen3.8-27B'], access)
+  const custom = { ...access, providerId: 'other-provider', isRcp: false }
+  assert.deepEqual(await store.get('alice', custom), [DEFAULT_MODEL])
+  await store.save('alice', ['provider/extra'], custom)
+  assert.deepEqual(await store.get('alice', access), ['Qwen/Qwen3.8-27B'])
+  assert.deepEqual(await store.get('alice', custom), ['provider/extra'])
+  assert.deepEqual(await store.get('bob', custom), [DEFAULT_MODEL])
+  const restarted = new ModelPreferences(
+    store.directory.replace(/model-preferences$/, ''),
+  )
+  assert.deepEqual(await restarted.get('alice', access), ['Qwen/Qwen3.8-27B'])
+})
+
 test('initial picker is small, key-aware, and includes the current Lemex default', async (t) => {
   const { store } = await fixture(t)
   assert.deepEqual(await store.get('alice', access), [

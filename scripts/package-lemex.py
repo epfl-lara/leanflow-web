@@ -1,225 +1,229 @@
 #!/usr/bin/env python3
-"""Copy a verified native Lemex installation without host credentials or state."""
+"""Package the pinned npm native runtime without personal config or credentials."""
+
 import argparse
+import base64
 import hashlib
 import json
-import mmap
-import subprocess
+import os
 from pathlib import Path
+import platform
 import shutil
-import tomllib
+import subprocess
+import tarfile
+import tempfile
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--source", default=str(Path.home() / ".local/lib/lemex"))
-parser.add_argument("--config", default=str(Path.home() / ".lemex/config.toml"))
-parser.add_argument("--destination", default=".runtime/lemex")
-parser.add_argument(
-    "--expected-commit", default="787a20eec6b6c50747e9040dc82f272ef16b80a6"
-)
-parser.add_argument(
-    "--source-checkout",
-    default=str(Path.home() / "lemex-fork"),
-    help="Clean checkout used to verify an existing native build when installer metadata is absent",
-)
-parser.add_argument(
-    "--build-artifacts",
-    default=str(Path.home() / ".cache/lemex-native-build/dev-small"),
-    help="Existing Cargo profile artifact directory; never rebuilt or modified",
-)
-args = parser.parse_args()
-source = Path(args.source).resolve()
-target = Path(args.destination).resolve()
+ROOT = Path(__file__).resolve().parent.parent
+RELEASE = json.loads((ROOT / "deploy/lemex-runtime.json").read_text())
+TARGETS = {"x64": "x86_64-unknown-linux-musl", "arm64": "aarch64-unknown-linux-musl"}
+ASSETS = [
+    "bin/lemex",
+    "bin/lemex-code-mode-host",
+    "codex-path/rg",
+    "codex-resources/bwrap",
+    "codex-package.json",
+]
 
 
-def sha256_file(filename):
-    digest = hashlib.sha256()
-    with filename.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def sha256(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-metadata = source / "lemex-install.json"
-if metadata.is_file():
-    provenance = json.loads(metadata.read_text())
-else:
-    # Some upstream source installers omit installation metadata. Recover only
-    # from explicit source/artifact evidence; never restamp an older binary.
-    checkout = Path(args.source_checkout).resolve()
-    artifacts = Path(args.build_artifacts).resolve()
-
-    def git(*arguments):
-        return subprocess.check_output(
-            ["git", "-C", str(checkout), *arguments], text=True
-        ).strip()
-
-    if git("rev-parse", "HEAD") != args.expected_commit or git("status", "--porcelain"):
-        raise SystemExit(
-            "A clean source checkout at the exact requested commit is required"
+def extract_runtime(tarball, destination, architecture, integrity):
+    with tarball.open("rb") as stream:
+        actual = (
+            "sha512-"
+            + base64.b64encode(hashlib.file_digest(stream, "sha512").digest()).decode()
         )
-    hashes = {}
-    for binary in ["lemex", "lemex-code-mode-host"]:
-        installed = source / "bin" / binary
-        built = artifacts / binary
-        if not installed.is_file() or not built.is_file():
-            raise SystemExit(
-                "Missing native Cargo artifact; supply --source-checkout and --build-artifacts"
+    if actual != integrity:
+        raise ValueError("npm tarball integrity does not match the pinned release")
+    target = TARGETS[architecture]
+    with tarfile.open(tarball, "r:gz") as archive:
+        package = json.load(archive.extractfile("package/package.json"))
+        if (
+            package.get("name") != RELEASE["package"]
+            or package.get("version") != f'{RELEASE["version"]}-linux-{architecture}'
+        ):
+            raise ValueError("Unexpected npm package identity")
+        for name in ASSETS:
+            member = archive.getmember(f"package/vendor/{target}/{name}")
+            if not member.isfile() or member.size > 512 * 1024 * 1024:
+                raise ValueError("Runtime assets must be bounded regular files")
+            output = destination / name
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with archive.extractfile(member) as source, output.open("wb") as stream:
+                shutil.copyfileobj(source, stream)
+        for name in ["LICENSE", "NOTICE"]:
+            member = archive.getmember("package/" + name)
+            if not member.isfile() or member.size > 1024 * 1024:
+                raise ValueError("Missing npm license or notices")
+            with archive.extractfile(member) as source, (destination / name).open(
+                "wb"
+            ) as output:
+                shutil.copyfileobj(source, output)
+
+
+def validate_runtime(directory, architecture):
+    metadata = json.loads((directory / "codex-package.json").read_text())
+    if (
+        metadata.get("target") != TARGETS[architecture]
+        or metadata.get("version") != RELEASE["version"]
+    ):
+        raise ValueError(
+            "Native runtime target/version does not match the pinned npm release"
+        )
+    machine = {"x64": 62, "arm64": 183}[architecture]
+    for name in ASSETS[:-1]:
+        with (directory / name).open("rb") as stream:
+            header = stream.read(20)
+        if (
+            len(header) < 20
+            or header[:6] != b"\x7fELF\x02\x01"
+            or int.from_bytes(header[18:20], "little") != machine
+        ):
+            raise ValueError(
+                f"Expected a native Linux {architecture} executable: {name}"
             )
-        hashes[binary] = sha256_file(installed)
-        if hashes[binary] != sha256_file(built):
-            raise SystemExit(
-                f"Installed {binary} does not match the supplied Cargo build artifact"
-            )
-    with (source / "bin/lemex").open("rb") as stream:
-        with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as binary:
-            if binary.find(args.expected_commit.encode("ascii")) == -1:
-                raise SystemExit(
-                    "Native CLI does not contain the expected compiled Git commit stamp"
-                )
-    if artifacts.name not in ["release", "dev-small"]:
-        raise SystemExit("Expected a release or dev-small Cargo profile directory")
-    provenance = {
-        "source_commit": args.expected_commit,
-        "native_build_commit": args.expected_commit,
-        "build_profile": artifacts.name,
-        "source_tree": git("rev-parse", args.expected_commit + "^{tree}"),
-        "rust_tree": git("rev-parse", args.expected_commit + ":codex-rs"),
-        "provenance_verification": "embedded_cli_commit_and_matching_existing_cargo_artifacts",
-        "native_artifact_sha256": hashes,
-    }
-if (
-    provenance.get("source_commit") != args.expected_commit
-    or provenance.get("native_build_commit") != args.expected_commit
-):
-    raise SystemExit(
-        "Native installation provenance does not match the requested source commit"
+
+
+def defaults(directory):
+    (directory / "config.toml").write_text(
+        """# LeanFlow defaults. Account credentials are supplied per process.
+model_provider = "rcp"
+model = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+model_reasoning_effort = "max"
+model_context_window = 240000
+model_auto_compact_token_limit = 220000
+model_catalog_json = "models.json"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+web_search = "disabled"
+
+[model_providers.rcp]
+name = "RCP"
+base_url = "https://inference.rcp.epfl.ch/v1"
+env_key = "LEMEX_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+supports_standalone_web_search = false
+"""
     )
-with (source / "bin/lemex").open("rb") as stream:
-    native_magic = stream.read(4)
-if native_magic != b"\x7fELF":
-    raise SystemExit("Expected the native ELF runtime, not an npm launcher")
-expected_native_hashes = provenance.get("native_artifact_sha256") or {
-    name: sha256_file(source / "bin" / name)
-    for name in ["lemex", "lemex-code-mode-host"]
-}
-target.mkdir(parents=True, exist_ok=True)
-for name in ["bin", "codex-path", "codex-resources"]:
-    shutil.copytree(source / name, target / name, dirs_exist_ok=True)
-if (source / "codex-package.json").is_file():
-    shutil.copy2(source / "codex-package.json", target / "codex-package.json")
-# Source installers may use umask 077. Docker COPY assigns root ownership, so
-# normalize only this owned bundle's executable assets for the worker UID.
-for directory in [target, *[entry for entry in target.rglob("*") if entry.is_dir()]]:
-    directory.chmod(0o755)
-for directory in ["bin", "codex-path", "codex-resources"]:
-    for entry in (target / directory).rglob("*"):
-        if entry.is_file():
-            entry.chmod(0o755)
-for name, expected_hash in expected_native_hashes.items():
-    if sha256_file(target / "bin" / name) != expected_hash:
-        raise SystemExit(
-            "Native installation changed while packaging; retry once its update has completed"
-        )
-config_file = Path(args.config)
-config = tomllib.loads(config_file.read_text()) if config_file.exists() else {}
-# Explicit allowlist; never copy arbitrary provider fields, headers, auth, MCP env,
-# host paths, trusted projects, installed hooks, or existing sessions.
-allowed_top = [
-    "model_provider",
-    "model",
-    "model_reasoning_effort",
-    "model_context_window",
-    "model_auto_compact_token_limit",
-]
-lines = ["# Sanitized native Lemex runtime defaults. Secrets are passed per process."]
-for name in allowed_top:
-    if name in config:
-        lines.append(f"{name} = {json.dumps(config[name])}")
-lines += [
-    'model_catalog_json = "models.json"',
-    'sandbox_mode = "danger-full-access"',
-    'approval_policy = "never"',
-    'web_search = "disabled"',
-    "",
-]
-for name, provider in config.get("model_providers", {}).items():
-    if not name.replace("_", "").replace("-", "").isalnum():
-        continue
-    lines.append(f"[model_providers.{name}]")
-    for key in [
-        "name",
-        "base_url",
-        "wire_api",
-        "requires_openai_auth",
-        "supports_websockets",
-        "supports_standalone_web_search",
-    ]:
-        if key in provider:
-            value = provider[key]
-            lines.append(
-                f"{key} = {str(value).lower() if isinstance(value, bool) else json.dumps(value)}"
+    shutil.copyfile(ROOT / "server/lemex-models.json", directory / "models.json")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--destination", default=".runtime/lemex")
+    parser.add_argument(
+        "--target-arch",
+        choices=TARGETS,
+        default={"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(
+            platform.machine()
+        ),
+    )
+    parser.add_argument(
+        "--source",
+        type=Path,
+        help="Optional already installed native vendor directory at the pinned npm version",
+    )
+    args = parser.parse_args()
+    if args.target_arch not in TARGETS:
+        parser.error("Use --target-arch x64 or arm64 for the Linux Docker host")
+    target = Path(args.destination).absolute()
+    if target.is_symlink() or target == ROOT or ROOT.is_relative_to(target):
+        raise ValueError("Use a dedicated runtime destination")
+    target = target.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="lemex-npm-", dir=target.parent
+    ) as temporary:
+        staging = Path(temporary)
+        bundle = staging / "runtime"
+        bundle.mkdir()
+        integrity = RELEASE["integrity"][args.target_arch]
+        if args.source:
+            for name in ASSETS:
+                source = args.source / name
+                if source.is_symlink() or not source.is_file():
+                    raise ValueError(f"Missing regular native asset: {name}")
+                output = bundle / name
+                output.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, output)
+            origin = "installed_native_runtime"
+        else:
+            package = (
+                f'{RELEASE["package"]}@{RELEASE["version"]}-linux-{args.target_arch}'
             )
-    lines.append("")
-lines += [
-    "[mcp_servers.lean]",
-    'command = "/opt/tools/bin/lean-lsp-mcp"',
-    'args = ["--lean-project-path", "/workspace"]',
-    "",
-    "[mcp_servers.leanexplore]",
-    'command = "/opt/tools/bin/lean-explore"',
-    'args = ["mcp", "serve"]',
-    "",
-]
-(target / "config.toml").write_text("\n".join(lines))
-models = config_file.parent / config.get("model_catalog_json", "models.json")
-if models.is_file():
-    # Model catalogs contain metadata only; reject obvious accidental auth data.
-    content = models.read_text()
-    parsed = json.loads(content)
+            environment = {
+                "PATH": os.environ["PATH"],
+                "HOME": str(staging),
+                "npm_config_cache": str(staging / "npm-cache"),
+            }
+            packed = json.loads(
+                subprocess.check_output(
+                    [
+                        "npm",
+                        "pack",
+                        "--json",
+                        "--ignore-scripts",
+                        "--registry=https://registry.npmjs.org/",
+                        package,
+                    ],
+                    cwd=staging,
+                    env=environment,
+                    text=True,
+                )
+            )
+            if len(packed) != 1 or packed[0].get("integrity") != integrity:
+                raise ValueError("npm returned an unexpected release integrity")
+            filename = Path(packed[0]["filename"])
+            if filename.name != str(filename):
+                raise ValueError("Invalid npm archive filename")
+            extract_runtime(staging / filename, bundle, args.target_arch, integrity)
+            origin = "npm_registry_integrity"
+        validate_runtime(bundle, args.target_arch)
+        defaults(bundle)
+        manifest = {
+            "version": RELEASE["version"],
+            "npm_package": RELEASE["package"],
+            "npm_version": f'{RELEASE["version"]}-linux-{args.target_arch}',
+            "npm_integrity": integrity if not args.source else None,
+            "native_target": TARGETS[args.target_arch],
+            "provenance_verification": origin,
+            "native_artifact_sha256": {
+                name: sha256(bundle / "bin" / name)
+                for name in ["lemex", "lemex-code-mode-host"]
+            },
+        }
+        (bundle / "lemex-install.json").write_text(
+            json.dumps(manifest, indent=2) + "\n"
+        )
+        manifest["files"] = {
+            str(path.relative_to(bundle)): sha256(path)
+            for path in sorted(bundle.rglob("*"))
+            if path.is_file()
+        }
+        (bundle / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        for directory in [bundle, *[p for p in bundle.rglob("*") if p.is_dir()]]:
+            directory.chmod(0o755)
+        for asset in ASSETS[:-1]:
+            (bundle / asset).chmod(0o755)
+        for path in bundle.rglob("*"):
+            if path.is_file() and str(path.relative_to(bundle)) not in ASSETS[:-1]:
+                path.chmod(0o644)
+        if target.exists():
+            if not (target / "manifest.json").is_file():
+                raise ValueError(
+                    "Refusing to replace a directory without a generated runtime manifest"
+                )
+            shutil.rmtree(target)
+        bundle.rename(target)
+    print(
+        f'Packaged {RELEASE["package"]} {RELEASE["version"]} for Linux {args.target_arch} into {target}'
+    )
 
-    def inspect(obj):
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                if key.lower() in [
-                    "api_key",
-                    "access_token",
-                    "authorization",
-                    "password",
-                    "secret",
-                ]:
-                    raise SystemExit("Refusing catalog with credential fields")
-                inspect(value)
-        elif isinstance(obj, list):
-            for value in obj:
-                inspect(value)
 
-    inspect(parsed)
-    (target / "models.json").write_text(content)
-else:
-    raise SystemExit("A curated model catalog is required for this runtime")
-manifest = {
-    key: provenance[key]
-    for key in [
-        "source_commit",
-        "native_build_commit",
-        "build_profile",
-        "source_tree",
-        "rust_tree",
-        "provenance_verification",
-        "native_artifact_sha256",
-    ]
-    if key in provenance
-}
-(target / "lemex-install.json").write_text(json.dumps(manifest, indent=2) + "\n")
-manifest["files"] = {}
-for path in sorted(target.rglob("*")):
-    if path.is_file() and path.name != "manifest.json":
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        manifest["files"][str(path.relative_to(target))] = digest.hexdigest()
-(target / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-print(
-    f"Packaged Lemex {args.expected_commit} into {target}; no host auth or session state copied"
-)
+if __name__ == "__main__":
+    main()

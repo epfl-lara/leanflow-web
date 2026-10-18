@@ -110,6 +110,79 @@ test('discovery coalesces same-account requests and fails closed after a refresh
   await assert.rejects(raced, { status: 409 })
 })
 
+test('changing endpoints invalidates the catalog even with the same key and cannot complete a stale discovery', async (t) => {
+  let calls = 0,
+    finish
+  const f = await fixture(t, async ({ provider }) => {
+    calls++
+    if (provider.LEMEX_BASE_URL === 'https://slow.example/v1')
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    return { models: [profile(provider.LEMEX_BASE_URL)] }
+  })
+  await f.providers.save('alice', 'same-fixture-key')
+  const first = await f.discovery.get('alice')
+  await f.providers.save(
+    'alice',
+    'same-fixture-key',
+    'https://other.example/v1',
+  )
+  const second = await f.discovery.get('alice')
+  assert.notEqual(first.providerId, second.providerId)
+  assert.equal(second.defaultModel, 'https://other.example/v1')
+  assert.equal(calls, 2)
+  await f.providers.save('alice', 'same-fixture-key', 'https://slow.example/v1')
+  const pending = f.discovery.get('alice')
+  while (!finish) await new Promise((resolve) => setImmediate(resolve))
+  await f.providers.save(
+    'alice',
+    'same-fixture-key',
+    'https://other.example/v1',
+  )
+  finish({ models: [profile('stale-provider-only')] })
+  await assert.rejects(pending, { status: 409 })
+})
+
+test('chat naming sends the selected account endpoint its own key and model', async (t) => {
+  const f = await fixture(t, async () => ({
+    models: [profile('custom/model', null)],
+  }))
+  await f.providers.save(
+    'alice',
+    'custom-fixture-key',
+    'https://custom.example/v1',
+  )
+  let sent
+  const generator = createChatTitleGenerator(f.config, {
+    fetchImpl: async (url, options) => {
+      sent = {
+        url: String(url),
+        key: options.headers.authorization,
+        body: JSON.parse(options.body),
+      }
+      return Response.json({
+        status: 'completed',
+        output: [
+          {
+            type: 'message',
+            role: 'assistant',
+            status: 'completed',
+            content: [{ type: 'output_text', text: 'Custom Provider Title' }],
+          },
+        ],
+      })
+    },
+  })
+  await generator.generate([{ role: 'user', content: 'Fixture task' }], {
+    owner: 'alice',
+  })
+  assert.equal(sent.url, 'https://custom.example/v1/responses')
+  assert.equal(sent.key, 'Bearer custom-fixture-key')
+  assert.equal(sent.body.model, 'custom/model')
+  assert.equal(sent.body.reasoning, undefined)
+})
+
 test('admission validates account models and efforts; global defaults and a different account cannot grant access', async (t) => {
   const f = await fixture(t, async () => ({
     models: [profile('limited-model', 'high')],
@@ -175,6 +248,52 @@ test('chat titles use an account model even when its key has no DeepSeek access'
   assert.deepEqual(sent.body.reasoning, { effort: 'medium' })
 })
 
+test('a queued run cannot send its context to a newly selected provider with the same model ID', async (t) => {
+  const f = await fixture(t, async () => ({
+    models: [profile('shared/model', null)],
+  }))
+  await f.providers.save('alice', 'fixture-queued-key')
+  const events = new EventStore(f.dataDir)
+  let workers = 0
+  const manager = new AgentManager({
+    events,
+    config: f.config,
+    maxConcurrent: 0,
+    runtime: {
+      spawn() {
+        workers++
+        throw new Error('Unexpected inference worker')
+      },
+    },
+    workspaces: { get: (id) => ({ id, status: 'ready' }) },
+  })
+  t.after(async () => {
+    await manager.shutdown()
+    events.close()
+  })
+  const queued = await manager.start('alice', 'old-project', {
+    mode: 'proofs',
+    prompt: 'Private fixture context',
+  })
+  await f.providers.save(
+    'alice',
+    'fixture-new-provider-key',
+    'https://changed.example/v1',
+  )
+  manager.maxConcurrent = 1
+  await manager.start('alice', 'another-project', {
+    mode: 'proofs',
+    prompt: 'Fixture drain trigger',
+  })
+  const end = Date.now() + 3000
+  while (events.get(queued.id, 'alice').status !== 'failed' && Date.now() < end)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  const failed = events.get(queued.id, 'alice')
+  assert.equal(failed.status, 'failed')
+  assert.match(failed.error, /provider changed while this run was queued/)
+  assert.equal(workers, 0)
+})
+
 test('native discovery uses a private empty home and requires a fresh authenticated cache', async (t) => {
   const f = await fixture(t)
   const lemexHome = path.join(f.dataDir, 'native')
@@ -200,6 +319,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         LEMEX_BASE_URL: 'https://provider.example/v1',
       },
       directory: f.discovery.directory,
+      fetchImpl: async () =>
+        Response.json({ data: [{ id: 'native/available' }] }),
     })
   assert.equal(
     (await invoke('live-fixture-key')).models[0].slug,

@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DEFAULT_MODEL, rcpModelCatalog } from './model-catalog.mjs'
+import { RCP_BASE_URL } from './provider-endpoint.mjs'
 
 export function catalogModels(catalog, defaultModel) {
   const list = Array.isArray(catalog) ? catalog : catalog.models || []
@@ -92,7 +93,7 @@ export async function loadConfig(
   }
   const provider = {
     LEMEX_API_KEY: undefined,
-    LEMEX_BASE_URL: env.LEMEX_BASE_URL || stored.LEMEX_BASE_URL,
+    LEMEX_BASE_URL: env.LEMEX_BASE_URL || stored.LEMEX_BASE_URL || RCP_BASE_URL,
   }
   const redact = (text) => {
     let result = String(text)
@@ -148,6 +149,7 @@ export async function loadConfig(
     lemex: {
       revision:
         provenance.source_commit || provenance.native_build_commit || null,
+      version: provenance.version || null,
       configured: !!provider.LEMEX_API_KEY,
     },
   }

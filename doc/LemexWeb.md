@@ -14,7 +14,13 @@ CYPRESS_INSTALL_BINARY=0 npm ci
 
 ### 2. Prepare the worker
 
-Follow [Prepare Lemex](NativeLemex.md) to build the native runtime and Docker worker. Do this once; the initial build can take a while.
+Build the worker. This downloads the pinned precompiled `@lemmy00/lemex` npm release, verifies its integrity, and includes the Lean tools. You do not need to compile Lemex or configure a host API key:
+
+```bash
+npm run worker:build
+```
+
+See [Prepare Lemex](NativeLemex.md) for release details and updates. The first Docker build also installs the Lean tools and can take a while.
 
 Then prepare a basic Lean project and build the app:
 
@@ -32,7 +38,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Open `.env` and set `LEMEX_BASE_URL` to your provider’s HTTPS API endpoint. Each account adds its own API key at first sign-in and can update it in Assistant settings. The web app no longer uses a shared server API key.
+RCP is ready as the default provider; leave `LEMEX_BASE_URL` unset. Each account adds its own API key at first sign-in and can update it in Assistant settings. Users who want another Responses-compatible provider can select **Another provider** and enter its public HTTPS API base URL and key there. The web app does not use a shared server API key.
 
 ```bash
 node --env-file=.env server/studio.mjs

@@ -1,5 +1,6 @@
 import { writeModelCatalog } from './model-catalog.mjs'
 import { providerFor } from './providers.mjs'
+import { providerToml } from './provider-endpoint.mjs'
 import { modelConfigFor } from './model-discovery.mjs'
 import { modelContextConfig } from './model-catalog.mjs'
 import * as fs from 'node:fs/promises'
@@ -58,6 +59,13 @@ export async function repairProjectSetup({
     )
   signal?.throwIfAborted()
   config = await modelConfigFor(config, owner)
+  if (
+    config.providerBaseUrl &&
+    config.providerBaseUrl !== provider.LEMEX_BASE_URL
+  )
+    throw new Error(
+      'Your provider changed while loading models. Retry project setup.',
+    )
   const model = config.models?.find((model) => model.id === config.defaultModel)
   if (!model)
     throw new Error(
@@ -73,7 +81,7 @@ export async function repairProjectSetup({
   await fs.writeFile(
     path.join(home, '.lemex/config.toml'),
     [
-      'model_provider = "rcp"',
+      ...providerToml(provider),
       `model = ${JSON.stringify(config.defaultModel)}`,
       'model_catalog_json = "models.json"',
       'web_search = "disabled"',

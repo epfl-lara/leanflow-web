@@ -1,6 +1,12 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import {
+  RCP_BASE_URL,
+  providerEndpoint,
+  isRcpEndpoint,
+  fetchProvider,
+} from './provider-endpoint.mjs'
+import {
   createCipheriv,
   createDecipheriv,
   createHash,
@@ -11,14 +17,15 @@ import {
 const fail = (message, status = 400) =>
   Object.assign(new Error(message), { status })
 
-// Only the server operator chooses the endpoint. Accounts supply their own key.
+// Version 1 records contain an RCP key. Version 2 encrypts the key and endpoint
+// together so changing connection metadata cannot redirect somebody else's key.
 export class Providers {
   constructor(dataDir, sessionKey, baseUrl, redact = String) {
     this.dir = path.join(dataDir, 'providers')
     this.key = createHash('sha256')
       .update('leanflow-provider-v1\0' + sessionKey)
       .digest()
-    this.baseUrl = baseUrl
+    this.baseUrl = baseUrl || RCP_BASE_URL
     this.legacyRedact = redact
     this.secrets = new Set()
     this.records = new Map()
@@ -36,7 +43,9 @@ export class Providers {
         const record = JSON.parse(
           await fs.readFile(this.filename(owner), 'utf8'),
         )
-        this.secrets.add(this.decrypt(owner, record))
+        const connection = this.unlock(owner, record)
+        providerEndpoint(connection.baseUrl)
+        this.secrets.add(connection.apiKey)
         this.records.set(owner, record)
       } catch {
         // A rotated session key or one damaged record must not lock everybody
@@ -48,18 +57,44 @@ export class Providers {
     }
     return this
   }
-  decrypt(owner, record) {
+  unlock(owner, record) {
+    if (![1, 2].includes(record.version))
+      throw new Error('Unknown saved provider format')
     const decipher = createDecipheriv(
       'aes-256-gcm',
       this.key,
       Buffer.from(record.iv, 'base64'),
     )
-    decipher.setAAD(Buffer.from(owner))
+    decipher.setAAD(Buffer.from(record.version === 2 ? owner + '\0v2' : owner))
     decipher.setAuthTag(Buffer.from(record.tag, 'base64'))
-    return Buffer.concat([
+    const plaintext = Buffer.concat([
       decipher.update(Buffer.from(record.value, 'base64')),
       decipher.final(),
     ]).toString('utf8')
+    if (record.version !== 2)
+      return { apiKey: plaintext, baseUrl: this.baseUrl }
+    const connection = JSON.parse(plaintext)
+    this.parseKey(connection.apiKey)
+    providerEndpoint(connection.baseUrl)
+    return connection
+  }
+  decrypt(owner, record) {
+    return this.unlock(owner, record).apiKey
+  }
+  baseFor(owner, record = this.records.get(owner)) {
+    return providerEndpoint(
+      record ? this.unlock(owner, record).baseUrl : this.baseUrl,
+    )
+  }
+  selection(owner, input = {}) {
+    if (!input || typeof input !== 'object' || Array.isArray(input))
+      throw fail('Choose a provider.')
+    if (input.provider === undefined && input.baseUrl === undefined)
+      return this.baseFor(owner)
+    if (input.provider === 'rcp') return providerEndpoint(this.baseUrl)
+    if (input.provider !== 'custom')
+      throw fail('Choose RCP or another provider.')
+    return providerEndpoint(input.baseUrl)
   }
   redact = (text) => {
     let value = this.legacyRedact(String(text))
@@ -69,7 +104,14 @@ export class Providers {
   }
   status(owner) {
     const record = this.records.get(owner)
-    return { configured: !!record, updatedAt: record?.updatedAt || null }
+    const baseUrl = this.baseFor(owner)
+    return {
+      configured: !!record,
+      updatedAt: record?.updatedAt || null,
+      provider: isRcpEndpoint(baseUrl) ? 'rcp' : 'custom',
+      baseUrl,
+      defaultBaseUrl: providerEndpoint(this.baseUrl),
+    }
   }
   provider(owner) {
     const record = this.records.get(owner)
@@ -79,17 +121,17 @@ export class Providers {
         428,
       )
     return {
-      LEMEX_BASE_URL: this.baseUrl,
+      LEMEX_BASE_URL: this.baseFor(owner, record),
       LEMEX_API_KEY: this.decrypt(owner, record),
     }
   }
-  async validate(input, fetchImpl = globalThis.fetch) {
+  async validate(input, fetchImpl = fetchProvider, baseUrl = this.baseUrl) {
     const key = this.parseKey(input)
     // Register before any transport operation, including failed validation.
     this.secrets.add(key)
     let url
     try {
-      url = new URL(this.baseUrl)
+      url = new URL(providerEndpoint(baseUrl))
       if (
         url.protocol !== 'https:' ||
         url.username ||
@@ -132,16 +174,23 @@ export class Providers {
       )
     return input.trim()
   }
-  async save(owner, input) {
+  async save(owner, input, selection) {
     const target = this.filename(owner),
       key = this.parseKey(input)
+    const baseUrl =
+      selection === undefined
+        ? this.baseFor(owner)
+        : providerEndpoint(selection)
     this.secrets.add(key)
     const iv = randomBytes(12),
       cipher = createCipheriv('aes-256-gcm', this.key, iv)
-    cipher.setAAD(Buffer.from(owner))
-    const value = Buffer.concat([cipher.update(key, 'utf8'), cipher.final()])
+    cipher.setAAD(Buffer.from(owner + '\0v2'))
+    const value = Buffer.concat([
+      cipher.update(JSON.stringify({ apiKey: key, baseUrl }), 'utf8'),
+      cipher.final(),
+    ])
     const record = {
-      version: 1,
+      version: 2,
       iv: iv.toString('base64'),
       tag: cipher.getAuthTag().toString('base64'),
       value: value.toString('base64'),

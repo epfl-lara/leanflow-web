@@ -86,7 +86,7 @@ test('startup uses the worker catalog and DeepSeek max rather than installed mod
   assert.equal(config.modelCatalog.models[0].default_reasoning_level, 'max')
   assert.deepEqual(config.provider, {
     LEMEX_API_KEY: undefined,
-    LEMEX_BASE_URL: undefined,
+    LEMEX_BASE_URL: 'https://inference.rcp.epfl.ch/v1',
   })
 })
 

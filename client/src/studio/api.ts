@@ -48,6 +48,9 @@ export interface Account {
 export interface ProviderStatus {
   configured: boolean
   updatedAt?: string | null
+  provider?: 'rcp' | 'custom'
+  baseUrl?: string
+  defaultBaseUrl?: string
 }
 
 export interface Session {
@@ -92,6 +95,8 @@ export interface Session {
 }
 
 export interface ModelAccess {
+  providerId?: string
+  isRcp?: boolean
   models: Session['models']
   defaultModel: string | null
   savedModels: string[]

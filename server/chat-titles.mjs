@@ -1,5 +1,6 @@
 import { providerFor } from './providers.mjs'
 import { modelConfigFor } from './model-discovery.mjs'
+import { fetchProvider } from './provider-endpoint.mjs'
 
 const MAX_INPUT_CHARS = 8_000
 const MAX_MESSAGES = 8
@@ -161,7 +162,7 @@ function responseTitle(response) {
 // receives project files, runs tools, or changes the proof agent's time limits.
 export function createChatTitleGenerator(
   config,
-  { fetchImpl = globalThis.fetch, timeoutMs = 30_000 } = {},
+  { fetchImpl = fetchProvider, timeoutMs = 30_000 } = {},
 ) {
   const selected = chooseModel(config)
   const model = selected?.id || null
@@ -180,11 +181,24 @@ export function createChatTitleGenerator(
     model,
     async generate(messages, { signal, owner } = {}) {
       if (config.modelsForUser) {
-        await providerFor(config, owner)
+        const provider = await providerFor(config, owner)
         const accountConfig = await modelConfigFor(config, owner)
         // Bind this request to the account snapshot; never mutate the shared
         // generator or reuse one user's default for another account.
-        const scoped = { ...accountConfig, modelsForUser: undefined }
+        if (
+          accountConfig.providerBaseUrl &&
+          accountConfig.providerBaseUrl !== provider.LEMEX_BASE_URL
+        )
+          throw failure(
+            'Your provider changed while loading models. Try naming the chat again.',
+            409,
+          )
+        const scoped = {
+          ...accountConfig,
+          provider,
+          providerForUser: undefined,
+          modelsForUser: undefined,
+        }
         return createChatTitleGenerator(scoped, {
           fetchImpl,
           timeoutMs,

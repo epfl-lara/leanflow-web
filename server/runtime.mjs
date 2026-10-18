@@ -229,6 +229,7 @@ export class Runtime {
     ]
     this.lemexCommit = null
     this.lemexNativeBuildCommit = null
+    this.lemexVersion = null
     await fsp.mkdir(this.runtimeDir, { recursive: true, mode: 0o700 })
     this.instance = createHash('sha256')
       .update(`${await fsp.realpath(this.dataDir)}\0${this.scope}`)
@@ -282,6 +283,7 @@ export class Runtime {
       this.lemexCommit =
         provenance.source_commit || provenance.native_build_commit || null
       this.lemexNativeBuildCommit = provenance.native_build_commit || null
+      this.lemexVersion = provenance.version || null
       this.ready = true
       this.error = null
       const security = await this.#host([
@@ -657,6 +659,7 @@ export class Runtime {
       dockerVersion: this.dockerVersion || null,
       lemexCommit: this.lemexCommit || null,
       lemexNativeBuildCommit: this.lemexNativeBuildCommit || null,
+      lemexVersion: this.lemexVersion || null,
       scope: this.scope,
       instance: this.instance,
       reaped: this.reaped,

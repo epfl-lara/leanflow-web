@@ -1,5 +1,6 @@
 import { writeModelCatalog } from './model-catalog.mjs'
 import { providerFor } from './providers.mjs'
+import { providerToml } from './provider-endpoint.mjs'
 import { modelConfigFor } from './model-discovery.mjs'
 import { modelContextConfig } from './model-catalog.mjs'
 import { promises as fs } from 'node:fs'
@@ -296,6 +297,7 @@ export class AgentManager {
       files,
       chatId,
       model,
+      ...(modelConfig.providerId ? { providerId: modelConfig.providerId } : {}),
       effort,
       maxSeconds,
       liveEdits:
@@ -566,6 +568,17 @@ export class AgentManager {
     try {
       const provider = await providerFor(this.config, job.owner)
       const modelConfig = await modelConfigFor(this.config, job.owner)
+      if (job.providerId && job.providerId !== modelConfig.providerId)
+        throw new Error(
+          'Your provider changed while this run was queued. Start a new run with the provider you want to use.',
+        )
+      if (
+        modelConfig.providerBaseUrl &&
+        modelConfig.providerBaseUrl !== provider.LEMEX_BASE_URL
+      )
+        throw new Error(
+          'Your provider changed while loading models. Start the run again.',
+        )
       const selected = modelConfig.models.find(
         (model) => model.id === job.model,
       )
@@ -696,7 +709,7 @@ export class AgentManager {
       const preferences = await this.settings.get(job.owner)
       const config =
         [
-          'model_provider = "rcp"',
+          ...providerToml(provider),
           `model = ${JSON.stringify(job.model)}`,
           'model_catalog_json = "models.json"',
           'web_search = "disabled"',

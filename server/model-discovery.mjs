@@ -4,6 +4,14 @@ import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { AgentRpc } from './rpc.mjs'
 import { catalogModels } from './config.mjs'
+import { createServer } from 'node:http'
+import { once } from 'node:events'
+import {
+  RCP_BASE_URL,
+  providerEndpoint,
+  isRcpEndpoint,
+  fetchProvider,
+} from './provider-endpoint.mjs'
 
 const failure = (message, status = 503) =>
   Object.assign(new Error(message), { status })
@@ -33,24 +41,68 @@ export async function discoverNativeModels({
   provider,
   directory,
   signal,
+  fetchImpl = fetchProvider,
 }) {
   const base = endpoint(provider.LEMEX_BASE_URL)
   const home = await fs.mkdtemp(path.join(directory, 'catalog-'))
-  let child, stopped, rpc
+  let child, stopped, rpc, catalogServer
   try {
+    const rcp = isRcpEndpoint(base)
+    let catalogUrl
+    if (!rcp) {
+      // Fetch custom catalogs through the server's DNS-pinned public-HTTPS
+      // transport. Let the installed Lemex normalize the exact bytes through
+      // its catalog endpoint, without giving native discovery a second DNS
+      // lookup or access to an unvalidated provider URL.
+      const response = await fetchImpl(base + '/models', {
+        headers: { authorization: `Bearer ${provider.LEMEX_API_KEY}` },
+        redirect: 'error',
+        signal,
+      })
+      if (!response.ok) throw new Error('Provider model discovery failed')
+      const body = Buffer.from(await response.arrayBuffer())
+      if (body.length > 1024 * 1024)
+        throw new Error('Provider catalog is too large')
+      catalogServer = createServer((req, res) => {
+        if (
+          new URL(req.url, 'http://127.0.0.1').pathname !== '/models' ||
+          req.method !== 'GET' ||
+          req.headers.authorization !== `Bearer ${provider.LEMEX_API_KEY}`
+        ) {
+          res.writeHead(404).end()
+          return
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Content-Length': body.length,
+        })
+        res.end(body)
+      })
+      catalogServer.listen(0, '127.0.0.1')
+      await once(catalogServer, 'listening')
+      catalogUrl = `http://127.0.0.1:${catalogServer.address().port}/models`
+    }
+    const id = rcp ? 'rcp' : 'leanflow'
     await fs.writeFile(
       path.join(home, 'config.toml'),
       [
-        'model_provider = "rcp"',
-        `model = ${JSON.stringify(config.defaultModel)}`,
-        `model_catalog_json = ${JSON.stringify(path.join(config.lemexHome, 'models.json'))}`,
-        '[model_providers.rcp]',
-        'name = "RCP"',
+        `model_provider = "${id}"`,
+        `model = ${JSON.stringify(rcp ? config.defaultModel : 'discovery')}`,
+        ...(rcp
+          ? [
+              `model_catalog_json = ${JSON.stringify(path.join(config.lemexHome, 'models.json'))}`,
+            ]
+          : []),
+        `[model_providers.${id}]`,
+        `name = "${rcp ? 'RCP' : 'Custom provider'}"`,
         `base_url = ${JSON.stringify(base)}`,
         'env_key = "LEMEX_API_KEY"',
         'wire_api = "responses"',
         'requires_openai_auth = false',
         'supports_websockets = false',
+        ...(catalogUrl
+          ? [`model_catalog_url = ${JSON.stringify(catalogUrl)}`]
+          : []),
         '[analytics]',
         'enabled = false',
         '[feedback]',
@@ -123,6 +175,10 @@ export async function discoverNativeModels({
       clearTimeout(timer)
     }
     await fs.rm(home, { recursive: true, force: true })
+    if (catalogServer) {
+      catalogServer.closeAllConnections()
+      await new Promise((resolve) => catalogServer.close(resolve))
+    }
   }
 }
 
@@ -180,10 +236,13 @@ export class ModelDiscovery {
         signal: controller.signal,
       })
       if (
-        this.providers.provider(owner).LEMEX_API_KEY !== provider.LEMEX_API_KEY
+        this.providers.provider(owner).LEMEX_API_KEY !==
+          provider.LEMEX_API_KEY ||
+        this.providers.provider(owner).LEMEX_BASE_URL !==
+          provider.LEMEX_BASE_URL
       )
         throw failure(
-          'Your API key changed while loading models. Refresh models again.',
+          'Your provider or API key changed while loading models. Refresh models again.',
           409,
         )
       modelCatalog.models.sort(
@@ -196,10 +255,11 @@ export class ModelDiscovery {
       )
       if (!models.length)
         throw failure(
-          'This API key has no available text models. Check its permissions in the RCP portal.',
+          'This API key has no available Responses-compatible text models. Check its permissions with your provider.',
           403,
         )
-      const preferred = this.config.defaultModel
+      const rcp = isRcpEndpoint(provider.LEMEX_BASE_URL || RCP_BASE_URL)
+      const preferred = rcp ? this.config.defaultModel : null
       const defaultModel = models.some((model) => model.id === preferred)
         ? preferred
         : models[0].id
@@ -208,6 +268,13 @@ export class ModelDiscovery {
         defaultModel,
         modelCatalog,
         modelsUpdatedAt: new Date().toISOString(),
+        providerId: rcp
+          ? 'rcp'
+          : createHash('sha256')
+              .update(providerEndpoint(provider.LEMEX_BASE_URL))
+              .digest('hex'),
+        providerBaseUrl: provider.LEMEX_BASE_URL,
+        isRcp: rcp,
       }
       this.cache.set(owner, { identity, at: Date.now(), value })
       return value
