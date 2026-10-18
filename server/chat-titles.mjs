@@ -1,3 +1,5 @@
+import { providerFor } from './providers.mjs'
+
 const MAX_INPUT_CHARS = 8_000
 const MAX_MESSAGES = 8
 const MAX_RESPONSE_BYTES = 128 * 1024
@@ -164,14 +166,24 @@ export function createChatTitleGenerator(
     selected?.reasoningEfforts?.some((level) => level.id === id),
   )
   const endpoint = providerEndpoint(config.provider?.LEMEX_BASE_URL)
-  const key = config.provider?.LEMEX_API_KEY
-  const available = !!(model && endpoint && key && fetchImpl)
+  const available = !!(
+    model &&
+    endpoint &&
+    (config.providerForUser || config.provider?.LEMEX_API_KEY) &&
+    fetchImpl
+  )
   return {
     available,
     model,
-    async generate(messages, { signal } = {}) {
+    async generate(messages, { signal, owner } = {}) {
       if (!available)
         throw failure('DeepSeek chat naming is not configured.', 503)
+      const key = (await providerFor(config, owner))?.LEMEX_API_KEY
+      if (!key)
+        throw failure(
+          'Add your Lemex API key in Assistant settings to name chats.',
+          428,
+        )
       const sample = conversationSample(messages)
       if (signal?.aborted) throw failure('Chat naming was cancelled.', 499)
       const controller = new AbortController()

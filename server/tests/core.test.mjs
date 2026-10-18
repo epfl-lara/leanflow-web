@@ -121,6 +121,7 @@ async function fixture(t, capacity) {
     redact: (value) => String(value).split(providerSecret).join('[redacted]'),
   }
   const studio = await createStudio({ dataDir, runtime, config, capacity })
+  await studio.providers.save('owner', providerSecret)
   await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve))
   t.after(() => studio.close())
   const url = `http://127.0.0.1:${studio.server.address().port}`
@@ -322,7 +323,11 @@ test('authentication persists private tokens, signs cookies, and rejects tamperi
     await fs.readFile(path.join(auth.dir, 'owner.token'), 'utf8')
   ).trim()
   const user = await auth.login(token, 'local')
-  assert.deepEqual(auth.public(user), { id: 'owner', name: 'Owner' })
+  assert.deepEqual(auth.public(user), {
+    id: 'owner',
+    name: 'Owner',
+    role: 'owner',
+  })
   assert.ok(!JSON.stringify(auth.users).includes(token))
   assert.equal(
     (await fs.stat(path.join(auth.dir, 'owner.token'))).mode & 0o777,
@@ -1017,7 +1022,9 @@ test('HTTP authentication and login keep collaborator tokens and provider creden
   )
   assert.equal(login.status, 200)
   const body = await login.text()
-  assert.deepEqual(JSON.parse(body), { user: { id: 'owner', name: 'Owner' } })
+  assert.deepEqual(JSON.parse(body), {
+    user: { id: 'owner', name: 'Owner', role: 'owner' },
+  })
   assert.ok(!body.includes(token) && !body.includes('tokenHash'))
   const cookie = login.headers.get('set-cookie')
   assert.ok(
@@ -1752,7 +1759,7 @@ test('configuration saves close only that project editor and expose setup retry 
   assert.equal(workspaces.get(project.id, 'owner').status, 'ready')
 })
 
-test('a server without a provider does not install automatic setup repair', async (t) => {
+test('automatic setup repair requires the project owner personal key', async (t) => {
   const dataDir = await temp(t),
     runtime = new FakeRuntime()
   const studio = await createStudio({
@@ -1768,7 +1775,11 @@ test('a server without a provider does not install automatic setup repair', asyn
     titleGenerator: async () => null,
   })
   t.after(() => studio.close())
-  assert.equal(studio.workspaces.setupRepair, undefined)
+  assert.equal(typeof studio.workspaces.setupRepair, 'function')
+  await assert.rejects(
+    () => studio.workspaces.setupRepair({ owner: 'owner' }),
+    { status: 428 },
+  )
 })
 
 test('startup migrates existing aliased project directories and retains missing projects as errors', async (t) => {

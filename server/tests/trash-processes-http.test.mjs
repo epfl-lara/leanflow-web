@@ -102,6 +102,7 @@ async function fixture(t) {
     },
     titleGenerator: async () => null,
   })
+  await studio.providers.save('owner', 'fixture-key-never-sent')
   await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve))
   t.after(async () => {
     for (const hold of runtime.holds) hold.release.resolve()

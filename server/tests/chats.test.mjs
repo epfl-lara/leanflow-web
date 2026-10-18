@@ -285,6 +285,7 @@ async function httpFixture(t, titleGenerator) {
     config,
     titleGenerator,
   })
+  await studio.providers.save('owner', 'test-no-provider-call')
   studio.agents.maxConcurrent = 0
   await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve))
   t.after(async () => {

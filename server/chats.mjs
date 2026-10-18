@@ -285,6 +285,7 @@ export class ChatStore {
         .then(() => {
           this.#owned(job.id, job.owner)
           return this.titleGenerator.generate(job.messages, {
+            owner: job.owner,
             signal: job.controller.signal,
           })
         })

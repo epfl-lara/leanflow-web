@@ -91,19 +91,15 @@ export async function loadConfig(
     if (e.code !== 'ENOENT') throw e
   }
   const provider = {
-    LEMEX_API_KEY: env.LEMEX_API_KEY || stored.LEMEX_API_KEY,
+    LEMEX_API_KEY: undefined,
     LEMEX_BASE_URL: env.LEMEX_BASE_URL || stored.LEMEX_BASE_URL,
   }
-  if (
-    provider.LEMEX_API_KEY &&
-    (provider.LEMEX_API_KEY !== stored.LEMEX_API_KEY ||
-      provider.LEMEX_BASE_URL !== stored.LEMEX_BASE_URL)
-  )
-    await fs.writeFile(providerFile, JSON.stringify(provider), { mode: 0o600 })
   const redact = (text) => {
     let result = String(text)
-    if (provider.LEMEX_API_KEY)
-      result = result.split(provider.LEMEX_API_KEY).join('[redacted]')
+    for (const secret of [env.LEMEX_API_KEY, stored.LEMEX_API_KEY].filter(
+      Boolean,
+    ))
+      result = result.split(secret).join('[redacted]')
     return result
   }
   let provenance = {}

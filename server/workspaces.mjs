@@ -2319,6 +2319,7 @@ export class WorkspaceStore {
       )
     signal.throwIfAborted()
     await this.setupRepair({
+      owner: project.owner,
       root: candidate,
       project: { name: project.name, toolchain: project.toolchain },
       error: cause.message,

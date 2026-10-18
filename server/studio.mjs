@@ -15,6 +15,7 @@ import { EventStore, JobManager } from './events.mjs'
 import { TexBuildManager } from './tex-builds.mjs'
 import { AgentManager } from './agents.mjs'
 import { Settings } from './settings.mjs'
+import { Providers } from './providers.mjs'
 import { ChatStore } from './chats.mjs'
 import { TrashManager } from './trash.mjs'
 import { createChatTitleGenerator } from './chat-titles.mjs'
@@ -160,6 +161,14 @@ export async function createStudio({
   const auth = new Auth(dataDir)
   await auth.init()
   const config = suppliedConfig || (await loadConfig(dataDir))
+  const providers = await new Providers(
+    dataDir,
+    auth.key,
+    config.provider?.LEMEX_BASE_URL,
+    config.redact,
+  ).init()
+  config.redact = providers.redact
+  config.providerForUser = (owner) => providers.provider(owner)
   const runtime =
     suppliedRuntime ||
     new Runtime({
@@ -240,21 +249,19 @@ export async function createStudio({
     maxConcurrent: capacity.agents,
     maxQueue: capacity.agentQueue,
   })
-  if (config.provider.LEMEX_API_KEY)
-    workspaces.setupRepair = (args) =>
-      withSetupRepairDeadline(
-        (boundedSignal) =>
-          agents.runSetupRepair(
-            (signal) =>
-              repairProjectSetup({ runtime, config, ...args, signal }),
-            {
-              signal: boundedSignal,
-              onQueued: () => args.onProgress?.('waiting-for-repair'),
-              onStarted: () => args.onProgress?.('repairing-setup'),
-            },
-          ),
-        { signal: args.signal, timeoutMs: capacity.setupRepairTimeoutMs },
-      )
+  workspaces.setupRepair = (args) =>
+    withSetupRepairDeadline(
+      (boundedSignal) =>
+        agents.runSetupRepair(
+          (signal) => repairProjectSetup({ runtime, config, ...args, signal }),
+          {
+            signal: boundedSignal,
+            onQueued: () => args.onProgress?.('waiting-for-repair'),
+            onStarted: () => args.onProgress?.('repairing-setup'),
+          },
+        ),
+      { signal: args.signal, timeoutMs: capacity.setupRepairTimeoutMs },
+    )
   const jobs = new JobManager({
     runtime,
     workspaces,
@@ -426,6 +433,10 @@ export async function createStudio({
         error:
           'This token belongs to a different account. Use the access token for the workspace you have open.',
       })
+    if (req.body.apiKey !== undefined) {
+      const key = await providers.validate(req.body.apiKey)
+      await providers.save(user.id, key)
+    }
     res.setHeader(
       'Set-Cookie',
       auth.cookie(user, !!origin?.startsWith('https:')),
@@ -442,14 +453,36 @@ export async function createStudio({
   app.get('/api/session', (req, res) =>
     res.json({
       user: auth.public(req.user),
+      eventTransport:
+        process.env.STUDIO_EVENT_TRANSPORT === 'poll' ? 'poll' : 'sse',
       capacity,
       runtime: runtime.info(),
       models: config.models,
       defaultModel: config.defaultModel,
       templates: runtime.templates(),
-      lemex: config.lemex,
+      lemex: { ...config.lemex, ...providers.status(req.user.id) },
     }),
   )
+  app.get('/api/provider', (req, res) =>
+    res.json(providers.status(req.user.id)),
+  )
+  app.put('/api/provider', async (req, res) => {
+    const key = await providers.validate(req.body?.apiKey)
+    res.json(await providers.save(req.user.id, key))
+  })
+  app.get('/api/admin/users', async (req, res) => {
+    auth.requireAdmin(req.user)
+    await auth.refreshUsers()
+    res.json(
+      auth.users.map((user) => ({
+        ...auth.public(user),
+        lemex: providers.status(user.id),
+      })),
+    )
+  })
+  app.post('/api/admin/users', async (req, res) => {
+    res.status(201).json(await auth.createUser(req.user, req.body))
+  })
   app.get('/api/playground', (_req, res) => res.json(playgroundState()))
   app.post('/api/playground/prepare', (_req, res) => {
     preparePlayground()
@@ -1053,6 +1086,8 @@ export async function createStudio({
     const after = Number(req.headers['last-event-id'] || req.query.after || 0)
     if (!Number.isSafeInteger(after) || after < 0)
       return res.status(400).json({ error: 'Invalid event cursor.' })
+    if (req.query.transport === 'poll')
+      return res.json({ events: events.eventPage(req.params.id, after) })
     res.setHeader('Content-Type', 'text/event-stream')
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
@@ -1274,6 +1309,7 @@ export async function createStudio({
     chats,
     config,
     settings,
+    providers,
     gitConnections,
     publisher,
     close,

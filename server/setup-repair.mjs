@@ -1,4 +1,5 @@
 import { writeModelCatalog } from './model-catalog.mjs'
+import { providerFor } from './providers.mjs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { AgentRpc } from './rpc.mjs'
@@ -42,14 +43,16 @@ export async function repairProjectSetup({
   config,
   root,
   project,
+  owner,
   error,
   signal,
   onOutput = () => {},
   onActivity = () => {},
 }) {
-  if (!config.provider.LEMEX_API_KEY)
+  const provider = await providerFor(config, owner)
+  if (!provider?.LEMEX_API_KEY)
     throw new Error(
-      'Automatic setup repair needs the server Lemex provider key. The uploaded files are retained.',
+      'Add your Lemex API key in Assistant settings to enable automatic setup repair. The uploaded files are retained.',
     )
   signal?.throwIfAborted()
   const model = config.models?.find((model) => model.id === config.defaultModel)
@@ -77,7 +80,7 @@ export async function repairProjectSetup({
   const child = await runtime.spawnWhenAvailable(
     root,
     ['lemex', 'app-server', '--stdio', '--strict-config'],
-    { env: config.provider, network: 'bridge', signal },
+    { env: provider, network: 'bridge', signal },
   )
   const closed = new Promise((resolve) => {
     child.once('close', resolve)
@@ -88,7 +91,7 @@ export async function repairProjectSetup({
   const output = createAgentOutputHandler({
     append: (_field, text) => log(text),
     redact: config.redact,
-    secrets: [config.provider.LEMEX_API_KEY],
+    secrets: [provider.LEMEX_API_KEY],
     showReasoning: false,
   })
   let resolveFinished, rejectFinished

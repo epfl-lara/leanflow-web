@@ -32,7 +32,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Open `.env` and set `LEMEX_API_KEY` and `LEMEX_BASE_URL` for your provider. You can leave them empty to use the Lean editor without the assistant.
+Open `.env` and set `LEMEX_BASE_URL` to your provider’s HTTPS API endpoint. Each account adds its own API key at first sign-in and can update it in Assistant settings. The web app no longer uses a shared server API key.
 
 ```bash
 node --env-file=.env server/studio.mjs
@@ -48,7 +48,9 @@ Open **http://localhost:8090**. In another terminal, from the app directory, rea
 cat .data/auth/owner.token
 ```
 
-Paste it into the sign-in screen and choose **Import or create project**. Keep the token and `.env` private.
+Sign in with the token, then save your own Lemex API key. See [accounts and personal keys](Configuration.md#accounts-and-personal-api-keys) for invitations and roles.
+
+After saving your key, choose **Import or create project**. Keep your token, API key, and `.env` private.
 
 ## Open it from another computer
 

@@ -377,6 +377,14 @@ export class EventStore extends EventEmitter {
       .all(id, after)
       .map((row) => JSON.parse(row.payload))
   }
+  eventPage(id, after = 0) {
+    return this.db
+      .prepare(
+        'SELECT payload FROM events WHERE job=? AND seq>? ORDER BY seq LIMIT 100',
+      )
+      .all(id, after)
+      .map((row) => JSON.parse(row.payload))
+  }
   append(id, field, text, type) {
     const job = this.getMetadata(id)
     const combined = (job[field] || '') + text,

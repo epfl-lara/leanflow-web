@@ -94,6 +94,7 @@ async function fixture(t, extraCapacity = {}) {
     },
     titleGenerator: async () => null,
   })
+  await studio.providers.save('owner', 'fixture-not-a-provider-key')
   const sockets = []
   t.after(async () => {
     for (const socket of sockets) socket.terminate()

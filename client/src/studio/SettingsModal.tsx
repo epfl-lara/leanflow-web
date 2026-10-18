@@ -1,5 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { api, errorText } from './api'
+import { api, errorText, type Account, type ProviderStatus } from './api'
+import { ProviderKeyForm } from './ProviderKeyForm'
+import { AdminAccounts } from './AdminAccounts'
 import { Dialog } from './Dialog'
 import { Icon } from './Icons'
 
@@ -18,15 +20,27 @@ interface Settings {
 export function SettingsModal({
   onClose,
   onSaved,
+  user,
+  onProviderSaved,
 }: {
   onClose: () => void
   onSaved: () => void
+  user: Account
+  onProviderSaved: () => void
 }) {
   const [settings, setSettings] = useState<Settings | null>(null)
+  const [provider, setProvider] = useState<ProviderStatus | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   useEffect(() => {
     let cancelled = false
+    void api<ProviderStatus>('/api/provider')
+      .then((value) => {
+        if (!cancelled) setProvider(value)
+      })
+      .catch((error) => {
+        if (!cancelled) setError(errorText(error))
+      })
     void api<Settings>('/api/settings')
       .then((value) => {
         if (!cancelled) setSettings(value)
@@ -66,6 +80,18 @@ export function SettingsModal({
       onClose={onClose}
       busy={busy}
     >
+      <h3>
+        {user.name} · {user.role === 'owner' ? 'Owner / admin' : user.role}
+      </h3>
+      {provider && (
+        <ProviderKeyForm
+          initial={provider}
+          onSaved={(value) => {
+            setProvider(value)
+            onProviderSaved()
+          }}
+        />
+      )}
       {!settings && !error && (
         <p className="field-help">
           <span className="spinner" /> Loading settings…
@@ -198,6 +224,7 @@ export function SettingsModal({
           </footer>
         </form>
       )}
+      {['owner', 'admin'].includes(user.role) && <AdminAccounts user={user} />}
     </Dialog>
   )
 }

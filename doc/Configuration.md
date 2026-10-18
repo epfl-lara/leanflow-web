@@ -4,18 +4,18 @@ Start with the [installation guide](LemexWeb.md#install-and-run). Put settings i
 
 ## Provider and server settings
 
-Set `LEMEX_API_KEY` and `LEMEX_BASE_URL` for your Lemex provider to enable the assistant. Leave them empty to use the editor without inference. Assistant requests use your provider's billing.
+Set `LEMEX_BASE_URL` to your Lemex provider's HTTPS API endpoint. Each account supplies its own API key during first sign-in and can replace it in **Assistant settings**. Assistant runs, automatic setup repairs, and chat titles use that account's key and quota. The web app does not use a shared `LEMEX_API_KEY`.
 
-| Setting                           | Use                                                                                                    |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `LEMEX_API_KEY`, `LEMEX_BASE_URL` | Provider credentials and API endpoint.                                                                 |
-| `LEMEX_HOME`                      | Override the packaged Lemex config and model catalog; falls back to `~/.lemex` when no package exists. |
-| `STUDIO_MODEL`                    | Override the default model, `deepseek-ai/DeepSeek-V4.1-Flash`.                                         |
-| `HOST`, `PORT`                    | Listen address and port; defaults to `127.0.0.1:8090`.                                                 |
-| `STUDIO_DATA_DIR`                 | Accounts, projects, chats, and caches; defaults to `.data`.                                            |
-| `STUDIO_ORIGIN`                   | Exact public HTTPS origin, including a nonstandard port if used.                                       |
-| `STUDIO_MAX_WORKERS`              | Maximum active workers; defaults to `6`.                                                               |
-| `LEMEX_WORKER_IMAGE`              | Worker image; defaults to `lemex-web-worker:local`.                                                    |
+| Setting              | Use                                                                                                    |
+| -------------------- | ------------------------------------------------------------------------------------------------------ |
+| `LEMEX_BASE_URL`     | HTTPS provider endpoint; keys are supplied by each account.                                            |
+| `LEMEX_HOME`         | Override the packaged Lemex config and model catalog; falls back to `~/.lemex` when no package exists. |
+| `STUDIO_MODEL`       | Override the default model, `deepseek-ai/DeepSeek-V4.1-Flash`.                                         |
+| `HOST`, `PORT`       | Listen address and port; defaults to `127.0.0.1:8090`.                                                 |
+| `STUDIO_DATA_DIR`    | Accounts, projects, chats, and caches; defaults to `.data`.                                            |
+| `STUDIO_ORIGIN`      | Exact public HTTPS origin, including a nonstandard port if used.                                       |
+| `STUDIO_MAX_WORKERS` | Maximum active workers; defaults to `6`.                                                               |
+| `LEMEX_WORKER_IMAGE` | Worker image; defaults to `lemex-web-worker:local`.                                                    |
 
 See [`.env.example`](../.env.example) for a ready-to-edit file. `npm start` and `npm run dev` do not load `.env` automatically. Exported environment variables override values loaded with Node's `--env-file`.
 
@@ -79,15 +79,27 @@ Bulk source uploads and saves share `STUDIO_MAX_SOURCE_REQUESTS` slots (default 
 
 With the default configuration, the assistant opens with DeepSeek-V4.1-Flash at `max`, its highest supported reasoning effort. Model and effort changes apply while the assistant is open; reopening it restores the default. The server offers each model's supported levels and disables the effort selector for models without adjustable effort. The UI and isolated Lemex workers use the same corrected catalog.
 
-## Add a collaborator
+## Accounts and personal API keys
+
+The initial owner is also an administrator. In **Assistant settings → Accounts**, the owner can create user or admin accounts. Admins can create user accounts. Regular users cannot administer accounts. Share each generated sign-in token privately; the app shows it once. Projects, chats, and provider keys remain account-scoped, including for admins.
+
+At first sign-in, enter your own Lemex API key. The server checks access with a non-inference `/models` request before saving it. Later, use **Assistant settings → Your Lemex API key** to replace it. A failed validation preserves the previous key. Running requests keep their current credential; new requests use the replacement.
+
+Keys are stored as account-bound AES-256-GCM ciphertext in `.data/providers`, with private file permissions. Encryption depends on `.data/auth/session.key`: back up that file together with the data directory. Losing or rotating it requires entering saved provider keys again. APIs return only saved/not-saved status, never the stored key. The server process can decrypt keys to run Lemex; retain the trusted-collaborator deployment model.
+
+For a temporary relay that buffers SSE, set `STUDIO_EVENT_TRANSPORT=poll`. Assistant events and reasoning history then use bounded JSON cursor replay. Ordinary deployments retain SSE by default.
+
+The explicit paid provider smoke scripts require `STUDIO_SMOKE_API_KEY` set to your own key. They seed only an isolated fixture account and do not copy another account’s saved key.
+
+### Create an account from the command line
 
 Run from the checkout, using the same environment file as the server:
 
 ```bash
-node --env-file=.env scripts/add-user.mjs "Collaborator name"
+node --env-file=.env scripts/add-user.mjs "Collaborator name" user /private/path/collaborator.token
 ```
 
-Share the printed token privately. Each account has its own projects and chats. For the service below, use `--env-file=.data/server.env` instead.
+Share the private token file securely. Use `admin` instead of `user` to appoint an administrator from the server. Each account has its own projects and chats. For the service below, use `--env-file=.data/server.env` instead.
 
 ## Run as a service
 

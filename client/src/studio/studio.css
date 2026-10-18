@@ -2923,3 +2923,11 @@ body.panel-resizing iframe {
   padding: 10px 12px;
   max-width: none;
 }
+
+.account-setup {
+  display: flex;
+  justify-content: center;
+}
+.account-setup .login-card {
+  width: min(100%, 640px);
+}

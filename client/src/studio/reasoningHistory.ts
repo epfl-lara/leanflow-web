@@ -1,4 +1,5 @@
 import type { Run, RunEvent } from './api'
+import { openRunEvents } from './runEventTransport'
 import {
   recordReasoningBlock,
   retainedReasoningBlocks,
@@ -66,7 +67,7 @@ export async function hydrateReasoningHistory(
   let blocks = prior?.reasoningBlocks || []
   let replayCursor = after
   await new Promise<void>((resolve, reject) => {
-    const stream = new EventSource(
+    const stream = openRunEvents(
       `/api/runs/${encodeURIComponent(run.id)}/events?after=${after}`,
     )
     const finish = (error?: Error) => {

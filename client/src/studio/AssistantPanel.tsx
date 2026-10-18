@@ -40,6 +40,7 @@ import type {
 } from './proofTarget'
 import './chat-workbench.css'
 import { texLanguage } from './texBuilds'
+import { messageId } from './messageId'
 
 const chronological = (values: Run[]) =>
   [...values].sort((a, b) =>
@@ -629,7 +630,7 @@ export function AssistantPanel({
             value.revision === captured.revision &&
             value.text === captured.text,
         )
-        const clientId = previousSubmission?.[0] || crypto.randomUUID()
+        const clientId = previousSubmission?.[0] || messageId()
         const currentFile = previousSubmission
           ? previousSubmission[1].currentFile
           : settings.currentFile

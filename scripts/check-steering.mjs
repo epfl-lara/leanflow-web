@@ -19,15 +19,19 @@ const dataDir = path.join(
   'steering-check-' + Date.now(),
 )
 await fs.mkdir(dataDir, { recursive: true, mode: 0o700 })
-await fs.copyFile(
-  path.join(projectDir, '.data/provider.json'),
+const providerBase = JSON.parse(
+  await fs.readFile(path.join(projectDir, '.data/provider.json'), 'utf8'),
+).LEMEX_BASE_URL
+await fs.writeFile(
   path.join(dataDir, 'provider.json'),
+  JSON.stringify({ LEMEX_BASE_URL: providerBase }),
+  { mode: 0o600 },
 )
-await fs.chmod(path.join(dataDir, 'provider.json'), 0o600)
 const config = await loadConfig(dataDir)
+const smokeKey = process.env.STUDIO_SMOKE_API_KEY
 assert(
-  config.provider.LEMEX_API_KEY,
-  'A configured provider is required for this explicit smoke test.',
+  smokeKey,
+  'Set STUDIO_SMOKE_API_KEY to your own key for this explicit paid provider check.',
 )
 const model = config.models.find((model) => model.id === config.defaultModel)
 const effort =
@@ -115,6 +119,7 @@ async function save(report) {
 }
 try {
   studio = await createStudio({ dataDir, runtime, config })
+  await studio.providers.save('owner', smokeKey)
   await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve))
   await studio.settings.save('owner', {
     extraInstructions: '',

@@ -29,7 +29,11 @@ test('repair writes the normalized model catalog and sends the exact configured 
     ],
   })
   const config = {
-    provider: { LEMEX_API_KEY: 'fixture-unused' },
+    provider: { LEMEX_API_KEY: 'forbidden-shared-key' },
+    providerForUser: (owner) => {
+      assert.equal(owner, 'alice')
+      return { LEMEX_API_KEY: 'alice-personal-fixture-key' }
+    },
     defaultModel: DEFAULT_MODEL,
     modelCatalog,
     models: catalogModels(modelCatalog, DEFAULT_MODEL),
@@ -67,9 +71,16 @@ test('repair writes the normalized model catalog and sends the exact configured 
   })
   await repairProjectSetup({
     root,
+    owner: 'alice',
     project: { name: 'Fixture' },
     error: 'Invalid Lake config',
-    runtime: { home: async () => home, spawnWhenAvailable: async () => child },
+    runtime: {
+      home: async () => home,
+      spawnWhenAvailable: async (_root, _args, options) => {
+        assert.equal(options.env.LEMEX_API_KEY, 'alice-personal-fixture-key')
+        return child
+      },
+    },
     config,
   })
   assert.deepEqual(

@@ -1,0 +1,368 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { Providers } from '../providers.mjs'
+import { createStudio } from '../studio.mjs'
+import { AgentManager } from '../agents.mjs'
+import { repairProjectSetup } from '../setup-repair.mjs'
+import { createChatTitleGenerator } from '../chat-titles.mjs'
+import { loadConfig } from '../config.mjs'
+
+async function temp(t) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-accounts-'))
+  t.after(() => fs.rm(dir, { recursive: true, force: true }))
+  return dir
+}
+
+test('account keys are encrypted, private, persistent, isolated and replaceable', async (t) => {
+  const dir = await temp(t),
+    store = await new Providers(
+      dir,
+      'fixture-session-key',
+      'https://provider.example/v1',
+    ).init()
+  assert.throws(() => store.provider('alice'), { status: 428 })
+  await store.save('alice', 'alice-fixture-private-key')
+  await store.save('bob', 'bob-fixture-private-key')
+  const text = await fs.readFile(store.filename('alice'), 'utf8')
+  assert(!text.includes('alice-fixture-private-key'))
+  assert.equal((await fs.stat(store.filename('alice'))).mode & 0o777, 0o600)
+  assert(!JSON.stringify(store.status('alice')).includes('key'))
+  assert.equal(
+    store.provider('alice').LEMEX_API_KEY,
+    'alice-fixture-private-key',
+  )
+  assert.equal(store.provider('bob').LEMEX_API_KEY, 'bob-fixture-private-key')
+  await store.save('alice', 'alice-fixture-replacement')
+  assert.equal(
+    store.redact(
+      'alice-fixture-private-key bob-fixture-private-key alice-fixture-replacement',
+    ),
+    '[redacted] [redacted] [redacted]',
+  )
+  const restarted = await new Providers(
+    dir,
+    'fixture-session-key',
+    store.baseUrl,
+  ).init()
+  assert.equal(
+    restarted.provider('alice').LEMEX_API_KEY,
+    'alice-fixture-replacement',
+  )
+  assert.equal(
+    restarted.provider('bob').LEMEX_API_KEY,
+    'bob-fixture-private-key',
+  )
+  assert.throws(() => restarted.provider('../alice'), { status: 428 })
+  await assert.rejects(() => restarted.save('../alice', 'fixture-key'), {
+    status: 400,
+  })
+  // A ciphertext cannot be copied onto another account.
+  await fs.copyFile(store.filename('alice'), store.filename('bob'))
+  const tampered = await new Providers(
+    dir,
+    'fixture-session-key',
+    store.baseUrl,
+  ).init()
+  assert.equal(tampered.status('bob').configured, false)
+  assert.equal(tampered.status('alice').configured, true)
+})
+
+test('legacy shared keys and environment keys are never enabled by web configuration', async (t) => {
+  const dir = await temp(t)
+  await fs.writeFile(
+    path.join(dir, 'provider.json'),
+    JSON.stringify({
+      LEMEX_API_KEY: 'legacy-private-key',
+      LEMEX_BASE_URL: 'https://provider.example/v1',
+    }),
+  )
+  const config = await loadConfig(dir, {
+    env: { LEMEX_API_KEY: 'environment-private-key' },
+  })
+  assert.equal(config.provider.LEMEX_API_KEY, undefined)
+  assert.equal(config.lemex.configured, false)
+  assert.equal(config.provider.LEMEX_BASE_URL, 'https://provider.example/v1')
+  assert.equal(
+    config.redact('legacy-private-key environment-private-key'),
+    '[redacted] [redacted]',
+  )
+})
+
+test('validation does no inference, forbids redirects, and never returns provider bodies or credentials', async (t) => {
+  const store = await new Providers(
+    await temp(t),
+    'key',
+    'https://provider.example/v1',
+  ).init()
+  await store.save('alice', 'original-fixture-key')
+  const key = 'replacement-fixture-key'
+  assert.equal(
+    await store.validate(key, async (url, options) => {
+      assert.equal(String(url), 'https://provider.example/v1/models')
+      assert.equal(options.redirect, 'error')
+      assert.equal(options.headers.authorization, `Bearer ${key}`)
+      assert.equal(options.body, undefined)
+      return new Response('{}')
+    }),
+    key,
+  )
+  await assert.rejects(
+    () => store.validate(key, async () => new Response(key, { status: 401 })),
+    (error) => error.status === 400 && !error.message.includes(key),
+  )
+  await assert.rejects(
+    () =>
+      store.validate(key, async () => {
+        throw new Error(key)
+      }),
+    (error) => error.status === 502 && !error.message.includes(key),
+  )
+  assert.equal(store.provider('alice').LEMEX_API_KEY, 'original-fixture-key')
+  for (const input of [null, {}, '', 'has a space', 'x\nheader:value'])
+    await assert.rejects(() => store.validate(input), { status: 400 })
+})
+
+async function fixture(t) {
+  const dataDir = await temp(t)
+  const studio = await createStudio({
+    dataDir,
+    runtime: {
+      async init() {},
+      async shutdown() {},
+      info: () => ({ ready: true }),
+      templates: () => [],
+    },
+    config: {
+      defaultModel: 'deepseek-test',
+      models: [{ id: 'deepseek-test' }],
+      provider: {
+        LEMEX_API_KEY: 'forbidden-shared-key',
+        LEMEX_BASE_URL: 'https://provider.example/v1',
+      },
+      redact: String,
+      lemex: { configured: true },
+    },
+  })
+  await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve))
+  t.after(() => studio.close())
+  const token = (
+    await fs.readFile(path.join(dataDir, 'auth/owner.token'), 'utf8')
+  ).trim()
+  const request = (endpoint, tokenValue = token, method = 'GET', body) =>
+    fetch(`http://127.0.0.1:${studio.server.address().port}${endpoint}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${tokenValue}`,
+        'Content-Type': 'application/json',
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+  return { ...studio, dataDir, token, request }
+}
+
+test('tokens identify roles; only owner appoints admins; users cannot list or create accounts', async (t) => {
+  const f = await fixture(t)
+  let response = await f.request('/api/admin/users', f.token, 'POST', {
+    name: 'Viktor',
+    role: 'admin',
+  })
+  assert.equal(response.status, 201)
+  const admin = await response.json()
+  response = await f.request('/api/admin/users', admin.token, 'POST', {
+    name: 'Maryna',
+    role: 'user',
+  })
+  assert.equal(response.status, 201)
+  const user = await response.json()
+  assert.equal((await f.request('/api/admin/users', user.token)).status, 403)
+  assert.equal(
+    (
+      await f.request('/api/admin/users', user.token, 'POST', {
+        name: 'Invalid escalation',
+        role: 'admin',
+      })
+    ).status,
+    403,
+  )
+  assert.equal(
+    (
+      await f.request('/api/admin/users', admin.token, 'POST', {
+        name: 'Another admin',
+        role: 'admin',
+      })
+    ).status,
+    403,
+  )
+  assert.equal(
+    (
+      await f.request('/api/admin/users', f.token, 'POST', {
+        name: {},
+        role: 'user',
+      })
+    ).status,
+    400,
+  )
+  assert.equal(
+    (await f.request('/api/admin/users', f.token, 'POST', { name: 'Maryna' }))
+      .status,
+    409,
+  )
+  for (const account of [admin, user]) {
+    const login = await f.request('/api/login', '', 'POST', {
+      token: account.token,
+    })
+    assert.equal(login.status, 200)
+    const cookie = login.headers.get('set-cookie').split(';')[0]
+    const session = await fetch(
+      `http://127.0.0.1:${f.server.address().port}/api/session`,
+      { headers: { Cookie: cookie } },
+    )
+    const body = await session.json()
+    assert.equal(body.user.role, account.user.role)
+    assert.equal(body.lemex.configured, false)
+    assert(!JSON.stringify(body).includes('forbidden-shared-key'))
+  }
+  await f.providers.save(user.user.id, 'private-personal-fixture-key')
+  assert.equal(
+    (await (await f.request('/api/provider', user.token)).json()).configured,
+    true,
+  )
+  assert.equal(
+    (await (await f.request('/api/provider', admin.token)).json()).configured,
+    false,
+  )
+  const listing = await (await f.request('/api/admin/users')).text()
+  for (const secret of [
+    admin.token,
+    user.token,
+    'private-personal-fixture-key',
+    'tokenHash',
+  ])
+    assert(!listing.includes(secret))
+  // Re-read persisted roles on every request, including an already issued cookie.
+  await f.auth.mutate(() => {
+    f.auth.users.find((u) => u.id === admin.user.id).role = 'user'
+  })
+  assert.equal((await f.request('/api/admin/users', admin.token)).status, 403)
+})
+
+test('API key updates validate once, stay within the authenticated account, and survive a store restart', async (t) => {
+  const f = await fixture(t)
+  const other = await f.auth.createUser({ id: 'owner' }, { name: 'Seewoo' })
+  let validations = 0
+  f.providers.validate = async (key) => {
+    validations++
+    if (key === 'invalid-key')
+      throw Object.assign(new Error('Key rejected'), { status: 400 })
+    return key
+  }
+  const reply = await f.request('/api/provider', other.token, 'PUT', {
+    apiKey: 'seewoo-fixture-key',
+    owner: 'owner',
+  })
+  assert.equal(reply.status, 200)
+  assert(!JSON.stringify(await reply.json()).includes('seewoo-fixture-key'))
+  assert.equal(
+    f.providers.provider(other.user.id).LEMEX_API_KEY,
+    'seewoo-fixture-key',
+  )
+  assert.throws(() => f.providers.provider('owner'), { status: 428 })
+  assert.equal(
+    (
+      await f.request('/api/provider', other.token, 'PUT', {
+        apiKey: 'invalid-key',
+      })
+    ).status,
+    400,
+  )
+  assert.equal(
+    f.providers.provider(other.user.id).LEMEX_API_KEY,
+    'seewoo-fixture-key',
+  )
+  assert.equal(validations, 2)
+  const restarted = await new Providers(
+    f.dataDir,
+    f.auth.key,
+    f.providers.baseUrl,
+  ).init()
+  assert.equal(
+    restarted.provider(other.user.id).LEMEX_API_KEY,
+    'seewoo-fixture-key',
+  )
+})
+
+test('agent runs, setup repairs, and chat titles cannot fall back to a shared key', async (t) => {
+  const f = await fixture(t)
+  const manager = new AgentManager({
+    config: f.config,
+    events: { listMetadata: () => [] },
+    workspaces: { get: () => ({ status: 'ready' }) },
+  })
+  await assert.rejects(
+    () =>
+      manager.start('missing-key', 'project', {
+        mode: 'proofs',
+        prompt: 'test',
+      }),
+    { status: 428 },
+  )
+  await assert.rejects(
+    () => repairProjectSetup({ config: f.config, owner: 'missing-key' }),
+    { status: 428 },
+  )
+  let received
+  const generator = createChatTitleGenerator(f.config, {
+    fetchImpl: async (_url, options) => {
+      received = options.headers.authorization
+      return Response.json({
+        status: 'completed',
+        output: [
+          {
+            type: 'message',
+            role: 'assistant',
+            status: 'completed',
+            content: [{ type: 'output_text', text: 'Fixture Chat Title' }],
+          },
+        ],
+      })
+    },
+  })
+  await assert.rejects(
+    () =>
+      generator.generate([{ role: 'user', content: 'test' }], {
+        owner: 'missing-key',
+      }),
+    { status: 428 },
+  )
+  assert.equal(received, undefined)
+  await f.providers.save('owner', 'owner-only-fixture-key')
+  await generator.generate([{ role: 'user', content: 'test' }], {
+    owner: 'owner',
+  })
+  assert.equal(received, 'Bearer owner-only-fixture-key')
+})
+
+test('event polling is cursor based, bounded, and enforces run ownership', async (t) => {
+  const f = await fixture(t),
+    other = await f.auth.createUser({ id: 'owner' }, { name: 'Other' })
+  const run = f.events.create('owner', { projectId: 'fixture', kind: 'check' })
+  for (let i = 0; i < 120; i++)
+    f.events.event(run.id, 'message', { text: `part ${i}` })
+  const url = `/api/runs/${run.id}/events?transport=poll&after=0`
+  assert.equal((await f.request(url, other.token)).status, 404)
+  const first = await (await f.request(url)).json()
+  assert.equal(first.events.length, 100)
+  const after = first.events.at(-1).seq
+  const next = await (
+    await f.request(`/api/runs/${run.id}/events?transport=poll&after=${after}`)
+  ).json()
+  assert(next.events.every((event) => event.seq > after))
+  assert.equal(
+    (await f.request(`/api/runs/${run.id}/events?transport=poll&after=-1`))
+      .status,
+    400,
+  )
+})

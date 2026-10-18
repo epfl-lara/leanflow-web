@@ -39,8 +39,20 @@ export type PlaygroundPreparationState =
   | 'failed'
   | 'unavailable'
 
+export interface Account {
+  id: string
+  name: string
+  role: 'owner' | 'admin' | 'user'
+}
+
+export interface ProviderStatus {
+  configured: boolean
+  updatedAt?: string | null
+}
+
 export interface Session {
-  user: { id: string; name: string }
+  user: Account
+  eventTransport?: 'sse' | 'poll'
   templates: Preset[]
   models: {
     id: string

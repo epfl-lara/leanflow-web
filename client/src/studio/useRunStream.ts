@@ -9,6 +9,7 @@ import {
 import { appendRunEvents, mergeRunSnapshot } from './runStream'
 import { hydrateReasoningHistory } from './reasoningHistory'
 import { runChangePaths } from './chatTimeline'
+import { openRunEvents } from './runEventTransport'
 
 /** Follow the active project run independently of which chat or turn is open. */
 export function useRunStream(
@@ -35,7 +36,7 @@ export function useRunStream(
     const historyController = new AbortController()
     let cancelled = false,
       current: Run | null = null,
-      stream: EventSource | undefined
+      stream: ReturnType<typeof openRunEvents> | undefined
     let poll: ReturnType<typeof setInterval> | undefined,
       timer: ReturnType<typeof setTimeout> | undefined
     let pending: RunEvent[] = [],
@@ -172,7 +173,7 @@ export function useRunStream(
     }
     const connect = () => {
       if (!current || !Number.isSafeInteger(current.eventCursor)) return
-      stream = new EventSource(
+      stream = openRunEvents(
         `/api/runs/${encodeURIComponent(runId)}/events?after=${current.eventCursor}`,
       )
       stream.addEventListener('open', () => {

@@ -1,4 +1,5 @@
 import { writeModelCatalog } from './model-catalog.mjs'
+import { providerFor } from './providers.mjs'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { AgentRpc } from './rpc.mjs'
@@ -134,10 +135,10 @@ export class AgentManager {
         new Error('Prepare this project before asking Lemex to work on it.'),
         { status: 409 },
       )
-    if (!this.config.provider.LEMEX_API_KEY)
+    if (!(await providerFor(this.config, owner))?.LEMEX_API_KEY)
       throw Object.assign(
         new Error(
-          'Lemex needs a provider API key. Configure LEMEX_API_KEY on the server.',
+          'Add your Lemex API key in Assistant settings before starting Lemex.',
         ),
         { status: 503 },
       )
@@ -558,6 +559,7 @@ export class AgentManager {
         )
       }, job.maxSeconds * 1000)
     try {
+      const provider = await providerFor(this.config, job.owner)
       this.events.updateMetadata(id, { status: 'running' })
       this.#progress(
         id,
@@ -725,7 +727,7 @@ export class AgentManager {
         snapshot.root,
         ['lemex', 'app-server', '--stdio', '--strict-config'],
         {
-          env: this.config.provider,
+          env: provider,
           network: 'bridge',
           signal: active.controller.signal,
         },
@@ -746,7 +748,7 @@ export class AgentManager {
         append: (field, text, type) =>
           this.events.append(id, field, text, type),
         redact: this.config.redact,
-        secrets: [this.config.provider.LEMEX_API_KEY],
+        secrets: [provider.LEMEX_API_KEY],
         showReasoning: preferences.showReasoning !== false,
       }))
       let resolveFinished, rejectFinished

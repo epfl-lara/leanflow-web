@@ -460,8 +460,9 @@ test('fresh native RPC context keeps chat history while optional current files r
       chats.appendRun(chat.id, 'alice', old)
       const runtime = {
         home: async () => home,
-        spawn: (cwd) => {
+        spawn: (cwd, _args, options) => {
           assert.equal(cwd, candidate)
+          assert.equal(options.env.LEMEX_API_KEY, 'alice-personal-fixture-key')
           const child = new EventEmitter()
           child.stdout = new PassThrough()
           child.stderr = new PassThrough()
@@ -537,7 +538,11 @@ test('fresh native RPC context keeps chat history while optional current files r
           }),
         },
         config: {
-          provider: { LEMEX_API_KEY: 'fake-provider-secret' },
+          provider: { LEMEX_API_KEY: 'forbidden-shared-key' },
+          providerForUser: (owner) => {
+            assert.equal(owner, 'alice')
+            return { LEMEX_API_KEY: 'alice-personal-fixture-key' }
+          },
           defaultModel: DEFAULT_MODEL,
           models: catalogModels(modelCatalog, DEFAULT_MODEL),
           modelCatalog,

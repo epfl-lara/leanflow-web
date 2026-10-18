@@ -58,6 +58,9 @@ import { SearchPanel } from './SearchPanel'
 import { BooksPanel, type BookChatRequest } from './BooksPanel'
 import { LibrarySourceDialog, type SourceRequest } from './LibrarySourceDialog'
 import { SettingsModal } from './SettingsModal'
+import { Brand } from './Brand'
+import { AccountSetup } from './AccountSetup'
+import { setRunEventTransport } from './runEventTransport'
 import { FileBrowser } from './FileBrowser'
 import { CreateEntryDialog, type EntryKind } from './CreateEntryDialog'
 import { parentFolders } from './projectPaths'
@@ -105,37 +108,6 @@ const terminalJob = (job: Job) =>
     job.status,
   )
 
-function Brand() {
-  return (
-    <div className="brand">
-      <div className="brand-main">
-        <img className="brand-mark" src="/leanflow-mark.svg" alt="" />
-        <strong>LeanFlow Web</strong>
-      </div>
-      <div className="brand-links">
-        <a
-          className="brand-credit"
-          href="https://lara.epfl.ch/"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Developed by EPFL LARA
-        </a>
-        <span aria-hidden="true">·</span>
-        <a
-          className="brand-credit"
-          href="https://github.com/epfl-lara/leanflow-web"
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label="LeanFlow Web on GitHub (opens in a new tab)"
-        >
-          GitHub
-        </a>
-      </div>
-    </div>
-  )
-}
-
 function Login({ onSession }: { onSession: (session: Session) => void }) {
   const [token, setToken] = useState('')
   const [busy, setBusy] = useState(false)
@@ -147,6 +119,7 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
     try {
       await post('/api/login', { token: token.trim() })
       const session = await api<Session>('/api/session')
+      setRunEventTransport(session.eventTransport)
       markSessionRestored()
       onSession(session)
     } catch (error) {
@@ -194,9 +167,8 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
           </button>
         </form>
         <p className="login-help">
-          Use the token provided by your server administrator. For the first
-          sign-in, the owner token is in <code>.data/auth/owner.token</code> on
-          the server.
+          Use your personal token from an administrator. On your first visit,
+          connect your account with your own Lemex API key.
         </p>
       </div>
       <div className="login-art" aria-hidden="true">
@@ -563,7 +535,9 @@ export function Studio() {
   const loadSession = useCallback(async () => {
     setStartupError('')
     try {
-      setSession(await api<Session>('/api/session'))
+      const value = await api<Session>('/api/session')
+      setRunEventTransport(value.eventTransport)
+      setSession(value)
       setAuthRequired(false)
     } catch (error) {
       if (error instanceof ApiError && error.status === 401)
@@ -1593,6 +1567,19 @@ export function Studio() {
         }}
       />
     )
+  if (session && session.lemex?.configured === false && !authRequired)
+    return (
+      <AccountSetup
+        session={session}
+        onSaved={() => {
+          void loadSession()
+        }}
+        onLogout={() => {
+          setSession(null)
+          setAuthRequired(true)
+        }}
+      />
+    )
   if (!session)
     return (
       <main className="startup-screen">
@@ -1929,7 +1916,12 @@ export function Studio() {
           <span className="user-avatar">
             {session.user.name?.[0]?.toUpperCase() || 'U'}
           </span>
-          <span className="user-name">{session.user.name}</span>
+          <span
+            className="user-name"
+            title={`${session.user.name} · ${session.user.role === 'owner' ? 'Owner / admin' : session.user.role}`}
+          >
+            {session.user.name}
+          </span>
           <button
             className="icon-button"
             title={theme === 'light' ? 'Use dark theme' : 'Use light theme'}
@@ -2927,6 +2919,10 @@ export function Studio() {
       )}
       {settingsModal && (
         <SettingsModal
+          user={session.user}
+          onProviderSaved={() => {
+            void loadSession()
+          }}
           onClose={() => setSettingsModal(false)}
           onSaved={() => setNotice('Assistant settings saved')}
         />
