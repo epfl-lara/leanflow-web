@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { LeanCheckSupport } from '../lean-check.mjs'
+import { LeanCheckSupport, PROJECT_CHECK_COMMAND } from '../lean-check.mjs'
 import { sourceFingerprint } from '../source-fingerprint.mjs'
 import { EventStore, JobManager } from '../events.mjs'
 
@@ -129,6 +129,9 @@ async function checkFixture(
           await fs.writeFile(path.join(root, 'lean-toolchain'), 'changed')
         return supported
       },
+      checkProject(root, options) {
+        return this.run(root, PROJECT_CHECK_COMMAND, options)
+      },
       async run(root, args, options) {
         calls.push({ args, options })
         if (changed) await fs.writeFile(path.join(root, 'Main.lean'), 'changed')
@@ -147,13 +150,13 @@ async function checkFixture(
   return { job: events.get(job.id, 'owner'), calls }
 }
 
-test('new projects use lake check once, old releases build, and single-file checks stay lightweight', async (t) => {
+test('new projects use the project-root native checker once, old releases build, and single-file checks stay lightweight', async (t) => {
   const modern = await checkFixture(t)
   assert.equal(modern.job.status, 'completed')
   assert.equal(modern.job.checkMethod, 'lake-check')
   assert.deepEqual(
     modern.calls.map((c) => c.args),
-    [['lake', 'check']],
+    [PROJECT_CHECK_COMMAND],
   )
   assert(
     modern.calls[0].options.kernelCheck && modern.calls[0].options.freshHome,
@@ -177,7 +180,7 @@ test('kernel rejections and sandbox failures do not fall back to build-only succ
     assert.equal(checked.job.checkMethod, 'lake-check')
     assert.deepEqual(
       checked.calls.map((c) => c.args),
-      [['lake', 'check']],
+      [PROJECT_CHECK_COMMAND],
     )
     assert.match(checked.job.error, /independent Lean/)
   }
@@ -195,7 +198,7 @@ test('full-check resource failures explain export and memory limits without down
     assert.match(checked.job.error, message)
     assert.deepEqual(
       checked.calls.map((c) => c.args),
-      [['lake', 'check']],
+      [PROJECT_CHECK_COMMAND],
     )
   }
 })

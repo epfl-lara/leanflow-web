@@ -481,7 +481,7 @@ export class JobManager {
             job.id,
             'log',
             kernelCheck
-              ? 'Building and independently checking the default project targets with the pinned Lean kernel.\n'
+              ? 'Building the default targets and independently checking every project declaration and its full dependency chain with the pinned Lean kernel. Unused declarations from imported libraries are outside this check.\n'
               : project.kind === 'single-file'
                 ? 'Checking this file with the pinned Lean compiler.\n'
                 : 'This pinned Lean release does not provide lake check. Using the existing project build check.\n',
@@ -496,18 +496,14 @@ export class JobManager {
             onOutput: (text) =>
               this.events.append(job.id, 'log', text, 'activity'),
           }
-          let result = await this.runtime.run(
-            project.root,
-            kernelCheck ? ['lake', 'check'] : ['lake', 'build'],
-            kernelCheck
-              ? {
-                  ...options,
-                  kernelCheck: true,
-                  freshHome: true,
-                  cleanHome: true,
-                }
-              : options,
-          )
+          let result = kernelCheck
+            ? await this.runtime.checkProject(project.root, {
+                ...options,
+                kernelCheck: true,
+                freshHome: true,
+                cleanHome: true,
+              })
+            : await this.runtime.run(project.root, ['lake', 'build'], options)
           controller.signal.throwIfAborted()
           if (file && file.endsWith('.lean') && result.code === 0) {
             const checked = await this.runtime.run(

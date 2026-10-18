@@ -5,6 +5,12 @@ import path from 'node:path'
 export const toolchainName = (value) =>
   value.replaceAll('/', '--').replaceAll(':', '---')
 
+export const PROJECT_CHECK_COMMAND = Object.freeze([
+  'python3',
+  '-I',
+  '/opt/leanflow-project-check/run.py',
+])
+
 // Cache capabilities, never proof verdicts. A changed installation or worker
 // image must be probed again, including release candidates with backports.
 export class LeanCheckSupport {

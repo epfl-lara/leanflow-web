@@ -9,7 +9,11 @@ import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { PreparedPresetCache } from './prepared-presets.mjs'
 import { fileURLToPath } from 'node:url'
-import { LeanCheckSupport, toolchainName } from './lean-check.mjs'
+import {
+  LeanCheckSupport,
+  PROJECT_CHECK_COMMAND,
+  toolchainName,
+} from './lean-check.mjs'
 import { createTexArtifactReceiver } from './tex-artifacts.mjs'
 import {
   SharedDependencyCache,
@@ -757,6 +761,18 @@ export class Runtime {
     return this.leanCheckSupport.supported(this.#root(root), options)
   }
 
+  checkProject(root, options = {}) {
+    return this.run(root, PROJECT_CHECK_COMMAND, {
+      ...options,
+      kernelCheck: true,
+      readOnlyWorkspace: true,
+      writeLakeCache: true,
+      freshHome: true,
+      cleanHome: true,
+      network: 'none',
+    })
+  }
+
   #root(root) {
     const actual = fs.realpathSync(root)
     const owned = fs.realpathSync(this.dataDir)
@@ -992,11 +1008,13 @@ export class Runtime {
       throw new Error('Worker mount options must be booleans')
     if (writeLakeCache && !readOnlyWorkspace)
       throw new Error('A writable Lake cache requires a read-only workspace')
+    const projectCheck =
+      args.length === PROJECT_CHECK_COMMAND.length &&
+      args.every((value, index) => value === PROJECT_CHECK_COMMAND[index])
     if (
       kernelCheck &&
-      (args.length !== 2 ||
-        args[0] !== 'lake' ||
-        args[1] !== 'check' ||
+      ((!projectCheck &&
+        (args.length !== 2 || args[0] !== 'lake' || args[1] !== 'check')) ||
         !readOnlyWorkspace ||
         !writeLakeCache ||
         !freshHome ||
@@ -1113,6 +1131,11 @@ export class Runtime {
       )
       if (this.apparmorEnabled)
         dockerArgs.push('--security-opt', 'apparmor=leanflow-kernel-check')
+      if (projectCheck)
+        dockerArgs.push(
+          '--mount',
+          `type=bind,src=${path.join(projectDir, 'server/lean-project-check')},dst=/opt/leanflow-project-check,readonly`,
+        )
     }
     if (repository)
       dockerArgs.push(

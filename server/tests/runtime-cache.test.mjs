@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { Runtime } from '../runtime.mjs'
+import { PROJECT_CHECK_COMMAND } from '../lean-check.mjs'
 
 async function fixture(t) {
   const directory = await fs.mkdtemp(
@@ -97,6 +98,55 @@ test('nested sandbox permissions apply only to isolated lake check workers', asy
   assert(!kernel.includes('--privileged') && !kernel.includes('--cap-add'))
   const normal = JSON.parse((await runtime.run(root, ['true'])).stdout)
   assert(!normal.includes('apparmor=leanflow-kernel-check'))
+  assert(!normal.includes('systempaths=unconfined'))
+})
+
+test('project checker mounts only the trusted adapter and forces an offline fresh read-only worker', async (t) => {
+  const { runtime, root } = await fixture(t)
+  const argv = JSON.parse(
+    (await runtime.checkProject(root, { network: 'bridge', freshHome: false }))
+      .stdout,
+  )
+  assert.deepEqual(
+    argv.slice(-PROJECT_CHECK_COMMAND.length),
+    PROJECT_CHECK_COMMAND,
+  )
+  assert.equal(argv[argv.indexOf('--network') + 1], 'none')
+  assert(
+    mounts(argv).some((mount) =>
+      mount.endsWith(
+        'server/lean-project-check,dst=/opt/leanflow-project-check,readonly',
+      ),
+    ),
+  )
+  assert(
+    mounts(argv).some((mount) => mount.endsWith('dst=/workspace,readonly')),
+  )
+  assert(mounts(argv).some((mount) => mount.endsWith('dst=/workspace/.lake')))
+  assert(argv.includes('systempaths=unconfined'))
+  const options = {
+    ...cacheOptions,
+    freshHome: true,
+    cleanHome: true,
+    kernelCheck: true,
+  }
+  for (const command of [
+    [...PROJECT_CHECK_COMMAND, 'extra'],
+    ['python3', '-I', '/workspace/.lake/forged.py'],
+    ['lake', 'check', '--inadvisably-no-sandbox'],
+  ])
+    await assert.rejects(
+      runtime.run(root, command, options),
+      /Kernel checking requires/,
+    )
+  const normal = JSON.parse(
+    (await runtime.run(root, PROJECT_CHECK_COMMAND)).stdout,
+  )
+  assert(
+    !mounts(normal).some((mount) =>
+      mount.includes('/opt/leanflow-project-check'),
+    ),
+  )
   assert(!normal.includes('systempaths=unconfined'))
 })
 
