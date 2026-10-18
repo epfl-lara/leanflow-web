@@ -3,6 +3,7 @@ import test from 'node:test'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import http from 'node:http'
 import { EventEmitter, once } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { WebSocket } from 'ws'
@@ -18,7 +19,8 @@ test('authenticated editor blocks executable widgets while goals, hover and diag
   const child = new EventEmitter()
   for (const stream of ['stdin', 'stdout', 'stderr'])
     child[stream] = new PassThrough()
-  let killed = false
+  let killed = false,
+    spawned = 0
   child.kill = () => {
     if (killed) return
     killed = true
@@ -57,6 +59,7 @@ test('authenticated editor blocks executable widgets while goals, hover and diag
       templates: () => [],
       spawn: (_root, args) => {
         assert.deepEqual(args, ['lake', 'serve', '--'])
+        spawned++
         return child
       },
     },
@@ -101,12 +104,59 @@ test('authenticated editor blocks executable widgets while goals, hover and diag
     body: JSON.stringify({ token }),
   })
   assert.equal(login.status, 200)
+  const cookie = login.headers.get('set-cookie').split(';')[0]
+  for (const [expected, endpoint, headers] of [
+    [401, project.id, { Origin: base }],
+    [403, project.id, { Cookie: cookie, Origin: 'https://attacker.invalid' }],
+    [404, 'missing-widget-project', { Cookie: cookie, Origin: base }],
+  ]) {
+    const response = await new Promise((resolve, reject) => {
+      const request = http.request(
+        base + '/websocket/' + endpoint,
+        {
+          headers: {
+            Connection: 'Upgrade',
+            Upgrade: 'websocket',
+            'Sec-WebSocket-Version': '13',
+            'Sec-WebSocket-Key': 'MTIzNDU2Nzg5MDEyMzQ1Ng==',
+            ...headers,
+          },
+          timeout: 2000,
+        },
+        (response) => {
+          let bytes = 0
+          response.on('data', (chunk) => (bytes += chunk.length))
+          response.once('end', () =>
+            resolve({
+              status: response.statusCode,
+              headers: response.headers,
+              bytes,
+            }),
+          )
+        },
+      )
+      request.on('upgrade', (_response, socket) => {
+        socket.destroy()
+        reject(new Error('A refused editor connection was upgraded'))
+      })
+      request.once('error', reject)
+      request.once('timeout', () =>
+        request.destroy(new Error('Upgrade refusal timed out')),
+      )
+      request.end()
+    })
+    assert.equal(response.status, expected)
+    assert.equal(response.headers['content-length'], '0')
+    assert.equal(response.headers['cache-control'], 'no-store')
+    assert.equal(response.bytes, 0)
+  }
+  assert.equal(spawned, 0, 'Refused upgrades cannot start a worker')
   const messages = []
   socket = new WebSocket(
     base.replace('http:', 'ws:') + '/websocket/' + project.id,
     {
       headers: {
-        Cookie: login.headers.get('set-cookie').split(';')[0],
+        Cookie: cookie,
         Origin: base,
       },
     },

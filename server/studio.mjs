@@ -1207,7 +1207,9 @@ export async function createStudio({
       req.url || '',
     )
     const reject = (status) => {
-      socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`)
+      socket.end(
+        `HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\nCache-Control: no-store\r\n\r\n`,
+      )
     }
     if (!user) return reject('401 Unauthorized')
     if (!sameOrigin(req, origin)) return reject('403 Forbidden')
