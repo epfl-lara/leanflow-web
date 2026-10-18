@@ -33,6 +33,9 @@ const active = {
   liveEdits: true,
 }
 const fixture = await chatBrowserFixture({
+  launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
+    ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
+    : {},
   session: {
     user: { id: 'naming-owner', name: 'Naming owner' },
     templates: [],
@@ -163,7 +166,7 @@ async function holdSuggestion() {
       }
     })
   await page
-    .getByRole('button', { name: 'Suggest with DeepSeek', exact: true })
+    .getByRole('button', { name: 'Suggest a name', exact: true })
     .click()
   await until(async () => !!release, 'held title suggestion')
   return release
@@ -260,7 +263,7 @@ try {
   await openRename()
   const beforeSuggestion = patches().length
   await page
-    .getByRole('button', { name: 'Suggest with DeepSeek', exact: true })
+    .getByRole('button', { name: 'Suggest a name', exact: true })
     .click()
   await until(
     async () =>
@@ -287,7 +290,7 @@ try {
       503,
     )
   await page
-    .getByRole('button', { name: 'Suggest with DeepSeek', exact: true })
+    .getByRole('button', { name: 'Suggest a name', exact: true })
     .click()
   await until(
     async () =>
@@ -315,7 +318,7 @@ try {
   await until(
     async () =>
       (await page
-        .getByRole('button', { name: 'Suggest with DeepSeek', exact: true })
+        .getByRole('button', { name: 'Suggest a name', exact: true })
         .count()) === 1,
     'suggestion finished after manual edit',
   )
@@ -398,7 +401,7 @@ try {
   await openRename()
   assert.equal(
     await page
-      .getByRole('button', { name: 'Suggest with DeepSeek', exact: true })
+      .getByRole('button', { name: 'Suggest a name', exact: true })
       .count(),
     0,
   )

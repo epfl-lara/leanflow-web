@@ -165,12 +165,12 @@ function ChatRenameForm({
           onClick={() => void suggest()}
         >
           <Icon name="bot" size={14} />
-          {suggesting ? 'Suggesting…' : 'Suggest with DeepSeek'}
+          {suggesting ? 'Suggesting…' : 'Suggest a name'}
         </button>
       )}
       {suggesting && (
         <span className="chat-controls-sr-only" role="status">
-          Suggesting a chat name with DeepSeek.
+          Suggesting a chat name.
         </span>
       )}
       {notice && (

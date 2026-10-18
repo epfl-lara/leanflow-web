@@ -3,6 +3,7 @@ import { providerFor } from './providers.mjs'
 import { providerToml } from './provider-endpoint.mjs'
 import { modelConfigFor } from './model-discovery.mjs'
 import { modelContextConfig } from './model-catalog.mjs'
+import { modeReasoningEffort } from '../shared/mode-reasoning.mjs'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { AgentRpc } from './rpc.mjs'
@@ -209,8 +210,8 @@ export class AgentManager {
         { status: 400 },
       )
     const effort =
-      input.effort === undefined || input.effort === null
-        ? selectedModel.defaultReasoningEffort || null
+      input.effort === undefined
+        ? modeReasoningEffort(input.mode, selectedModel)
         : input.effort
     if (
       effort !== null &&

@@ -79,8 +79,11 @@ export function ChatOptions({
             <label htmlFor={effortId}>Reasoning effort</label>
             <HelpTip label="Reasoning effort">
               Choose how much reasoning the model uses for the next run. Higher
-              levels can take longer. Available levels depend on the selected
-              model; Default uses that model’s default.
+              levels can take longer. Ask &amp; Search starts at high; Proofs,
+              Formalize, and Optimize start at max when supported. Otherwise,
+              the model’s default is used. Your choice is remembered separately
+              for each mode and model while this assistant is open. Default lets
+              the provider choose.
             </HelpTip>
           </div>
           <select

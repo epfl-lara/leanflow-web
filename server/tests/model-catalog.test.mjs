@@ -103,7 +103,7 @@ test('explicit server catalog and model overrides remain available', async (t) =
   )
 })
 
-test('run defaults use max; explicit selections are preserved and unsupported levels fail before execution', async (t) => {
+test('proof run defaults use max; explicit selections and provider-default null are preserved', async (t) => {
   const { data, options } = await fixture(t)
   const config = await loadConfig(data, options)
   config.provider = { LEMEX_API_KEY: 'fixture' }
@@ -136,7 +136,7 @@ test('run defaults use max; explicit selections are preserved and unsupported le
   ].entries()) {
     const job = await manager.start('alice', `p${index}`, { ...input, effort })
     assert.equal(job.model, DEFAULT_MODEL)
-    assert.equal(job.effort, effort || 'max')
+    assert.equal(job.effort, effort === undefined ? 'max' : effort)
   }
   for (const effort of ['medium', 'ultra', 'unknown']) {
     await assert.rejects(

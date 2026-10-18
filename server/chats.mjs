@@ -1,6 +1,10 @@
 import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
+import {
+  sampleChatTitleMessages,
+  truncateTitleContext,
+} from './chat-titles.mjs'
 
 function fail(message, status = 400) {
   throw Object.assign(new Error(message), { status, statusCode: status })
@@ -38,12 +42,127 @@ function promptTitle(prompt) {
   return Array.from(clean).slice(0, 80).join('') || 'New chat'
 }
 
+function titleFile(value) {
+  if (
+    typeof value !== 'string' ||
+    !value ||
+    value.length > 300 ||
+    value.startsWith('/') ||
+    value.includes('\\') ||
+    /\p{Cc}/u.test(value) ||
+    value.split('/').some((part) => part === '..' || part === '.') ||
+    /^[A-Za-z]:/.test(value)
+  )
+    return undefined
+  return value
+}
+
+function titleTaskContext(run, redact) {
+  const currentFile = titleFile(
+    typeof run.currentFile === 'string'
+      ? redact(run.currentFile)
+      : run.currentFile,
+  )
+  const target = run.proofTarget
+  const targetFile = titleFile(
+    typeof target?.path === 'string' ? redact(target.path) : target?.path,
+  )
+  if (!currentFile && !targetFile) return null
+  const context = {}
+  if (
+    [
+      'ask',
+      'search',
+      'proofs',
+      'repair',
+      'prove',
+      'formalize',
+      'optimize',
+    ].includes(run.mode)
+  )
+    context.mode = run.mode
+  if (currentFile && currentFile !== targetFile)
+    context.currentFile = currentFile
+  if (targetFile) {
+    const proofTarget = { path: targetFile }
+    if (Number.isSafeInteger(target.startLine) && target.startLine > 0)
+      proofTarget.startLine = target.startLine
+    if (
+      Number.isSafeInteger(target.endLine) &&
+      target.endLine >= target.startLine
+    )
+      proofTarget.endLine = target.endLine
+    // A declaration header from an already captured selection is sufficient to
+    // distinguish unnamed examples. Do not load files or send the proof body.
+    if (typeof target.source === 'string') {
+      const declaration = redact(target.source).match(
+        /\b(?:theorem|lemma|def|abbrev|example|instance)\b[\s\S]*/u,
+      )?.[0]
+      if (declaration) {
+        const header = declaration.split(/:=|\bwhere\b|\n\s*\|/u)[0].trim()
+        if (header) proofTarget.statement = truncateTitleContext(header, 320)
+      }
+    }
+    // Keep the exact identifying name last so it survives middle truncation of
+    // a long prompt, even in the eight-message conversation sample.
+    if (typeof target.name === 'string' && target.name.trim())
+      proofTarget.name = truncateTitleContext(redact(target.name).trim(), 300)
+    context.proofTarget = proofTarget
+  }
+  return Object.keys(context).length ? context : null
+}
+
+function titleUserMessage(text, run, redact) {
+  if (typeof text !== 'string' || !text.trim()) return null
+  const request = redact(text).trim()
+  const context = titleTaskContext(run, redact)
+  return {
+    role: 'user',
+    content: context
+      ? `${request}\n\nTask context (source data):\n${JSON.stringify(context)}`
+      : request,
+  }
+}
+
+function titleRunMessages(run, redact) {
+  const messages = []
+  const opening = titleUserMessage(run.prompt, run, redact)
+  if (opening) messages.push(opening)
+  // Accepted in-run steering can contain the latest question or theorem even
+  // when no new top-level run was created. Pending and failed updates are not
+  // part of the conversation the assistant has acted on.
+  for (const followup of run.followups || []) {
+    if (followup?.status !== 'accepted') continue
+    const message = titleUserMessage(
+      followup.text,
+      {
+        mode: run.mode,
+        ...(followup.currentFileUnavailable
+          ? {}
+          : { currentFile: followup.currentFile }),
+        proofTarget: followup.proofTarget,
+      },
+      redact,
+    )
+    if (message) messages.push(message)
+  }
+  if (typeof run.message === 'string' && run.message.trim())
+    messages.push({ role: 'assistant', content: redact(run.message).trim() })
+  return messages
+}
+
 /** Chat metadata stores run references; EventStore retains the actual transcripts. */
 export class ChatStore {
-  constructor({ dataDir, workspaces, events, titleGenerator }) {
+  constructor({
+    dataDir,
+    workspaces,
+    events,
+    titleGenerator,
+    redact = String,
+  }) {
     if (!dataDir || !workspaces || !events)
       throw new Error('ChatStore requires dataDir, workspaces, and events')
-    Object.assign(this, { workspaces, events, titleGenerator })
+    Object.assign(this, { workspaces, events, titleGenerator, redact })
     this.titleTasks = new Map()
     this.titleQueue = []
     this.titleActive = 0
@@ -226,34 +345,37 @@ export class ChatStore {
       return Promise.reject(
         Object.assign(
           new Error(
-            'DeepSeek chat naming is unavailable. You can still enter a name manually.',
+            'Chat naming is unavailable. You can still enter a name manually.',
           ),
           { status: 503 },
         ),
       )
     const { runs } = this.history(id, owner)
-    const selected = runs.length > 3 ? [runs[0], ...runs.slice(-2)] : runs
-    const messages = []
-    let remaining = 8000
-    for (const run of selected) {
-      for (const [role, value] of [
-        ['user', run.prompt],
-        ['assistant', run.message],
-      ]) {
-        if (typeof value !== 'string' || !value.trim() || remaining <= 0)
-          continue
-        const content = value.trim().slice(0, Math.min(2000, remaining))
-        messages.push({ role, content })
-        remaining -= content.length
+    // history() intentionally exposes only the most recent 100 runs. Naming
+    // also retains the authoritative opening request of an older conversation.
+    const first = this.db
+      .prepare(
+        'SELECT run FROM chat_runs WHERE chat=? ORDER BY position LIMIT 1',
+      )
+      .get(id)
+    if (first && !runs.some((run) => run.id === first.run)) {
+      try {
+        const run = this.events.getMetadata(first.run, owner)
+        const chat = this.#owned(id, owner)
+        if (run.projectId === chat.projectId && run.kind === 'agent')
+          runs.unshift(run)
+      } catch (error) {
+        if (error.status !== 404) return Promise.reject(error)
       }
     }
-    if (!messages.length)
-      return Promise.reject(
-        Object.assign(
-          new Error('Send a message before asking DeepSeek to name this chat.'),
-          { status: 400 },
-        ),
+    let messages
+    try {
+      messages = sampleChatTitleMessages(
+        runs.flatMap((run) => titleRunMessages(run, this.redact)),
       )
+    } catch (error) {
+      return Promise.reject(error)
+    }
     const existing = this.titleTasks.get(id)
     if (existing) return existing.promise
     if (this.titleQueue.length >= 16)
@@ -367,7 +489,8 @@ export class ChatStore {
       !chat.explicitTitle &&
       this.titleGenerator?.available &&
       !this.closed
-    if (count === 0 && !chat.explicitTitle) chat.title = promptTitle(run.prompt)
+    if (count === 0 && !chat.explicitTitle)
+      chat.title = promptTitle(this.redact(run.prompt || ''))
     if (autoName) {
       chat.titleStatus = 'pending'
       chat.titleRequestId = randomUUID()

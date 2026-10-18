@@ -582,7 +582,7 @@ test('fresh native RPC context keeps chat history while optional current files r
       assert.equal(
         requests.find((request) => request.method === 'turn/start').params
           .effort,
-        'max',
+        'high',
       )
       assert.deepEqual(
         JSON.parse(

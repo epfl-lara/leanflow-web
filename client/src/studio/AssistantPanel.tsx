@@ -42,6 +42,10 @@ import type {
 import './chat-workbench.css'
 import { texLanguage } from './texBuilds'
 import { messageId } from './messageId'
+import {
+  reasoningPreferenceKey,
+  selectedReasoningEffort,
+} from '../../../shared/mode-reasoning.mjs'
 
 const chronological = (values: Run[]) =>
   [...values].sort((a, b) =>
@@ -112,7 +116,7 @@ export function AssistantPanel({
   const [model, setModel] = useState(
     session.defaultModel || session.models[0]?.id || '',
   )
-  const [efforts, setEfforts] = useState<Record<string, string>>({}),
+  const [efforts, setEfforts] = useState<Record<string, string | null>>({}),
     [liveEdits, setLiveEdits] = useState(true),
     [searchLiveEdits, setSearchLiveEdits] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({}),
@@ -176,9 +180,10 @@ export function AssistantPanel({
     !stoppingIds.includes(activeRun!.id)
   const hasActive = !!activeRun || stoppingIds.length > 0
   const selectedModel = session.models.find((item) => item.id === model)
-  const effort = Object.hasOwn(efforts, model)
-    ? efforts[model]
-    : selectedModel?.defaultReasoningEffort || ''
+  const providerScope =
+    typeof session.lemex?.baseUrl === 'string' ? session.lemex.baseUrl : 'rcp'
+  const effort =
+    selectedReasoningEffort(efforts, providerScope, selectedModel, mode) || ''
   const effortAvailable =
     !effort ||
     selectedModel?.reasoningEfforts?.some((level) => level.id === effort)
@@ -501,8 +506,9 @@ export function AssistantPanel({
     }
   }, [loadChats, loadProject, openChat, chatSelectionKey])
   useEffect(() => {
-    // Each project opens at the server default; model/effort changes apply
-    // only while this assistant is open.
+    // Each project opens at the server model and workflow effort defaults.
+    // Deliberate choices last while this assistant is open; old browser-stored
+    // per-model defaults cannot be distinguished from explicit choices.
     setModel(session.defaultModel || session.models[0]?.id || '')
     setEfforts({})
     setLiveEdits(true)
@@ -885,7 +891,10 @@ export function AssistantPanel({
         onModel={setModel}
         effort={effort}
         onEffort={(value) =>
-          setEfforts((previous) => ({ ...previous, [model]: value }))
+          setEfforts((previous) => ({
+            ...previous,
+            [reasoningPreferenceKey(providerScope, model, mode)]: value || null,
+          }))
         }
         liveEdits={currentLiveEdits}
         onLiveEdits={mode === 'search' ? setSearchLiveEdits : setLiveEdits}

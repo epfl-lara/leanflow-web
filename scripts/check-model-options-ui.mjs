@@ -27,6 +27,9 @@ const catalog = rcpModelCatalog({
   ),
 })
 const fixture = await chatBrowserFixture({
+  launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
+    ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
+    : {},
   session: {
     user: { id: 'model-options-user', name: 'Fixture' },
     templates: [],
@@ -68,19 +71,19 @@ async function openOptions() {
 }
 try {
   await page.addInitScript(
-    ({ projectId }) => {
+    ({ projectId, defaultModel }) => {
       const key = `lemex-chat-options:model-options-user:${projectId}`
       if (!localStorage.getItem(key))
         localStorage.setItem(
           key,
           JSON.stringify({
             model: 'Qwen/Qwen3.8-27B',
-            efforts: { ['deepseek-ai/DeepSeek-V4.1-Flash']: 'low' },
+            efforts: { [defaultModel]: 'max' },
             liveEdits: false,
           }),
         )
     },
-    { projectId },
+    { projectId, defaultModel: DEFAULT_MODEL },
   )
   state.onCreateRun = ({ chat, body, respond }) => {
     const run = {
@@ -119,6 +122,60 @@ try {
   )
   report.checks.push(
     'DeepSeek max opens even with an old saved model/effort; edit preference is preserved',
+  )
+
+  for (const [name, expected] of [
+    ['Ask & Search', 'high'],
+    ['Proofs', 'max'],
+    ['Formalize', 'max'],
+    ['Optimize', 'max'],
+  ]) {
+    await page
+      .locator('.mode-tabs')
+      .getByRole('button', { name, exact: true })
+      .click()
+    assert.equal(await effort.inputValue(), expected)
+  }
+  await page
+    .locator('.mode-tabs')
+    .getByRole('button', { name: 'Ask & Search', exact: true })
+    .click()
+  await effort.selectOption('low')
+  await page
+    .locator('.mode-tabs')
+    .getByRole('button', { name: 'Proofs', exact: true })
+    .click()
+  assert.equal(await effort.inputValue(), 'max')
+  await page
+    .locator('.mode-tabs')
+    .getByRole('button', { name: 'Ask & Search', exact: true })
+    .click()
+  assert.equal(await effort.inputValue(), 'low')
+  await effort.selectOption('')
+  await page.getByLabel('Message Lemex').fill('Use the provider default.')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await until(
+    () => state.runs.some((run) => run.prompt === 'Use the provider default.'),
+    'provider default request',
+  )
+  assert.equal(state.runs.at(-1).effort, null)
+  await page
+    .locator('.mode-tabs')
+    .getByRole('button', { name: 'Formalize', exact: true })
+    .click()
+  assert.equal(await effort.inputValue(), 'max')
+  await page
+    .locator('.mode-tabs')
+    .getByRole('button', { name: 'Ask & Search', exact: true })
+    .click()
+  assert.equal(await effort.inputValue(), '')
+  await effort.selectOption('high')
+  await page
+    .locator('.mode-tabs')
+    .getByRole('button', { name: 'Proofs', exact: true })
+    .click()
+  report.checks.push(
+    'Ask & Search starts high and the other three modes start max; deliberate per-mode choices and provider-default null are preserved',
   )
 
   assert.equal(
@@ -179,6 +236,10 @@ try {
   await model.selectOption('Qwen/Qwen3.8-27B')
   assert.equal(await effort.inputValue(), 'medium')
   assert.deepEqual(await levels(), ['', 'none', 'low', 'medium', 'xhigh'])
+  await model.selectOption(DEFAULT_MODEL)
+  assert.equal(await effort.inputValue(), 'low')
+  await model.selectOption('Qwen/Qwen3.8-27B')
+  assert.equal(await effort.inputValue(), 'medium')
   await model.selectOption('zai-org/GLM-5.3-Flash')
   assert.equal(await effort.inputValue(), 'max')
   assert.deepEqual(await levels(), ['', 'low', 'high', 'max'])

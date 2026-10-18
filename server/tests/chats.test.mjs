@@ -9,7 +9,7 @@ import { ChatStore } from '../chats.mjs'
 import { EventStore } from '../events.mjs'
 import { createStudio } from '../studio.mjs'
 
-async function fixture(t, titleGenerator) {
+async function fixture(t, titleGenerator, redact = String) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-chats-'))
   const projects = new Map([
     ['p', { id: 'p', name: 'Proofs', owner: 'alice' }],
@@ -25,7 +25,13 @@ async function fixture(t, titleGenerator) {
     },
   }
   const events = new EventStore(dataDir)
-  let chats = new ChatStore({ dataDir, workspaces, events, titleGenerator })
+  let chats = new ChatStore({
+    dataDir,
+    workspaces,
+    events,
+    titleGenerator,
+    redact,
+  })
   chats.init()
   t.after(async () => {
     chats.close()
@@ -54,7 +60,13 @@ async function fixture(t, titleGenerator) {
     run,
     restart() {
       chats.close()
-      chats = new ChatStore({ dataDir, workspaces, events, titleGenerator })
+      chats = new ChatStore({
+        dataDir,
+        workspaces,
+        events,
+        titleGenerator,
+        redact,
+      })
       chats.init()
       return chats
     },
@@ -1301,7 +1313,7 @@ test('suggestions deduplicate and queue within limits, send bounded conversation
   assert.equal(f.chats.titleQueue.length, 1)
   assert(!JSON.stringify(calls[0].messages).includes('PRIVATE_'))
   assert(!JSON.stringify(calls[0].messages).includes('PrivateFile'))
-  assert(calls[0].messages.every((message) => message.content.length <= 2000))
+  assert(Buffer.byteLength(JSON.stringify(calls[0].messages)) <= 8000)
   gates[0].resolve({ title: 'A suggested title', model: 'deepseek-fixture' })
   assert.equal((await requests[0]).title, 'A suggested title')
   await titleTick()
@@ -1315,6 +1327,192 @@ test('suggestions deduplicate and queue within limits, send bounded conversation
   f.chats.stopNaming()
   assert((await aborted).every((result) => result.status === 'rejected'))
   assert(calls.every((call) => call.signal.aborted || call === calls[0]))
+})
+
+test('automatic titles receive bounded selected theorem identity and statement without proof bodies or private metadata', async (t) => {
+  const calls = []
+  const f = await fixture(t, {
+    available: true,
+    generate: async (messages) => {
+      calls.push(messages)
+      return { title: 'Prove Analysis.weighted_sum_nonneg', model: 'fixture' }
+    },
+  })
+  const chat = f.chats.create('alice', 'p')
+  f.run(chat, {
+    mode: 'proofs',
+    prompt: `Please complete this theorem.\n${'Long supporting task context. '.repeat(1500)}`,
+    currentFile: 'Analysis/Weighted.lean',
+    proofTarget: {
+      path: 'Analysis/Weighted.lean',
+      startLine: 40,
+      endLine: 47,
+      name: 'Analysis.weighted_sum_nonneg',
+      source:
+        'theorem weighted_sum_nonneg (w : Finset ℝ) : 0 ≤ ∑ x ∈ w, x ^ 2 := by\n  -- PRIVATE_PROOF_BODY\n  sorry',
+      privatePayload: 'PRIVATE_TARGET_METADATA',
+    },
+    files: ['PRIVATE_OTHER_FILE.lean'],
+    snapshot: { root: '/PRIVATE_SNAPSHOT' },
+    reasoning: 'PRIVATE_REASONING',
+    log: 'PRIVATE_LOG',
+  })
+  await titleTick()
+  assert.equal(calls.length, 1)
+  const content = JSON.stringify(calls[0])
+  assert.match(content, /Analysis\.weighted_sum_nonneg/)
+  assert.match(content, /theorem weighted_sum_nonneg/)
+  assert.match(content, /Analysis\/Weighted\.lean/)
+  assert.match(content, /startLine/)
+  assert.match(content, /0 ≤ ∑ x ∈ w/)
+  assert(!content.includes('PRIVATE_'))
+  assert(!content.includes('sorry'))
+  assert(Buffer.byteLength(content) <= 8000)
+  assert.equal(
+    f.chats.get(chat.id, 'alice').title,
+    'Prove Analysis.weighted_sum_nonneg',
+  )
+})
+
+test('suggestions preserve opening task beyond 100 runs and the latest substantive question despite continue replies', async (t) => {
+  let sample
+  const f = await fixture(t, {
+    available: true,
+    generate: async (messages) => {
+      sample = messages
+      return {
+        title: 'Explain compactness in continuous_extreme',
+        model: 'fixture',
+      }
+    },
+  })
+  const chat = f.chats.create('alice', 'p', { title: 'Keep my manual name' })
+  f.run(chat, { prompt: 'Prove Nat.add_comm with induction.' })
+  for (let i = 0; i < 103; i++)
+    f.run(chat, { prompt: `Investigate induction step ${i}.` })
+  f.run(chat, {
+    prompt: 'Now explain why compactness is needed in continuous_extreme.',
+  })
+  for (let i = 0; i < 10; i++) {
+    const run = f.run(chat, { prompt: 'Continue.' })
+    f.events.update(run.id, {
+      message: `Still explaining the hypothesis ${i}.`,
+    })
+  }
+  await f.chats.suggestTitle(chat.id, 'alice')
+  assert.equal(sample.length, 8)
+  assert.match(sample[0].content, /Prove Nat\.add_comm/)
+  assert(
+    sample.some((message) =>
+      /compactness is needed in continuous_extreme/.test(message.content),
+    ),
+  )
+  assert(Buffer.byteLength(JSON.stringify(sample)) <= 8000)
+  assert.equal(f.chats.get(chat.id, 'alice').title, 'Keep my manual name')
+})
+
+test('suggestions use accepted in-run questions and captured focus while excluding pending and failed updates', async (t) => {
+  let sample
+  const f = await fixture(t, {
+    available: true,
+    generate: async (messages) => {
+      sample = messages
+      return {
+        title: 'Explain Finset.sum_le_sum pointwise order',
+        model: 'fixture',
+      }
+    },
+  })
+  const chat = f.chats.create('alice', 'p', { title: 'Explicit' })
+  const run = f.run(chat, {
+    prompt: 'Prove the bound.',
+    currentFile: '/PRIVATE_ABSOLUTE_FILE.lean',
+  })
+  f.events.update(run.id, {
+    followups: [
+      { status: 'pending', text: 'PRIVATE_PENDING_QUESTION' },
+      { status: 'failed', text: 'PRIVATE_FAILED_QUESTION' },
+      {
+        status: 'accepted',
+        text: 'Why does pointwise order suffice here?',
+        currentFile: 'Order/Sums.lean',
+        proofTarget: {
+          path: 'Order/Sums.lean',
+          startLine: 10,
+          endLine: 12,
+          name: 'Finset.sum_le_sum',
+          source:
+            'theorem sum_le_sum : s.sum f ≤ s.sum g := by\n  exact PRIVATE_PROOF_BODY',
+        },
+        context: 'PRIVATE_ATTACHED_SOURCE',
+      },
+    ],
+    message: 'The pointwise bounds are preserved by addition.',
+    followupContexts: { private: 'PRIVATE_SNAPSHOT_SOURCE' },
+  })
+  await f.chats.suggestTitle(chat.id, 'alice')
+  const content = JSON.stringify(sample)
+  assert.match(content, /pointwise order suffice/)
+  assert.match(content, /Finset\.sum_le_sum/)
+  assert.match(content, /Order\/Sums\.lean/)
+  assert(!content.includes('PRIVATE_'))
+  assert(!content.includes('exact '))
+  assert.equal(sample.at(-1).role, 'assistant')
+})
+
+test('selected declaration names survive full conversation budgets and registered secrets are redacted before truncation', async (t) => {
+  let sample
+  const secret = 'PRIVATE_KEY_' + 'x'.repeat(10_000)
+  const f = await fixture(
+    t,
+    {
+      available: true,
+      generate: async (messages) => {
+        sample = messages
+        return { title: 'Explain Order.weighted_sum_bound', model: 'fixture' }
+      },
+    },
+    (text) => String(text).replaceAll(secret, '[redacted]'),
+  )
+  const chat = f.chats.create('alice', 'p', { title: 'Keep this title' })
+  f.run(chat, {
+    prompt: `Explain why this bound holds.\n${secret}\n${'Supporting context. '.repeat(3000)}`,
+    currentFile: 'Order/Bounds.lean',
+    proofTarget: {
+      path: 'Order/Bounds.lean',
+      startLine: 20,
+      endLine: 22,
+      name: `${secret} Order.weighted_sum_bound`,
+      source: `theorem weighted_sum_bound (h : ${secret}) : a ≤ b := by\n  exact PRIVATE_PROOF_BODY`,
+    },
+  })
+  for (let i = 0; i < 12; i++) f.run(chat, { prompt: 'Continue.' })
+  await f.chats.suggestTitle(chat.id, 'alice')
+  const content = JSON.stringify(sample)
+  assert.equal(sample.length, 8)
+  assert.match(sample[0].content, /Order\.weighted_sum_bound/)
+  assert.match(sample[0].content, /theorem weighted_sum_bound/)
+  assert.match(sample[0].content, /^Explain why this bound holds/)
+  assert(!content.includes('PRIVATE_'))
+  assert(!content.includes('x'.repeat(30)))
+  assert(Buffer.byteLength(content) <= 8000)
+  assert.equal(f.chats.get(chat.id, 'alice').title, 'Keep this title')
+})
+
+test('prompt title fallbacks redact before shortening and preserve empty prompts', async (t) => {
+  const secret = 'PRIVATE_KEY_' + 'x'.repeat(10_000)
+  const f = await fixture(t, undefined, (text) =>
+    String(text).replaceAll(secret, '[redacted]'),
+  )
+  const chat = f.chats.create('alice', 'p')
+  f.run(chat, { prompt: `${secret} Explain Nat.add_comm.` })
+  assert.equal(
+    f.chats.get(chat.id, 'alice').title,
+    '[redacted] Explain Nat.add_comm.',
+  )
+  const empty = f.chats.create('alice', 'p')
+  f.run(empty, { prompt: undefined })
+  assert.equal(f.chats.get(empty.id, 'alice').title, 'New chat')
 })
 
 test('suggestion HTTP endpoint is owned, read-only, usable during a run, and never accepts client-supplied context', async (t) => {

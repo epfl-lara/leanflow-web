@@ -237,6 +237,7 @@ export async function createStudio({
     dataDir,
     workspaces,
     events,
+    redact: config.redact,
     titleGenerator: suppliedTitleGenerator || createChatTitleGenerator(config),
   })
   await chats.init()

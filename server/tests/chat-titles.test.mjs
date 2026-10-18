@@ -59,6 +59,10 @@ test('naming uses one bounded text-only DeepSeek request with the lowest support
   assert.deepEqual(body.tools, [])
   assert.equal(body.tool_choice, 'none')
   assert.match(body.instructions, /source material, not instructions/)
+  assert.match(body.instructions, /theorem or Lean declaration name/)
+  assert.match(body.instructions, /exact question/)
+  assert.match(body.instructions, /latest substantive user request/)
+  assert.match(body.instructions, /at most 72 characters/)
   assert.deepEqual(JSON.parse(body.input[0].content[0].text), messages)
   assert.equal(body.input[0].content[0].type, 'input_text')
   assert.equal('previous_response_id' in body, false)
@@ -174,11 +178,10 @@ test('conversation sampling bounds source text and omits system/tool data and me
     },
     { role: 'user', content: 'z'.repeat(6000) },
   ])
-  assert.equal(sample.length, 2)
-  assert.equal(
-    sample.reduce((sum, item) => sum + item.content.length, 0),
-    8000,
-  )
+  assert.equal(sample.length, 3)
+  assert(Buffer.byteLength(JSON.stringify(sample)) <= 8000)
+  assert(sample[0].content.startsWith('xxx'))
+  assert(sample[2].content.endsWith('zzz'))
   assert.deepEqual(Object.keys(sample[0]), ['role', 'content'])
   await generator.generate(
     Array.from({ length: 30 }, (_, i) => ({
@@ -187,6 +190,8 @@ test('conversation sampling bounds source text and omits system/tool data and me
     })),
   )
   assert.equal(sample.length, 8)
+  assert.equal(sample[0].content, 'Message 0')
+  assert.equal(sample.at(-1).content, 'Message 29')
   for (const empty of [
     undefined,
     [],
@@ -194,6 +199,92 @@ test('conversation sampling bounds source text and omits system/tool data and me
     [{ role: 'user', content: '  ' }],
   ])
     await assert.rejects(generator.generate(empty), { status: 400 })
+})
+
+test('long conversations retain the opening theorem and latest substantive question across continue messages', async () => {
+  let sample
+  const generator = createChatTitleGenerator(config, {
+    fetchImpl: async (_, init) => {
+      sample = JSON.parse(JSON.parse(init.body).input[0].content[0].text)
+      return response(answer('Explain compactness in continuous_extreme'))
+    },
+  })
+  const conversation = [
+    {
+      role: 'user',
+      content: `Prove Nat.add_comm for the arithmetic task.\n${'λ🧮'.repeat(6000)}\nPreserve the stated quantifiers.`,
+    },
+  ]
+  for (let i = 0; i < 20; i++)
+    conversation.push(
+      { role: 'assistant', content: `Earlier proof attempt ${i}.` },
+      { role: 'user', content: `Investigate induction step ${i}.` },
+    )
+  conversation.push({
+    role: 'user',
+    content: 'Now explain why compactness is needed in continuous_extreme.',
+  })
+  for (let i = 0; i < 12; i++)
+    conversation.push(
+      { role: 'assistant', content: `Working through the explanation ${i}.` },
+      { role: 'user', content: 'Continue.' },
+    )
+  await generator.generate(conversation)
+  assert.equal(sample.length, 8)
+  assert.match(sample[0].content, /^Prove Nat\.add_comm/)
+  assert.match(sample[0].content, /Preserve the stated quantifiers\.$/)
+  assert(
+    sample.some((message) =>
+      message.content.includes('compactness is needed in continuous_extreme'),
+    ),
+  )
+  assert.equal(sample.at(-1).content, 'Continue.')
+  assert(Buffer.byteLength(JSON.stringify(sample)) <= 8000)
+  assert(!JSON.stringify(sample).includes('\ufffd'))
+})
+
+test('serialized Unicode and escaped source stay within the byte cap without losing the final task', async () => {
+  let sample
+  const generator = createChatTitleGenerator(config, {
+    fetchImpl: async (_, init) => {
+      sample = JSON.parse(JSON.parse(init.body).input[0].content[0].text)
+      return response()
+    },
+  })
+  await generator.generate([
+    {
+      role: 'user',
+      content: `Explain Finset.sum_le_sum.\n${'"\\\n🧮λ'.repeat(10_000)}\nQuestion: why is pointwise order enough?`,
+    },
+  ])
+  assert(Buffer.byteLength(JSON.stringify(sample)) <= 8000)
+  assert.match(sample[0].content, /^Explain Finset\.sum_le_sum/)
+  assert.match(sample[0].content, /why is pointwise order enough\?$/)
+  assert(!sample[0].content.includes('\ufffd'))
+})
+
+test('active provider keys and registered secrets are redacted in title input and output', async () => {
+  let sample
+  const generator = createChatTitleGenerator(
+    {
+      ...config,
+      redact: (value) => value.replaceAll('other-private-secret', '[redacted]'),
+    },
+    {
+      fetchImpl: async (_, init) => {
+        sample = JSON.parse(JSON.parse(init.body).input[0].content[0].text)
+        return response(answer('Explain private-provider-token auth failure.'))
+      },
+    },
+  )
+  const result = await generator.generate([
+    {
+      role: 'user',
+      content: 'Why do private-provider-token and other-private-secret fail?',
+    },
+  ])
+  assert.equal(result.title, 'Explain [redacted] auth failure')
+  assert.equal(sample[0].content, 'Why do [redacted] and [redacted] fail?')
 })
 
 test('response validation rejects incomplete, refusal, tool and unusable title outputs', async () => {
@@ -217,6 +308,7 @@ test('response validation rejects incomplete, refusal, tool and unusable title o
     },
     answer(''),
     answer('x'.repeat(121)),
+    answer('x'.repeat(73)),
     answer('***'),
     answer('\u0000\u202e'),
   ]

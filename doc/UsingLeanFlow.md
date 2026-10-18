@@ -136,9 +136,23 @@ To formalize a document, open its PDF, TeX, Markdown, plain text, or other reada
 
 **New chat** starts a fresh conversation, listed after its first message. Use the chat selector to reopen one and its pencil to rename it.
 
+Automatic names and rename suggestions identify the task's theorem, declaration,
+question, or error when that information is available. Naming keeps the opening
+request and recent context, including a selected proof's name and statement;
+a brief follow-up such as "continue" retains the original task. A name you enter
+yourself takes precedence over automatic naming.
+To refresh an existing broad name, open its pencil, choose **Suggest a name**,
+review the suggestion, then save it.
+
 Check **Current file** above your message. Its path is supplied automatically when available; you do not need to attach it to a task or update. Missing automatic context is skipped. Explicitly selected files and proof targets must be available. For PDFs, only the path is supplied. PDF contents are not attached.
 
 Type **@** or use **Select files** to attach extra files. **Options** controls model, reasoning effort, and live edits. Drafts and selections stay with their chats.
+
+Reasoning defaults to **high** for **Ask & Search**, and **max** for **Proofs**,
+**Formalize**, and **Optimize**. If the model does not advertise that level, its
+advertised default is used; a model with fixed reasoning keeps its provider
+default. A level you select in Options applies to that model and task mode,
+so switching modes does not carry an Ask & Search setting into a proof task.
 
 The **Model** dropdown shows your saved models. Choose **Add models…** to browse everything available with your API key, select or remove models, then choose **Save models**. This list is saved to your account across projects, browsers, and sign-ins. Editing it keeps your current model, reasoning effort, and default. Models that your key no longer allows stay marked unavailable until you remove them. You can also edit the list in **Assistant settings → Edit saved models**.
 
