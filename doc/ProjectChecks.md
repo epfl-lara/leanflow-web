@@ -97,6 +97,12 @@ In particular, `import Mathlib` exports all of Mathlib on every full check.
 Focused imports reduce that work. Reusing compiled packages does not skip their
 independent kernel replay. Resource failures are failures, not proof certificates.
 
+With Lean 4.35.0-rc4, a full Mathlib export can pass kernel replay and then fail
+Lake's separate axiom policy on generated declarations such as
+`Lake.DataType.bool` and `Lake.FacetOut.module.olean`. This was observed with the
+prepared Mathlib snapshot; it is reported as a failed check. LeanFlow does not
+silently allow those axioms or substitute a build success for the native result.
+
 See [Lean's announcement](https://leodemoura.github.io/blog/2026-10-15-lean-now-ships-with-verified-kernels/)
 and [Lake's checker implementation](https://github.com/leanprover/lean4/blob/v4.35.0/src/lake/Lake/CLI/Check.lean)
 for the checker and export semantics.
