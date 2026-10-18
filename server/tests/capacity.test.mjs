@@ -28,6 +28,7 @@ test('invalid capacity settings fail before startup rather than disabling admiss
     'STUDIO_MAX_SOURCE_REQUESTS_PER_USER',
     'STUDIO_MAX_SMALL_SOURCE_REQUESTS',
     'STUDIO_MAX_SMALL_SOURCE_REQUESTS_PER_USER',
+    'STUDIO_KERNEL_EXPORT_MAX_BYTES',
   ]) {
     for (const value of ['0', '-1', 'NaN', 'Infinity', '1.5'])
       assert.throws(() => loadCapacity({ [name]: value }), new RegExp(name))

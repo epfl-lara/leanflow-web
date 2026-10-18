@@ -45,6 +45,7 @@ import {
 } from './pinned-lake.mjs'
 import { configurationDigest } from './shared-dependencies.mjs'
 import { singleFileSource, availablePlaygroundName } from './single-files.mjs'
+import { sourceFingerprint } from './source-fingerprint.mjs'
 import { readDependencyConfiguration } from './shared-dependencies.mjs'
 import {
   libraryModulePath,
@@ -3849,6 +3850,10 @@ export class WorkspaceStore {
     this.#ready(project)
     validateId(runId, 'run')
     return this.#locked(id, () => this.#capture(this.get(id, owner), runId))
+  }
+
+  checkFingerprint(id, owner) {
+    return this.#locked(id, () => sourceFingerprint(this.get(id, owner).root))
   }
 
   async #capture(project, runId) {

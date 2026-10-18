@@ -78,5 +78,10 @@ export function loadCapacity(env = process.env) {
     ),
     workerCpus: positiveNumber(env, 'STUDIO_WORKER_CPUS', 2, false),
     workerMemory,
+    kernelExportMaxBytes: positiveNumber(
+      env,
+      'STUDIO_KERNEL_EXPORT_MAX_BYTES',
+      8 * 1024 ** 3,
+    ),
   }
 }

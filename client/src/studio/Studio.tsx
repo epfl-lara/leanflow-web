@@ -94,6 +94,7 @@ interface DeleteTarget {
 }
 
 interface Job {
+  checkMethod?: 'lake-check' | 'lake-build'
   id: string
   projectId: string
   createdAt: string
@@ -107,7 +108,6 @@ const terminalJob = (job: Job) =>
   ['completed', 'failed', 'cancelled', 'interrupted', 'error'].includes(
     job.status,
   )
-
 
 function Login({ onSession }: { onSession: (session: Session) => void }) {
   const [token, setToken] = useState('')
@@ -2557,6 +2557,19 @@ export function Studio() {
                 </button>
                 {jobOpen && (
                   <>
+                    {job.checkMethod === 'lake-check' && (
+                      <p className="field-help">
+                        Builds the project’s default targets and independently
+                        rechecks their proofs with Lean’s kernel. The selected
+                        file is also checked if it is outside those targets.
+                      </p>
+                    )}
+                    {job.checkMethod === 'lake-build' && (
+                      <p className="field-help">
+                        Uses the project’s pinned Lean compiler. This check does
+                        not include an independent project kernel replay.
+                      </p>
+                    )}
                     {job.error && (
                       <p className="error-message" role="alert">
                         {job.error}

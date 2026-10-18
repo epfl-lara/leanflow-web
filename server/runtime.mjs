@@ -9,6 +9,7 @@ import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { PreparedPresetCache } from './prepared-presets.mjs'
 import { fileURLToPath } from 'node:url'
+import { LeanCheckSupport, toolchainName } from './lean-check.mjs'
 import { createTexArtifactReceiver } from './tex-artifacts.mjs'
 import {
   SharedDependencyCache,
@@ -26,8 +27,6 @@ const presetDefinitions = JSON.parse(
 )
 const validToolchain =
   /^leanprover\/lean4:v\d+\.\d+\.\d+(?:-(?:rc\d+|nightly-[0-9-]+))?$/
-const toolchainName = (value) =>
-  value.replaceAll('/', '--').replaceAll(':', '---')
 const forbiddenEnv = new Set([
   'HOME',
   'ELAN_HOME',
@@ -149,6 +148,7 @@ export class Runtime {
     maxQueue = 24,
     cpus = 2,
     memory = '4g',
+    kernelExportMaxBytes = 8 * 1024 ** 3,
     pidsLimit = 512,
     docker = 'docker',
     hostToolchainDir = path.join(process.env.HOME || '', '.elan/toolchains'),
@@ -163,6 +163,12 @@ export class Runtime {
     this.maxQueue = maxQueue
     this.cpus = cpus
     this.memory = memory
+    if (
+      !Number.isSafeInteger(kernelExportMaxBytes) ||
+      kernelExportMaxBytes <= 0
+    )
+      throw new Error('Kernel export limit must be a positive byte count.')
+    this.kernelExportMaxBytes = kernelExportMaxBytes
     this.pidsLimit = pidsLimit
     this.docker = docker
     this.hostToolchainDir = hostToolchainDir
@@ -177,6 +183,8 @@ export class Runtime {
     this.reaped = 0
     this.owner = randomUUID()
     this.children = new Set()
+    this.leanCheckSupport = new LeanCheckSupport(this)
+    this.apparmorEnabled = false
     this.toolchains = new Map()
     this.dependencies = new Map()
     this.dependencyRegistryStamp = null
@@ -272,6 +280,18 @@ export class Runtime {
       this.lemexNativeBuildCommit = provenance.native_build_commit || null
       this.ready = true
       this.error = null
+      const security = await this.#host([
+        'info',
+        '--format',
+        '{{json .SecurityOptions}}',
+      ])
+      try {
+        this.apparmorEnabled = JSON.parse(security.stdout).some((value) =>
+          value.startsWith('name=apparmor'),
+        )
+      } catch {
+        /* Engines without AppArmor do not need an AppArmor profile. */
+      }
     } catch (error) {
       this.ready = false
       this.error = `Worker unavailable: ${error.message}. Run scripts/build-worker.sh.`
@@ -637,6 +657,7 @@ export class Runtime {
       instance: this.instance,
       reaped: this.reaped,
       active: this.children.size,
+      usedSlots: this.#usedSlots(),
       queued: this.queue.length,
       maxConcurrent: this.maxConcurrent,
       limits: { cpus: this.cpus, memory: this.memory, pids: this.pidsLimit },
@@ -730,6 +751,10 @@ export class Runtime {
   }
   async homeForRoot(root) {
     return this.home(root)
+  }
+
+  leanCheckSupported(root, options) {
+    return this.leanCheckSupport.supported(this.#root(root), options)
   }
 
   #root(root) {
@@ -906,6 +931,27 @@ export class Runtime {
       })
   }
 
+  #workerSlots(options = {}) {
+    return options.kernelCheck ? Math.min(3, this.maxConcurrent) : 1
+  }
+
+  #usedSlots() {
+    return [...this.children].reduce(
+      (sum, child) => sum + (child.workerSlots || 1),
+      0,
+    )
+  }
+
+  #hasCapacity(options = {}) {
+    // Keep only one large export on disk, and charge its larger RAM/CPU budget
+    // to the same pool as editors and ordinary workers.
+    return (
+      (!options.kernelCheck ||
+        ![...this.children].some((child) => child.kernelCheck)) &&
+      this.#usedSlots() + this.#workerSlots(options) <= this.maxConcurrent
+    )
+  }
+
   spawn(
     root,
     args,
@@ -920,6 +966,7 @@ export class Runtime {
       freshHome = false,
       readOnlyHome = false,
       cleanHome = false,
+      kernelCheck = false,
       repositoryRoot,
     } = {},
   ) {
@@ -939,18 +986,47 @@ export class Runtime {
         freshHome,
         readOnlyHome,
         cleanHome,
+        kernelCheck,
       ].some((value) => typeof value !== 'boolean')
     )
       throw new Error('Worker mount options must be booleans')
     if (writeLakeCache && !readOnlyWorkspace)
       throw new Error('A writable Lake cache requires a read-only workspace')
+    if (
+      kernelCheck &&
+      (args.length !== 2 ||
+        args[0] !== 'lake' ||
+        args[1] !== 'check' ||
+        !readOnlyWorkspace ||
+        !writeLakeCache ||
+        !freshHome ||
+        network !== 'none')
+    )
+      throw new Error(
+        'Kernel checking requires an isolated lake check worker with read-only source.',
+      )
     if (!['none', 'bridge'].includes(network))
       throw new Error('Only isolated or outbound worker networks are supported')
-    if (this.children.size >= this.maxConcurrent)
+    if (!this.#hasCapacity({ kernelCheck }))
       throw Object.assign(
         new Error('All workspace workers are busy; try again shortly'),
         { status: 503 },
       )
+    const workerSlots = this.#workerSlots({ kernelCheck })
+    let workerMemory = this.memory
+    if (kernelCheck) {
+      const size = /^([1-9][0-9]*)([bkmg]?)$/i.exec(this.memory)
+      if (!size) throw new Error('Invalid kernel worker memory limit.')
+      workerMemory = `${BigInt(size[1]) * BigInt(workerSlots)}${size[2]}`
+      const disk = fs.statfsSync(this.runtimeDir)
+      if (
+        disk.bavail * disk.bsize <
+        this.kernelExportMaxBytes + 512 * 1024 ** 2
+      )
+        throw new Error(
+          'Full Lean checking needs more temporary disk space. Ask the administrator to free space or review the kernel export limit.',
+        )
+    }
     this.#reloadDependencies()
     const actual = this.#root(root)
     const repository = this.#repositoryMount(actual, repositoryRoot)
@@ -965,6 +1041,9 @@ export class Runtime {
       fresh: freshHome,
       clean: cleanHome,
     })
+    const kernelTemp = kernelCheck
+      ? ensurePrivateDirectory(home, 'kernel-check-tmp')
+      : null
     const name = `lemex-web-${this.owner.slice(0, 8)}-${randomUUID().slice(0, 12)}`
     const dockerArgs = [
       'run',
@@ -987,17 +1066,23 @@ export class Runtime {
       '--security-opt',
       'no-new-privileges',
       '--cpus',
-      String(this.cpus),
+      String(this.cpus * workerSlots),
       '--memory',
-      this.memory,
+      workerMemory,
       '--memory-swap',
-      this.memory,
+      workerMemory,
       '--pids-limit',
       String(this.pidsLimit),
       '--network',
       network,
-      '--tmpfs',
-      '/tmp:rw,nosuid,size=1g',
+      ...(kernelTemp
+        ? [
+            '--mount',
+            `type=bind,src=${kernelTemp},dst=/tmp`,
+            '--ulimit',
+            `fsize=${this.kernelExportMaxBytes}:${this.kernelExportMaxBytes}`,
+          ]
+        : ['--tmpfs', '/tmp:rw,nosuid,size=1g']),
       '--workdir',
       repository?.selected || '/workspace',
       '--mount',
@@ -1015,6 +1100,20 @@ export class Runtime {
       '--env',
       'LAKE_CACHE_DIR=/home/worker/.cache/lake',
     ]
+    if (kernelCheck) {
+      // Permit Bubblewrap's unprivileged inner namespaces in this worker only.
+      // Keep the outer worker unprivileged, offline, capability-free and read-only.
+      dockerArgs.push(
+        '--security-opt',
+        `seccomp=${path.join(projectDir, 'deploy/lake-check-seccomp.json')}`,
+        '--security-opt',
+        'systempaths=unconfined',
+        '--tmpfs',
+        '/run/user:rw,nosuid,noexec,size=16m,mode=1777',
+      )
+      if (this.apparmorEnabled)
+        dockerArgs.push('--security-opt', 'apparmor=leanflow-kernel-check')
+    }
     if (repository)
       dockerArgs.push(
         '--mount',
@@ -1086,13 +1185,26 @@ export class Runtime {
       signal,
       timeoutMs,
       onOutput,
+      freshHome,
+      workerSlots,
+      kernelCheck,
     })
   }
 
   #launchWorker(
     root,
     dockerArgs,
-    { childEnv, home, name, signal, timeoutMs, onOutput },
+    {
+      childEnv,
+      home,
+      name,
+      signal,
+      timeoutMs,
+      onOutput,
+      freshHome = false,
+      workerSlots = 1,
+      kernelCheck = false,
+    },
   ) {
     const child = spawnChild(this.docker, dockerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -1100,6 +1212,8 @@ export class Runtime {
       env: childEnv,
     })
     child.workerHome = home
+    child.workerSlots = workerSlots
+    child.kernelCheck = kernelCheck
     child.containerName = name
     child.workspaceRoot = path.resolve(root)
     this.children.add(child)
@@ -1162,6 +1276,7 @@ export class Runtime {
         // The final removal happens after the Docker client has exited, so a
         // cancelled launch cannot create its container after this check.
         await removeWorker()
+        if (freshHome) await removeDisposableTree(home)
         this.children.delete(child)
         this.#drain()
       })().catch((error) => {
@@ -1252,7 +1367,7 @@ export class Runtime {
   #spawnTex(root, args, options, worker) {
     if (this.stopping) throw new Error('Runtime is shutting down')
     options.signal?.throwIfAborted()
-    if (this.children.size >= this.maxConcurrent)
+    if (!this.#hasCapacity())
       throw Object.assign(new Error('All workspace workers are busy.'), {
         status: 503,
       })
@@ -1350,7 +1465,7 @@ export class Runtime {
       return Promise.reject(
         options.signal.reason || new Error('Worker job was cancelled'),
       )
-    if (this.children.size < this.maxConcurrent)
+    if (this.#hasCapacity(options))
       return spawnOnly
         ? Promise.resolve(this.#spawnScheduled(root, args, options, worker))
         : this.#run(root, args, options, worker)
@@ -1429,10 +1544,14 @@ export class Runtime {
   #drain() {
     while (
       !this.stopping &&
-      this.children.size < this.maxConcurrent &&
+      this.#usedSlots() < this.maxConcurrent &&
       this.queue.length
     ) {
-      const job = this.queue.shift()
+      const index = this.queue.findIndex((job) =>
+        this.#hasCapacity(job.options),
+      )
+      if (index < 0) break
+      const [job] = this.queue.splice(index, 1)
       job.options.signal?.removeEventListener('abort', job.abort)
       if (job.options.signal?.aborted) {
         job.reject(

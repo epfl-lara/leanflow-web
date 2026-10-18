@@ -464,20 +464,48 @@ export class JobManager {
           if (file) await this.workspaces.readFile(projectId, owner, file)
           controller.signal.throwIfAborted()
           this.events.updateMetadata(job.id, { status: 'running' })
+          const fingerprint = await this.workspaces.checkFingerprint?.(
+            projectId,
+            owner,
+          )
+          const kernelCheck =
+            project.kind !== 'single-file' &&
+            !!(await this.runtime.leanCheckSupported?.(project.root, {
+              signal: controller.signal,
+            }))
+          controller.signal.throwIfAborted()
+          const checkMethod = kernelCheck ? 'lake-check' : 'lake-build'
+          this.events.updateMetadata(job.id, { checkMethod })
+          this.events.append(
+            job.id,
+            'log',
+            kernelCheck
+              ? 'Building and independently checking the default project targets with the pinned Lean kernel.\n'
+              : project.kind === 'single-file'
+                ? 'Checking this file with the pinned Lean compiler.\n'
+                : 'This pinned Lean release does not provide lake check. Using the existing project build check.\n',
+            'activity',
+          )
           const options = {
             network: 'none',
             timeoutMs: this.checkTimeoutMs,
             signal: controller.signal,
-            ...(project.repairedConfiguration
-              ? { readOnlyWorkspace: true, writeLakeCache: true }
-              : {}),
+            readOnlyWorkspace: true,
+            writeLakeCache: true,
             onOutput: (text) =>
               this.events.append(job.id, 'log', text, 'activity'),
           }
           let result = await this.runtime.run(
             project.root,
-            ['lake', 'build'],
-            options,
+            kernelCheck ? ['lake', 'check'] : ['lake', 'build'],
+            kernelCheck
+              ? {
+                  ...options,
+                  kernelCheck: true,
+                  freshHome: true,
+                  cleanHome: true,
+                }
+              : options,
           )
           controller.signal.throwIfAborted()
           if (file && file.endsWith('.lean') && result.code === 0) {
@@ -493,16 +521,31 @@ export class JobManager {
               stderr: result.stderr + checked.stderr,
             }
           }
+          if (
+            fingerprint !== undefined &&
+            fingerprint !==
+              (await this.workspaces.checkFingerprint(projectId, owner))
+          ) {
+            result = { ...result, code: 1, sourceChanged: true }
+          }
           this.events.updateMetadata(job.id, {
             status: result.code === 0 ? 'completed' : 'failed',
             result,
             error:
               result.code === 0
                 ? undefined
-                : result.timedOut
-                  ? 'Lean checking reached its time limit. Inspect the last module in the build output, then retry or ask the administrator to review the check limits.'
-                  : setupFailureMessage(result) ||
-                    'Lean build failed. See the build output.',
+                : result.sourceChanged
+                  ? 'Project files changed during this check. Run the check again to check the current files.'
+                  : result.timedOut
+                    ? 'Lean checking reached its time limit. Inspect the last module in the build output, then retry or ask the administrator to review the check limits.'
+                    : kernelCheck && result.code === 153
+                      ? 'The full Lean export exceeded its file size limit. Use more focused imports or ask the administrator to review the kernel export limit.'
+                      : kernelCheck && result.code === 137
+                        ? 'The full Lean checker was stopped, possibly by its memory limit. Use more focused imports or ask the administrator to review the worker limits.'
+                        : setupFailureMessage(result) ||
+                          (kernelCheck
+                            ? 'The independent Lean project check did not pass. Inspect the check output; a kernel or sandbox failure is not replaced by a build-only result.'
+                            : 'Lean build failed. See the build output.'),
           })
           const dependency = dependencyFailureMessage(result)
           if (dependency)

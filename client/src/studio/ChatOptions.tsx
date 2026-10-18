@@ -40,24 +40,24 @@ export function ChatOptions({
         Options <span>{selected?.name || 'Choose model'}</span>
       </summary>
       <div className="chat-options-fields">
+        {models.length > 10 && (
+          <div className="chat-model-search">
+            <label className="sr-only" htmlFor={searchId}>
+              Search available models
+            </label>
+            <input
+              id={searchId}
+              type="search"
+              placeholder="Search available models…"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </div>
+        )}
         <div>
           <div className="help-label">
             <label htmlFor={modelId}>Model</label>
           </div>
-          {models.length > 10 && (
-            <>
-              <label className="sr-only" htmlFor={searchId}>
-                Search available models
-              </label>
-              <input
-                id={searchId}
-                type="search"
-                placeholder="Search available models…"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-              />
-            </>
-          )}
           <select
             id={modelId}
             value={model}

@@ -1,6 +1,4 @@
-import { promises as fs } from 'node:fs'
-import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { sourceFingerprint } from './source-fingerprint.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
 
 // These checks are independent of the agent's own statements and diagnostics.
@@ -412,29 +410,6 @@ with tempfile.TemporaryDirectory(prefix='lean-web-audit-') as temp:
     if not result['complete']: result['reason']='The candidate is incomplete or did not pass the proof integrity checks.'
 print(json.dumps(result))
 `
-
-async function sourceFingerprint(root) {
-  const files = []
-  async function walk(directory, relative = '') {
-    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-      if (['.lake', '.git'].includes(entry.name)) continue
-      const filename = path.join(directory, entry.name),
-        name = path.posix.join(relative, entry.name)
-      if (entry.isSymbolicLink())
-        files.push([name, 'link', await fs.readlink(filename)])
-      else if (entry.isDirectory()) await walk(filename, name)
-      else if (entry.isFile())
-        files.push([
-          name,
-          createHash('sha256')
-            .update(await fs.readFile(filename))
-            .digest('hex'),
-        ])
-    }
-  }
-  await walk(root)
-  return JSON.stringify(files.sort((a, b) => a[0].localeCompare(b[0])))
-}
 
 export async function verifyCandidate(
   runtime,

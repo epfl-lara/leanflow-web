@@ -187,6 +187,7 @@ export async function createStudio({
       maxQueue: capacity.workerQueue,
       cpus: capacity.workerCpus,
       memory: capacity.workerMemory,
+      kernelExportMaxBytes: capacity.kernelExportMaxBytes,
     })
   await runtime.init()
   let playgroundPreparation = Promise.resolve()

@@ -19,7 +19,11 @@ async function fixture(t) {
     `#!${process.execPath}\nif (process.argv[2] === 'run') console.log(JSON.stringify(process.argv.slice(2)))\n`,
     { mode: 0o700 },
   )
-  const runtime = new Runtime({ dataDir, docker })
+  const runtime = new Runtime({
+    dataDir,
+    docker,
+    kernelExportMaxBytes: 1024 * 1024,
+  })
   runtime.ready = true
   runtime.imageId = 'fixture-image'
   t.after(async () => {
@@ -32,6 +36,111 @@ async function fixture(t) {
 const mounts = (argv) =>
   argv.flatMap((value, index) => (value === '--mount' ? [argv[index + 1]] : []))
 const cacheOptions = { readOnlyWorkspace: true, writeLakeCache: true }
+
+test('fresh verification homes are removed after success or failure without deleting the persistent home', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  const home = await runtime.home(root)
+  await fs.writeFile(path.join(home, 'persistent'), 'keep')
+  const before = (await fs.readdir(path.join(dataDir, 'runtime/homes'))).sort()
+  for (const exit of [0, 1]) {
+    await fs.writeFile(
+      runtime.docker,
+      `#!${process.execPath}\nif(process.argv[2]==='run')process.exit(${exit})\n`,
+      { mode: 0o700 },
+    )
+    assert.equal(
+      (await runtime.run(root, ['true'], { freshHome: true })).code,
+      exit,
+    )
+    assert.deepEqual(
+      (await fs.readdir(path.join(dataDir, 'runtime/homes'))).sort(),
+      before,
+    )
+    assert.equal(
+      await fs.readFile(path.join(home, 'persistent'), 'utf8'),
+      'keep',
+    )
+  }
+})
+
+test('nested sandbox permissions apply only to isolated lake check workers', async (t) => {
+  const { runtime, root } = await fixture(t)
+  runtime.apparmorEnabled = true
+  const options = {
+    ...cacheOptions,
+    kernelCheck: true,
+    freshHome: true,
+    cleanHome: true,
+  }
+  for (const [args, overrides] of [
+    [['true'], {}],
+    [['lake', 'check'], { network: 'bridge' }],
+    [['lake', 'check'], { freshHome: false }],
+    [['lake', 'check'], { readOnlyWorkspace: false, writeLakeCache: false }],
+  ])
+    await assert.rejects(
+      runtime.run(root, args, { ...options, ...overrides }),
+      /Kernel checking requires/,
+    )
+  const kernel = JSON.parse(
+    (await runtime.run(root, ['lake', 'check'], options)).stdout,
+  )
+  assert(kernel.includes('apparmor=leanflow-kernel-check'))
+  assert(kernel.some((arg) => arg.endsWith('deploy/lake-check-seccomp.json')))
+  assert(kernel.includes('systempaths=unconfined'))
+  assert.equal(kernel[kernel.indexOf('--memory') + 1], '12g')
+  assert.equal(kernel[kernel.indexOf('--cpus') + 1], '6')
+  assert(kernel.includes('fsize=1048576:1048576'))
+  assert(
+    mounts(kernel).some((mount) => mount.includes('kernel-check-tmp,dst=/tmp')),
+  )
+  assert(!kernel.includes('--privileged') && !kernel.includes('--cap-add'))
+  const normal = JSON.parse((await runtime.run(root, ['true'])).stdout)
+  assert(!normal.includes('apparmor=leanflow-kernel-check'))
+  assert(!normal.includes('systempaths=unconfined'))
+})
+
+test('full checks share weighted worker capacity and serialize exports while small jobs remain responsive', async (t) => {
+  const { runtime, root } = await fixture(t)
+  runtime.maxConcurrent = 4
+  await fs.writeFile(
+    runtime.docker,
+    `#!${process.execPath}\nif(process.argv[2]==='run' && !process.argv.includes('quick'))setInterval(()=>{},1000)\n`,
+    { mode: 0o700 },
+  )
+  const first = runtime.spawn(root, ['hold'])
+  const second = runtime.spawn(root, ['hold'])
+  const options = {
+    ...cacheOptions,
+    kernelCheck: true,
+    freshHome: true,
+    cleanHome: true,
+  }
+  const pending = runtime.spawnWhenAvailable(root, ['lake', 'check'], options)
+  assert.equal(runtime.info().queued, 1)
+  const editor = runtime.spawn(root, ['hold'])
+  first.kill()
+  await first.workerStopped
+  assert.equal(runtime.info().queued, 1)
+  second.kill()
+  await second.workerStopped
+  const kernel = await pending
+  assert.equal(runtime.info().usedSlots, 4)
+  assert.equal(kernel.workerSlots, 3)
+  const next = runtime.spawnWhenAvailable(root, ['lake', 'check'], options)
+  assert.equal(runtime.info().queued, 1)
+  editor.kill()
+  await editor.workerStopped
+  assert.equal(runtime.info().queued, 1, 'Only one export may run at a time')
+  assert.equal((await runtime.run(root, ['quick'])).code, 0)
+  kernel.kill()
+  await kernel.workerStopped
+  const resumed = await next
+  assert.equal(resumed.kernelCheck, true)
+  resumed.kill()
+  await resumed.workerStopped
+  assert.equal(runtime.info().usedSlots, 0)
+})
 
 test('dependency lookups observe replacements, in-place edits and deletion after warming the registry', async (t) => {
   const { runtime, root, dataDir } = await fixture(t)

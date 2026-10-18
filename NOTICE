@@ -1,6 +1,10 @@
 LeanFlow Web
 Developed by EPFL LARA (https://epfl-lara.github.io/).
 
+The dedicated Lean kernel worker's seccomp and AppArmor profiles are adapted
+from github.com/moby/profiles at 4b8214fc4971e06172938a1f1554ccff6647ee80.
+Copyright The Moby Authors; Apache License, Version 2.0.
+
 This project is derived from lean4web:
 https://github.com/leanprover-community/lean4web
 Upstream base commit: 9c4cd4f4ed804b06a24257788894314c93008276

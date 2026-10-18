@@ -89,6 +89,8 @@ Put the cursor on a completed `#eval` command to see its output in **Goals & dia
 
 An interactive program such as LeanTui's `#eval chessMain []` waits for keyboard input. Remove that command, then use **Restart Lean** to recover the editor. Unsaved edits stay in the editor. Save your changes and open **Terminal** to run the project's executable, for example `lake exe chess-demo`.
 
+**Check Project** uses the project's pinned `lake check` when available, including an independent kernel recheck of the default targets. Older releases keep their existing build check. The selected file is also compiled if it is outside the default targets. Single-file playgrounds retain **Check File**. See [Project checks and Lean caches](ProjectChecks.md) for scope, compatibility and worker setup.
+
 While a project or file check runs, **Checking…** shows the elapsed wall-clock time in minutes. Use **Stop check** beside it to cancel the check and wait for its worker to stop. Fix or remove the blocking command before checking again.
 
 If an older imported project reports a ProofWidgets `package-lock.json.hash` read-only error, stop its active checks and chats, then use **Refresh setup**. Setup prepares and tests the dependencies before sharing them read only, preserving the project's Lean version and dependency pins.
