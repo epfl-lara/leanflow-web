@@ -3852,8 +3852,10 @@ export class WorkspaceStore {
     return this.#locked(id, () => this.#capture(this.get(id, owner), runId))
   }
 
-  checkFingerprint(id, owner) {
-    return this.#locked(id, () => sourceFingerprint(this.get(id, owner).root))
+  checkFingerprint(id, owner, options) {
+    return this.#locked(id, () =>
+      sourceFingerprint(this.get(id, owner).root, options),
+    )
   }
 
   async #capture(project, runId) {

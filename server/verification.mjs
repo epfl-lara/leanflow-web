@@ -502,7 +502,7 @@ export async function verifyCandidate(
       reason: 'Could not resolve the pinned Lean verification environment.',
     }
   }
-  const fingerprint = await sourceFingerprint(root)
+  const fingerprint = await sourceFingerprint(root, { signal: options.signal })
   const build = await runtime.run(root, ['lake', 'build'], {
     ...options,
     network: 'none',
@@ -517,7 +517,9 @@ export async function verifyCandidate(
       errors: [build.stdout, build.stderr].filter(Boolean),
       reason: 'The candidate project does not build.',
     }
-  if ((await sourceFingerprint(root)) !== fingerprint)
+  if (
+    (await sourceFingerprint(root, { signal: options.signal })) !== fingerprint
+  )
     return {
       compiled: false,
       complete: false,

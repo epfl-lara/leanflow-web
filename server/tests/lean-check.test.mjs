@@ -238,3 +238,34 @@ test('input fingerprints include auxiliary sources and links but exclude rebuild
   await fs.symlink('input.txt', path.join(root, 'alias'))
   assert.notEqual(await sourceFingerprint(root), auxiliary)
 })
+
+test('input scanning rejects a redirected root and never reads through directory links', async (t) => {
+  const base = await directory(t),
+    root = path.join(base, 'project'),
+    other = path.join(base, 'outside')
+  await fs.mkdir(root)
+  await fs.mkdir(other)
+  await fs.writeFile(path.join(root, 'Main.lean'), 'owned source')
+  await fs.writeFile(path.join(other, 'private.txt'), 'outside one')
+  const alias = path.join(base, 'redirected')
+  await fs.symlink(other, alias)
+  await assert.rejects(() => sourceFingerprint(alias), /Project inputs/)
+  await fs.symlink(other, path.join(root, 'linked-directory'))
+  const before = await sourceFingerprint(root)
+  await fs.writeFile(path.join(other, 'private.txt'), 'outside two')
+  assert.equal(await sourceFingerprint(root), before)
+})
+
+test('source scanning preserves cancellation without exposing host diagnostics', async (t) => {
+  const root = await directory(t)
+  const controller = new AbortController()
+  controller.abort(new Error('User stopped checking'))
+  await assert.rejects(
+    () => sourceFingerprint(root, { signal: controller.signal }),
+    /User stopped checking/,
+  )
+  await assert.rejects(
+    () => sourceFingerprint(path.join(root, 'missing')),
+    /^Error: Project inputs/,
+  )
+})

@@ -19,6 +19,9 @@ Checks run offline, with source and toolchains read only and the project's
 private `.lake` build cache writable. If files change during a check, its result
 cannot be accepted as a check of the new files: run the check again. Use
 **Stop check** to stop its entire worker, including exporter and kernel processes.
+Source scans anchor reads to directory handles and do not follow project links;
+replaced inputs fail the check. Scans use Python's isolated import mode, as
+worker cache registries do, and support cancellation.
 
 ## What is cached
 

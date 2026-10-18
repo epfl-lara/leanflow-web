@@ -467,6 +467,7 @@ export class JobManager {
           const fingerprint = await this.workspaces.checkFingerprint?.(
             projectId,
             owner,
+            { signal: controller.signal },
           )
           const kernelCheck =
             project.kind !== 'single-file' &&
@@ -524,7 +525,9 @@ export class JobManager {
           if (
             fingerprint !== undefined &&
             fingerprint !==
-              (await this.workspaces.checkFingerprint(projectId, owner))
+              (await this.workspaces.checkFingerprint(projectId, owner, {
+                signal: controller.signal,
+              }))
           ) {
             result = { ...result, code: 1, sourceChanged: true }
           }
