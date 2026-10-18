@@ -2562,6 +2562,8 @@ export function Studio() {
                         Builds the project’s default targets and independently
                         rechecks their proofs with Lean’s kernel. The selected
                         file is also checked if it is outside those targets.
+                        Full checks include imported libraries, so large
+                        projects can take tens of minutes.
                       </p>
                     )}
                     {job.checkMethod === 'lake-build' && (
