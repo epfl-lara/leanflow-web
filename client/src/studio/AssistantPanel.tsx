@@ -173,13 +173,12 @@ export function AssistantPanel({
     !stoppingIds.includes(activeRun!.id)
   const hasActive = !!activeRun || stoppingIds.length > 0
   const selectedModel = session.models.find((item) => item.id === model)
-  const effort = selectedModel?.reasoningEfforts?.some(
-    (level) => level.id === efforts[model],
-  )
+  const effort = Object.hasOwn(efforts, model)
     ? efforts[model]
-    : Object.hasOwn(efforts, model)
-      ? ''
-      : selectedModel?.defaultReasoningEffort || ''
+    : selectedModel?.defaultReasoningEffort || ''
+  const effortAvailable =
+    !effort ||
+    selectedModel?.reasoningEfforts?.some((level) => level.id === effort)
   const target =
     proofTarget?.path ||
     (!readOnly && file?.endsWith('.lean')
@@ -519,7 +518,15 @@ export function AssistantPanel({
       /* Default options remain usable if browser storage is unavailable. */
     }
     setPreferencesLoaded(preferenceKey)
-  }, [preferenceKey, session.models, session.defaultModel])
+  }, [preferenceKey])
+  useEffect(() => {
+    // Discovery can fill an initially empty picker. Keep explicit choices
+    // across refreshes and report lost access instead of changing a run option.
+    setModel(
+      (current) =>
+        current || session.defaultModel || session.models[0]?.id || '',
+    )
+  }, [session.models, session.defaultModel])
   useEffect(() => {
     if (preferencesLoaded !== preferenceKey) return
     try {
@@ -879,6 +886,19 @@ export function AssistantPanel({
         onLiveEdits={mode === 'search' ? setSearchLiveEdits : setLiveEdits}
         active={hasActive}
       />
+      {!session.models.length && (
+        <p className="error-message" role="alert">
+          {session.lemex?.modelError || 'No model is available with your key.'}{' '}
+          Open Assistant settings to refresh models or update your API key.
+        </p>
+      )}
+      {!!session.models.length && (!selectedModel || !effortAvailable) && (
+        <p className="error-message" role="alert">
+          {!selectedModel
+            ? 'Your selected model is no longer available with this key. Choose an available model in Options.'
+            : 'Your selected reasoning effort is no longer available for this model. Choose a supported level in Options.'}
+        </p>
+      )}
       {statusRun && (
         <div className="chat-current-work" role="status" aria-live="polite">
           <div>
@@ -1151,7 +1171,9 @@ export function AssistantPanel({
               busy ||
               (hasActive
                 ? !acceptingUpdate
-                : (requiresLeanTarget && !target) || !model)
+                : (requiresLeanTarget && !target) ||
+                  !selectedModel ||
+                  !effortAvailable)
             }
           >
             {busy ? (

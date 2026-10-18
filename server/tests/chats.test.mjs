@@ -1,3 +1,4 @@
+import { fixtureModelDiscovery } from './fixtures/model-discovery.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -280,6 +281,7 @@ async function httpFixture(t, titleGenerator) {
     redact: String,
   }
   const studio = await createStudio({
+    modelDiscoverer: fixtureModelDiscovery,
     dataDir,
     runtime,
     config,

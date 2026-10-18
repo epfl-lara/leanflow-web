@@ -1,3 +1,4 @@
+import { fixtureModelDiscovery } from './fixtures/model-discovery.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import * as fs from 'node:fs/promises'
@@ -120,7 +121,13 @@ async function fixture(t, capacity) {
     lemex: { configured: true, revision: 'test-revision' },
     redact: (value) => String(value).split(providerSecret).join('[redacted]'),
   }
-  const studio = await createStudio({ dataDir, runtime, config, capacity })
+  const studio = await createStudio({
+    dataDir,
+    runtime,
+    config,
+    capacity,
+    modelDiscoverer: fixtureModelDiscovery,
+  })
   await studio.providers.save('owner', providerSecret)
   await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve))
   t.after(() => studio.close())
@@ -1763,6 +1770,7 @@ test('automatic setup repair requires the project owner personal key', async (t)
   const dataDir = await temp(t),
     runtime = new FakeRuntime()
   const studio = await createStudio({
+    modelDiscoverer: fixtureModelDiscovery,
     dataDir,
     runtime,
     config: {
@@ -1789,6 +1797,7 @@ test('startup migrates existing aliased project directories and retains missing 
   await fs.mkdir(real)
   await fs.symlink(real, alias)
   const first = await createStudio({
+    modelDiscoverer: fixtureModelDiscovery,
     dataDir: real,
     runtime: new FakeRuntime(),
     config: {
@@ -1824,6 +1833,7 @@ test('startup migrates existing aliased project directories and retains missing 
   await fs.rm(projects[1].root, { recursive: true })
   await first.close()
   const restarted = await createStudio({
+    modelDiscoverer: fixtureModelDiscovery,
     dataDir: alias,
     runtime: new FakeRuntime(),
     config: {

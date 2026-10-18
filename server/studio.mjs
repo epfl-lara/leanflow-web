@@ -16,6 +16,7 @@ import { TexBuildManager } from './tex-builds.mjs'
 import { AgentManager } from './agents.mjs'
 import { Settings } from './settings.mjs'
 import { Providers } from './providers.mjs'
+import { ModelDiscovery } from './model-discovery.mjs'
 import { ChatStore } from './chats.mjs'
 import { TrashManager } from './trash.mjs'
 import { createChatTitleGenerator } from './chat-titles.mjs'
@@ -153,6 +154,7 @@ export async function createStudio({
   titleGenerator: suppliedTitleGenerator,
   capacity = loadCapacity(),
   books = new LeanBooks(),
+  modelDiscoverer,
 } = {}) {
   dataDir = path.resolve(dataDir)
   const workspaceDataDir = dataDir
@@ -169,6 +171,13 @@ export async function createStudio({
   ).init()
   config.redact = providers.redact
   config.providerForUser = (owner) => providers.provider(owner)
+  const modelDiscovery = new ModelDiscovery({
+    dataDir,
+    config,
+    providers,
+    ...(modelDiscoverer ? { discover: modelDiscoverer } : {}),
+  })
+  config.modelsForUser = (owner, options) => modelDiscovery.get(owner, options)
   const runtime =
     suppliedRuntime ||
     new Runtime({
@@ -450,18 +459,46 @@ export async function createStudio({
     )
     res.json({ ok: true })
   })
-  app.get('/api/session', (req, res) =>
+  app.get('/api/session', async (req, res) => {
+    let modelAccess
+    try {
+      modelAccess = await modelDiscovery.get(req.user.id)
+    } catch (error) {
+      modelAccess = {
+        models: [],
+        defaultModel: null,
+        modelError: config.redact(error.message),
+      }
+    }
     res.json({
       user: auth.public(req.user),
       eventTransport:
         process.env.STUDIO_EVENT_TRANSPORT === 'poll' ? 'poll' : 'sse',
       capacity,
       runtime: runtime.info(),
-      models: config.models,
-      defaultModel: config.defaultModel,
+      models: modelAccess.models,
+      defaultModel: modelAccess.defaultModel,
+      modelsUpdatedAt: modelAccess.modelsUpdatedAt || null,
       templates: runtime.templates(),
-      lemex: { ...config.lemex, ...providers.status(req.user.id) },
-    }),
+      lemex: {
+        ...config.lemex,
+        ...providers.status(req.user.id),
+        modelError: modelAccess.modelError || null,
+      },
+    })
+  })
+  const publicModels = ({ models, defaultModel, modelsUpdatedAt }) => ({
+    models,
+    defaultModel,
+    modelsUpdatedAt,
+  })
+  app.get('/api/models', async (req, res) =>
+    res.json(publicModels(await modelDiscovery.get(req.user.id))),
+  )
+  app.post('/api/models/refresh', async (req, res) =>
+    res.json(
+      publicModels(await modelDiscovery.get(req.user.id, { refresh: true })),
+    ),
   )
   app.get('/api/provider', (req, res) =>
     res.json(providers.status(req.user.id)),
@@ -1284,6 +1321,7 @@ export async function createStudio({
         texStopped = texBuilds.shutdown()
       await runtime.shutdown?.()
       await Promise.allSettled([
+        modelDiscovery.close(),
         checksStopped,
         agentsStopped,
         texStopped,
@@ -1310,6 +1348,7 @@ export async function createStudio({
     config,
     settings,
     providers,
+    modelDiscovery,
     gitConnections,
     publisher,
     close,

@@ -99,7 +99,7 @@ test('repair writes the normalized model catalog and sends the exact configured 
   )
   assert.equal(
     requests.find((r) => r.method === 'turn/start').params.effort,
-    'max',
+    'medium',
   )
   const envelope = JSON.parse(
     requests.find((r) => r.method === 'turn/start').params.input[0].text,

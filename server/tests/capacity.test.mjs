@@ -1,3 +1,4 @@
+import { fixtureModelDiscovery } from './fixtures/model-discovery.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -82,6 +83,7 @@ async function fixture(t, extraCapacity = {}) {
     },
   }
   const studio = await createStudio({
+    modelDiscoverer: fixtureModelDiscovery,
     dataDir,
     runtime,
     capacity,

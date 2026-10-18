@@ -1,5 +1,7 @@
 import { writeModelCatalog } from './model-catalog.mjs'
 import { providerFor } from './providers.mjs'
+import { modelConfigFor } from './model-discovery.mjs'
+import { modelContextConfig } from './model-catalog.mjs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { AgentRpc } from './rpc.mjs'
@@ -55,7 +57,12 @@ export async function repairProjectSetup({
       'Add your Lemex API key in Assistant settings to enable automatic setup repair. The uploaded files are retained.',
     )
   signal?.throwIfAborted()
+  config = await modelConfigFor(config, owner)
   const model = config.models?.find((model) => model.id === config.defaultModel)
+  if (!model)
+    throw new Error(
+      'No Lemex model is available for this account. Refresh models in Assistant settings.',
+    )
   const effort = model?.defaultReasoningEffort
   if (effort && !model.reasoningEfforts?.some((level) => level.id === effort))
     throw new Error(
@@ -70,6 +77,7 @@ export async function repairProjectSetup({
       `model = ${JSON.stringify(config.defaultModel)}`,
       'model_catalog_json = "models.json"',
       'web_search = "disabled"',
+      ...modelContextConfig(config.modelCatalog, config.defaultModel),
       '[analytics]',
       'enabled = false',
       '[feedback]',

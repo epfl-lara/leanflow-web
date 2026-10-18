@@ -60,7 +60,8 @@ export interface Session {
     reasoningEfforts?: { id: string; description?: string }[]
     defaultReasoningEffort?: string | null
   }[]
-  defaultModel?: string
+  defaultModel?: string | null
+  modelsUpdatedAt?: string | null
   runtime?: Record<string, unknown>
   capacity?: {
     workers: number
@@ -84,8 +85,15 @@ export interface Session {
     revision?: string
     version?: string
     configured?: boolean
+    modelError?: string | null
     [key: string]: unknown
   }
+}
+
+export interface ModelAccess {
+  models: Session['models']
+  defaultModel: string | null
+  modelsUpdatedAt?: string | null
 }
 
 export interface Project {

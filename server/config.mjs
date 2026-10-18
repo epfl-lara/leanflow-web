@@ -7,7 +7,7 @@ import { DEFAULT_MODEL, rcpModelCatalog } from './model-catalog.mjs'
 export function catalogModels(catalog, defaultModel) {
   const list = Array.isArray(catalog) ? catalog : catalog.models || []
   const models = list
-    .filter((model) => !model.hidden)
+    .filter((model) => !model.hidden && model.visibility !== 'hide')
     .map((model) => {
       const reasoningEfforts = (
         Array.isArray(model.supported_reasoning_levels)
@@ -35,7 +35,7 @@ export function catalogModels(catalog, defaultModel) {
       }
     })
     .filter((model) => model.id)
-  if (!models.some((model) => model.id === defaultModel))
+  if (defaultModel && !models.some((model) => model.id === defaultModel))
     models.unshift({
       id: defaultModel,
       name: defaultModel,
@@ -71,7 +71,7 @@ export async function loadConfig(
   } catch {}
   const value = (name) =>
     new RegExp(`^${name}\\s*=\\s*"([^"\\n]+)"`, 'm').exec(text)?.[1]
-  const defaultModel = env.STUDIO_MODEL || DEFAULT_MODEL
+  const defaultModel = env.STUDIO_MODEL || value('model') || DEFAULT_MODEL
   let catalog
   const catalogFile = value('model_catalog_json') || 'models.json'
   try {
@@ -139,6 +139,7 @@ export async function loadConfig(
   }
   return {
     defaultModel,
+    lemexHome: installedHome,
     models,
     modelCatalog: catalog,
     provider,

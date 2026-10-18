@@ -14,7 +14,7 @@ parser.add_argument("--source", default=str(Path.home() / ".local/lib/lemex"))
 parser.add_argument("--config", default=str(Path.home() / ".lemex/config.toml"))
 parser.add_argument("--destination", default=".runtime/lemex")
 parser.add_argument(
-    "--expected-commit", default="2f0e12c10d0baf7404a83da3b8cb8f04b77822c9"
+    "--expected-commit", default="787a20eec6b6c50747e9040dc82f272ef16b80a6"
 )
 parser.add_argument(
     "--source-checkout",
@@ -105,6 +105,8 @@ expected_native_hashes = provenance.get("native_artifact_sha256") or {
 target.mkdir(parents=True, exist_ok=True)
 for name in ["bin", "codex-path", "codex-resources"]:
     shutil.copytree(source / name, target / name, dirs_exist_ok=True)
+if (source / "codex-package.json").is_file():
+    shutil.copy2(source / "codex-package.json", target / "codex-package.json")
 # Source installers may use umask 077. Docker COPY assigns root ownership, so
 # normalize only this owned bundle's executable assets for the worker UID.
 for directory in [target, *[entry for entry in target.rglob("*") if entry.is_dir()]]:

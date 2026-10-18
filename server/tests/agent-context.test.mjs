@@ -1,3 +1,4 @@
+import profiles from '../lemex-models.json' with { type: 'json' }
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -523,7 +524,7 @@ test('fresh native RPC context keeps chat history while optional current files r
         },
       }
       const modelCatalog = rcpModelCatalog({
-        models: [{ slug: DEFAULT_MODEL }],
+        models: [profiles.models.find((model) => model.slug === DEFAULT_MODEL)],
       })
       const manager = new AgentManager({
         runtime,

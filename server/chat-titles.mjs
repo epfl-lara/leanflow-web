@@ -1,4 +1,5 @@
 import { providerFor } from './providers.mjs'
+import { modelConfigFor } from './model-discovery.mjs'
 
 const MAX_INPUT_CHARS = 8_000
 const MAX_MESSAGES = 8
@@ -34,6 +35,8 @@ function chooseModel(config) {
     models.find((model) => model.id === config.defaultModel) ||
     models.find((model) => /flash/i.test(model.id)) ||
     models[0] ||
+    (config.models || []).find((model) => model.id === config.defaultModel) ||
+    config.models?.[0] ||
     null
   )
 }
@@ -167,7 +170,7 @@ export function createChatTitleGenerator(
   )
   const endpoint = providerEndpoint(config.provider?.LEMEX_BASE_URL)
   const available = !!(
-    model &&
+    (model || config.modelsForUser) &&
     endpoint &&
     (config.providerForUser || config.provider?.LEMEX_API_KEY) &&
     fetchImpl
@@ -176,8 +179,19 @@ export function createChatTitleGenerator(
     available,
     model,
     async generate(messages, { signal, owner } = {}) {
+      if (config.modelsForUser) {
+        await providerFor(config, owner)
+        const accountConfig = await modelConfigFor(config, owner)
+        // Bind this request to the account snapshot; never mutate the shared
+        // generator or reuse one user's default for another account.
+        const scoped = { ...accountConfig, modelsForUser: undefined }
+        return createChatTitleGenerator(scoped, {
+          fetchImpl,
+          timeoutMs,
+        }).generate(messages, { signal, owner })
+      }
       if (!available)
-        throw failure('DeepSeek chat naming is not configured.', 503)
+        throw failure('Chat naming is not configured for this account.', 503)
       const key = (await providerFor(config, owner))?.LEMEX_API_KEY
       if (!key)
         throw failure(

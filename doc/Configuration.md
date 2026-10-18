@@ -10,7 +10,7 @@ Set `LEMEX_BASE_URL` to your Lemex provider's HTTPS API endpoint. Each account s
 | -------------------- | ------------------------------------------------------------------------------------------------------ |
 | `LEMEX_BASE_URL`     | HTTPS provider endpoint; keys are supplied by each account.                                            |
 | `LEMEX_HOME`         | Override the packaged Lemex config and model catalog; falls back to `~/.lemex` when no package exists. |
-| `STUDIO_MODEL`       | Override the default model, `deepseek-ai/DeepSeek-V4.1-Flash`.                                         |
+| `STUDIO_MODEL`       | Override the default model, `deepseek-ai/DeepSeek-V4.1-Flash-1017`.                                    |
 | `HOST`, `PORT`       | Listen address and port; defaults to `127.0.0.1:8090`.                                                 |
 | `STUDIO_DATA_DIR`    | Accounts, projects, chats, and caches; defaults to `.data`.                                            |
 | `STUDIO_ORIGIN`      | Exact public HTTPS origin, including a nonstandard port if used.                                       |
@@ -77,7 +77,11 @@ The maximum is 6 hours. Editors, assistant runs and proof verification use their
 
 Bulk source uploads and saves share `STUDIO_MAX_SOURCE_REQUESTS` slots (default 2, at most 1 per account by default). Known uncompressed requests up to 3 MiB have a separate bounded lane: `STUDIO_MAX_SMALL_SOURCE_REQUESTS` defaults to 8, with at most 2 per account. This keeps ordinary saves available while large uploads run. Compressed and unknown-length requests use bulk capacity. Both lanes include body parsing and queued writes, even after a parsed request disconnects. Keep bulk capacity low when worker memory is tight. A busy request returns a retryable message and preserves the editor's unsaved buffer.
 
-With the default configuration, the assistant opens with DeepSeek-V4.1-Flash at `max`, its highest supported reasoning effort. Model and effort changes apply while the assistant is open; reopening it restores the default. The server offers each model's supported levels and disables the effort selector for models without adjustable effort. The UI and isolated Lemex workers use the same corrected catalog.
+With the default configuration, the assistant prefers DeepSeek-V4.1-Flash-1017 at `max`, matching the current Lemex defaults. Its bundled preferred models also include DeepSeek-V4.1-Flash (`high`), Qwen3.8-Flash-Next and Qwen3.8-27B (`medium`), GLM-5.3-Flash (`max`), and Leanstral-2603 (`high`). A model is offered only when the account’s key exposes it. If the preferred model is unavailable, the default is the first available model in Lemex’s priority order.
+
+The server runs native Lemex discovery with each account’s own key in a temporary private home. The authenticated `/models` list determines availability; Lemex’s deployment metadata determines reasoning options and context limits. Catalogs are kept in memory for five minutes and are isolated by account and effective key. Changing a key invalidates that account’s cached access automatically. Use **Assistant settings → Models available with your key → Refresh models** after provider permissions change. A discovery error shows an actionable message; it does not grant access to the bundled fallback catalog.
+
+Model and effort choices apply while the assistant is open. Reopening a project restores its available default. Refreshing access preserves a selected model and effort if both remain available. The same account catalog controls assistant runs, queued run admission, setup repair, and chat titles. The worker receives that catalog and uses the selected model’s context limit. Models without adjustable reasoning have the effort selector disabled.
 
 ## Accounts and personal API keys
 

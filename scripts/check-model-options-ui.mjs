@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import profiles from '../server/lemex-models.json' with { type: 'json' }
 // All API calls are fixtures; serve the client on STUDIO_TEST_URL.
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -16,13 +17,14 @@ const catalog = rcpModelCatalog({
     'Qwen/Qwen3.8-27B',
     'zai-org/GLM-5.3-Flash',
     'moonshotai/Kimi-K2.7-Code',
-  ].map((slug) => ({
-    slug,
-    default_reasoning_level: 'medium',
-    supported_reasoning_levels: ['low', 'medium', 'high'].map((effort) => ({
-      effort,
-    })),
-  })),
+  ].map(
+    (slug) =>
+      profiles.models.find((model) => model.slug === slug) || {
+        slug,
+        default_reasoning_level: null,
+        supported_reasoning_levels: [],
+      },
+  ),
 })
 const fixture = await chatBrowserFixture({
   session: {
@@ -94,7 +96,7 @@ try {
   await openOptions()
   assert.equal(await model.inputValue(), DEFAULT_MODEL)
   assert.equal(await effort.inputValue(), 'max')
-  assert.deepEqual(await levels(), ['', 'low', 'high', 'xhigh', 'max'])
+  assert.deepEqual(await levels(), ['', 'none', 'low', 'high', 'xhigh', 'max'])
   assert.equal(
     await page.getByLabel('Edit files live', { exact: true }).isChecked(),
     false,
@@ -118,8 +120,8 @@ try {
   )
 
   await model.selectOption('Qwen/Qwen3.8-27B')
-  assert.equal(await effort.inputValue(), 'xhigh')
-  assert.deepEqual(await levels(), ['', 'low', 'medium', 'xhigh'])
+  assert.equal(await effort.inputValue(), 'medium')
+  assert.deepEqual(await levels(), ['', 'none', 'low', 'medium', 'xhigh'])
   await model.selectOption('zai-org/GLM-5.3-Flash')
   assert.equal(await effort.inputValue(), 'max')
   assert.deepEqual(await levels(), ['', 'low', 'high', 'max'])

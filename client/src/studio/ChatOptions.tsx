@@ -1,5 +1,5 @@
 import type { Session } from './api'
-import { useId } from 'react'
+import { useId, useState } from 'react'
 import { HelpTip } from './HelpTip'
 
 export function ChatOptions({
@@ -24,6 +24,15 @@ export function ChatOptions({
   const selected = models.find((item) => item.id === model)
   const levels = selected?.reasoningEfforts || []
   const modelId = useId()
+  const searchId = useId()
+  const [query, setQuery] = useState('')
+  const matching = models.filter(
+    (item) =>
+      item.id === model ||
+      `${item.id} ${item.name}`
+        .toLowerCase()
+        .includes(query.toLowerCase().trim()),
+  )
   const effortId = useId()
   return (
     <details className="chat-options">
@@ -35,12 +44,34 @@ export function ChatOptions({
           <div className="help-label">
             <label htmlFor={modelId}>Model</label>
           </div>
+          {models.length > 10 && (
+            <>
+              <label className="sr-only" htmlFor={searchId}>
+                Search available models
+              </label>
+              <input
+                id={searchId}
+                type="search"
+                placeholder="Search available models…"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </>
+          )}
           <select
             id={modelId}
             value={model}
             onChange={(event) => onModel(event.target.value)}
+            disabled={!models.length}
           >
-            {models.map((item) => (
+            {!selected && model ? (
+              <option value={model} disabled>
+                Unavailable: {model}
+              </option>
+            ) : (
+              !models.length && <option value="">No model available</option>
+            )}
+            {matching.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.name || item.id}
               </option>
@@ -62,9 +93,9 @@ export function ChatOptions({
             aria-describedby={
               !levels.length ? 'reasoning-effort-help' : undefined
             }
-            value={levels.some((level) => level.id === effort) ? effort : ''}
+            value={effort}
             onChange={(event) => onEffort(event.target.value)}
-            disabled={!levels.length}
+            disabled={!levels.length && !effort}
           >
             <option value="">
               Default
@@ -72,6 +103,11 @@ export function ChatOptions({
                 ? ` (${selected.defaultReasoningEffort})`
                 : ''}
             </option>
+            {effort && !levels.some((level) => level.id === effort) && (
+              <option value={effort} disabled>
+                Unavailable: {effort}
+              </option>
+            )}
             {levels.map((level) => (
               <option key={level.id} value={level.id} title={level.description}>
                 {level.id}

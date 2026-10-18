@@ -1,3 +1,4 @@
+import { fixtureModelDiscovery } from './fixtures/model-discovery.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
@@ -128,6 +129,7 @@ test('validation does no inference, forbids redirects, and never returns provide
 async function fixture(t) {
   const dataDir = await temp(t)
   const studio = await createStudio({
+    modelDiscoverer: fixtureModelDiscovery,
     dataDir,
     runtime: {
       async init() {},

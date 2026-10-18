@@ -48,7 +48,7 @@ Open **http://localhost:8090**. In another terminal, from the app directory, rea
 cat .data/auth/owner.token
 ```
 
-Sign in with the token, then save your own Lemex API key. See [accounts and personal keys](Configuration.md#accounts-and-personal-api-keys) for invitations and roles.
+Sign in with the token, then save your own Lemex API key. LeanFlow discovers the models that key can use; refresh its access in Assistant settings after permissions change. See [accounts and personal keys](Configuration.md#accounts-and-personal-api-keys) for invitations and roles.
 
 After saving your key, choose **Import or create project**. Keep your token, API key, and `.env` private.
 

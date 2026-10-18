@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { api, errorText, type Account, type ProviderStatus } from './api'
 import { ProviderKeyForm } from './ProviderKeyForm'
 import { AdminAccounts } from './AdminAccounts'
+import { ModelAccess } from './ModelAccess'
 import { Dialog } from './Dialog'
 import { Icon } from './Icons'
 
@@ -90,6 +91,12 @@ export function SettingsModal({
             setProvider(value)
             onProviderSaved()
           }}
+        />
+      )}
+      {provider?.configured && (
+        <ModelAccess
+          revision={provider.updatedAt}
+          onUpdated={onProviderSaved}
         />
       )}
       {!settings && !error && (

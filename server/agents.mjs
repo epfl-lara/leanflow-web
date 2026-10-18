@@ -1,5 +1,7 @@
 import { writeModelCatalog } from './model-catalog.mjs'
 import { providerFor } from './providers.mjs'
+import { modelConfigFor } from './model-discovery.mjs'
+import { modelContextConfig } from './model-catalog.mjs'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { AgentRpc } from './rpc.mjs'
@@ -195,11 +197,14 @@ export class AgentManager {
       throw Object.assign(new Error('Choose whether to show edits live.'), {
         status: 400,
       })
-    const model = input.model || this.config.defaultModel
-    const selectedModel = this.config.models.find((item) => item.id === model)
+    const modelConfig = await modelConfigFor(this.config, owner)
+    const model = input.model || modelConfig.defaultModel
+    const selectedModel = modelConfig.models.find((item) => item.id === model)
     if (!selectedModel)
       throw Object.assign(
-        new Error('This model is not in the server model catalog.'),
+        new Error(
+          'This model is not available with your API key. Refresh models in Assistant settings and choose an available model.',
+        ),
         { status: 400 },
       )
     const effort =
@@ -560,6 +565,18 @@ export class AgentManager {
       }, job.maxSeconds * 1000)
     try {
       const provider = await providerFor(this.config, job.owner)
+      const modelConfig = await modelConfigFor(this.config, job.owner)
+      const selected = modelConfig.models.find(
+        (model) => model.id === job.model,
+      )
+      if (
+        !selected ||
+        (job.effort &&
+          !selected.reasoningEfforts?.some((level) => level.id === job.effort))
+      )
+        throw new Error(
+          'Your current key no longer supports this run’s model or reasoning effort. Choose an available model and start again.',
+        )
       this.events.updateMetadata(id, { status: 'running' })
       this.#progress(
         id,
@@ -683,8 +700,7 @@ export class AgentManager {
           `model = ${JSON.stringify(job.model)}`,
           'model_catalog_json = "models.json"',
           'web_search = "disabled"',
-          'model_context_window = 200000',
-          'model_auto_compact_token_limit = 180000',
+          ...modelContextConfig(modelConfig.modelCatalog, job.model),
           `show_raw_agent_reasoning = ${preferences.showReasoning !== false}`,
           '[mcp_servers.lean]',
           'command = "/opt/tools/bin/lean-lsp-mcp"',
@@ -721,7 +737,7 @@ export class AgentManager {
       await fs.writeFile(path.join(home, '.lemex/config.toml'), config, {
         mode: 0o600,
       })
-      await writeModelCatalog(home, this.config.modelCatalog)
+      await writeModelCatalog(home, modelConfig.modelCatalog)
       if (active.controller.signal.aborted) return
       const child = this.runtime.spawn(
         snapshot.root,

@@ -9,6 +9,9 @@ import { DEFAULT_MODEL, rcpModelCatalog } from '../model-catalog.mjs'
 import { AgentManager } from '../agents.mjs'
 import { EventStore } from '../events.mjs'
 
+const profiles = JSON.parse(
+  await fs.readFile(new URL('../lemex-models.json', import.meta.url), 'utf8'),
+).models
 const nativeModel = (slug) => ({
   slug,
   display_name: slug,
@@ -17,21 +20,15 @@ const nativeModel = (slug) => ({
     effort,
   })),
   model_context_window: 200000,
+  ...(profiles.find((model) => model.slug === slug) || {}),
 })
 
 test('RCP selections match model encoders and preserve unrelated native metadata', () => {
-  const expected = [
-    [DEFAULT_MODEL, ['low', 'high', 'xhigh', 'max'], 'max'],
-    ['deepseek-ai/DeepSeek-V4-Flash-0731', ['low', 'high', 'max'], 'low'],
-    ['Qwen/Qwen3.8-Flash-Next', ['low', 'medium', 'xhigh'], 'xhigh'],
-    ['Qwen/Qwen3.8-27B', ['low', 'medium', 'xhigh'], 'xhigh'],
-    ['zai-org/GLM-5.2', ['high', 'max'], 'max'],
-    ['zai-org/GLM-5.3-Flash', ['low', 'high', 'max'], 'max'],
-    ['moonshotai/Kimi-K2.7-Code', [], null],
-    ['Qwen/Qwen3.5-397B-A17B', [], null],
-    ['Qwen/Qwen3-VL-235B-A22B-Thinking', [], null],
-    ['Qwen/Qwen3.6-35B-A3B', [], null],
-  ]
+  const expected = profiles.map((model) => [
+    model.slug,
+    model.supported_reasoning_levels.map((level) => level.effort),
+    model.default_reasoning_level,
+  ])
   const input = { models: expected.map(([id]) => nativeModel(id)) }
   const original = structuredClone(input)
   const catalog = rcpModelCatalog(input)
@@ -63,7 +60,7 @@ async function fixture(t) {
   ]) {
     await fs.writeFile(
       path.join(dir, 'config.toml'),
-      'model = "host-only/model"\nmodel_catalog_json = "models.json"\n',
+      `model = "${dir === packaged ? DEFAULT_MODEL : 'host-only/model'}"\nmodel_catalog_json = "models.json"\n`,
     )
     await fs.writeFile(
       path.join(dir, 'models.json'),
@@ -131,6 +128,7 @@ test('run defaults use max; explicit selections are preserved and unsupported le
   for (const [index, effort] of [
     undefined,
     null,
+    'none',
     'low',
     'high',
     'xhigh',

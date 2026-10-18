@@ -114,9 +114,9 @@ test('model choice stays in DeepSeek and omits unsupported effort instead of gue
   }
 })
 
-test('missing DeepSeek or unsafe provider configuration makes naming unavailable without a request', async () => {
+test('missing models or unsafe provider configuration makes naming unavailable without a request', async () => {
   const variants = [
-    { models: [{ id: 'other/model' }], defaultModel: 'other/model' },
+    { models: [], defaultModel: null },
     { provider: {} },
     {
       provider: {

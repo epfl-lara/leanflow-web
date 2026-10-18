@@ -1,0 +1,348 @@
+{
+  "models": [
+    {
+      "slug": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+      "display_name": "DeepSeek V4.1 Flash 1017",
+      "description": "DeepSeek V4.1 Flash 1017 via RCP",
+      "default_reasoning_level": "max",
+      "supported_reasoning_levels": [
+        {
+          "effort": "none",
+          "description": "Disable reasoning"
+        },
+        {
+          "effort": "low",
+          "description": "Lighter reasoning effort"
+        },
+        {
+          "effort": "high",
+          "description": "High reasoning effort"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra-high reasoning effort"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning effort"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 1,
+      "availability_nux": null,
+      "upgrade": null,
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": false,
+      "context_window": 240000,
+      "max_context_window": 240000,
+      "input_modalities": ["text"],
+      "supports_search_tool": false,
+      "use_responses_lite": false,
+      "supports_reasoning_summary_parameter": false,
+      "default_reasoning_summary": "none",
+      "experimental_supported_tools": [],
+      "model_messages": {
+        "instructions_template": "You are Lemex, an agentic coding assistant running in the Lemex CLI. You and the user share the same workspace and collaborate to achieve the user's goals. Be precise, safe, and helpful. Prefer concise, actionable responses.",
+        "instructions_variables": null,
+        "approvals": null,
+        "collaboration_modes": null,
+        "auto_review": null,
+        "permissions": null,
+        "multi_agent": null,
+        "token_budget": null,
+        "guardian_v2": null
+      }
+    },
+    {
+      "slug": "deepseek-ai/DeepSeek-V4.1-Flash",
+      "display_name": "DeepSeek V4.1 Flash",
+      "description": "DeepSeek V4.1 Flash via RCP",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "none",
+          "description": "Disable reasoning"
+        },
+        {
+          "effort": "low",
+          "description": "Lighter reasoning effort"
+        },
+        {
+          "effort": "high",
+          "description": "High reasoning effort"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra-high reasoning effort"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning effort"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 2,
+      "availability_nux": null,
+      "upgrade": null,
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": false,
+      "context_window": 200000,
+      "max_context_window": 200000,
+      "input_modalities": ["text"],
+      "supports_search_tool": false,
+      "use_responses_lite": false,
+      "supports_reasoning_summary_parameter": false,
+      "default_reasoning_summary": "none",
+      "experimental_supported_tools": [],
+      "model_messages": {
+        "instructions_template": "You are Lemex, an agentic coding assistant running in the Lemex CLI. You and the user share the same workspace and collaborate to achieve the user's goals. Be precise, safe, and helpful. Prefer concise, actionable responses.",
+        "instructions_variables": null,
+        "approvals": null,
+        "collaboration_modes": null,
+        "auto_review": null,
+        "permissions": null,
+        "multi_agent": null,
+        "token_budget": null,
+        "guardian_v2": null
+      }
+    },
+    {
+      "slug": "Qwen/Qwen3.8-Flash-Next",
+      "display_name": "Qwen 3.8 Flash Next",
+      "description": "Qwen 3.8 Flash Next via RCP",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "none",
+          "description": "Disable reasoning"
+        },
+        {
+          "effort": "low",
+          "description": "Lighter reasoning effort"
+        },
+        {
+          "effort": "medium",
+          "description": "Balanced reasoning effort"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra-high reasoning effort"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 3,
+      "availability_nux": null,
+      "upgrade": null,
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": false,
+      "context_window": 200000,
+      "max_context_window": 200000,
+      "input_modalities": ["text"],
+      "supports_search_tool": false,
+      "use_responses_lite": false,
+      "supports_reasoning_summary_parameter": false,
+      "default_reasoning_summary": "none",
+      "experimental_supported_tools": [],
+      "model_messages": {
+        "instructions_template": "You are Lemex, an agentic coding assistant running in the Lemex CLI. You and the user share the same workspace and collaborate to achieve the user's goals. Be precise, safe, and helpful. Prefer concise, actionable responses.",
+        "instructions_variables": null,
+        "approvals": null,
+        "collaboration_modes": null,
+        "auto_review": null,
+        "permissions": null,
+        "multi_agent": null,
+        "token_budget": null,
+        "guardian_v2": null
+      }
+    },
+    {
+      "slug": "Qwen/Qwen3.8-27B",
+      "display_name": "Qwen 3.8 27B",
+      "description": "Qwen 3.8 27B via RCP",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "none",
+          "description": "Disable reasoning"
+        },
+        {
+          "effort": "low",
+          "description": "Lighter reasoning effort"
+        },
+        {
+          "effort": "medium",
+          "description": "Balanced reasoning effort"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra-high reasoning effort"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 4,
+      "availability_nux": null,
+      "upgrade": null,
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": false,
+      "context_window": 200000,
+      "max_context_window": 200000,
+      "input_modalities": ["text"],
+      "supports_search_tool": false,
+      "use_responses_lite": false,
+      "supports_reasoning_summary_parameter": false,
+      "default_reasoning_summary": "none",
+      "experimental_supported_tools": [],
+      "model_messages": {
+        "instructions_template": "You are Lemex, an agentic coding assistant running in the Lemex CLI. You and the user share the same workspace and collaborate to achieve the user's goals. Be precise, safe, and helpful. Prefer concise, actionable responses.",
+        "instructions_variables": null,
+        "approvals": null,
+        "collaboration_modes": null,
+        "auto_review": null,
+        "permissions": null,
+        "multi_agent": null,
+        "token_budget": null,
+        "guardian_v2": null
+      }
+    },
+    {
+      "slug": "zai-org/GLM-5.3-Flash",
+      "display_name": "GLM 5.3 Flash",
+      "description": "GLM 5.3 Flash via RCP",
+      "default_reasoning_level": "max",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Lighter reasoning effort"
+        },
+        {
+          "effort": "high",
+          "description": "High reasoning effort"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning effort"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 5,
+      "availability_nux": null,
+      "upgrade": null,
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": false,
+      "context_window": 200000,
+      "max_context_window": 200000,
+      "input_modalities": ["text"],
+      "supports_search_tool": false,
+      "use_responses_lite": false,
+      "supports_reasoning_summary_parameter": false,
+      "default_reasoning_summary": "none",
+      "experimental_supported_tools": [],
+      "model_messages": {
+        "instructions_template": "You are Lemex, an agentic coding assistant running in the Lemex CLI. You and the user share the same workspace and collaborate to achieve the user's goals. Be precise, safe, and helpful. Prefer concise, actionable responses.",
+        "instructions_variables": null,
+        "approvals": null,
+        "collaboration_modes": null,
+        "auto_review": null,
+        "permissions": null,
+        "multi_agent": null,
+        "token_budget": null,
+        "guardian_v2": null
+      }
+    },
+    {
+      "slug": "mistralai/Leanstral-2603",
+      "display_name": "Leanstral 2603",
+      "description": "Leanstral 2603 via RCP",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "none",
+          "description": "Disable reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "High reasoning effort"
+        }
+      ],
+      "shell_type": "unified_exec",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 6,
+      "availability_nux": null,
+      "upgrade": null,
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_image_detail_original": false,
+      "context_window": 200000,
+      "max_context_window": 200000,
+      "input_modalities": ["text"],
+      "supports_search_tool": false,
+      "use_responses_lite": false,
+      "supports_reasoning_summary_parameter": false,
+      "default_reasoning_summary": "none",
+      "experimental_supported_tools": [],
+      "model_messages": {
+        "instructions_template": "You are Lemex, an agentic coding assistant running in the Lemex CLI. You and the user share the same workspace and collaborate to achieve the user's goals. Be precise, safe, and helpful. Prefer concise, actionable responses.",
+        "instructions_variables": null,
+        "approvals": null,
+        "collaboration_modes": null,
+        "auto_review": null,
+        "permissions": null,
+        "multi_agent": null,
+        "token_budget": null,
+        "guardian_v2": null
+      }
+    }
+  ]
+}

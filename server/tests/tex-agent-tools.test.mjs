@@ -1,3 +1,4 @@
+import profiles from '../lemex-models.json' with { type: 'json' }
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createTexAgentTools } from '../tex-agent-tools.mjs'
@@ -336,7 +337,7 @@ test('native assistant advertises and executes TeX tools in search while proof m
         },
       }
       const modelCatalog = rcpModelCatalog({
-        models: [{ slug: DEFAULT_MODEL }],
+        models: [profiles.models.find((model) => model.slug === DEFAULT_MODEL)],
       })
       const manager = new AgentManager({
         runtime,
