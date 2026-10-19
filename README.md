@@ -24,7 +24,7 @@ Self-host LeanFlow Web for yourself or trusted collaborators on Linux with Node.
 
 After setup, use `npm run dev` for development with your settings exported. See [AGENTS.md](AGENTS.md) for code practices, formatting, and checks.
 
-See [Configuration](doc/Configuration.md) for advanced settings and [Verification](doc/Verification.md) for runtime checks.
+See [Configuration](doc/Configuration.md) for advanced settings, [Checks and releases](doc/Automation.md) for GitHub Actions, and [Verification](doc/Verification.md) for runtime checks.
 
 ## Credits
 
