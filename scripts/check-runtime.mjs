@@ -53,23 +53,26 @@ try {
   if (actualProvenance.provenance_verification === 'npm_registry_integrity') {
     const release = JSON.parse(
       await fs.readFile(
-        path.join(projectDir, 'deploy/lemex-runtime.json'),
+        path.resolve(
+          projectDir,
+          process.env.LEMEX_RUNTIME_DIR || '.runtime/lemex',
+          'manifest.json',
+        ),
         'utf8',
       ),
     )
-    const architecture = actualProvenance.npm_version?.endsWith('-linux-arm64')
-      ? 'arm64'
-      : 'x64'
-    assert.equal(actualProvenance.npm_package, release.package)
-    assert.equal(actualProvenance.version, release.version)
-    assert.equal(
-      actualProvenance.npm_version,
-      `${release.version}-linux-${architecture}`,
-    )
-    assert.equal(
-      actualProvenance.npm_integrity,
-      release.integrity[architecture],
-    )
+    for (const field of [
+      'npm_package',
+      'version',
+      'npm_version',
+      'npm_integrity',
+      'native_target',
+    ])
+      assert.equal(
+        actualProvenance[field],
+        release[field],
+        `Worker differs from the packaged runtime: ${field}`,
+      )
   }
   await runtime.prepareToolchain('leanprover/lean4:v4.34.1')
   const proof = await runtime.run(root, [

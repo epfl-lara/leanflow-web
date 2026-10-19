@@ -25,7 +25,7 @@ RCP is the default provider. Each account adds its own API key at first sign-in 
 
 ### 3. Prepare the worker and libraries
 
-Build the worker. This downloads the pinned precompiled `@lemmy00/lemex` npm release, verifies its integrity, and includes the Lean tools. You do not need to compile Lemex or configure a host API key:
+Build the worker. Each build downloads the latest precompiled `@lemmy00/lemex` npm release, verifies its integrity, records its exact version, and includes the Lean tools. You do not need to compile Lemex or configure a host API key:
 
 ```bash
 npm run worker:build

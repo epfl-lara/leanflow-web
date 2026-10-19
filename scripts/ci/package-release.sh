@@ -34,9 +34,10 @@ worker_image="${LEMEX_WORKER_IMAGE:?Set the verified worker image}"
 worker_id="$(docker image inspect --format '{{.Id}}' "$worker_image")"
 node --input-type=module - "$release_commit" "$worker_image" "$worker_id" <<'JS' > "$release_dir/manifest.json"
 import fs from 'node:fs'
+import { execFileSync } from 'node:child_process'
 const [commit, workerImage, workerImageId] = process.argv.slice(2)
 const { version } = JSON.parse(fs.readFileSync('package.json', 'utf8'))
-const lemex = JSON.parse(fs.readFileSync('deploy/lemex-runtime.json', 'utf8'))
+const lemex = JSON.parse(execFileSync('docker', ['run', '--rm', '--read-only', '--network', 'none', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', workerImageId, 'cat', '/opt/lemex/lemex-install.json'], { encoding: 'utf8' }))
 console.log(JSON.stringify({ version, commit, node: process.version, platform: 'linux/amd64', workerImage, workerImageId, lemex }, null, 2))
 JS
 cp "$release_dir/manifest.json" "$stage_dir/leanflow-web/release-manifest.json"

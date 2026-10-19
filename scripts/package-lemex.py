@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the pinned npm native runtime without personal config or credentials."""
+"""Package the latest npm native runtime without personal config or credentials."""
 
 import argparse
 import base64
@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import tarfile
@@ -25,25 +26,75 @@ ASSETS = [
 ]
 
 
+def resolve_release(architecture, environment, directory):
+    """Resolve latest once, then use that exact version throughout this build."""
+
+    def metadata(spec):
+        return json.loads(
+            subprocess.check_output(
+                [
+                    "npm",
+                    "view",
+                    "--json",
+                    "--prefer-online",
+                    "--registry=https://registry.npmjs.org/",
+                    spec,
+                    "name",
+                    "version",
+                    "dist.integrity",
+                ],
+                cwd=directory,
+                env=environment,
+                text=True,
+                timeout=180,
+            )
+        )
+
+    latest = metadata(f'{RELEASE["package"]}@latest')
+    version = latest.get("version", "")
+    if latest.get("name") != RELEASE["package"] or not re.fullmatch(
+        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version
+    ):
+        raise ValueError("npm latest must identify a stable Lemex release")
+    native_version = f"{version}-linux-{architecture}"
+    native = metadata(f'{RELEASE["package"]}@{native_version}')
+    if (
+        native.get("name") != RELEASE["package"]
+        or native.get("version") != native_version
+    ):
+        raise ValueError("Unexpected native npm package identity")
+    integrity = native.get("dist.integrity", "")
+    if (
+        not integrity.startswith("sha512-")
+        or len(base64.b64decode(integrity.removeprefix("sha512-"), validate=True)) != 64
+    ):
+        raise ValueError("The npm release must provide SHA-512 integrity")
+    return {
+        "package": RELEASE["package"],
+        "version": version,
+        "integrity": {architecture: integrity},
+    }
+
+
 def sha256(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def extract_runtime(tarball, destination, architecture, integrity):
+def extract_runtime(tarball, destination, architecture, integrity, release=RELEASE):
     with tarball.open("rb") as stream:
         actual = (
             "sha512-"
             + base64.b64encode(hashlib.file_digest(stream, "sha512").digest()).decode()
         )
     if actual != integrity:
-        raise ValueError("npm tarball integrity does not match the pinned release")
+        raise ValueError("npm tarball integrity does not match the selected release")
     target = TARGETS[architecture]
     with tarfile.open(tarball, "r:gz") as archive:
         package = json.load(archive.extractfile("package/package.json"))
         if (
-            package.get("name") != RELEASE["package"]
-            or package.get("version") != f'{RELEASE["version"]}-linux-{architecture}'
+            package.get("name") != release["package"]
+            or package.get("version") != f'{release["version"]}-linux-{architecture}'
         ):
             raise ValueError("Unexpected npm package identity")
         for name in ASSETS:
@@ -64,14 +115,14 @@ def extract_runtime(tarball, destination, architecture, integrity):
                 shutil.copyfileobj(source, output)
 
 
-def validate_runtime(directory, architecture):
+def validate_runtime(directory, architecture, release=RELEASE):
     metadata = json.loads((directory / "codex-package.json").read_text())
     if (
         metadata.get("target") != TARGETS[architecture]
-        or metadata.get("version") != RELEASE["version"]
+        or metadata.get("version") != release["version"]
     ):
         raise ValueError(
-            "Native runtime target/version does not match the pinned npm release"
+            "Native runtime target/version does not match the selected npm release"
         )
     machine = {"x64": 62, "arm64": 183}[architecture]
     for name in ASSETS[:-1]:
@@ -117,6 +168,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--destination", default=".runtime/lemex")
     parser.add_argument(
+        "--pinned",
+        action="store_true",
+        help="Explicitly use deploy/lemex-runtime.json instead of npm latest",
+    )
+    parser.add_argument(
         "--target-arch",
         choices=TARGETS,
         default={"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(
@@ -142,7 +198,18 @@ def main():
         staging = Path(temporary)
         bundle = staging / "runtime"
         bundle.mkdir()
-        integrity = RELEASE["integrity"][args.target_arch]
+        environment = {
+            "PATH": os.environ["PATH"],
+            "HOME": str(staging),
+            "npm_config_cache": str(staging / "npm-cache"),
+        }
+        # Local source packaging remains an explicit, offline reference build.
+        release = (
+            RELEASE
+            if args.pinned or args.source
+            else resolve_release(args.target_arch, environment, staging)
+        )
+        integrity = release["integrity"][args.target_arch]
         if args.source:
             for name in ASSETS:
                 source = args.source / name
@@ -154,13 +221,8 @@ def main():
             origin = "installed_native_runtime"
         else:
             package = (
-                f'{RELEASE["package"]}@{RELEASE["version"]}-linux-{args.target_arch}'
+                f'{release["package"]}@{release["version"]}-linux-{args.target_arch}'
             )
-            environment = {
-                "PATH": os.environ["PATH"],
-                "HOME": str(staging),
-                "npm_config_cache": str(staging / "npm-cache"),
-            }
             packed = json.loads(
                 subprocess.check_output(
                     [
@@ -181,14 +243,17 @@ def main():
             filename = Path(packed[0]["filename"])
             if filename.name != str(filename):
                 raise ValueError("Invalid npm archive filename")
-            extract_runtime(staging / filename, bundle, args.target_arch, integrity)
+            extract_runtime(
+                staging / filename, bundle, args.target_arch, integrity, release
+            )
             origin = "npm_registry_integrity"
-        validate_runtime(bundle, args.target_arch)
+        validate_runtime(bundle, args.target_arch, release)
         defaults(bundle)
         manifest = {
-            "version": RELEASE["version"],
-            "npm_package": RELEASE["package"],
-            "npm_version": f'{RELEASE["version"]}-linux-{args.target_arch}',
+            "version": release["version"],
+            "npm_package": release["package"],
+            "npm_version": f'{release["version"]}-linux-{args.target_arch}',
+            "npm_channel": "pinned" if args.pinned or args.source else "latest",
             "npm_integrity": integrity if not args.source else None,
             "native_target": TARGETS[args.target_arch],
             "provenance_verification": origin,
@@ -221,7 +286,7 @@ def main():
             shutil.rmtree(target)
         bundle.rename(target)
     print(
-        f'Packaged {RELEASE["package"]} {RELEASE["version"]} for Linux {args.target_arch} into {target}'
+        f'Packaged {release["package"]} {release["version"]} for Linux {args.target_arch} into {target}'
     )
 
 

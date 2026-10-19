@@ -26,6 +26,7 @@ try {
   assert.equal(health.ok, true)
   assert.equal(health.runtime, true)
   assert.equal(studio.runtime.imageId, manifest.workerImageId)
+  assert.equal(studio.runtime.info().lemexVersion, manifest.lemex.version)
   const page = await fetch(base)
   assert.equal(page.status, 200)
   assert.match(await page.text(), /<html/)

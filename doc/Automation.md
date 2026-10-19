@@ -4,13 +4,13 @@ GitHub Actions runs on GitHub-hosted Linux machines. Checks use isolated fixture
 
 Before the first run, allow Actions for the repository in its organization settings, then enable it under **Repository settings → Actions → General**. Set the default workflow token to **Read repository contents and packages permissions** and require actions to use full commit hashes. An organization policy can prevent repository administrators from enabling Actions themselves.
 
-| Workflow     | When                                                             | What it checks or produces                                                                                                                                                          |
-| ------------ | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **CI**       | Pull requests, pushes to `main`/`dev`, merge queues, or manually | Node.js 24/26 tests, Python packaging, types, lint, changed-file formatting, production dependency audit, client build, and browser regressions.                                    |
-| **Security** | Pull requests, `main`, merge queues, and weekly                  | CodeQL for JavaScript/TypeScript, Python, and workflows; dependency review on pull requests.                                                                                        |
-| **Release**  | Manually on `main`, or a `v*` tag                                | Repeats CI, builds the pinned Lemex worker, checks real Lean execution and Docker isolation, and packages the app and worker. A version tag also creates an attested draft release. |
+| Workflow     | When                                                             | What it checks or produces                                                                                                                                                             |
+| ------------ | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CI**       | Pull requests, pushes to `main`/`dev`, merge queues, or manually | Node.js 24/26 tests, Python packaging, types, lint, changed-file formatting, production dependency audit, client build, and browser regressions.                                       |
+| **Security** | Pull requests, `main`, merge queues, and weekly                  | CodeQL for JavaScript/TypeScript, Python, and workflows; dependency review on pull requests.                                                                                           |
+| **Release**  | Manually on `main`, or a `v*` tag                                | Repeats CI, resolves the latest Lemex release, checks real Lean execution and Docker isolation, and packages the app and worker. A version tag also creates an attested draft release. |
 
-Dependabot proposes weekly updates for npm packages, actions, and Docker base images. Review and merge them through the same checks. The native Lemex release remains explicitly pinned in [`deploy/lemex-runtime.json`](../deploy/lemex-runtime.json).
+Dependabot proposes weekly updates for npm packages, actions, and Docker base images. Review and merge them through the same checks. Worker builds resolve npm's latest Lemex release and verify its integrity. Each release manifest records the version and provenance from the actual worker image, so downloaded artifacts retain the verified runtime. See [Lemex updates](NativeLemex.md#updates).
 
 ## Prepare a release
 
