@@ -6,30 +6,25 @@ Write, explore, and improve Lean proofs in your browser with a Lemex assistant.
 
 Developed by [EPFL LARA](https://epfl-lara.github.io/).
 
-- **Start in Mathlib Playground:** open a scratch file or upload a `.lean` file using prepared Mathlib. Your private playgrounds can be renamed, reopened, and deleted.
-- **Bring your project:** import a Git repository or upload local files, with prepared Mathlib, CSLib, and Physlib environments.
-- **Work with Lean:** edit code alongside live goals, diagnostics, and declaration search.
-- **Read the Lean books:** browse and search local copies, and share chapters or passages with Lemex.
-- **Write LaTeX:** edit multi-file documents beside their PDF, follow compiler errors, and ask Lemex to edit and compile with the optional TeX worker.
-- **Work with Lemex:** choose a proof or select lines to prove, fix, or optimize. Follow its progress, send updates, and stop it whenever you need.
-- **Stay in control:** review live edits, keep separate chats, and commit or push your changes.
+- **Start with Lean:** use Mathlib Playground, import a Git repository, or upload your files.
+- **Explore proofs:** edit alongside live goals, diagnostics, declaration search, and local Lean books.
+- **Ask Lemex:** select a proof to complete, repair, or optimize, using models available with your own API key.
+- **Write LaTeX:** edit documents beside their PDF with the optional TeX worker.
+- **Stay in control:** review edits, steer separate chats, and commit or push your work.
 
 ## Get started
 
-LeanFlow Web is self-hosted for you and trusted collaborators. You'll need Linux, Node.js 24+, Python 3.11+, Git, and Docker. Worker setup downloads the precompiled Lemex npm release; no Rust build is needed.
+Self-host LeanFlow Web for yourself or trusted collaborators on Linux with Node.js 24+, Python 3.11+, Git, and Docker. Setup uses a precompiled Lemex release; no Rust build is needed.
 
-```bash
-git clone https://github.com/epfl-lara/leanflow-web.git
-cd leanflow-web
-```
-
-Follow the **[installation guide](doc/LemexWeb.md#install-and-run)** to prepare Lemex, build the worker, configure your provider, and start the app. It also covers sign-in and access from another computer.
+- **[Install](doc/LemexWeb.md#install-and-run):** prepare the app and sign in.
+- **[Host for a team](doc/Hosting.md):** add persistent storage, a service, and an HTTPS address.
+- **[Use LeanFlow Web](doc/UsingLeanFlow.md):** work with projects, proofs, and Lemex.
 
 ## Contribute
 
 After setup, use `npm run dev` for development with your settings exported. See [AGENTS.md](AGENTS.md) for code practices, formatting, and checks.
 
-See [Using LeanFlow Web](doc/UsingLeanFlow.md) for everyday tasks, [Configuration](doc/Configuration.md) for hosting, and [Verification](doc/Verification.md) for runtime checks.
+See [Configuration](doc/Configuration.md) for advanced settings and [Verification](doc/Verification.md) for runtime checks.
 
 ## Credits
 

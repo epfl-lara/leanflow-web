@@ -202,4 +202,4 @@ To empty Trash, choose **Delete All**, review the item count and total size, the
 
 Drag separators to resize panels; double-click to reset. If sign-in expires, use the recovery dialog with the same token to keep your edits and drafts.
 
-For installation and hosting, see [Install and run](LemexWeb.md#install-and-run) and [Configuration](Configuration.md).
+For setup, see [Install and run](LemexWeb.md#install-and-run) and [Hosting](Hosting.md). Advanced settings are in [Configuration](Configuration.md).
