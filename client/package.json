@@ -10,7 +10,7 @@
   "dependencies": {
     "@codingame/monaco-vscode-bulk-edit-service-override": "8.0.4",
     "@codingame/monaco-vscode-latex-default-extension": "8.0.4",
-    "@codingame/monaco-vscode-markdown-basics-default-extension": "8.0.4",
+    "@codingame/monaco-vscode-markdown-basics-default-extension": "37.6.1",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
     "@fortawesome/free-solid-svg-icons": "^7.1.0",
