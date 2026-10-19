@@ -107,7 +107,7 @@ jobs:
           path: client/dist
       - run: npx --no-install playwright install --with-deps chromium
       - name: Check isolated browser flows
-        run: bash scripts/ci/check-browser.sh
+        run: node scripts/ci/check-browser.mjs
       - name: Save fixture reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

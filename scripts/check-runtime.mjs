@@ -39,11 +39,38 @@ try {
     '/opt/lemex/lemex-install.json',
   ])
   const actualProvenance = JSON.parse(actualNative.stdout)
-  assert.equal(runtime.info().lemexCommit, actualProvenance.source_commit)
+  assert.equal(
+    runtime.info().lemexCommit,
+    actualProvenance.source_commit ||
+      actualProvenance.native_build_commit ||
+      null,
+  )
   assert.equal(
     runtime.info().lemexNativeBuildCommit,
     actualProvenance.native_build_commit || null,
   )
+  assert.equal(runtime.info().lemexVersion, actualProvenance.version || null)
+  if (actualProvenance.provenance_verification === 'npm_registry_integrity') {
+    const release = JSON.parse(
+      await fs.readFile(
+        path.join(projectDir, 'deploy/lemex-runtime.json'),
+        'utf8',
+      ),
+    )
+    const architecture = actualProvenance.npm_version?.endsWith('-linux-arm64')
+      ? 'arm64'
+      : 'x64'
+    assert.equal(actualProvenance.npm_package, release.package)
+    assert.equal(actualProvenance.version, release.version)
+    assert.equal(
+      actualProvenance.npm_version,
+      `${release.version}-linux-${architecture}`,
+    )
+    assert.equal(
+      actualProvenance.npm_integrity,
+      release.integrity[architecture],
+    )
+  }
   await runtime.prepareToolchain('leanprover/lean4:v4.34.1')
   const proof = await runtime.run(root, [
     'lean',

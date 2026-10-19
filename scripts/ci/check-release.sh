@@ -5,6 +5,7 @@ release_commit="$(git rev-parse HEAD)"
 verify_dir="$(mktemp -d)"
 trap 'rm -rf "$verify_dir"' EXIT
 (cd .runtime/release && sha256sum --check SHA256SUMS)
+docker load --input ".runtime/release/leanflow-worker-${release_commit}.tar.gz"
 tar -xzf ".runtime/release/leanflow-web-${release_commit}.tar.gz" -C "$verify_dir"
 cd "$verify_dir/leanflow-web"
 export STUDIO_DATA_DIR="$verify_dir/data"
