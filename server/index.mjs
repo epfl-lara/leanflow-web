@@ -399,10 +399,11 @@ wss.addListener('connection', async function (ws, req) {
   }
   const project = reRes[1]
 
-  if (!project.match(/^[a-zA-Z][a-zA-Z1-9.-_]*/)) {
+  if (!/^[a-zA-Z][a-zA-Z0-9._-]*$/.test(project)) {
     console.error(
       `Connection refused because of invalid project name: ${project}`,
     )
+    ws.close(1008, 'Invalid project name')
     return
   }
 

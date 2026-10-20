@@ -242,6 +242,75 @@ test('project disposal releases a model acquired while the project was closing',
   assert.equal(f.notices.length, 0)
 })
 
+test('concurrent retention acquires only one reference and releases it exactly once', async () => {
+  const f = fixture()
+  let release
+  f.pending(
+    new Promise((resolve) => {
+      release = resolve
+    }),
+  )
+  f.cache.select(a)
+  const first = f.cache.retain(a),
+    second = f.cache.retain(a)
+  release()
+  await Promise.all([first, second])
+  assert.equal(f.requests.length, 1)
+  assert(f.cache.has(a))
+  f.cache.dispose()
+  assert.deepEqual(f.released, [a])
+})
+
+for (const change of [
+  'clear',
+  'invalidate',
+  'remove',
+  'switch away and back',
+]) {
+  test(`pending retention cannot resurrect a reference after ${change}`, async () => {
+    const f = fixture()
+    let release
+    f.pending(
+      new Promise((resolve) => {
+        release = resolve
+      }),
+    )
+    const retaining = f.visit(a)
+    if (change === 'clear') f.cache.clear()
+    if (change === 'invalidate') f.cache.invalidate()
+    if (change === 'remove') f.cache.removePaths(['A.lean'])
+    if (change === 'switch away and back') {
+      f.cache.select(b)
+      f.cache.select(a)
+    }
+    release()
+    await retaining
+    assert(!f.cache.has(a))
+    assert.deepEqual(f.released, [a])
+    await f.visit(a)
+    assert(f.cache.has(a))
+    f.cache.dispose()
+    assert.deepEqual(f.released, [a, a])
+  })
+}
+
+test('a file that grows beyond the limit during retention is not cached', async () => {
+  const f = fixture()
+  let release
+  f.pending(
+    new Promise((resolve) => {
+      release = resolve
+    }),
+  )
+  const retaining = f.visit(a)
+  f.models.get(a).text = 'x'.repeat(256 * 1024 + 1)
+  release()
+  await retaining
+  assert(!f.cache.has(a))
+  assert.deepEqual(f.released, [a])
+  f.cache.dispose()
+})
+
 test('dropping clean UI buffers preserves warm files but a refetched revision invalidates importers', async () => {
   const f = fixture()
   const main = { content: 'main', hash: 'a' },

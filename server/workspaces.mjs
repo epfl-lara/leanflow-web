@@ -955,7 +955,7 @@ export class WorkspaceStore {
 
   #event(project, type, message) {
     const sanitized = String(message).replace(
-      /(https?:\/\/)[^\s/@]+:[^\s/@]+@/g,
+      /(https?:\/\/)[^\s/@:]+:[^\s/@]+@/g,
       '$1[redacted]@',
     )
     this.db.prepare('INSERT INTO events(project,time,data) VALUES(?,?,?)').run(

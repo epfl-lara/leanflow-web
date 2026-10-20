@@ -144,6 +144,35 @@ test('changing endpoints invalidates the catalog even with the same key and cann
   await assert.rejects(pending, { status: 409 })
 })
 
+test('shutdown waits for superseded key discoveries and never publishes an aborted catalog', async (t) => {
+  const work = []
+  const f = await fixture(
+    t,
+    ({ signal }) => new Promise((resolve) => work.push({ signal, resolve })),
+  )
+  await f.providers.save('alice', 'first-fixture-key')
+  const first = f.discovery.get('alice').catch((error) => error)
+  while (work.length < 1) await new Promise((resolve) => setImmediate(resolve))
+  await f.providers.save('alice', 'second-fixture-key')
+  const second = f.discovery.get('alice').catch((error) => error)
+  while (work.length < 2) await new Promise((resolve) => setImmediate(resolve))
+  let closed = false
+  const closing = f.discovery.close().then(() => {
+    closed = true
+  })
+  assert(work.every(({ signal }) => signal.aborted))
+  work[1].resolve({ models: [profile('cancelled')] })
+  await second
+  await new Promise((resolve) => setImmediate(resolve))
+  const closedBeforeOldWorkStopped = closed
+  work[0].resolve({ models: [profile('superseded')] })
+  await Promise.all([first, closing])
+  assert.equal(closedBeforeOldWorkStopped, false)
+  assert.equal(f.discovery.running, 0)
+  assert.equal(f.discovery.cache.size, 0)
+  assert.equal(f.discovery.pending.size, 0)
+})
+
 test('chat naming sends the selected account endpoint its own key and model', async (t) => {
   const f = await fixture(t, async () => ({
     models: [profile('custom/model', null)],

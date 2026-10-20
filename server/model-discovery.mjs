@@ -194,6 +194,7 @@ export class ModelDiscovery {
     this.directory = path.join(dataDir, 'model-discovery')
     this.cache = new Map()
     this.pending = new Map()
+    this.tasks = new Set()
     this.controllers = new Set()
     this.running = 0
     this.stopping = false
@@ -235,6 +236,7 @@ export class ModelDiscovery {
         directory: this.directory,
         signal: controller.signal,
       })
+      controller.signal.throwIfAborted()
       if (
         this.providers.provider(owner).LEMEX_API_KEY !==
           provider.LEMEX_API_KEY ||
@@ -288,17 +290,19 @@ export class ModelDiscovery {
         clearTimeout(timer)
         this.controllers.delete(controller)
         if (this.pending.get(owner)?.task === task) this.pending.delete(owner)
+        this.tasks.delete(task)
         this.running--
       })
     this.pending.set(owner, { identity, task })
+    this.tasks.add(task)
     return task
   }
   async close() {
     this.stopping = true
     for (const controller of this.controllers) controller.abort()
-    await Promise.allSettled(
-      [...this.pending.values()].map((value) => value.task),
-    )
+    // A key change replaces the account's pending entry while its old child
+    // may still be stopping. Wait for every child and private-home cleanup.
+    await Promise.allSettled([...this.tasks])
   }
 }
 

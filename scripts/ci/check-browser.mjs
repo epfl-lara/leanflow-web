@@ -31,6 +31,7 @@ const suites = [
   'reasoning-timeline',
   'reasoning-history',
   'autosave',
+  'lean-cache',
 ]
 const selected = process.argv.slice(2)
 try {

@@ -155,7 +155,7 @@ export function App() {
       setProvider(null)
     }
     if (styleRefForRemoteCursors && styleRefForRemoteCursors.current)
-      styleRefForRemoteCursors.current.innerHTML = ''
+      styleRefForRemoteCursors.current.textContent = ''
     ydoc.destroy()
     usernamesRef.current.clear()
   }
@@ -481,7 +481,7 @@ export function App() {
     usersInCollab.forEach((state, clientId) => {
       // deterministically use clientId to assign remote cursor color for each connected user
       const color = getCollaboratorColor(clientId)
-      const name = (state?.user?.name || 'Anonymous').replace(/"/g, '\\"')
+      const name = CSS.escape(String(state?.user?.name || 'Anonymous'))
       css += `
           .yRemoteSelection-${clientId} {
             background-color: color-mix(in srgb, var(${color}) 25%, transparent);
@@ -499,7 +499,7 @@ export function App() {
           }
         `
     })
-    styleRefForRemoteCursors.current.innerHTML = css
+    styleRefForRemoteCursors.current.textContent = css
   }, [usersInCollab, provider])
 
   return (

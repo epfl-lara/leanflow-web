@@ -16,7 +16,7 @@ Dependabot proposes weekly updates for npm packages, actions, and Docker base im
 
 Use Linux and Node.js 24 or newer for the full server suite; containment checks require Linux filesystem support. After `npm ci`, run `npm test`, `npm run check`, `npm run lint`, and `npm run build`.
 
-For browser checks, install Chromium with `npx --no-install playwright install chromium`, then run `node scripts/ci/check-browser.mjs`. The runner starts its own local server and mocks APIs, Lean and providers. It covers accounts, models, chat, code previews, reasoning, narrow layouts, and autosave recovery and conflicts. Reports and screenshots are saved under `.runtime/` and uploaded by CI. To focus a run, append suite names, for example `chat-readability autosave`.
+For browser checks, install Chromium with `npx --no-install playwright install chromium`, then run `node scripts/ci/check-browser.mjs`. The runner starts its own local server and mocks APIs, Lean and providers. It covers accounts, models, chat, code previews, reasoning, narrow layouts, autosave recovery and conflicts, and Lean cache invalidation across files and projects. Reports and screenshots are saved under `.runtime/` and uploaded by CI. To focus a run, append suite names, for example `chat-readability autosave lean-cache`.
 
 ## Prepare a release
 

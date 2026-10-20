@@ -26,6 +26,8 @@ export class LeanModelCache {
   private active: string | null = null
   private disposed = false
   private buffers: ReadonlyMap<string, OpenFile> | undefined
+  private pending = new Map<string, Promise<void>>()
+  private generation = 0
 
   constructor(
     private released: () => void,
@@ -38,6 +40,7 @@ export class LeanModelCache {
 
   select(uri: string | null) {
     if (this.disposed) return
+    if (uri !== this.active) this.cancelPending()
     this.active = uri
     const selected = uri ? this.entries.get(uri) : undefined
     if (selected && uri) {
@@ -74,17 +77,37 @@ export class LeanModelCache {
       !resource.path.endsWith('.lean')
     )
       return
+    const pending = this.pending.get(uri)
+    if (pending) return pending
     const model = editor.getModel(resource)
     if (!model || model.getValueLength() > this.options.maxTextLength) return
     // Never seed a virtual file here: that would reload the model whose Lean
     // worker we are trying to preserve, or replace an unsaved browser buffer.
-    const reference = await createModelReference(resource)
-    if (this.disposed || uri !== this.active) {
-      reference.dispose()
-      return
-    }
-    const path = resource.path.slice('/workspace/'.length)
-    this.entries.set(uri, { reference, path, source: this.buffers?.get(path) })
+    const generation = this.generation
+    const task = (async () => {
+      const reference = await createModelReference(resource)
+      if (
+        this.disposed ||
+        generation !== this.generation ||
+        uri !== this.active ||
+        !reference.object.textEditorModel ||
+        reference.object.textEditorModel.getValueLength() >
+          this.options.maxTextLength
+      ) {
+        reference.dispose()
+        return
+      }
+      const path = resource.path.slice('/workspace/'.length)
+      this.entries.set(uri, {
+        reference,
+        path,
+        source: this.buffers?.get(path),
+      })
+    })().finally(() => {
+      if (this.pending.get(uri) === task) this.pending.delete(uri)
+    })
+    this.pending.set(uri, task)
+    return task
   }
 
   reconcile(
@@ -142,12 +165,21 @@ export class LeanModelCache {
   }
 
   invalidate() {
+    this.cancelPending()
     for (const key of this.entries.keys())
       if (key !== this.active) this.remove(key)
   }
 
   clear() {
+    this.cancelPending()
     for (const key of this.entries.keys()) this.remove(key)
+  }
+
+  private cancelPending() {
+    // A delayed acquisition must not revive a deleted/reloaded file, even if
+    // the user has already switched back to the same URI in the meantime.
+    this.generation++
+    this.pending.clear()
   }
 
   private remove(uri: string) {

@@ -13,6 +13,8 @@ import { WorkspaceStore, validateRepository } from './workspaces.mjs'
 import { GitConnections } from './git-connections.mjs'
 import { loadConfig } from './config.mjs'
 import { EventStore, JobManager } from './events.mjs'
+import { streamRunEvents } from './event-stream.mjs'
+import { staticAssets } from './static-assets.mjs'
 import { TexBuildManager } from './tex-builds.mjs'
 import { AgentManager } from './agents.mjs'
 import { Settings } from './settings.mjs'
@@ -423,7 +425,8 @@ export async function createStudio({
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('Referrer-Policy', 'same-origin')
     res.setHeader('X-Frame-Options', 'SAMEORIGIN')
-    if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store')
+    if (/^\/api(?:\/|$)/i.test(req.path))
+      res.setHeader('Cache-Control', 'no-store')
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
       if (!sameOrigin(req, origin))
         return res.status(403).json({
@@ -1196,18 +1199,7 @@ export async function createStudio({
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
     res.flushHeaders()
-    const send = (event) =>
-      res.write(
-        `id: ${event.seq}\nevent: message\ndata: ${JSON.stringify(event)}\n\n`,
-      )
-    const existing = events.events(req.params.id, after)
-    for (const event of existing) send(event)
-    events.on(req.params.id, send)
-    const timer = setInterval(() => res.write(': heartbeat\n\n'), 15_000)
-    req.on('close', () => {
-      clearInterval(timer)
-      events.off(req.params.id, send)
-    })
+    streamRunEvents(req, res, events, req.params.id, after)
   })
   app.use('/api/books', compression())
   installBookRoutes(app, books)
@@ -1228,11 +1220,7 @@ export async function createStudio({
     res.status(404).json({ error: 'API endpoint not found.' }),
   )
   app.use(compression())
-  app.use(
-    express.static(path.join(projectDir, 'client/dist'), {
-      index: 'index.html',
-    }),
-  )
+  app.use(staticAssets(path.join(projectDir, 'client/dist')))
   app.use((error, req, res, _next) => {
     finishSourceRequest(req)
     if (res.headersSent) return res.end()

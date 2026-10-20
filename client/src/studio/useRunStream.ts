@@ -42,7 +42,10 @@ export function useRunStream(
     let pending: RunEvent[] = [],
       revision: string | undefined
     let filesPending = false,
-      snapshotRequest = 0
+      snapshotRequest = 0,
+      snapshotPending = false,
+      refreshAgain = false,
+      terminalPublished = false
     let historyRequest: Promise<void> | undefined
     let historyBase: Run | null = null
     let historyEvents: RunEvent[] = []
@@ -82,6 +85,7 @@ export function useRunStream(
           })
       }
       if (!runIsActive(current)) {
+        terminalPublished = true
         stream?.close()
         if (poll) clearInterval(poll)
         setConnection('')
@@ -123,11 +127,17 @@ export function useRunStream(
         })
     }
     const refresh = async () => {
-      if (cancelled) return
+      if (cancelled || terminalPublished) return
+      if (snapshotPending) {
+        refreshAgain = true
+        return
+      }
+      snapshotPending = true
       const request = ++snapshotRequest
       try {
         const snapshot = await api<RunReceipt>(
           `/api/runs/${encodeURIComponent(runId)}?view=metadata`,
+          { signal: historyController.signal },
         )
         if (!cancelled) {
           if (request === snapshotRequest) callbacksRef.current.onRecovered()
@@ -145,6 +155,14 @@ export function useRunStream(
       } catch (error) {
         if (!cancelled && request === snapshotRequest)
           callbacksRef.current.onError(error)
+      } finally {
+        snapshotPending = false
+        // Poll ticks and streamed updates share one request on a slow link.
+        // Replay one requested refresh so a final snapshot is never missed.
+        if (refreshAgain) {
+          refreshAgain = false
+          void refresh()
+        }
       }
     }
     const flush = () => {

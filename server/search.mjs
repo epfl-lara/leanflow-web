@@ -15,7 +15,7 @@ const declarationKinds = new Set([
   'example',
 ])
 const declarationStart =
-  /^[ \t]*(?:@\[[^\n]*?\][ \t]*)*(?:(?:private|protected|public|noncomputable|unsafe|partial|nonrec)\s+)*(theorem|lemma|def|abbrev|opaque|instance|class|structure|inductive|axiom|constant|example)(?![\p{L}\p{N}_'])/mu
+  /^[ \t]*(?:@\[[^\]\n]*\][ \t]*)*(?:(?:private|protected|public|noncomputable|unsafe|partial|nonrec)\s+){0,8}(theorem|lemma|def|abbrev|opaque|instance|class|structure|inductive|axiom|constant|example)(?![\p{L}\p{N}_'])/mu
 
 function textField(values, limit = 16_000) {
   const value = values.find(

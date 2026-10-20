@@ -5,7 +5,7 @@ import {
   timingSafeEqual,
 } from 'node:crypto'
 import { promises as fs } from 'node:fs'
-import { readFileSync, statSync } from 'node:fs'
+import { closeSync, fstatSync, openSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 
 const hash = (value) => createHash('sha256').update(value).digest('hex')
@@ -143,14 +143,22 @@ export class Auth {
   }
   identify(req) {
     try {
-      const filename = path.join(this.dir, 'users.json'),
-        stat = statSync(filename)
-      const stamp = `${stat.mtimeMs}:${stat.size}`
-      if (this.usersStamp !== stamp) {
-        const users = JSON.parse(readFileSync(filename, 'utf8'))
-        if (!Array.isArray(users)) return null
-        this.users = users
-        this.usersStamp = stamp
+      const filename = path.join(this.dir, 'users.json')
+      const stamp = (stat) =>
+        `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`
+      if (this.usersStamp !== stamp(statSync(filename, { bigint: true }))) {
+        // Permission changes can replace a file without changing its size or
+        // mtime. Fingerprint the same descriptor we read, as for dependencies.
+        const fd = openSync(filename, 'r')
+        try {
+          const loadedStamp = stamp(fstatSync(fd, { bigint: true }))
+          const users = JSON.parse(readFileSync(fd, 'utf8'))
+          if (!Array.isArray(users)) return null
+          this.users = users
+          this.usersStamp = loadedStamp
+        } finally {
+          closeSync(fd)
+        }
       }
     } catch {
       return null
@@ -219,6 +227,8 @@ export class Auth {
     if (this.attempts.size > 1000)
       for (const [key, value] of this.attempts)
         if (now - value.start > 300_000) this.attempts.delete(key)
+    while (this.attempts.size > 1000)
+      this.attempts.delete(this.attempts.keys().next().value)
     throw Object.assign(new Error('That access token was not recognized.'), {
       status: 401,
     })

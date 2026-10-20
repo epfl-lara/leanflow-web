@@ -186,8 +186,11 @@ export function proofRisks(changes, mode) {
 // treating part of the statement as an editable proof body.
 function ambiguousTheoremStatement(source) {
   const masked = maskLean(source)
+  // Attribute groups cannot consume each other's closing brackets. Bound
+  // redundant modifiers so invalid multiline prefixes cannot cause quadratic
+  // retries at each line. Unsupported syntax stays outside editable spans.
   const declarations =
-    /^[ \t]*(?:@\[[^\n]*?\][ \t]*)*(?:(?:private|protected|noncomputable)\s+)*(?:theorem|lemma)\b/gm
+    /^[ \t]*(?:@\[[^\]\n]*\][ \t]*)*(?:(?:private|protected|noncomputable)\s+){0,8}(?:theorem|lemma)\b/gm
   for (const match of masked.matchAll(declarations)) {
     let depth = 0
     for (let i = match.index + match[0].length; i < masked.length; i++) {
@@ -210,7 +213,7 @@ function proofSpans(source) {
   const masked = maskLean(source),
     spans = []
   const pattern =
-    /^[ \t]*(?:@\[[^\n]*?\][ \t]*)*(?:(?:private|protected|noncomputable)\s+)*(?:theorem|lemma)\b/gm
+    /^[ \t]*(?:@\[[^\]\n]*\][ \t]*)*(?:(?:private|protected|noncomputable)\s+){0,8}(?:theorem|lemma)\b/gm
   for (const match of masked.matchAll(pattern)) {
     let depth = 0,
       start = -1
@@ -246,7 +249,7 @@ function proofSpans(source) {
 function hiddenProofCommands(source) {
   const masked = maskLean(source)
   return proofSpans(source).some(({ start, end }) =>
-    /(?:^|[^\p{L}\p{N}_'.])(?:@\[|#(?=[\p{L}_])|(?:(?:private|protected|noncomputable|local|scoped)\s+)*(?:theorem|lemma|def|opaque|abbrev|example|axiom|constant|structure|inductive|class|instance|attribute|notation|infixl|infixr|infix|prefix|postfix|macro|macro_rules|syntax|elab|initialize|set_option|namespace|section|variable|variables|include|omit|open|export|end)\b)/u.test(
+    /(?:^|[^\p{L}\p{N}_'.])(?:@\[|#(?=[\p{L}_])|(?:(?:private|protected|noncomputable|local|scoped)\s+){0,8}(?:theorem|lemma|def|opaque|abbrev|example|axiom|constant|structure|inductive|class|instance|attribute|notation|infixl|infixr|infix|prefix|postfix|macro|macro_rules|syntax|elab|initialize|set_option|namespace|section|variable|variables|include|omit|open|export|end)\b)/u.test(
       masked.slice(start, end),
     ),
   )

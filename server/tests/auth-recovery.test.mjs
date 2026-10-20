@@ -85,6 +85,27 @@ test('session recovery renews an expired cookie only for the expected workspace 
   assert.equal((await session.json()).user.id, 'owner')
 })
 
+test('private API responses and authentication failures never enter HTTP caches, including route casing aliases', async (t) => {
+  const { request, login, token } = await fixture(t)
+  const signedIn = await login({ token })
+  assert.equal(signedIn.headers.get('cache-control'), 'no-store')
+  const cookie = signedIn.headers.get('set-cookie').split(';')[0]
+  await signedIn.text()
+  for (const route of [
+    '/api/session',
+    '/API/session',
+    '/Api/Session',
+    '/api',
+    '/API',
+  ]) {
+    for (const headers of [{}, { Cookie: cookie }]) {
+      const response = await request(route, { headers })
+      assert.equal(response.headers.get('cache-control'), 'no-store', route)
+      await response.text()
+    }
+  }
+})
+
 test('recovery rejects another valid account without replacing a browser cookie', async (t) => {
   const { request, login, token, otherToken } = await fixture(t)
   const initial = await login({ token })

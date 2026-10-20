@@ -220,3 +220,52 @@ test('cancelling a pending metadata poll prevents publication and stream startup
   assert.equal(fixture.streams.length, 0)
   assert(fixture.cleared())
 })
+
+test('slow metadata requests coalesce polling and keep one trailing refresh', async (t) => {
+  const requests = [],
+    published = [],
+    errors = []
+  const fixture = harness(
+    t,
+    (url, options) =>
+      new Promise((resolve, reject) => {
+        requests.push({ url, options, resolve, reject })
+      }),
+  )
+  fixture.useRunStream('run', {
+    onRun: (run) => published.push(run),
+    onFilesUpdated: async () => {},
+    onTerminal: () => {},
+    onError: (error) => errors.push(error),
+    onRecovered: () => {},
+  })
+  for (let tick = 0; tick < 20; tick++) fixture.poll()
+  assert.equal(requests.length, 1)
+  requests[0].resolve({
+    id: 'run',
+    status: 'running',
+    eventCursor: 1,
+    reasoningBlocks: [],
+  })
+  await settle()
+  assert.equal(requests.length, 2)
+  for (let tick = 0; tick < 20; tick++) fixture.poll()
+  assert.equal(requests.length, 2)
+  requests[1].reject(new Error('Temporary network failure'))
+  await settle()
+  assert.equal(requests.length, 3)
+  assert.equal(errors.length, 1)
+  requests[2].resolve({
+    id: 'run',
+    status: 'completed',
+    eventCursor: 3,
+    message: 'Final output',
+    reasoningBlocks: [],
+  })
+  await settle()
+  assert.equal(published.at(-1).message, 'Final output')
+  fixture.poll()
+  assert.equal(requests.length, 3)
+  fixture.cleanup()
+  assert(requests.every(({ options }) => options.signal.aborted))
+})

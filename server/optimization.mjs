@@ -151,7 +151,7 @@ export function optimizationTheorems(source) {
       'Module, prelude, and mutual declaration syntax is not supported for automatic measurement.',
     )
   const pattern =
-    /^[ \t]*(?:@\[[^\n]*?\][ \t]*)*(?:(?:private|protected|noncomputable)\s+)*(theorem|lemma)\s+([\p{L}_][\p{L}\p{N}_'.]*)/gmu
+    /^[ \t]*(?:@\[[^\]\n]*\][ \t]*)*(?:(?:private|protected|noncomputable)\s+){0,8}(theorem|lemma)\s+([\p{L}_][\p{L}\p{N}_'.]*)/gmu
   const matches = [...masked.matchAll(pattern)]
   const occurrences = [
     ...masked.matchAll(/(?<![\p{L}\p{N}_'.])(?:theorem|lemma)\b/gu),

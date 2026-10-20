@@ -128,6 +128,7 @@ jobs:
             .runtime/reasoning-timeline-ui/
             .runtime/reasoning-history-ui/
             .runtime/autosave-ui/
+            .runtime/lean-cache-ui/
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7
