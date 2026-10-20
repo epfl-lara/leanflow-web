@@ -40,14 +40,17 @@ export default defineConfig({
       targets: [
         {
           src: [
-            '../node_modules/@leanprover/infoview/dist/*',
+            '../node_modules/@leanprover/infoview/dist/*.{js,css,ttf}',
             '../node_modules/lean4monaco/dist/webview/webview.js',
           ],
           dest: 'infoview',
+          // Lean's iframe requests these fixed paths without source directories.
+          rename: { stripBase: true },
         },
         {
           src: ['../node_modules/@leanprover/infoview/dist/codicon.ttf'],
           dest: 'assets',
+          rename: { stripBase: true },
         },
       ],
     }),

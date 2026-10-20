@@ -12,7 +12,7 @@
     "start:client": "npm --workspace @leanweb/client run dev",
     "start:server": "node server/studio.mjs",
     "build": "npm run build:client",
-    "build:client": "npm --workspace @leanweb/client run build",
+    "build:client": "npm --workspace @leanweb/client run build && node scripts/ci/check-client-assets.mjs",
     "build:server": "node --check server/studio.mjs",
     "build:projects": "node scripts/bootstrap-presets.mjs",
     "production": "node server/studio.mjs",
@@ -49,7 +49,7 @@
     "wait-on": "^9.5.1"
   },
   "overrides": {
-    "katex": "^0.18.2"
+    "katex": "^0.19.0"
   },
   "engines": {
     "node": ">=24.x"

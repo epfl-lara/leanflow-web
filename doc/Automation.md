@@ -12,6 +12,8 @@ Before the first run, allow Actions for the repository in its organization setti
 
 Dependabot proposes weekly updates for npm packages, actions, and Docker base images. Review and merge them through the same checks. Worker builds resolve npm's latest Lemex release and verify its integrity. Each release manifest records the version and provenance from the actual worker image, so downloaded artifacts retain the verified runtime. See [Lemex updates](NativeLemex.md#updates).
 
+Keep the Monaco service packages compatible with `lean4monaco`'s editor wrapper; major and minor service updates need a coordinated editor upgrade. Retain a supported Ubuntu LTS base when reviewing worker updates. The client build also checks Lean's info-panel scripts, styles, and fonts at their expected URLs.
+
 ## Run checks locally
 
 Use Linux and Node.js 24 or newer for the full server suite; containment checks require Linux filesystem support. After `npm ci`, run `npm test`, `npm run check`, `npm run lint`, and `npm run build`.

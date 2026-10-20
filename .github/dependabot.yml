@@ -12,6 +12,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Lean4monaco's editor wrapper requires the Monaco 8.0.x service family.
+      # Upgrade these together with the wrapper after checking editor compatibility.
+      - dependency-name: '@codingame/monaco-vscode-*'
+        update-types: [version-update:semver-major, version-update:semver-minor]
     groups:
       compatible-updates:
         update-types: [minor, patch]
@@ -20,4 +25,8 @@ updates:
     directory: /deploy
     schedule:
       interval: weekly
+    ignore:
+      # Keep the supported 24.04 LTS base; 25.10 is an interim release.
+      - dependency-name: ubuntu
+        versions: ['25.10']
     open-pull-requests-limit: 2
