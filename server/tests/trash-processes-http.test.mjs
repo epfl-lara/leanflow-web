@@ -200,15 +200,12 @@ test('stop-and-trash cancels all checks together and blocks new work until real 
       .status,
     404,
   )
-  assert.equal((await f.request(endpoint + '/trash')).status, 409)
   assert(f.runtime.holds.every((hold) => !hold.options.signal.aborted))
   let archived = false
-  const trash = f
-    .request(endpoint + '/trash', { stopActive: true })
-    .then((response) => {
-      archived = true
-      return response
-    })
+  const trash = f.request(endpoint + '/trash').then((response) => {
+    archived = true
+    return response
+  })
   await Promise.all(f.runtime.holds.map((hold) => hold.aborted.promise))
   assert.equal(archived, false)
   assert.equal(f.workspaces.get(f.project.id, 'owner').archivedAt, undefined)

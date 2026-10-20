@@ -300,7 +300,6 @@ export function Studio() {
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [deleteError, setDeleteError] = useState('')
-  const [deleteStopping, setDeleteStopping] = useState(false)
   const [lastTrash, setLastTrash] = useState<TrashItem | null>(null)
   const [trashOpen, setTrashOpen] = useState(false)
   const [trashItems, setTrashItems] = useState<TrashItem[]>([])
@@ -1378,7 +1377,6 @@ export function Studio() {
 
   function requestDelete(target: DeleteTarget) {
     setDeleteError('')
-    setDeleteStopping(false)
     setDeleteTarget(target)
   }
   async function showTrash() {
@@ -1390,11 +1388,10 @@ export function Studio() {
       setTrashError(errorText(error))
     }
   }
-  async function deleteItem(stopActive = false) {
+  async function deleteItem() {
     if (!deleteTarget || deleteBusy) return
     const target = deleteTarget
     setDeleteBusy(true)
-    setDeleteStopping(stopActive)
     setDeleteError('')
     try {
       if (savePromise.current)
@@ -1422,7 +1419,7 @@ export function Studio() {
           : `/api/projects/${encodeURIComponent(target.projectId)}/trash`,
         {
           ...(target.path === undefined ? {} : { path: target.path }),
-          ...(stopActive ? { stopActive: true } : {}),
+          ...(target.kind !== 'chat' ? { stopActive: true } : {}),
         },
       )
       setLastTrash({ ...receipt, name: target.name })
@@ -1473,7 +1470,6 @@ export function Studio() {
       setDeleteError(errorText(error))
     } finally {
       setDeleteBusy(false)
-      setDeleteStopping(false)
     }
   }
   async function deleteForever(item: TrashItem) {
@@ -2825,9 +2821,8 @@ export function Studio() {
             )}
             {deleteTarget.kind !== 'chat' && (
               <p>
-                If this project has active checks, Lemex runs, or setup, choose
-                <strong> Stop all processes and move to Trash</strong>. LeanFlow
-                will wait for them to stop before moving the item.
+                Active checks, Lemex runs, terminals, and project setup will
+                stop automatically before the item moves to Trash.
               </p>
             )}
             {dirty &&
@@ -2857,23 +2852,16 @@ export function Studio() {
             >
               Cancel
             </button>
-            {deleteTarget.kind !== 'chat' && (
-              <button
-                className="button danger"
-                disabled={deleteBusy}
-                onClick={() => void deleteItem(true)}
-              >
-                {deleteBusy && deleteStopping
-                  ? 'Stopping processes…'
-                  : 'Stop all processes and move to Trash'}
-              </button>
-            )}
             <button
               className="button danger"
               disabled={deleteBusy}
               onClick={() => void deleteItem()}
             >
-              {deleteBusy && !deleteStopping ? 'Moving…' : 'Move to Trash'}
+              {deleteBusy
+                ? deleteTarget.kind === 'chat'
+                  ? 'Moving…'
+                  : 'Stopping and moving…'
+                : 'Move to Trash'}
             </button>
           </footer>
         </Dialog>

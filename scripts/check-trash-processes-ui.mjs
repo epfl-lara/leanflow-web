@@ -606,7 +606,7 @@ try {
   await moveProject('Process fixture')
   const stopAll = () =>
     deleteDialog().getByRole('button', {
-      name: 'Stop all processes and move to Trash',
+      name: 'Move to Trash',
       exact: true,
     })
   await stopAll().waitFor()
@@ -660,26 +660,20 @@ try {
   assert.equal(state.projects.length, 1)
   await page.locator('.monaco-editor').waitFor()
   report.checks.push(
-    'Deleting a project with an active check offers Stop all processes and move to Trash; Cancel keeps it running; pending guards prevent repeated writes; failure keeps the project and successful retry removes it.',
+    'Move to Trash automatically stops the active check; Cancel keeps it running; pending guards prevent repeated writes; failure keeps the project and successful retry removes it.',
   )
 
   await moveProject('Remaining project')
   await deleteDialog()
     .getByRole('button', { name: 'Move to Trash', exact: true })
     .click()
-  await deleteDialog()
-    .getByRole('alert')
-    .filter({ hasText: 'Stop active checks' })
-    .waitFor()
-  await stopAll().waitFor()
-  await stopAll().click()
   await until(
     async () => (await deleteDialog().count()) === 0,
     'server-reported active work stopped and trashed',
   )
   assert.equal(state.projects.length, 0)
   assert(
-    actions.some(
+    !actions.some(
       (action) =>
         action.endpoint === `/api/projects/${otherProjectId}/trash` &&
         !action.body.stopActive,
@@ -693,7 +687,7 @@ try {
     ),
   )
   report.checks.push(
-    'A normal trash request rejected for server-side active work exposes the combined stop-and-trash action and retries with stopActive:true.',
+    'Move to Trash requests process cleanup immediately, without a separate stop action or an initial rejected request.',
   )
   assert.deepEqual(
     externalRequests,

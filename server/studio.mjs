@@ -740,9 +740,11 @@ export async function createStudio({
       )
     workspaces.get(req.params.id, req.user.id)
     requireNoGit(req.params.id, req.user.id)
-    const move = async (ignoreStopping = false) => {
+    const move = async () => {
       const assertIdle = () =>
-        requireNoActiveWork(req.params.id, req.user.id, { ignoreStopping })
+        requireNoActiveWork(req.params.id, req.user.id, {
+          ignoreStopping: true,
+        })
       assertIdle()
       return workspaces.trash(req.params.id, req.user.id, req.body.path, {
         assertIdle,
@@ -754,15 +756,17 @@ export async function createStudio({
             : [],
       })
     }
-    const receipt = req.body.stopActive
-      ? await activity.withStopped(req.user.id, req.params.id, async () => {
-          await terminals.closeProject(req.params.id)
-          for (const ws of sockets)
-            if (socketProjects.get(ws) === req.params.id)
-              ws.close(1001, 'Project processes stopped for Trash.')
-          return move(true)
-        })
-      : await move()
+    const receipt = await activity.withStopped(
+      req.user.id,
+      req.params.id,
+      async () => {
+        await terminals.closeProject(req.params.id)
+        for (const ws of sockets)
+          if (socketProjects.get(ws) === req.params.id)
+            ws.close(1001, 'Project processes stopped for Trash.')
+        return move()
+      },
+    )
     if (receipt.kind === 'project')
       for (const ws of sockets)
         if (socketProjects.get(ws) === receipt.projectId)

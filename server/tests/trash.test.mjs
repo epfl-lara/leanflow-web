@@ -388,7 +388,6 @@ test('HTTP trash and restore enforce authentication, owners, and active check or
   runtime.prepareToolchain = () => gate
   await store.prepare(project.id, 'owner')
   try {
-    assert.equal((await request(endpoint)).status, 409)
     assert.equal(
       (await request(`/api/trash/${binary.trashId}/restore`)).status,
       409,

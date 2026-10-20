@@ -184,6 +184,24 @@ export function ProjectModal({
             New project
           </button>
         </div>
+        <label className="field-label" htmlFor="project-name">
+          Project name <span>optional</span>
+        </label>
+        <input
+          id="project-name"
+          placeholder={
+            kind === 'import'
+              ? 'Detected from the link'
+              : kind === 'upload'
+                ? 'Uploaded project'
+                : 'My Lean project'
+          }
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          disabled={busy}
+          maxLength={100}
+          autoFocus={kind === 'create'}
+        />
         {kind === 'import' ? (
           <>
             <label className="field-label" htmlFor="repository-url">
@@ -396,54 +414,35 @@ export function ProjectModal({
             )}
           </>
         )}
-        <details className="import-options">
-          <summary>More options</summary>
-          <label className="field-label" htmlFor="project-name">
-            Project name <span>optional</span>
-          </label>
-          <input
-            id="project-name"
-            placeholder={
-              kind === 'import'
-                ? 'Detected from the link'
-                : kind === 'upload'
-                  ? 'Uploaded project'
-                  : 'My Lean project'
-            }
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            disabled={busy}
-            maxLength={100}
-          />
-          {kind !== 'create' && (
-            <>
-              <label className="field-label" htmlFor="project-subdirectory">
-                Lean project subdirectory <span>optional</span>
-              </label>
-              <input
-                id="project-subdirectory"
-                value={subdirectory}
-                placeholder="Detected automatically"
-                onChange={(event) => setSubdirectory(event.target.value)}
-                disabled={busy}
-              />
-            </>
-          )}
-          {kind === 'import' && (
-            <>
-              <label className="field-label" htmlFor="revision">
-                Branch, tag, or commit <span>optional</span>
-              </label>
-              <input
-                id="revision"
-                value={revision}
-                placeholder="From the link or default branch"
-                onChange={(event) => setRevision(event.target.value)}
-                disabled={busy}
-              />
-            </>
-          )}
-        </details>
+        {kind !== 'create' && (
+          <details className="import-options">
+            <summary>More options</summary>
+            <label className="field-label" htmlFor="project-subdirectory">
+              Lean project subdirectory <span>optional</span>
+            </label>
+            <input
+              id="project-subdirectory"
+              value={subdirectory}
+              placeholder="Detected automatically"
+              onChange={(event) => setSubdirectory(event.target.value)}
+              disabled={busy}
+            />
+            {kind === 'import' && (
+              <>
+                <label className="field-label" htmlFor="revision">
+                  Branch, tag, or commit <span>optional</span>
+                </label>
+                <input
+                  id="revision"
+                  value={revision}
+                  placeholder="From the link or default branch"
+                  onChange={(event) => setRevision(event.target.value)}
+                  disabled={busy}
+                />
+              </>
+            )}
+          </details>
+        )}
         {kind !== 'create' && (
           <label className="setup-repair-choice">
             <input

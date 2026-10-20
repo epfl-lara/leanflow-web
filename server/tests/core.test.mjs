@@ -1508,7 +1508,7 @@ for (const message of [
   })
 }
 
-test('terminal guards capacity, preparation, Git and Trash, and stop-all cleans it up', async (t) => {
+test('terminal guards capacity, preparation and Git, and moving to Trash stops it automatically', async (t) => {
   const json = (body) => ({
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -1524,7 +1524,6 @@ test('terminal guards capacity, preparation, Git and Trash, and stop-all cleans 
   for (const [route, body] of [
     ['prepare', {}],
     ['git', { action: 'branch', name: 'test' }],
-    ['trash', {}],
     [
       'upload',
       {
@@ -1547,7 +1546,7 @@ test('terminal guards capacity, preparation, Git and Trash, and stop-all cleans 
   const closed = new Promise((resolve) => ws.once('close', resolve))
   const response = await f.request(`/api/projects/${f.project.id}/trash`, {
     method: 'POST',
-    ...json({ stopActive: true }),
+    ...json({}),
   })
   assert.equal(response.status, 200)
   await closed
