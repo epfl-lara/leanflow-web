@@ -364,11 +364,20 @@ test('HTTP trash and restore enforce authentication, owners, and active check or
   ).json()
   for (const kind of ['agent', 'check']) {
     const job = events.create('owner', { projectId: project.id, kind })
-    assert.equal((await request(endpoint, { path: 'Main.lean' })).status, 409)
     assert.equal(
       (await request(`/api/trash/${receipt.trashId}/restore`)).status,
       409,
     )
+    const moved = await request(endpoint, { path: 'Main.lean' })
+    if (kind === 'agent') {
+      assert.equal(moved.status, 200)
+      assert.equal(events.getMetadata(job.id).status, 'cancelled')
+      const item = await moved.json()
+      await request(`/api/trash/${item.trashId}/restore`)
+    } else {
+      // A check with no live controller cannot confirm worker teardown.
+      assert.equal(moved.status, 409)
+    }
     events.update(job.id, { status: 'cancelled' })
   }
   assert.equal(
