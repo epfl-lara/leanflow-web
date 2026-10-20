@@ -1,0 +1,403 @@
+/* Readable message content shared by replies, reasoning and tool previews. */
+.chat-workbench .user-message .markdown-body,
+.chat-workbench .user-message .markdown-body p,
+.chat-workbench .message-body {
+  font-size: 14px;
+  line-height: 1.75;
+}
+.chat-workbench .markdown-body h1 {
+  font-size: 20px;
+}
+.chat-workbench .markdown-body h2 {
+  font-size: 17px;
+}
+.chat-workbench .markdown-body h3 {
+  font-size: 15px;
+}
+.chat-workbench .markdown-body h4,
+.chat-workbench .markdown-body h5,
+.chat-workbench .markdown-body h6 {
+  font-size: 14px;
+}
+.chat-workbench .markdown-body p {
+  margin-bottom: 14px;
+}
+.chat-workbench .markdown-body li {
+  margin: 7px 0;
+}
+.chat-workbench .markdown-body li > p {
+  margin-bottom: 5px;
+}
+.chat-workbench .markdown-body > :last-child {
+  margin-bottom: 0;
+}
+.chat-workbench .markdown-body :not(pre) > code {
+  font-size: 0.9em;
+  padding: 1px 4px;
+}
+.chat-workbench .conversation-turn + .conversation-turn {
+  border-top: 1px solid var(--border);
+  padding-top: 20px;
+}
+.assistant-message .message-label {
+  justify-content: space-between;
+  gap: 10px;
+}
+.message-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.message-author small {
+  font-size: 11px;
+  font-weight: 400;
+}
+.copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  padding: 4px 5px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.copy-button:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.code-block {
+  min-width: 0;
+  max-width: 100%;
+  margin: 14px 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  overflow: hidden;
+}
+.code-block-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 9px;
+  min-height: 36px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.code-language {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.code-line-count {
+  color: var(--muted);
+}
+.code-block-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-left: auto;
+}
+.code-block-actions button {
+  font-size: 11px;
+  padding: 3px 5px;
+  min-height: 26px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+}
+.code-block-actions button:hover,
+.code-block-actions button[aria-pressed='true'] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.code-block > pre,
+.markdown-body .code-block > pre,
+.chat-workbench .markdown-body .code-block > pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 12px 14px;
+  max-height: 25rem;
+  overflow: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+  scrollbar-width: thin;
+  background: transparent;
+  font: 12.5px/1.7 var(--mono);
+  tab-size: 2;
+}
+.code-block > pre:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.code-block > pre > code,
+.markdown-body .code-block > pre > code {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  white-space: inherit;
+  overflow-wrap: inherit;
+  color: var(--text);
+  background: transparent;
+}
+.code-block.code-wrap > pre,
+.markdown-body .code-block.code-wrap > pre,
+.chat-workbench .markdown-body .code-block.code-wrap > pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.code-block > pre.code-expanded,
+.markdown-body .code-block > pre.code-expanded,
+.chat-workbench .markdown-body .code-block > pre.code-expanded {
+  max-height: none;
+}
+.code-expand {
+  display: block;
+  width: 100%;
+  padding: 7px 12px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent);
+  text-align: left;
+  font-size: 11px;
+}
+.code-expand:hover {
+  background: var(--accent-soft);
+}
+.syntax-keyword {
+  color: var(--accent);
+  font-weight: 600;
+}
+.syntax-tactic {
+  color: light-dark(#7d3597, #ddb0ee);
+}
+.syntax-string,
+.syntax-added {
+  color: light-dark(#216e47, #91d1aa);
+}
+.syntax-number {
+  color: light-dark(#a34b18, #efb18a);
+}
+.syntax-comment {
+  color: var(--muted);
+  font-style: italic;
+}
+.syntax-unfinished,
+.syntax-removed {
+  color: var(--danger);
+}
+.syntax-unfinished {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.tool-activity {
+  margin: 14px 0 18px;
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+  min-width: 0;
+}
+.tool-activity-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 5px;
+}
+.tool-activity-heading > button {
+  margin-left: auto;
+  font-size: 11px;
+}
+.tool-step {
+  min-width: 0;
+  border-radius: 6px;
+}
+.tool-step + .tool-step {
+  margin-top: 3px;
+}
+.tool-step > summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 6px;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 5px;
+}
+.tool-step > summary::-webkit-details-marker {
+  display: none;
+}
+.tool-step > summary:hover {
+  background: var(--surface);
+}
+.tool-step > summary:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.tool-step > summary > svg {
+  flex-shrink: 0;
+  margin-top: 4px;
+  transition: transform 120ms;
+}
+.tool-step[open] > summary > svg {
+  transform: rotate(90deg);
+}
+.tool-step-icon {
+  display: flex;
+  color: var(--muted);
+  padding-top: 3px;
+  flex: 0 0 15px;
+}
+.tool-step-icon .spinner {
+  width: 13px;
+  height: 13px;
+}
+.tool-step-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.tool-step-text > strong {
+  display: block;
+  font-weight: 550;
+}
+.tool-step-text > span {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 11px;
+}
+.tool-step[open] .tool-step-text > span {
+  display: block;
+}
+.tool-step-meta {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1.8;
+  color: var(--muted);
+  text-align: right;
+  max-width: 90px;
+}
+.tool-step-meta > span,
+.tool-step-meta > small {
+  display: block;
+}
+.tool-step-meta > small {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.tool-step.is-running {
+  background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
+}
+.tool-step.is-running .tool-step-meta {
+  color: var(--accent);
+}
+.tool-step.has-error .tool-step-meta,
+.tool-step.has-error .tool-step-icon {
+  color: var(--danger);
+}
+.tool-step-body {
+  min-width: 0;
+  padding: 0 7px 10px;
+}
+.tool-step-body h4 {
+  margin: 12px 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.tool-step-body .code-block {
+  margin: 5px 0 10px;
+}
+.tool-step-body .field-help {
+  font-size: 11px;
+}
+.tool-identity {
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.turn-outcome {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  margin: 16px 0 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+}
+.turn-outcome > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.turn-outcome > div {
+  min-width: 0;
+}
+.turn-outcome strong {
+  font-size: 13px;
+  line-height: 1.5;
+}
+.turn-outcome p {
+  margin: 5px 0 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.turn-outcome.passed {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+  background: color-mix(in srgb, var(--success) 5%, var(--bg));
+}
+.turn-outcome.passed > svg,
+.turn-outcome.passed strong {
+  color: var(--success);
+}
+.turn-outcome.attention > svg,
+.turn-outcome.attention strong {
+  color: var(--danger);
+}
+.turn-outcome.attention {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+.chat-workbench .turn-saved-edits {
+  gap: 6px;
+  font-size: 12px;
+}
+.turn-saved-edits > button {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  background: var(--canvas);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.chat-workbench .chat-current-work p {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.chat-workbench .chat-current-work .chat-work-meta {
+  flex-wrap: wrap;
+}
+.chat-workbench .chat-current-work .chat-edit-status {
+  white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tool-step > summary > svg {
+    transition: none;
+  }
+}

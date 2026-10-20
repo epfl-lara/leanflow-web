@@ -306,6 +306,7 @@ export interface RunEvent {
   type: string
   data: Record<string, unknown>
 }
+export type { ToolStep } from '../../../shared/tool-activity.mjs'
 export interface Change {
   path: string
   before: string
@@ -353,6 +354,8 @@ export interface Run {
   maxSeconds?: number | null
   error?: string
   events?: RunEvent[]
+  toolActivity?: import('../../../shared/tool-activity.mjs').ToolStep[]
+  toolActivityTruncated?: boolean
   changes?: Change[]
   verification?: unknown
   usage?: unknown

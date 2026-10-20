@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { memo, useCallback, useRef, useState } from 'react'
 import { runIsActive, type Run, type RunProofTarget } from './api'
 import { Icon } from './Icons'
 import { OutputText } from './AssistantText'
@@ -9,11 +9,14 @@ import {
   runChangeCount,
   runChangePaths,
   runStatusLabel,
-  finalVerificationIssue,
 } from './chatTimeline'
 import { modeName } from './chatModes'
 import { ReasoningTrace } from './ReasoningTrace'
 import { UsageSummary } from './UsageSummary'
+import { ToolActivity } from './ToolActivity'
+import { TurnOutcome } from './TurnOutcome'
+import { CopyButton } from './CopyButton'
+import { chatFileLink } from './chatFileLink'
 
 function TargetLabel({
   target,
@@ -62,11 +65,24 @@ export const ConversationTurn = memo(function ConversationTurn({
   const [expanded, setExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [detailsError, setDetailsError] = useState('')
+  const [linkError, setLinkError] = useState('')
+  const openLocalLink = useCallback(
+    (href: string) => {
+      const target = chatFileLink(href)
+      if (!target || !onOpenTarget) {
+        setLinkError('This link does not point to a project file.')
+        return
+      }
+      setLinkError('')
+      onOpenTarget(target)
+    },
+    [onOpenTarget],
+  )
   const changeCount = runChangeCount(run, !!run.liveEdits)
   const liveCount = runChangeCount(run, true)
   const [activityOpen, setActivityOpen] = useState(false)
+  const detailsRef = useRef<HTMLDetailsElement>(null)
   const segments = conversationSegments(run)
-  const verificationIssue = !active ? finalVerificationIssue(run) : ''
   return (
     <article className="conversation-turn" data-run-id={run.id}>
       {run.prompt && (
@@ -85,6 +101,12 @@ export const ConversationTurn = memo(function ConversationTurn({
           Earlier assistant output was trimmed; the latest response is shown.
         </p>
       )}
+      {run.toolActivityTruncated && (
+        <p className="field-help">
+          Showing the latest recorded work steps. Earlier step summaries were
+          trimmed.
+        </p>
+      )}
       {segments.map((segment) =>
         segment.kind === 'reasoning' ? (
           <ReasoningTrace
@@ -94,16 +116,28 @@ export const ConversationTurn = memo(function ConversationTurn({
             block={segment.block}
             streaming={segment.active}
           />
+        ) : segment.kind === 'activity' ? (
+          <ToolActivity
+            key={segment.key}
+            steps={segment.steps}
+            active={active}
+            onInspect={() => onInspect(run.id)}
+            onOpenTarget={onOpenTarget}
+          />
         ) : segment.kind === 'assistant' ? (
           <div key={segment.key} className="assistant-message">
             <span className="message-label">
-              <Icon name="bot" size={14} />
-              Lemex
+              <span className="message-author">
+                <Icon name="bot" size={14} />
+                Lemex <small>· {modeName(run.mode)}</small>
+              </span>
+              <CopyButton text={segment.text} label="Copy reply" />
             </span>
             <div className="message-body markdown-body">
               <OutputText
                 text={segment.text}
                 streaming={active && segment.key === segments.at(-1)?.key}
+                onOpenLocalLink={openLocalLink}
               />
             </div>
           </div>
@@ -149,27 +183,25 @@ export const ConversationTurn = memo(function ConversationTurn({
           {run.error}
         </p>
       )}
+      {linkError && (
+        <p className="error-message" role="alert">
+          {linkError}
+        </p>
+      )}
       {run.liveEditConflict && (
         <p className="error-message">{run.liveEditConflict}</p>
       )}
-      {verificationIssue && (
-        <div className="turn-verification-issue" role="alert">
-          <strong>Final checks need attention</strong>
-          <p>{verificationIssue}</p>
-          <button
-            type="button"
-            className="turn-action"
-            onClick={() => setExpanded(true)}
-          >
-            Review checks
-          </button>
-        </div>
+      {!active && (
+        <TurnOutcome
+          run={run}
+          onDetails={() => {
+            setExpanded(true)
+            detailsRef.current?.querySelector('summary')?.focus()
+          }}
+        />
       )}
-      {runStatusLabel(run) === 'Checked with Lean' && (
-        <p className="field-help">
-          Lean checked the code. Review whether its statement and assumptions
-          match your source.
-        </p>
+      {!active && (
+        <OptimizationSummary value={run.optimization} active={false} />
       )}
       {active &&
         run.liveEdits &&
@@ -229,6 +261,7 @@ export const ConversationTurn = memo(function ConversationTurn({
         {run.liveUndone && <span className="turn-status">Edits undone</span>}
       </div>
       <details
+        ref={detailsRef}
         className="turn-details"
         open={expanded}
         onToggle={(event) => {
@@ -247,15 +280,13 @@ export const ConversationTurn = memo(function ConversationTurn({
           }
         }}
       >
-        <summary>
-          Details <span>{modeName(run.mode)}</span>
-        </summary>
+        <summary>Checks & run details</summary>
         {expanded && (
           <>
             {loading && <p className="field-help">Loading details…</p>}
             {detailsError && <p className="error-message">{detailsError}</p>}
             <Verification value={run.verification} />
-            <OptimizationSummary value={run.optimization} active={active} />
+            {active && <OptimizationSummary value={run.optimization} active />}
             {run.liveEdits && (
               <p className="field-help">
                 {run.liveUndone
@@ -269,7 +300,10 @@ export const ConversationTurn = memo(function ConversationTurn({
                 open={activityOpen}
                 onToggle={(event) => setActivityOpen(event.currentTarget.open)}
               >
-                <summary>Activity</summary>
+                <summary>
+                  Technical log
+                  {run.toolActivity?.length ? '' : ' · earlier run'}
+                </summary>
                 {activityOpen && <pre>{run.log}</pre>}
               </details>
             )}

@@ -819,6 +819,18 @@ export function AssistantPanel({
   const stopping =
     !!statusRun &&
     (statusRun.status === 'stopping' || stoppingIds.includes(statusRun.id))
+  const currentStep =
+    statusRun?.status === 'running'
+      ? statusRun.toolActivity?.findLast((step) => step.status === 'running')
+      : undefined
+  const currentWorkDetail =
+    currentStep?.detail ||
+    (statusRun?.progress &&
+    !['Working', 'Running command', 'Using tool'].includes(
+      statusRun.progress.label,
+    )
+      ? statusRun.progress.detail
+      : '')
   const canApply =
     !!dialogRun &&
     !dialogRun.liveEdits &&
@@ -920,19 +932,13 @@ export function AssistantPanel({
             <strong>
               {stopping
                 ? 'Stopping…'
-                : statusRun.progress?.label || runStatusLabel(statusRun)}
+                : currentStep?.label ||
+                  statusRun.progress?.label ||
+                  runStatusLabel(statusRun)}
             </strong>
             <span className="chat-elapsed">{elapsed}</span>
           </div>
-          {statusRun.progress?.detail &&
-            !stopping &&
-            !['Working', 'Running command', 'Using tool'].includes(
-              statusRun.progress.label,
-            ) && (
-              <p title={statusRun.progress.detail}>
-                {statusRun.progress.detail}
-              </p>
-            )}
+          {currentWorkDetail && !stopping && <p>{currentWorkDetail}</p>}
           {!stopping && (liveEditStatus(statusRun) || connection) && (
             <p className="chat-work-meta">
               <span

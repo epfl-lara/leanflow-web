@@ -135,6 +135,14 @@ const chatTranscript = (job, eventCursor, reasoningBlocks) => ({
   reasoningChars: job.reasoning?.length || 0,
   reasoningSummaryChars: job.reasoningSummary?.length || 0,
   logChars: job.log?.length || 0,
+  ...(job.toolActivity
+    ? {
+        toolActivity: job.toolActivity.map(
+          ({ input: _input, output: _output, ...step }) => step,
+        ),
+        toolActivityTruncated: !!job.toolActivityTruncated,
+      }
+    : {}),
   eventCursor,
   ...(job.usage ? { usage: job.usage } : {}),
   ...(job.verification

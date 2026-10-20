@@ -5,6 +5,7 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { remarkLatexMath } from './remarkLatexMath'
 import { Icon } from './Icons'
+import { MarkdownCodeBlock } from './CodeBlock'
 import 'katex/dist/katex.min.css'
 
 function MarkdownLink({
@@ -39,6 +40,7 @@ function MarkdownLink({
 }
 
 const markdownComponents: Components = {
+  pre: MarkdownCodeBlock,
   table: ({ node: _node, children, ...props }) => (
     <div className="markdown-table">
       <table {...props}>{children}</table>

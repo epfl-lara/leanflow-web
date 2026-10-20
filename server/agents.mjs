@@ -10,6 +10,7 @@ import { AgentRpc } from './rpc.mjs'
 import { TERMINAL } from './events.mjs'
 import { proofRisks, verifyCandidate } from './verification.mjs'
 import { createAgentOutputHandler } from './agent-output.mjs'
+import { createAgentActivityHandler } from './agent-activity.mjs'
 import { createNativeDiagnosticHandler } from './native-diagnostics.mjs'
 import { createHoverLookupGuard } from './agent-hover-guard.mjs'
 import { LiveMirror } from './agent-live.mjs'
@@ -780,6 +781,12 @@ export class AgentManager {
         secrets: [provider.LEMEX_API_KEY],
         showReasoning: preferences.showReasoning !== false,
       }))
+      const activity = createAgentActivityHandler({
+        events: this.events,
+        id,
+        redact: this.config.redact,
+        secrets: [provider.LEMEX_API_KEY],
+      })
       let resolveFinished, rejectFinished
       const finished = new Promise((resolve, reject) => {
         resolveFinished = resolve
@@ -848,6 +855,10 @@ export class AgentManager {
         )
           return
         if (output.handle(method, params)) return
+        if (method === 'item/started' || method === 'item/completed') {
+          output.flushBuffered()
+          activity.handle(method, params.item)
+        }
         if (method === 'item/started') {
           const item = params.item || {}
           if (item.type === 'commandExecution') {

@@ -1,6 +1,11 @@
 import { runIsActive, type Run, type RunEvent } from './api'
 import { runReasoningBlocks, runChangePaths } from './chatTimeline'
 import {
+  isToolStep,
+  MAX_TOOL_STEPS,
+  mergeToolStep,
+} from '../../../shared/tool-activity.mjs'
+import {
   recordReasoningBlock,
   retainedReasoningBlocks,
 } from '../../../shared/reasoning-timeline.mjs'
@@ -32,6 +37,21 @@ export function mergeRunSnapshot(previous: Run | null, value: Run): Run {
     ...previous,
     ...value,
     verification: mergeVerification(previous.verification, value.verification),
+  }
+  if (value.toolActivity) {
+    const known = new Map(previous.toolActivity?.map((step) => [step.id, step]))
+    // Compact chat history omits bodies. Keep previews already fetched while a
+    // step is expanded, respecting explicit eviction and the shared size cap.
+    next.toolActivity = value.toolActivity.reduce<
+      NonNullable<Run['toolActivity']>
+    >(
+      (steps, step) =>
+        mergeToolStep(
+          steps,
+          step.detailsOmitted ? step : { ...known.get(step.id), ...step },
+        ),
+      [],
+    )
   }
   const revisionChanged =
     (value.liveRevision !== undefined &&
@@ -155,6 +175,14 @@ export function appendRunEvents(previous: Run, events: RunEvent[]): Run {
       delete next.changes
     }
     if (event.type === 'usage') next.usage = data
+    if (event.type === 'tool-step' && isToolStep(data)) {
+      const steps = next.toolActivity || []
+      next.toolActivityTruncated =
+        !!next.toolActivityTruncated ||
+        (steps.length >= MAX_TOOL_STEPS &&
+          !steps.some((step) => step.id === data.id))
+      next.toolActivity = mergeToolStep(steps, data)
+    }
   }
   return next
 }

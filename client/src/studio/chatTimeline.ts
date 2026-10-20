@@ -1,9 +1,10 @@
-import type { Run, RunFollowup, ReasoningBlock } from './api'
+import type { Run, RunFollowup, ReasoningBlock, ToolStep } from './api'
 
 export type ConversationSegment =
   | { kind: 'assistant'; text: string; key: string }
   | { kind: 'followup'; followup: RunFollowup; key: string }
   | { kind: 'reasoning'; block: ReasoningBlock; key: string; active: boolean }
+  | { kind: 'activity'; steps: ToolStep[]; key: string }
 
 // Older servers expose accumulated text without its event positions.
 export function runReasoningBlocks(run: Run): ReasoningBlock[] {
@@ -31,6 +32,12 @@ export function conversationSegments(run: Run): ConversationSegment[] {
     result: ConversationSegment[] = []
   const blocks = runReasoningBlocks(run)
   const insertions = [
+    ...(run.toolActivity || []).map((step) => ({
+      kind: 'activity' as const,
+      step,
+      messageOffset: step.messageOffset,
+      order: step.afterFollowups + 0.25,
+    })),
     ...blocks.map((block) => ({
       kind: 'reasoning' as const,
       block,
@@ -72,7 +79,16 @@ export function conversationSegments(run: Run): ConversationSegment[] {
           entry.block.id === blocks.at(-1)?.id &&
           entry.messageOffset >= (run.messageBaseOffset || 0) + text.length,
       })
-    else
+    else if (entry.kind === 'activity') {
+      const previous = result.at(-1)
+      if (previous?.kind === 'activity') previous.steps.push(entry.step)
+      else
+        result.push({
+          kind: 'activity',
+          steps: [entry.step],
+          key: `activity-${entry.step.id}`,
+        })
+    } else
       result.push({
         kind: 'followup',
         followup: entry.followup,
@@ -138,7 +154,7 @@ export function finalVerificationIssue(run: Run): string {
     ('reason' in value &&
       typeof value.reason === 'string' &&
       value.reason.trim()) ||
-    'Open Details to review the final checks.'
+    'Open Checks & run details to review the final checks.'
   )
 }
 

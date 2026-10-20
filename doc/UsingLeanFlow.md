@@ -164,6 +164,10 @@ Use **Send update** for extra instructions or **Stop** to interrupt. Updates sho
 
 Scroll up freely; **Jump to latest** resumes following output. Reasoning appears between replies in separate Show/Hide sections. Long traces scroll inside their own panel, keeping the Show/Hide controls within the message instead of floating over the chat. Files and chat drafts remain available during a run.
 
+**Work steps** shows file reads, searches, commands, edits, and proof checks where they happen in the conversation. Expand a step for its input and result preview, or open its linked file. Older steps fold away; running steps and the latest issue stay visible. A tool marked **Done** has finished its call. Intermediate check results come from the tool; the separate **Final Lean check** reports the server’s proof verification. New runs record these steps; earlier runs retain their technical log under **Checks & run details**.
+
+Code blocks have a language label, **Copy code**, and **Wrap** for long lines. Long blocks can be expanded, and Lean snippets highlight keywords and tactics. Use **Copy reply** for the whole response. File links open in the editor. Final check results and optimization measurements appear directly below the reply; detailed errors, axioms, usage, and logs are under **Checks & run details**.
+
 With live edits on, the work status shows whether any files have been updated. Scratch checks do not change your editor; changes appear when Lemex writes to a project file. Saved edits still need final Lean verification. In review-first mode, files update after you accept the candidate changes.
 
 Use **View edits** to inspect saved changes during a run. If **Final checks need attention** appears, select **Review checks** to see why the server did not verify the result.

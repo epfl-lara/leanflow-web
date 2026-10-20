@@ -85,6 +85,7 @@ import {
 import './studio.css'
 import './single-file.css'
 import './file-reading.css'
+import './chat-content.css'
 
 interface DeleteTarget {
   chatId?: string
