@@ -20,11 +20,13 @@ Self-host LeanFlow Web for yourself or trusted collaborators on Linux with Node.
 - **[Host for a team](doc/Hosting.md):** add persistent storage, a service, and an HTTPS address.
 - **[Use LeanFlow Web](doc/UsingLeanFlow.md):** work with projects, proofs, and Lemex.
 
+Each collaborator signs in with an individual access token and saves their own provider API key; EPFL RCP is the default. Before inviting a team, complete the short [installation verification](doc/Verification.md).
+
 ## Contribute
 
 After setup, use `npm run dev` for development with your settings exported. See [AGENTS.md](AGENTS.md) for code practices, formatting, and checks.
 
-See [Configuration](doc/Configuration.md) for advanced settings, [Checks and releases](doc/Automation.md) for GitHub Actions, and [Verification](doc/Verification.md) for runtime checks.
+See [Configuration](doc/Configuration.md) for advanced settings, [Checks and releases](doc/Automation.md) for GitHub Actions, and [Security](SECURITY.md) for private vulnerability reporting.
 
 ## Credits
 

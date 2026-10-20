@@ -275,6 +275,12 @@ export function Studio() {
     id: number
     target: Pick<ProofTarget, 'path' | 'startLine' | 'endLine' | 'name'>
   } | null>(null)
+  const [revealPosition, setRevealPosition] = useState<{
+    id: number
+    path: string
+    line: number
+    column: number
+  } | null>(null)
   const proofRequestId = useRef(0)
   const [git, setGit] = useState<GitInfo | null>(null)
   const [error, setError] = useState('')
@@ -499,6 +505,7 @@ export function Studio() {
       setEditorProof(null)
       setFocusEditorRequest(null)
       setRevealProof(null)
+      setRevealPosition(null)
       setGit(null)
       setGitOpen(null)
       setTerminalProjectId(null)
@@ -737,16 +744,41 @@ export function Studio() {
   )
 
   const openFile = useCallback(
-    async (id: string, path: string, line?: number, column?: number) => {
+    async (
+      id: string,
+      path: string,
+      line?: number,
+      column?: number,
+      { reload = false }: { reload?: boolean } = {},
+    ) => {
       const expected = bufferStore.getSnapshot().scope
       if (expected.projectId !== id) return
       const request = ++openRequest.current
+      const revealCurrent = () => {
+        if (line)
+          setRevealPosition({
+            id: ++proofRequestId.current,
+            path,
+            line,
+            column: column || 1,
+          })
+        setSidebarOpen(false)
+      }
+      // Diagnostic links navigate within the current editor. Reopening it
+      // would discard undo/cursor state and could
+      // overwrite keystrokes made while a redundant source request was pending.
+      if (!reload && bufferStore.getSnapshot().file?.path === path) {
+        setOpening(false)
+        setError('')
+        revealCurrent()
+        return
+      }
       setOpening(true)
       setError('')
       try {
         const pdf = isPdfFile(path)
         const cached = bufferStore.getSnapshot().buffers.get(path)
-        const value =
+        let value =
           cached && cached.content !== cached.savedContent
             ? cached
             : pdf
@@ -760,11 +792,31 @@ export function Studio() {
                 )
         if (request !== openRequest.current || !bufferStore.isCurrent(expected))
           return
+        const latest = bufferStore.getSnapshot().buffers.get(path)
+        // A refresh may race a local edit or save. Prefer the current buffer
+        // over the response, including its conflict hash and undo history.
+        if (latest && latest !== cached) {
+          if (bufferStore.getSnapshot().file?.path === path) {
+            revealCurrent()
+            return
+          }
+          value = latest
+        }
+        if (
+          latest &&
+          bufferStore.getSnapshot().file?.path === path &&
+          value.content === latest.content &&
+          value.hash === latest.hash &&
+          !pdf
+        ) {
+          revealCurrent()
+          return
+        }
         setFile({
           path,
           content: value.content,
           savedContent:
-            cached && value === cached ? cached.savedContent : value.content,
+            latest && value === latest ? latest.savedContent : value.content,
           hash: value.hash,
           generation: ++generation.current,
           readOnly:
@@ -805,7 +857,15 @@ export function Studio() {
           const currentPath = value.find(
             (entry) => entry.path === fileRef.current?.path,
           )?.path
-          void openFile(projectId, currentPath || first.path)
+          void openFile(
+            projectId,
+            currentPath || first.path,
+            undefined,
+            undefined,
+            {
+              reload: !!currentPath,
+            },
+          )
         }
       })
       .catch((error) => {
@@ -1261,7 +1321,10 @@ export function Studio() {
       return
     await loadFiles(projectId)
     if (!bufferStore.isCurrent(scope)) return
-    if (fileRef.current) await openFile(projectId, fileRef.current.path)
+    if (fileRef.current)
+      await openFile(projectId, fileRef.current.path, undefined, undefined, {
+        reload: true,
+      })
     await loadGit(projectId)
   }
 
@@ -1355,7 +1418,10 @@ export function Studio() {
       if (current.preview === 'pdf') {
         // Terminal polling supplies no changed paths. Keep the reader's page
         // and scroll position until a reported edit or an explicit reload.
-        if (paths.includes(current.path)) await openFile(id, current.path)
+        if (paths.includes(current.path))
+          await openFile(id, current.path, undefined, undefined, {
+            reload: true,
+          })
         return
       }
       const latest = await api<{ content: string; hash: string }>(
@@ -2232,7 +2298,15 @@ export function Studio() {
               onClick={() =>
                 projectId &&
                 navigate(async () => {
-                  await openFile(projectId, agentPendingFile)
+                  await openFile(
+                    projectId,
+                    agentPendingFile,
+                    undefined,
+                    undefined,
+                    {
+                      reload: true,
+                    },
+                  )
                   setAgentPendingFile(null)
                 })
               }
@@ -2555,6 +2629,7 @@ export function Studio() {
                   goalsSize={goalsSize}
                   onGoalsSizeChange={setGoalsSize}
                   revealTarget={revealProof || undefined}
+                  revealPosition={revealPosition}
                   onProofStateChange={acceptEditorProof}
                   focusEditorRequest={focusEditorRequest}
                   onFocusEditorHandled={(id) =>
@@ -3133,6 +3208,7 @@ export function Studio() {
                   )
                     return
                   setReloadBusy(true)
+                  setError('')
                   try {
                     const latest = await api<{ content: string; hash: string }>(
                       `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(reloadTarget)}`,

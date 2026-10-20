@@ -14,6 +14,10 @@ const stages = {
     'Waiting for Lemex',
     'Setup repair is queued for an available assistant slot. You can keep working in another project.',
   ],
+  'waiting-for-rcp': [
+    'Waiting for this RCP key',
+    'Another task is using this RCP key. Setup repair will start automatically when it finishes. You can stop setup while it waits.',
+  ],
   'reading-project': [
     'Reading the project',
     'Finding the Lean environment and checking the project configuration.',

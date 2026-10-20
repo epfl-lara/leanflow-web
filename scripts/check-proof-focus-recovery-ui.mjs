@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { build } from 'esbuild'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
 
 const base = process.env.STUDIO_TEST_URL || 'http://127.0.0.1:8102'
@@ -46,25 +47,19 @@ const { page, browser, report } = fixture
 const reportDir = path.resolve('.runtime/proof-focus-recovery-ui')
 await fs.mkdir(reportDir, { recursive: true })
 const results = { checks: [], providerCalls: 0 }
-const harness = `<!doctype html><html><head></head><body><div id="root"></div><script type="module">
-import React from '/node_modules/.vite/deps/react.js';
-import ReactDOMClient from '/node_modules/.vite/deps/react-dom_client.js';
-const { createRoot } = ReactDOMClient;
-import RefreshRuntime from '/@react-refresh';
-RefreshRuntime.injectIntoGlobalHook(window);
-window.$RefreshReg$ = () => {};
-window.$RefreshSig$ = () => (type) => type;
-window.__vite_plugin_react_preamble_installed__ = true;
-const { AssistantPanel } = await import('/src/studio/AssistantPanel.tsx');
-import '/src/studio/studio.css';
+const harness = `<!doctype html><html><head><link rel="stylesheet" href="/__focus-recovery.css"></head><body><div id="root"></div><script type="module" src="/__focus-recovery.js"></script></body></html>`
+const harnessSource = `
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import { AssistantPanel } from './src/studio/AssistantPanel.tsx';
+import './src/studio/studio.css';
 const props=${JSON.stringify(props)};
 if(sessionStorage.getItem('focus-recovery-attached')) props.focusRequest=null;
 Object.assign(props,{onDeleteChat:()=>{},beforeRun:async()=>{},beforeApply:async()=>{},onDiscard:async()=>{},onApplied:async()=>{},onFilesUpdated:async()=>{},onOpenTarget:()=>{},onFocusHandled:()=>{sessionStorage.setItem('focus-recovery-attached','1');window.__focusRecoveryRender({focusRequest:null})}});
 window.__focusRecoveryProps=props;
 const root=createRoot(document.getElementById('root'));
 window.__focusRecoveryRender=(extra)=>{Object.assign(props,extra);root.render(React.createElement(AssistantPanel,props))};
-window.__focusRecoveryRender({});
-</script></body></html>`
+window.__focusRecoveryRender({});`
 await page.addInitScript(
   ({ key }) => {
     if (!localStorage.getItem(key)) localStorage.setItem(key, 'old-chat')
@@ -85,6 +80,34 @@ await page.route(`**/api/projects/${projectId}/chats`, async (route) => {
   await route.fallback()
 })
 try {
+  // This first-mount race needs an isolated component. Bundle it in memory so
+  // the fixture also works with the static CI server, without Vite dev URLs.
+  const compiled = await build({
+    stdin: {
+      contents: harnessSource,
+      resolveDir: path.resolve('client'),
+      loader: 'tsx',
+    },
+    outfile: path.join(reportDir, 'harness.js'),
+    bundle: true,
+    write: false,
+    format: 'esm',
+    jsx: 'automatic',
+    target: 'es2022',
+    define: { 'process.env.NODE_ENV': '"production"' },
+    loader: { '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl' },
+  })
+  for (const output of compiled.outputFiles) {
+    const extension = path.extname(output.path)
+    assert(['.js', '.css'].includes(extension), 'Unexpected fixture asset')
+    await page.route(`${base}/__focus-recovery${extension}`, (route) =>
+      route.fulfill({
+        contentType:
+          extension === '.js' ? 'application/javascript' : 'text/css',
+        body: Buffer.from(output.contents),
+      }),
+    )
+  }
   await page.goto(`${base}/__focus-recovery`)
   await page.getByLabel('Focused proof', { exact: true }).waitFor()
   results.beforeRestore = await page

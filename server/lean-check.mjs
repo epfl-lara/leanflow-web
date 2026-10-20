@@ -50,9 +50,16 @@ export class LeanCheckSupport {
       stat.mtimeNs,
       stat.ctimeNs,
     ].join('\0')
-    let task = this.cache.get(key)
-    if (!task) {
-      task = this.runtime
+    options.signal?.throwIfAborted()
+    let entry = this.cache.get(key)
+    if (entry?.controller.signal.aborted) {
+      this.cache.delete(key)
+      entry = undefined
+    }
+    if (!entry) {
+      entry = { controller: new AbortController(), waiters: 0, settled: false }
+      const current = entry
+      entry.task = this.runtime
         .run(
           root,
           [`/opt/lean-toolchains/${toolchainName(version)}/bin/lake`, '--help'],
@@ -62,7 +69,7 @@ export class LeanCheckSupport {
             freshHome: true,
             cleanHome: true,
             timeoutMs: 15000,
-            signal: options.signal,
+            signal: entry.controller.signal,
           },
         )
         .then((result) => {
@@ -73,15 +80,39 @@ export class LeanCheckSupport {
           return /^\s*check\s+\S/m.test(result.stdout)
         })
         .catch((error) => {
-          if (this.cache.get(key) === task) this.cache.delete(key)
+          if (this.cache.get(key) === current) this.cache.delete(key)
           throw error
         })
-      this.cache.set(key, task)
+        .finally(() => {
+          current.settled = true
+        })
+      this.cache.set(key, entry)
       while (this.cache.size > 16)
         this.cache.delete(this.cache.keys().next().value)
     }
-    const supported = await task
-    options.signal?.throwIfAborted()
-    return supported
+    // Concurrent checks share capability discovery, but stopping one check
+    // must not cancel another. Remove the worker only after the final waiter
+    // leaves, and await that cleanup before completing the cancellation.
+    entry.waiters++
+    let abort
+    try {
+      const supported = await Promise.race([
+        entry.task,
+        new Promise((_, reject) => {
+          abort = () => reject(options.signal.reason)
+          options.signal?.addEventListener('abort', abort, { once: true })
+          if (options.signal?.aborted) abort()
+        }),
+      ])
+      options.signal?.throwIfAborted()
+      return supported
+    } finally {
+      options.signal?.removeEventListener('abort', abort)
+      entry.waiters--
+      if (!entry.waiters && !entry.settled) {
+        entry.controller.abort(new Error('Checker discovery was cancelled.'))
+        await entry.task.catch(() => {})
+      }
+    }
   }
 }

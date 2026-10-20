@@ -96,6 +96,82 @@ test('failed and cancelled capability discovery cannot downgrade a project or po
   assert.equal(calls, 2)
 })
 
+async function pendingProbe(t) {
+  const root = await directory(t)
+  await fs.mkdir(path.join(root, 'bin'))
+  await fs.writeFile(path.join(root, 'bin/lake'), 'fixture')
+  await fs.writeFile(path.join(root, 'lean-toolchain'), 'fixture')
+  let finish,
+    signal,
+    calls = 0
+  const support = new LeanCheckSupport({
+    imageId: 'fixture',
+    toolchains: new Map([['fixture', root]]),
+    run: async (_root, _args, options) => {
+      calls++
+      signal = options.signal
+      await new Promise((resolve) => {
+        finish = resolve
+      })
+      signal.throwIfAborted()
+      return { code: 0, stdout: 'check  independent checker' }
+    },
+  })
+  const waitFor = async (predicate) => {
+    for (let i = 0; i < 1000; i++) {
+      if (predicate()) return
+      await new Promise((resolve) => setTimeout(resolve, 1))
+    }
+    throw new Error('Probe fixture did not reach the expected state')
+  }
+  t.after(() => finish?.())
+  return {
+    root,
+    support,
+    waitFor,
+    finish: () => finish(),
+    signal: () => signal,
+    calls: () => calls,
+  }
+}
+
+test('cancelling one checker discovery waiter keeps the shared probe available to another', async (t) => {
+  const f = await pendingProbe(t)
+  const controller = new AbortController()
+  const first = f.support.supported(f.root, { signal: controller.signal })
+  const second = f.support.supported(f.root)
+  await f.waitFor(() => [...f.support.cache.values()][0]?.waiters === 2)
+  controller.abort(new Error('First check stopped'))
+  await assert.rejects(first, /First check stopped/)
+  assert.equal(f.signal().aborted, false)
+  f.finish()
+  assert.equal(await second, true)
+  assert.equal(await f.support.supported(f.root), true)
+  assert.equal(f.calls(), 1)
+})
+
+test('the last cancelled checker waiter waits for worker cleanup and does not poison retries', async (t) => {
+  const f = await pendingProbe(t)
+  const controller = new AbortController()
+  let completed = false
+  const pending = f.support
+    .supported(f.root, { signal: controller.signal })
+    .finally(() => {
+      completed = true
+    })
+  const rejected = assert.rejects(pending, /Check stopped/)
+  await f.waitFor(() => !!f.signal())
+  controller.abort(new Error('Check stopped'))
+  await f.waitFor(() => f.signal().aborted)
+  assert.equal(completed, false)
+  f.finish()
+  await rejected
+  const retry = f.support.supported(f.root)
+  await f.waitFor(() => f.calls() === 2)
+  f.finish()
+  assert.equal(await retry, true)
+})
+
 async function checkFixture(
   t,
   {

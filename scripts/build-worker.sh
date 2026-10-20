@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+node scripts/ci/check-lean-probe-pins.mjs
 runtime_bundle_dir="${LEMEX_RUNTIME_DIR:-.runtime/lemex}"
 worker_arch="$(docker info --format '{{.Architecture}}')"
 case "$worker_arch" in

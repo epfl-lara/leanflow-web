@@ -4,6 +4,13 @@ import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 import path from 'node:path'
 import { processIdentity } from './lease.mjs'
+import {
+  dependencyCacheCommands,
+  runDependencyCache,
+  runPinnedLake,
+  setupFailureMessage,
+} from './pinned-lake.mjs'
+import { readPresetConfiguration } from './prepared-presets.mjs'
 
 // The server and provisioning CLI share one installer and an atomic lease.
 // A killed installer can be resumed without two processes writing one cache.
@@ -155,16 +162,11 @@ export class PresetInstaller {
     const append = (chunk) => {
       writes = writes.then(() => log.write(String(chunk))).catch(() => {})
     }
-    const execute = async (
-      root,
-      args,
-      network = 'bridge',
-      allowFailure = false,
-    ) => {
+    const execute = async (root, args, network = 'bridge') => {
       signal.throwIfAborted()
       onProgress(preset.id, args.join(' '))
       append(`\n$ ${args.join(' ')}\n`)
-      const result = await runtime.run(root, args, {
+      const result = await runPinnedLake(runtime, root, args, {
         signal,
         network,
         onOutput: append,
@@ -172,9 +174,14 @@ export class PresetInstaller {
         maxOutputBytes: 256 * 1024,
       })
       signal.throwIfAborted()
-      if (result.code !== 0 && !allowFailure)
+      if (result.code !== 0)
         throw new Error(
-          `Command failed (${result.code}): ${args.join(' ')}\n${result.stderr.slice(-4000)}`,
+          [
+            setupFailureMessage(result),
+            `Command failed (${result.code}): ${args.join(' ')}\n${(result.stderr || result.stdout || '').slice(-4000)}`,
+          ]
+            .filter(Boolean)
+            .join('\n'),
         )
       return result
     }
@@ -202,15 +209,25 @@ export class PresetInstaller {
         `${imports.map((name) => `import ${name}`).join('\n')}\n\n/-- Start a proof here, or select code and ask Lemex for help. -/\ntheorem addition_commutes (a b : Nat) : a + b = b + a := by\n  exact Nat.add_comm a b\n`,
       )
       if (preset.repository) {
+        // An interrupted installation may leave a partial lockfile. The preset's
+        // immutable top-level revision is authoritative when rebuilding it.
+        await fs.rm(path.join(root, 'lake-manifest.json'), { force: true })
         await execute(root, ['lake', 'update'])
-        await execute(root, ['lake', 'exe', 'cache', 'get'], 'bridge', true)
-        if (preset.id === 'physlib')
-          await execute(
-            root,
-            ['sh', '-c', 'cd .lake/packages/Physlib && lake exe get_cache'],
-            'bridge',
-            true,
-          )
+        const configuration = readPresetConfiguration(root, preset)
+        const manifest = JSON.parse(configuration['lake-manifest.json'])
+        for (const command of dependencyCacheCommands(manifest, {
+          toolchain: preset.toolchain,
+        }))
+          await runDependencyCache(runtime, root, command, {
+            signal,
+            network: 'bridge',
+            onOutput: (message) => {
+              append(message)
+              onProgress(preset.id, String(message))
+            },
+            timeoutMs: 90 * 60 * 1000,
+            maxOutputBytes: 256 * 1024,
+          })
       }
       await execute(root, ['lake', 'build', 'Main'])
       const checked = await execute(
@@ -239,6 +256,7 @@ export class PresetInstaller {
         }
       }
       signal.throwIfAborted()
+      readPresetConfiguration(root, preset)
       const marker = {
         id: preset.id,
         toolchain: preset.toolchain,

@@ -107,16 +107,23 @@ export function ProviderKeyForm({
         Your key is encrypted on the server and stays saved between visits.
       </p>
       {provider === 'rcp' && (
-        <p className="field-help">
-          <a
-            href="https://portal.rcp.epfl.ch/aiaas/keys"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Find or create your API key in the EPFL RCP portal
-          </a>{' '}
-          (opens in a new tab).
-        </p>
+        <>
+          <p className="field-help">
+            <a
+              href="https://portal.rcp.epfl.ch/aiaas/keys"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Find or create your API key in the EPFL RCP portal
+            </a>{' '}
+            (opens in a new tab).
+          </p>
+          <p className="field-help">
+            Free RCP keys allow one model request at a time. Chats using the
+            same RCP key wait their turn and start automatically. You can stop a
+            waiting chat.
+          </p>
+        </>
       )}
       <input
         id="lemex-api-key"

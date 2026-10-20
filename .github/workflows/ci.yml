@@ -52,7 +52,7 @@ jobs:
         run: |
           python3 -m venv .runtime/python-tools
           .runtime/python-tools/bin/pip install black==25.1.0
-          .runtime/python-tools/bin/black --check scripts/package-lemex.py
+          .runtime/python-tools/bin/black --check scripts/package-lemex.py scripts/test_lean_probe_worker.py deploy/lean-probe-worker
           python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Test
         run: |
@@ -88,10 +88,14 @@ jobs:
         run: bash scripts/ci/check-workflows.sh
 
   browser:
-    name: Browser regressions
+    name: Browser / ${{ matrix.group }}
     needs: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [chat, workspace]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -107,28 +111,15 @@ jobs:
           path: client/dist
       - run: npx --no-install playwright install --with-deps chromium
       - name: Check isolated browser flows
-        run: node scripts/ci/check-browser.mjs
+        run: node scripts/ci/check-browser.mjs --group=${{ matrix.group }}
       - name: Save fixture reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: browser-reports
+          name: browser-reports-${{ matrix.group }}
           path: |
-            .runtime/auth-recovery-ui/
-            .runtime/provider-settings-ui/
-            .runtime/model-options-ui/
-            .runtime/chat-naming-ui/
-            .runtime/chat-ui/
-            .runtime/streaming-ui/
-            .runtime/ask-search-ui/
-            .runtime/markdown-security-ui/
-            .runtime/chat-readability-ui/
-            .runtime/chat-compact-ui/
-            .runtime/reasoning-ui/
-            .runtime/reasoning-timeline-ui/
-            .runtime/reasoning-history-ui/
-            .runtime/autosave-ui/
-            .runtime/lean-cache-ui/
+            .runtime/*-ui/
+            .runtime/books-feature/ui/
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7

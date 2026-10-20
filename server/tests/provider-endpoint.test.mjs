@@ -195,3 +195,37 @@ test('worker provider definitions use explicit endpoints and Responses; only RCP
   assert(!custom.includes('fixture-secret'))
   assert(!custom.includes('inference.rcp.epfl.ch'))
 })
+
+test('malformed asynchronous provider responses reject without escaping event callbacks', async () => {
+  const replyWith = (status, body = Buffer.from('{}')) =>
+    fetchProvider(
+      'https://api.example.com/v1/models',
+      {},
+      {
+        resolve: async () => [{ address: '8.8.8.8', family: 4 }],
+        request: (_url, _options, reply) => {
+          const request = new EventEmitter()
+          request.end = () =>
+            setImmediate(() => {
+              const response = new EventEmitter()
+              response.statusCode = status
+              reply(response)
+              response.emit('data', body)
+              response.emit('end')
+            })
+          return request
+        },
+      },
+    )
+  for (const status of [199, 700, undefined, NaN])
+    await assert.rejects(replyWith(status), {
+      message: 'Provider returned an invalid HTTP response.',
+    })
+  // Unexpected transport data can also make Buffer.concat/Response throw.
+  // The generic failure must not reveal the upstream object's contents.
+  await assert.rejects(replyWith(200, { length: 0, secret: 'fixture-only' }), {
+    message: 'Provider returned an invalid HTTP response.',
+  })
+  assert.equal((await replyWith(204)).status, 204)
+  assert.equal((await replyWith(599)).status, 599)
+})

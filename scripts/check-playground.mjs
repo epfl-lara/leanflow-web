@@ -8,7 +8,7 @@ import { performance } from 'node:perf_hooks'
 import { Runtime } from '../server/runtime.mjs'
 import { WorkspaceStore } from '../server/workspaces.mjs'
 
-const dataDir = path.resolve(process.env.STUDIO_DATA_DIR || '.data')
+let dataDir = path.resolve(process.env.STUDIO_DATA_DIR || '.data')
 const reportDir = path.resolve('.runtime/playground-real-check')
 await fs.mkdir(reportDir, { recursive: true })
 const runtime = new Runtime({
@@ -16,6 +16,7 @@ const runtime = new Runtime({
   scope: 'helper',
   maxConcurrent: 1,
   maxQueue: 2,
+  memory: process.env.STUDIO_WORKER_MEMORY || '4g',
 })
 const report = { providerCalls: 0, checks: [], readyTimesMs: [] }
 let store, fixtureDir
@@ -23,6 +24,7 @@ const projects = []
 try {
   const info = await runtime.init()
   assert.equal(info.ready, true, info.error)
+  dataDir = runtime.dataDir
   await runtime.preparePresetEnvironment('mathlib')
   const template = runtime.templateRoot('mathlib')
   const templateSource = await fs.readFile(

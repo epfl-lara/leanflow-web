@@ -383,7 +383,6 @@ export class TexBuildManager {
           )
         controller.signal.throwIfAborted()
         this.events.updateMetadata(job.id, {
-          status: 'running',
           sourceRevision: source.sourceRevision,
           workspaceRevision: source.workspaceRevision,
           sourceBytes: source.bytes,
@@ -403,6 +402,10 @@ export class TexBuildManager {
             engine,
             timeoutMs: this.timeoutMs,
             signal: controller.signal,
+            onSpawn: () => {
+              controller.signal.throwIfAborted()
+              this.events.updateMetadata(job.id, { status: 'running' })
+            },
             onOutput: outputLog,
           },
         )

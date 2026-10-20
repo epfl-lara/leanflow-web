@@ -1,16 +1,37 @@
 import { EventEmitter } from 'node:events'
-import { createInterface } from 'node:readline'
 import { sourceFileByteLimit } from '../shared/source-limits.mjs'
 
 export class AgentRpc extends EventEmitter {
-  constructor(child) {
+  constructor(child, { maxMessageBytes = 64 * 1024 * 1024 } = {}) {
     super()
+    if (!Number.isSafeInteger(maxMessageBytes) || maxMessageBytes < 1)
+      throw new Error('Lemex message limit must be a positive integer.')
     this.child = child
     this.nextId = 1
     this.pending = new Map()
     this.closed = false
-    const lines = createInterface({ input: child.stdout })
-    lines.on('line', (line) => {
+    let buffered = Buffer.alloc(0),
+      bytes = 0
+    const fail = (error) => {
+      if (this.closed) return
+      this.closed = true
+      buffered = Buffer.alloc(0)
+      bytes = 0
+      child.stdout.off('data', receive)
+      child.stdout.off('end', end)
+      child.stdout.resume()
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer)
+        pending.reject(error)
+      }
+      this.pending.clear()
+      this.emit('closed', error)
+    }
+    const invalid = (message) => {
+      fail(new Error(message))
+      child.kill('SIGTERM')
+    }
+    const dispatch = (line) => {
       let message
       try {
         message = JSON.parse(line)
@@ -18,6 +39,16 @@ export class AgentRpc extends EventEmitter {
         this.emit('log', line)
         return
       }
+      if (!message || typeof message !== 'object' || Array.isArray(message))
+        throw new Error('Expected a Lemex message object.')
+      if (
+        (message.method !== undefined &&
+          (typeof message.method !== 'string' || !message.method)) ||
+        ('id' in message &&
+          typeof message.id !== 'string' &&
+          !Number.isSafeInteger(message.id))
+      )
+        throw new Error('Invalid Lemex message envelope.')
       if ('id' in message && !message.method) {
         const pending = this.pending.get(message.id)
         if (!pending) return
@@ -26,7 +57,11 @@ export class AgentRpc extends EventEmitter {
         if (message.error)
           pending.reject(
             Object.assign(
-              new Error(message.error.message || JSON.stringify(message.error)),
+              new Error(
+                typeof message.error.message === 'string'
+                  ? message.error.message
+                  : 'Lemex could not complete this request.',
+              ),
               { code: message.error.code, data: message.error.data },
             ),
           )
@@ -34,17 +69,57 @@ export class AgentRpc extends EventEmitter {
       } else if (message.method && 'id' in message) {
         this.emit('request', message)
       } else if (message.method) this.emit('notification', message)
-    })
-    const fail = (error) => {
-      if (this.closed) return
-      this.closed = true
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer)
-        pending.reject(error)
-      }
-      this.pending.clear()
-      this.emit('closed', error)
     }
+    const line = () => {
+      const content = buffered.toString('utf8', 0, bytes)
+      buffered = Buffer.alloc(0)
+      bytes = 0
+      try {
+        dispatch(content.endsWith('\r') ? content.slice(0, -1) : content)
+      } catch {
+        // Worker output and its event payloads are untrusted. A malformed
+        // packet must fail only its assistant session, never the shared server.
+        invalid('Lemex returned an invalid message. Start this run again.')
+      }
+    }
+    const receive = (data) => {
+      const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data)
+      let start = 0
+      while (!this.closed && start < buffer.length) {
+        const newline = buffer.indexOf(10, start)
+        const stop = newline < 0 ? buffer.length : newline
+        if (bytes + stop - start > maxMessageBytes) {
+          invalid(
+            'Lemex returned too much data in one message. Reduce the task or file size and try again.',
+          )
+          return
+        }
+        if (stop > start) {
+          const size = bytes + stop - start
+          if (buffered.length < size) {
+            const grown = Buffer.allocUnsafe(
+              Math.min(
+                maxMessageBytes,
+                Math.max(4096, size, buffered.length * 2),
+              ),
+            )
+            buffered.copy(grown, 0, 0, bytes)
+            buffered = grown
+          }
+          buffer.copy(buffered, bytes, start, stop)
+          bytes = size
+        }
+        if (newline < 0) return
+        line()
+        start = newline + 1
+      }
+    }
+    const end = () => {
+      if (!this.closed && bytes) line()
+    }
+    child.stdout.on('data', receive)
+    child.stdout.on('end', end)
+    child.stdout.on('error', fail)
     child.on('error', fail)
     child.on('close', (code) =>
       fail(new Error(`Lemex process exited (${code}).`)),

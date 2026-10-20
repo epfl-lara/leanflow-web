@@ -8,6 +8,10 @@ RCP (`https://inference.rcp.epfl.ch/v1`) is the default; no endpoint setting is 
 
 Keys and their endpoints are encrypted together. Updating a connection requires entering its key; changing the URL never forwards an existing key to a new host. Existing RCP keys remain valid without a migration or re-entry. Saved model shortlists are kept separately for each provider endpoint, so switching back to RCP restores its list. `LEMEX_BASE_URL` remains available as an operator override for the default endpoint in existing installations.
 
+To support free RCP keys, requests using the same RCP endpoint and key are scheduled one at a time. Waiting chats and setup repairs remain cancellable, and chat naming waits behind foreground work. Different keys and custom providers keep their own capacity. This coordination applies within one LeanFlow server; other applications using the same key can still cause a provider limit. The app does not infer a subscription tier from the key or silently change the selected model.
+
+Automatic RCP chat naming starts after the first run finishes and its worker releases the key; it occupies no naming slot while that run is active. A cancelled run keeps its prompt-based title. Once requested, naming waits up to 15 seconds for a key or naming slot, then offers manual naming or a later retry. Provider requests have a 30-second timeout, with a 45-second limit for the complete naming job. At most three names per account and 18 server-wide may be pending; actual naming calls remain limited to two. Closing a suggestion cancels its request when no other viewer or automatic naming task needs it. Automatic naming failures keep the existing prompt-based title; a manual name always wins.
+
 | Setting              | Use                                                                                                    |
 | -------------------- | ------------------------------------------------------------------------------------------------------ |
 | `LEMEX_BASE_URL`     | HTTPS provider endpoint; keys are supplied by each account.                                            |
@@ -73,7 +77,7 @@ Project setup allows 30 minutes for its own Lake build. Large imported repositor
 STUDIO_SETUP_BUILD_TIMEOUT_MS=5400000
 ```
 
-Lean checks use the setup build timeout by default. Set `STUDIO_CHECK_TIMEOUT_MS` to override it. Specialized Lemex setup repair has a separate 15-minute deadline, including queue time. Set `STUDIO_SETUP_REPAIR_TIMEOUT_MS` to adjust it. These deadlines are bounded to six hours, and Stop remains available while work is queued or running.
+Lean checks use the setup build timeout by default. Set `STUDIO_CHECK_TIMEOUT_MS` to override it. Specialized Lemex setup repair has a separate 15-minute execution deadline, starting after an assistant slot and its RCP key are available; queue time does not consume it. Worker startup and the repair itself share that budget. Set `STUDIO_SETUP_REPAIR_TIMEOUT_MS` to adjust it. These deadlines are bounded to six hours, and Stop remains available while work is queued or running.
 
 The maximum is 6 hours. Editors, assistant runs and proof verification use their own limits. Longer builds also need enough worker RAM; measure representative repositories and leave headroom for every worker that can run together. Review `STUDIO_MAX_WORKERS`, `STUDIO_WORKER_CPUS` and `STUDIO_WORKER_MEMORY` together before an idle restart.
 

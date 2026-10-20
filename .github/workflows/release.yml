@@ -67,6 +67,8 @@ jobs:
           name: client-dist
           path: client/dist
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Check bundled LeanProbe support for default Lean versions
+        run: node scripts/ci/check-lean-probe-pins.mjs --latest
       - name: Resolve and prepare latest Lemex runtime
         run: python3 scripts/package-lemex.py --target-arch x64
       - name: Build Linux x64 worker

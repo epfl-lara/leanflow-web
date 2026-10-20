@@ -26,7 +26,7 @@ const fixture = await chatBrowserFixture({
     templates: [],
     models: [],
     runtime: { ready: true },
-    lemex: { configured: false },
+    lemex: { configured: true },
   },
   projects: [initialProject],
   files: { [initialId]: { 'Main.lean': 'example : True := by trivial\n' } },

@@ -9,6 +9,7 @@ import { execFile, spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
+import { editorShortcuts } from './lib/editor-shortcuts.mjs'
 
 const source = `import Std
 namespace Demo
@@ -85,6 +86,12 @@ lean.stdout.on('data', (chunk) => {
       buffer.subarray(headerEnd + 4, headerEnd + 4 + length).toString(),
     )
     buffer = buffer.subarray(headerEnd + 4 + length)
+    // Lean also initiates requests (for example inlay-hint refreshes). Their
+    // ids can overlap ours, so acknowledge them before matching responses.
+    if (typeof message.method === 'string') {
+      if ('id' in message) send({ id: message.id, result: null })
+      continue
+    }
     const item = pending.get(message.id)
     if (item) {
       pending.delete(message.id)
@@ -274,7 +281,7 @@ try {
   await sourceEditor.focus()
   await page.keyboard.press('ArrowRight')
   assert.match(await outline.innerText(), /Demo\.second/)
-  await page.keyboard.press('Control+Home')
+  await page.keyboard.press(editorShortcuts.documentStart)
   await until(
     async () =>
       await outline
@@ -550,11 +557,11 @@ try {
 
   documentSymbols = []
   await sourceEditor.focus()
-  await page.keyboard.press('Control+Home')
+  await page.keyboard.press(editorShortcuts.documentStart)
   await page.keyboard.type('-- fresh unsaved selection')
   await page.keyboard.press('Enter')
-  await page.keyboard.press('Control+Home')
-  await page.keyboard.press('Shift+End')
+  await page.keyboard.press(editorShortcuts.documentStart)
+  await page.keyboard.press(editorShortcuts.selectLineEnd)
   await outline.getByRole('button', { name: 'Ask Lemex', exact: true }).click()
   assert.equal(await searchMode.getAttribute('aria-pressed'), 'true')
   assert.match(
@@ -563,7 +570,7 @@ try {
   )
   assert.equal(report.sockets.length, 1)
   await sourceEditor.focus()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(editorShortcuts.documentEnd)
   await page
     .getByLabel('Focused proof', { exact: true })
     .getByRole('button', { name: /Selected proof/ })

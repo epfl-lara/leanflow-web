@@ -10,6 +10,25 @@ import { environmentSmokeProof } from './project-libraries.mjs'
 
 const digest = (value) => createHash('sha256').update(value).digest('hex')
 
+export function readPresetConfiguration(root, definition) {
+  const configuration = readDependencyConfiguration(root)
+  if (configuration['lean-toolchain']?.trim() !== definition.toolchain)
+    throw new Error(
+      'The prepared library toolchain does not match its pinned version.',
+    )
+  if (definition.revision) {
+    const manifest = JSON.parse(configuration['lake-manifest.json'] || '{}')
+    const dependency = manifest.packages?.find(
+      (pkg) => pkg.name === definition.package,
+    )
+    if (!dependency || dependency.rev !== definition.revision)
+      throw new Error(
+        'The prepared library does not match its pinned dependency revision.',
+      )
+  }
+  return configuration
+}
+
 // Certificates belong to the server. Workers see prepared libraries read only.
 // Revalidate once when the pins, configuration, toolchain or worker image change.
 export class PreparedPresetCache {
@@ -35,24 +54,12 @@ export class PreparedPresetCache {
     const marker = JSON.parse(markerText)
     if (marker.code !== 0)
       throw new Error('The prepared library has not passed its Lean check.')
-    const configuration = readDependencyConfiguration(root)
-    if (configuration['lean-toolchain']?.trim() !== definition.toolchain)
-      throw new Error(
-        'The prepared library toolchain does not match its pinned version.',
-      )
-    if (definition.revision) {
-      const manifest = JSON.parse(configuration['lake-manifest.json'] || '{}')
-      const dependency = manifest.packages?.find(
-        (pkg) => pkg.name === definition.package,
-      )
-      if (!dependency || dependency.rev !== definition.revision)
-        throw new Error(
-          'The prepared library does not match its pinned dependency revision.',
-        )
-    }
+    const configuration = readPresetConfiguration(root, definition)
     const toolchainRoot = this.runtime.toolchains.get(definition.toolchain)
     if (!toolchainRoot) return null
-    const binary = fs.statSync(path.join(toolchainRoot, 'bin/lean'))
+    const binary = fs.statSync(path.join(toolchainRoot, 'bin/lean'), {
+      bigint: true,
+    })
     const configurationHash = configurationDigest(configuration)
     const key = digest(
       JSON.stringify({
@@ -63,8 +70,11 @@ export class PreparedPresetCache {
         image: this.runtime.imageId,
         toolchain: {
           root: toolchainRoot,
-          size: binary.size,
-          modified: binary.mtimeMs,
+          device: String(binary.dev),
+          inode: String(binary.ino),
+          size: String(binary.size),
+          modified: String(binary.mtimeNs),
+          changed: String(binary.ctimeNs),
         },
       }),
     )

@@ -158,11 +158,18 @@ export class ChatStore {
     workspaces,
     events,
     titleGenerator,
+    titleTimeoutMs = 45_000,
     redact = String,
   }) {
     if (!dataDir || !workspaces || !events)
       throw new Error('ChatStore requires dataDir, workspaces, and events')
-    Object.assign(this, { workspaces, events, titleGenerator, redact })
+    Object.assign(this, {
+      workspaces,
+      events,
+      titleGenerator,
+      titleTimeoutMs,
+      redact,
+    })
     this.titleTasks = new Map()
     this.titleQueue = []
     this.titleActive = 0
@@ -184,6 +191,7 @@ export class ChatStore {
       const chat = JSON.parse(row.data)
       chat.titleStatus = 'unavailable'
       delete chat.titleRequestId
+      delete chat.titleDeferredRun
       this.#save(chat)
     }
     // A one-time reference migration keeps earlier project tasks available in
@@ -334,13 +342,18 @@ export class ChatStore {
     chat.titleSource = 'manual'
     chat.titleStatus = 'ready'
     delete chat.titleRequestId
+    delete chat.titleDeferredRun
     chat.updatedAt = new Date().toISOString()
     this.#save(chat)
     return this.#public(chat)
   }
 
-  suggestTitle(id, owner) {
+  suggestTitle(id, owner, { signal } = {}) {
     this.#owned(id, owner)
+    if (signal?.aborted)
+      return Promise.reject(
+        Object.assign(new Error('Chat naming was cancelled.'), { status: 499 }),
+      )
     if (this.closed || !this.titleGenerator?.available)
       return Promise.reject(
         Object.assign(
@@ -377,34 +390,118 @@ export class ChatStore {
       return Promise.reject(error)
     }
     const existing = this.titleTasks.get(id)
-    if (existing) return existing.promise
-    if (this.titleQueue.length >= 16)
+    if (existing) return this.#titleConsumer(existing, signal)
+    const accountTasks = [...this.titleTasks.values()].filter(
+      (job) => job.owner === owner,
+    ).length
+    if (accountTasks >= 3 || this.titleTasks.size >= 18)
       return Promise.reject(
         Object.assign(
           new Error(
-            'Chat naming is busy. Try again shortly or enter a name manually.',
+            accountTasks >= 3
+              ? 'Your account already has three chat names in progress. Wait for one to finish, close a pending suggestion, or enter a name manually.'
+              : 'Chat naming is busy. Try again shortly or enter a name manually.',
           ),
           { status: 503 },
         ),
       )
     const controller = new AbortController()
-    const job = { id, owner, messages, controller }
+    const job = {
+      id,
+      owner,
+      messages,
+      controller,
+      consumers: 0,
+      persistent: false,
+    }
     job.promise = new Promise((resolve, reject) => {
       job.resolve = resolve
       job.reject = reject
     })
     this.titleTasks.set(id, job)
     this.titleQueue.push(job)
+    job.timer = setTimeout(
+      () =>
+        this.#cancelTitle(
+          job,
+          Object.assign(
+            new Error(
+              'Chat naming took too long. Try again or enter a name manually.',
+            ),
+            { status: 504 },
+          ),
+        ),
+      Math.max(1, Math.min(this.titleTimeoutMs, 60_000)),
+    )
+    job.timer.unref?.()
     this.#drainTitles()
-    return job.promise
+    return this.#titleConsumer(job, signal)
+  }
+
+  #titleConsumer(job, signal) {
+    // Automatic naming has an independent consumer. Closing one manual dialog
+    // must not cancel an automatic title or another viewer's suggestion.
+    if (!signal) {
+      job.persistent = true
+      return job.promise
+    }
+    job.consumers++
+    return new Promise((resolve, reject) => {
+      let done = false
+      const finish = () => {
+        if (done) return false
+        done = true
+        job.consumers--
+        signal.removeEventListener('abort', abort)
+        return true
+      }
+      const abort = () => {
+        if (!finish()) return
+        const error = Object.assign(new Error('Chat naming was cancelled.'), {
+          status: 499,
+        })
+        if (!job.consumers && !job.persistent) this.#cancelTitle(job, error)
+        reject(error)
+      }
+      signal.addEventListener('abort', abort, { once: true })
+      job.promise.then(
+        (result) => {
+          if (finish()) resolve(result)
+        },
+        (error) => {
+          if (finish()) reject(error)
+        },
+      )
+      if (signal.aborted) abort()
+    })
+  }
+
+  #cancelTitle(job, error) {
+    clearTimeout(job.timer)
+    job.controller.abort(error)
+    job.reject(error)
+    const index = this.titleQueue.indexOf(job)
+    if (index >= 0) {
+      this.titleQueue.splice(index, 1)
+      if (this.titleTasks.get(job.id) === job) this.titleTasks.delete(job.id)
+      this.#drainTitles()
+    }
+    // Started requests retain their slot until the generator has cleaned up.
   }
 
   #drainTitles() {
-    while (!this.closed && this.titleActive < 2 && this.titleQueue.length) {
+    // The provider-aware generator limits actual requests after key readiness.
+    // Waiting for one account's RCP key must not occupy another account's slot.
+    while (
+      !this.closed &&
+      (this.titleGenerator.managesConcurrency || this.titleActive < 2) &&
+      this.titleQueue.length
+    ) {
       const job = this.titleQueue.shift()
       this.titleActive++
       Promise.resolve()
         .then(() => {
+          job.controller.signal.throwIfAborted()
           this.#owned(job.id, job.owner)
           return this.titleGenerator.generate(job.messages, {
             owner: job.owner,
@@ -413,11 +510,13 @@ export class ChatStore {
         })
         .then((result) => {
           if (this.closed) throw new Error('Chat naming stopped.')
+          job.controller.signal.throwIfAborted()
           this.#owned(job.id, job.owner)
           return { title: title(result.title), model: result.model }
         })
         .then(job.resolve, job.reject)
         .finally(() => {
+          clearTimeout(job.timer)
           this.titleActive--
           if (this.titleTasks.get(job.id) === job)
             this.titleTasks.delete(job.id)
@@ -457,11 +556,51 @@ export class ChatStore {
     }
   }
 
-  appendRun(id, owner, suppliedRun) {
-    return this.#linkRun(id, owner, suppliedRun)
+  appendRun(id, owner, suppliedRun, options) {
+    return this.#linkRun(id, owner, suppliedRun, options)
   }
 
-  #linkRun(id, owner, suppliedRun, { legacy = false } = {}) {
+  // AgentManager calls this only after native cleanup and key release. The
+  // persistent marker costs no queue slot, waiter, timer or provider request
+  // while a long first RCP run is active, and is consumed at most once.
+  finishRun(id) {
+    if (this.closed) return
+    try {
+      const run = this.events.getMetadata(id)
+      if (
+        !run.chatId ||
+        !['completed', 'failed', 'cancelled'].includes(run.status)
+      )
+        return
+      const chat = this.#owned(run.chatId, run.owner)
+      if (
+        chat.explicitTitle ||
+        chat.titleStatus !== 'pending' ||
+        !chat.titleRequestId ||
+        chat.titleDeferredRun !== id
+      )
+        return
+      delete chat.titleDeferredRun
+      if (run.status === 'cancelled') {
+        chat.titleStatus = 'unavailable'
+        delete chat.titleRequestId
+        this.#save(chat)
+        return
+      }
+      this.#save(chat)
+      void this.#autoTitle(chat)
+    } catch {
+      // Naming is best-effort: deleted/archived chats or unavailable metadata
+      // retain their fallback without failing an already completed agent run.
+    }
+  }
+
+  #linkRun(
+    id,
+    owner,
+    suppliedRun,
+    { legacy = false, deferTitle = false } = {},
+  ) {
     const chat = this.#owned(id, owner)
     if (!suppliedRun || typeof suppliedRun.id !== 'string')
       fail('Invalid chat run')
@@ -494,6 +633,7 @@ export class ChatStore {
     if (autoName) {
       chat.titleStatus = 'pending'
       chat.titleRequestId = randomUUID()
+      if (deferTitle) chat.titleDeferredRun = run.id
     }
     chat.updatedAt = new Date().toISOString()
     this.db.exec('BEGIN IMMEDIATE')
@@ -507,7 +647,7 @@ export class ChatStore {
       this.db.exec('ROLLBACK')
       throw error
     }
-    if (autoName) void this.#autoTitle(chat)
+    if (autoName && !deferTitle) void this.#autoTitle(chat)
     return this.#public(chat)
   }
 
@@ -594,6 +734,7 @@ export class ChatStore {
     chat.archivedAt = new Date().toISOString()
     if (chat.titleStatus === 'pending') chat.titleStatus = 'unavailable'
     delete chat.titleRequestId
+    delete chat.titleDeferredRun
     chat.updatedAt = chat.archivedAt
     this.#save(chat)
     return this.#receipt(chat)
@@ -658,7 +799,8 @@ export class ChatStore {
   }
 
   #deleteChat(chat) {
-    this.titleTasks.get(chat.id)?.controller.abort(new Error('Chat deleted.'))
+    const job = this.titleTasks.get(chat.id)
+    if (job) this.#cancelTitle(job, new Error('Chat deleted.'))
     this.db.prepare('DELETE FROM chat_runs WHERE chat=?').run(chat.id)
     this.db
       .prepare('DELETE FROM chats WHERE id=? AND owner=?')
@@ -715,13 +857,11 @@ export class ChatStore {
 
   stopNaming() {
     this.closed = true
-    for (const job of this.titleTasks.values()) job.controller.abort()
-    for (const job of this.titleQueue.splice(0)) {
-      this.titleTasks.delete(job.id)
-      job.reject(
+    for (const job of this.titleTasks.values())
+      this.#cancelTitle(
+        job,
         Object.assign(new Error('Chat naming stopped.'), { status: 503 }),
       )
-    }
   }
 
   close() {

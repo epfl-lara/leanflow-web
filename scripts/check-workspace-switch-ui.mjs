@@ -110,6 +110,7 @@ try {
   let delayPdf = null
   let delayStatus = null
   let rejectNextSave = false
+  let saveCapacityUnavailable = false
   let creationCount = 0
   await page.route('**/api/playground', (route) =>
     route.fulfill({ json: { state: 'ready' } }),
@@ -202,6 +203,14 @@ try {
         input.expectedHash,
         previous === undefined ? null : hash(previous),
       )
+      if (saveCapacityUnavailable)
+        return route.fulfill({
+          status: 429,
+          json: {
+            error:
+              'Fixture save capacity is temporarily full. Your edits are preserved.',
+          },
+        })
       if (rejectNextSave) {
         rejectNextSave = false
         return route.fulfill({
@@ -338,7 +347,9 @@ try {
   }
   const append = async (text) => {
     await page.locator('.monaco-editor textarea').first().focus()
-    await page.keyboard.press('Control+End')
+    await page.keyboard.press(
+      process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+    )
     await page.keyboard.insertText(text)
     await until(() => save.isEnabled(), 'dirty editor')
   }
@@ -385,6 +396,9 @@ try {
   await open('main.tex', marker.a)
   await panel.waitFor()
   await panel.locator('iframe[title="PDF preview"]').waitFor()
+  // Exercise dirty navigation even when autosave's debounce expires while
+  // interacting with readers. The server reports a temporary save limit.
+  saveCapacityUnavailable = true
   await append('\n% ALPHA_UNSAVED\n')
   await select('b').click()
   const unsaved = page.getByRole('dialog', {
@@ -400,6 +414,8 @@ try {
     .getByRole('button', { name: 'Discard edits', exact: true })
     .click()
   await waitFile('Main.lean', marker.b)
+  saveCapacityUnavailable = false
+  assert(!state.files[ids.a]['main.tex'].includes('ALPHA_UNSAVED'))
   assert.equal(await panel.count(), 0)
   assert.equal(await page.locator('iframe[title="PDF preview"]').count(), 0)
   assert.equal(
@@ -745,9 +761,11 @@ try {
   )
   await switchTo('a', 'main.tex')
 
+  saveCapacityUnavailable = true
   await append('\n% SAVE_CONFLICT_DRAFT\n')
   await select('c').click()
   await unsaved.waitFor()
+  saveCapacityUnavailable = false
   rejectNextSave = true
   await unsaved
     .getByRole('button', { name: 'Save & continue', exact: true })
@@ -781,6 +799,7 @@ try {
     )
   }
   await startHeldPlayground(1)
+  saveCapacityUnavailable = true
   await append('\n% EDIT_DURING_CREATION\n')
   held.get('creation:1')()
   await unsaved.waitFor()
@@ -789,6 +808,7 @@ try {
   await unsaved.getByRole('button', { name: 'Cancel', exact: true }).click()
   assert.equal(await select('a').getAttribute('aria-current'), 'page')
   assert((await editorText()).includes('EDIT_DURING_CREATION'))
+  saveCapacityUnavailable = false
   await save.click()
   await until(
     () => save.isDisabled(),
@@ -800,6 +820,7 @@ try {
 
   await startHeldPlayground(2)
   await switchTo('c', 'main.tex')
+  saveCapacityUnavailable = true
   await append('\n% OTHER_PROJECT_DURING_CREATION\n')
   held.get('creation:2')()
   await until(() => !held.has('creation:2'), 'old creation response released')
@@ -814,6 +835,7 @@ try {
   assert.equal(await select('c').getAttribute('aria-current'), 'page')
   assert((await editorText()).includes('OTHER_PROJECT_DURING_CREATION'))
   assert.equal(await unsaved.count(), 0)
+  saveCapacityUnavailable = false
   await save.click()
   await until(() => save.isDisabled(), 'new project draft saved')
   report.checks.push(
@@ -908,8 +930,8 @@ try {
   )
 
   await startHeldPlayground(6)
-  await append('\n% SAVE_DURING_CREATION\n')
   delayWrite = ids.c
+  await append('\n% SAVE_DURING_CREATION\n')
   await save.click()
   await until(
     () => held.has(`write:${ids.c}`),
@@ -930,10 +952,12 @@ try {
 
   const beforeSaveHash = hash(state.files[ids.c]['main.tex'])
   await startHeldPlayground(7)
+  saveCapacityUnavailable = true
   await append('\n% SAVE_AND_OPEN_CREATED\n')
   held.get('creation:7')()
   await unsaved.waitFor()
   assert((await unsaved.innerText()).includes('Created playground 7'))
+  saveCapacityUnavailable = false
   await unsaved
     .getByRole('button', { name: 'Save & continue', exact: true })
     .click()
@@ -958,6 +982,7 @@ try {
 
   const savedSeventh = state.files['new-playground-7']['Main.lean']
   await startHeldPlayground(8)
+  saveCapacityUnavailable = true
   await append('\n-- DISCARD_AND_OPEN_CREATED\n')
   held.get('creation:8')()
   await unsaved.waitFor()
@@ -966,6 +991,7 @@ try {
     .getByRole('button', { name: 'Discard edits', exact: true })
     .click()
   await waitFile('Main.lean', 'CREATED_8')
+  saveCapacityUnavailable = false
   assert.equal(state.files['new-playground-7']['Main.lean'], savedSeventh)
   assert(!writes.some((entry) => entry.projectId === 'new-playground-7'))
   assert.equal(

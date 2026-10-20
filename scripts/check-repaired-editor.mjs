@@ -8,14 +8,17 @@ import { WebSocket } from 'ws'
 import { Runtime } from '../server/runtime.mjs'
 import { createStudio } from '../server/studio.mjs'
 import { AgentRpc } from '../server/rpc.mjs'
+import { providerRequestConfig } from '../server/provider-requests.mjs'
 
-const dataDir = path.resolve('.data')
+const dataDir = path.resolve(process.env.STUDIO_DATA_DIR || '.data')
 const fixture = path.join(dataDir, 'runtime/repaired-editor', randomUUID())
 const output = path.resolve('.runtime/repaired-editor')
 const runtime = new Runtime({
   dataDir,
-  image: 'lemex-web-worker:lean-probe-646cb0ee',
+  image:
+    process.env.LEAN_PROBE_TEST_IMAGE || 'lemex-web-worker:lean-probe-646cb0ee',
   scope: 'helper',
+  memory: process.env.STUDIO_WORKER_MEMORY || '6g',
 })
 const source = 'theorem preserved (n : Nat) : n + 0 = n := by rfl\n'
 const roots = new Set()
@@ -187,7 +190,16 @@ try {
   const home = await runtime.home(snapshot.root)
   await fs.writeFile(
     path.join(home, '.lemex/config.toml'),
-    'model_provider = "fixture"\nmodel = "offline-fixture"\n[model_providers.fixture]\nname = "Offline fixture"\nbase_url = "http://127.0.0.1:9/v1"\nwire_api = "responses"\n',
+    [
+      ...providerRequestConfig({ LEMEX_API_KEY: 'offline-fixture' }),
+      'model_provider = "fixture"',
+      'model = "offline-fixture"',
+      '[model_providers.fixture]',
+      'name = "Offline fixture"',
+      'base_url = "http://127.0.0.1:9/v1"',
+      'wire_api = "responses"',
+      '',
+    ].join('\n'),
   )
   const child = runtime.spawn(
     snapshot.root,
@@ -201,6 +213,28 @@ try {
     20000,
   )
   rpc.notify('initialized')
+  const resolved = await rpc.call('config/read', { includeLayers: false })
+  const features = await rpc.call('experimentalFeature/list', { limit: 200 })
+  const disabled = [
+    'multi_agent',
+    'multi_agent_v2',
+    'concurrent_reasoning_summaries',
+  ]
+  report.nativeFeatures = {}
+  for (const name of disabled) {
+    assert.equal(resolved.config.features[name], false)
+    const feature = features.data.find((entry) => entry.name === name)
+    assert(feature, `The native binary does not recognize ${name}`)
+    assert.equal(
+      feature.enabled,
+      false,
+      `${name} is enabled in the native runtime`,
+    )
+    report.nativeFeatures[name] = feature.enabled
+  }
+  report.checks.push(
+    'Strict native config accepts the production RCP flags; native feature introspection confirms subagents and concurrent reasoning summaries are disabled.',
+  )
   const started = await rpc.call(
     'thread/start',
     {

@@ -143,16 +143,24 @@ export async function fetchProvider(
         response.on('aborted', () =>
           reject(new Error('Provider response was interrupted.')),
         )
-        response.on('end', () =>
-          resolveResponse(
-            new Response(
-              [204, 205, 304].includes(response.statusCode)
-                ? null
-                : Buffer.concat(chunks),
-              { status: response.statusCode },
-            ),
-          ),
-        )
+        response.on('end', () => {
+          // Node accepts nonstandard HTTP status codes that the Fetch Response
+          // constructor rejects. Keep malformed provider replies inside this
+          // request's rejection path instead of throwing from an event handler.
+          try {
+            const status = response.statusCode
+            if (!Number.isInteger(status) || status < 200 || status > 599)
+              throw new Error('Invalid HTTP status')
+            resolveResponse(
+              new Response(
+                [204, 205, 304].includes(status) ? null : Buffer.concat(chunks),
+                { status },
+              ),
+            )
+          } catch {
+            reject(new Error('Provider returned an invalid HTTP response.'))
+          }
+        })
       },
     )
     req.on('error', reject)

@@ -266,8 +266,24 @@ try {
     'Read-only dependency files can be downloaded without offering a trash action.',
   )
 
+  // Keep a genuine conflicting edit dirty while exercising buffer downloads.
+  let rejectedSaves = 0
+  state.onSave = ({ project: savingProject, entries, respond }) => {
+    assert.equal(savingProject.id, projectId)
+    assert.deepEqual(
+      entries.map((entry) => entry.path),
+      ['Main.lean'],
+    )
+    rejectedSaves++
+    return respond(
+      { error: 'Fixture file changed on disk. Reload before saving.' },
+      409,
+    )
+  }
   await page.locator('.monaco-editor textarea').first().focus()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   const marker = '\n-- Unsaved download fixture\n'
   await page.keyboard.insertText(marker)
   await tree.getByLabel('Unsaved changes').waitFor()
@@ -434,10 +450,19 @@ try {
   report.checks.push(
     'A playground with additional files downloads a ZIP from its visible project root.',
   )
-  assert(
-    report.requests.every((request) => request.method === 'GET'),
-    'Download checks must not write project files or call an agent',
+  const mutations = report.requests.filter(
+    (request) => request.method !== 'GET',
   )
+  assert.equal(mutations.length, rejectedSaves)
+  assert(
+    mutations.every(
+      (request) =>
+        request.method === 'PUT' &&
+        request.endpoint === `/api/projects/${projectId}/file`,
+    ),
+    'Only the explicitly rejected autosaves may attempt a write; downloads never call an agent',
+  )
+  assert.equal(state.files[projectId]['Main.lean'], main)
   fixture.assertClean()
   report.downloads = downloads
   report.ok = true

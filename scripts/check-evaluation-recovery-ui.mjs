@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
+import { editorShortcuts } from './lib/editor-shortcuts.mjs'
 
 const id = 'evaluation-recovery-fixture'
 const source = '#eval show IO Unit from do\n  IO.println "Hello"\n'
@@ -65,7 +66,7 @@ try {
     .getByRole('button', { name: 'Stop check', exact: true })
     .waitFor()
   await f.page.locator('.monaco-editor textarea').focus()
-  await f.page.keyboard.press('Control+End')
+  await f.page.keyboard.press(editorShortcuts.documentEnd)
   await f.page.keyboard.insertText('-- unsaved work survives recovery\n')
   await f.page.getByRole('button', { name: 'Stop check', exact: true }).click()
   await until(() => stopped === 1, 'check cancellation')

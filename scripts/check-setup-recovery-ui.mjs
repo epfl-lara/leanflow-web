@@ -87,7 +87,9 @@ try {
   )
   if (!initiallyFailed) {
     await f.page.locator('.monaco-editor textarea').focus()
-    await f.page.keyboard.press('Control+End')
+    await f.page.keyboard.press(
+      process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+    )
     await f.page.keyboard.insertText('\n# Updated setup\n')
   } else {
     await f.page

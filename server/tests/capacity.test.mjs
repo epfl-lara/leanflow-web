@@ -186,6 +186,12 @@ test('three assistant tasks execute concurrently while a fourth waits for capaci
   const f = await fixture(t),
     manager = f.studio.agents,
     pending = []
+  // This checks global capacity, independently of RCP's per-key serialization.
+  await f.studio.providers.save(
+    'owner',
+    'fixture-not-a-provider-key',
+    'https://provider.example/v1',
+  )
   f.studio.workspaces.snapshot = () =>
     new Promise((_resolve, reject) => pending.push(reject))
   try {

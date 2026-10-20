@@ -133,7 +133,9 @@ try {
       .getByText('Read only', { exact: true })
       .waitFor()
     await input().focus()
-    await page.keyboard.press('Control+End')
+    await page.keyboard.press(
+      process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+    )
     await page.keyboard.insertText('FORBIDDEN_DEPENDENCY_EDIT')
     assert.equal(await save.isEnabled(), false)
     assert(
@@ -141,7 +143,10 @@ try {
         'FORBIDDEN_DEPENDENCY_EDIT',
       ),
     )
-    assert.equal(writes.length, 0)
+    assert.deepEqual(
+      writes.filter((name) => name.startsWith('.lake/')),
+      [],
+    )
   }
 
   await fixture.ready()
@@ -157,7 +162,9 @@ try {
 
   await open('Main.lean', 'projectValue')
   await input().focus()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await page.keyboard.insertText('-- PROJECT_STILL_EDITABLE\n')
   await until(
     () => save.isEnabled(),
@@ -215,7 +222,10 @@ try {
     'Projects with identical dependency paths show their own sources and documentation when switching in both directions.',
   )
   fixture.assertClean()
-  assert.equal(writes.length, 0)
+  assert.deepEqual(
+    writes.filter((name) => name.startsWith('.lake/')),
+    [],
+  )
   report.ok = true
   await page.screenshot({ path: path.join(output, 'dependencies.png') })
 } catch (error) {

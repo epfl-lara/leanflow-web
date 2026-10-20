@@ -69,7 +69,7 @@ cat .data/auth/owner.token
 
 If you set `STUDIO_DATA_DIR`, read `auth/owner.token` inside that directory instead.
 
-Sign in with the token, then save your own Lemex API key. LeanFlow discovers the models that key can use; refresh its access in Assistant settings after permissions change. See [accounts and personal keys](Configuration.md#accounts-and-personal-api-keys) for invitations and roles.
+Sign in with the token, then save your own provider API key. For the default EPFL RCP provider, create or find it in the [RCP key portal](https://portal.rcp.epfl.ch/aiaas/keys) while on EPFL/VPN. LeanFlow discovers the models that key can use; refresh its access in Assistant settings after permissions change. See [accounts and personal keys](Configuration.md#accounts-and-personal-api-keys) for invitations and roles.
 
 After saving your key, choose **Import or create project**. Keep your token, API key, and `.env` private.
 

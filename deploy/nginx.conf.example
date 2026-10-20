@@ -1,0 +1,40 @@
+# Include from Nginx's http context (for example, sites-enabled).
+# Replace lean.example.org and certificate paths. Keep the app on loopback.
+map $http_upgrade $leanflow_connection {
+    default upgrade;
+    '' close;
+}
+
+server {
+    listen 80;
+    server_name lean.example.org;
+    return 301 https://lean.example.org$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name lean.example.org;
+    ssl_certificate /etc/nginx/ssl/lean.example.org.fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/lean.example.org.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    location / {
+        # 32 MiB decoded source plus worst-case JSON escaping and path overhead.
+        # The app enforces smaller per-file and authenticated upload limits.
+        client_max_body_size 208m;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $leanflow_connection;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
+    }
+}

@@ -325,10 +325,18 @@ async function httpFixture(t, titleGenerator) {
     JSON.stringify(studio.auth.users),
   )
   const url = `http://127.0.0.1:${studio.server.address().port}`
-  const request = (endpoint, { method = 'GET', body, access = token } = {}) =>
+  const request = (
+    endpoint,
+    {
+      method = 'GET',
+      body,
+      access = token,
+      signal = AbortSignal.timeout(5000),
+    } = {},
+  ) =>
     fetch(url + endpoint, {
       method,
-      signal: AbortSignal.timeout(5000),
+      signal,
       headers: {
         ...(access ? { Authorization: `Bearer ${access}` } : {}),
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
@@ -1355,6 +1363,230 @@ test('suggestions deduplicate and queue within limits, send bounded conversation
   f.chats.stopNaming()
   assert((await aborted).every((result) => result.status === 'rejected'))
   assert(calls.every((call) => call.signal.aborted || call === calls[0]))
+})
+
+test('manual naming subscriptions cancel only after the last viewer leaves and remove queued work promptly', async (t) => {
+  const calls = []
+  const f = await fixture(t, {
+    available: true,
+    generate: (_messages, { signal }) =>
+      new Promise((resolve, reject) => {
+        calls.push({ signal, resolve })
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        })
+      }),
+  })
+  const chat = f.chats.create('alice', 'p', { title: 'Manual fixture' })
+  f.run(chat)
+  const first = new AbortController(),
+    second = new AbortController()
+  const one = f.chats.suggestTitle(chat.id, 'alice', { signal: first.signal })
+  const two = f.chats.suggestTitle(chat.id, 'alice', { signal: second.signal })
+  await titleTick()
+  assert.equal(calls.length, 1)
+  first.abort()
+  await assert.rejects(one, { status: 499 })
+  assert.equal(calls[0].signal.aborted, false)
+  second.abort()
+  await assert.rejects(two, { status: 499 })
+  await titleTick()
+  assert.equal(calls[0].signal.aborted, true)
+  assert.equal(f.chats.titleTasks.size, 0)
+
+  const pending = []
+  for (let index = 0; index < 2; index++) {
+    const next = f.chats.create('alice', 'p', {
+      title: 'Active manual fixture',
+    })
+    f.run(next)
+    pending.push(f.chats.suggestTitle(next.id, 'alice'))
+  }
+  const queued = f.chats.create('alice', 'p', {
+    title: 'Queued manual fixture',
+  })
+  f.run(queued)
+  const cancelled = new AbortController()
+  const cancelledRequest = f.chats.suggestTitle(queued.id, 'alice', {
+    signal: cancelled.signal,
+  })
+  await titleTick()
+  assert.equal(f.chats.titleQueue.length, 1)
+  cancelled.abort()
+  await assert.rejects(cancelledRequest, { status: 499 })
+  assert.equal(f.chats.titleQueue.length, 0)
+  assert.equal(f.chats.titleTasks.size, 2)
+  assert.equal(calls.length, 3)
+  for (const call of calls.slice(1))
+    call.resolve({ title: 'Finished manual fixture', model: 'fixture' })
+  await Promise.all(pending)
+})
+
+test('closing a manual naming viewer preserves an independent automatic title', async (t) => {
+  const gate = titleGate()
+  let providerSignal
+  const f = await fixture(t, {
+    available: true,
+    generate: (_messages, { signal }) => {
+      providerSignal = signal
+      return gate.promise
+    },
+  })
+  const chat = f.chats.create('alice', 'p')
+  f.run(chat)
+  await titleTick()
+  const viewer = new AbortController()
+  const suggestion = f.chats.suggestTitle(chat.id, 'alice', {
+    signal: viewer.signal,
+  })
+  viewer.abort()
+  await assert.rejects(suggestion, { status: 499 })
+  assert.equal(providerSignal.aborted, false)
+  gate.resolve({ title: 'Independent automatic title', model: 'fixture' })
+  await titleTick()
+  assert.equal(
+    f.chats.get(chat.id, 'alice').title,
+    'Independent automatic title',
+  )
+})
+
+test('deferred automatic naming respects manual rename, deletion, cancellation and restart without retaining work', async (t) => {
+  let calls = 0
+  const gate = titleGate()
+  const f = await fixture(t, {
+    available: true,
+    generate: async () => {
+      calls++
+      return gate.promise
+    },
+  })
+  const deferred = () => {
+    const chat = f.chats.create('alice', 'p')
+    const run = f.events.create('alice', {
+      kind: 'agent',
+      projectId: 'p',
+      chatId: chat.id,
+      prompt: 'Explain the theorem',
+    })
+    f.chats.appendRun(chat.id, 'alice', run, { deferTitle: true })
+    return { chat, run }
+  }
+  const renamed = deferred()
+  f.chats.rename(renamed.chat.id, 'alice', { title: 'My exact theorem name' })
+  f.events.updateMetadata(renamed.run.id, { status: 'completed' })
+  f.chats.finishRun(renamed.run.id)
+  assert.equal(
+    f.chats.get(renamed.chat.id, 'alice').title,
+    'My exact theorem name',
+  )
+  const deleted = deferred()
+  f.events.updateMetadata(deleted.run.id, { status: 'completed' })
+  f.chats.trash('alice', deleted.chat.id)
+  f.chats.finishRun(deleted.run.id)
+  const cancelled = deferred()
+  f.events.updateMetadata(cancelled.run.id, { status: 'cancelled' })
+  f.chats.finishRun(cancelled.run.id)
+  assert.equal(
+    f.chats.get(cancelled.chat.id, 'alice').titleStatus,
+    'unavailable',
+  )
+  const restarted = deferred()
+  f.restart()
+  f.events.updateMetadata(restarted.run.id, { status: 'completed' })
+  f.chats.finishRun(restarted.run.id)
+  await titleTick()
+  assert.equal(calls, 0)
+  assert.equal(f.chats.titleTasks.size, 0)
+  assert.equal(
+    f.chats.get(restarted.chat.id, 'alice').titleStatus,
+    'unavailable',
+  )
+  const late = deferred()
+  f.events.updateMetadata(late.run.id, { status: 'completed' })
+  f.chats.finishRun(late.run.id)
+  await titleTick()
+  assert.equal(calls, 1)
+  f.chats.rename(late.chat.id, 'alice', {
+    title: 'Manual name after completion',
+  })
+  gate.resolve({ title: 'Late generated name', model: 'fixture' })
+  await titleTick()
+  assert.equal(
+    f.chats.get(late.chat.id, 'alice').title,
+    'Manual name after completion',
+  )
+})
+
+test('naming has an overall deadline and retains active capacity until cancellation cleanup finishes', async (t) => {
+  const gate = titleGate()
+  let providerSignal
+  const f = await fixture(t, {
+    available: true,
+    generate: (_messages, { signal }) => {
+      providerSignal = signal
+      return gate.promise
+    },
+  })
+  f.chats.titleTimeoutMs = 5
+  const chat = f.chats.create('alice', 'p', { title: 'Keep original name' })
+  f.run(chat)
+  const pending = f.chats.suggestTitle(chat.id, 'alice')
+  const result = assert.rejects(
+    pending,
+    (error) => error.status === 504 && /manually/.test(error.message),
+  )
+  await new Promise((resolve) => setTimeout(resolve, 15))
+  await result
+  assert.equal(providerSignal.aborted, true)
+  assert.equal(f.chats.titleActive, 1)
+  assert.equal(f.chats.titleTasks.size, 1)
+  gate.resolve({ title: 'Late response must not apply', model: 'fixture' })
+  await titleTick()
+  assert.equal(f.chats.titleActive, 0)
+  assert.equal(f.chats.titleTasks.size, 0)
+  assert.equal(f.chats.get(chat.id, 'alice').title, 'Keep original name')
+})
+
+test('disconnecting the last HTTP naming requester cancels provider work and frees naming capacity', async (t) => {
+  let providerSignal
+  const entered = titleGate()
+  const f = await httpFixture(t, {
+    available: true,
+    generate: (_messages, { signal }) =>
+      new Promise((_, reject) => {
+        providerSignal = signal
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        })
+        entered.resolve()
+      }),
+  })
+  const chat = f.chats.create('owner', f.project.id, {
+    title: 'Keep manual name',
+  })
+  const run = f.events.create('owner', {
+    kind: 'agent',
+    projectId: f.project.id,
+    chatId: chat.id,
+    prompt: 'Explain Nat.add_comm',
+  })
+  f.chats.appendRun(chat.id, 'owner', run)
+  const controller = new AbortController()
+  const request = f.request(`/api/chats/${chat.id}/title`, {
+    method: 'POST',
+    body: {},
+    signal: controller.signal,
+  })
+  await entered.promise
+  controller.abort()
+  await assert.rejects(request, { name: 'AbortError' })
+  for (let turn = 0; turn < 100 && !providerSignal.aborted; turn++)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(providerSignal.aborted, true)
+  await titleTick()
+  assert.equal(f.chats.titleTasks.size, 0)
+  assert.equal(f.chats.titleActive, 0)
+  assert.equal(f.chats.get(chat.id, 'owner').title, 'Keep manual name')
 })
 
 test('automatic titles receive bounded selected theorem identity and statement without proof bodies or private metadata', async (t) => {

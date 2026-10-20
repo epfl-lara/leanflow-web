@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
+import { editorShortcuts } from './lib/editor-shortcuts.mjs'
 
 const projectId = 'chat-focus-picker-fixture'
 const source =
@@ -172,11 +173,11 @@ try {
 
   await page.setViewportSize({ width: 1600, height: 1000 })
   await page.locator('.monaco-editor textarea').first().focus()
-  await page.keyboard.press('Control+Home')
+  await page.keyboard.press(editorShortcuts.documentStart)
   await page.keyboard.press('ArrowDown')
   await page.keyboard.press('ArrowDown')
-  await page.keyboard.press('Home')
-  await page.keyboard.press('Shift+End')
+  await page.keyboard.press(editorShortcuts.lineStart)
+  await page.keyboard.press(editorShortcuts.selectLineEnd)
   await openFocus()
   const current = menu.getByRole('button', {
     name: /Use editor selection or current proof/,

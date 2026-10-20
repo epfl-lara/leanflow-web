@@ -6,6 +6,7 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
+import { editorShortcuts } from './lib/editor-shortcuts.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const reportDir = path.join(root, '.runtime/proof-chat-ui')
@@ -163,6 +164,12 @@ try {
   await focus('first')
   assert((await composer.inputValue()).includes('Complete or repair'))
   await focus('first', 'optimize')
+  await until(
+    async () =>
+      (await composer.inputValue()) ===
+      'Optimize this proof while preserving its statement.',
+    'default prompt follows the completed focus action',
+  )
   assert.equal(
     await composer.inputValue(),
     'Optimize this proof while preserving its statement.',
@@ -185,9 +192,9 @@ try {
   )
 
   await page.locator('.monaco-editor textarea').focus()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(editorShortcuts.documentEnd)
   await page.keyboard.press('ArrowUp')
-  await page.keyboard.press('End')
+  await page.keyboard.press(editorShortcuts.lineEnd)
   await page.keyboard.insertText(' -- revised proof')
   await until(
     () => page.getByRole('button', { name: 'Save', exact: true }).isEnabled(),
@@ -231,9 +238,9 @@ try {
   )
 
   await page.locator('.monaco-editor textarea').focus()
-  await page.keyboard.press('Control+Home')
+  await page.keyboard.press(editorShortcuts.documentStart)
   await page.keyboard.press('ArrowDown')
-  await page.keyboard.press('End')
+  await page.keyboard.press(editorShortcuts.lineEnd)
   await page.keyboard.insertText(' -- live guidance')
   await focus('first')
   await composer.fill('Please work on this lemma next.')

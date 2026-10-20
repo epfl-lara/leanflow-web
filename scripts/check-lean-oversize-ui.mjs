@@ -36,13 +36,14 @@ const reportDir = path.resolve('.runtime/lean-oversize-ui')
 await fs.mkdir(reportDir, { recursive: true })
 let saves = 0,
   attempts = 0
+let allowSaves = false
 await f.page.route(
   `**/api/projects/${id}/file?path=Main.lean`,
   async (route) => {
     if (route.request().method() !== 'PUT') return route.fallback()
     const input = route.request().postDataJSON()
     attempts++
-    if (attempts === 1)
+    if (!allowSaves)
       return route.fulfill({
         status: 429,
         headers: { 'Retry-After': '1' },
@@ -68,7 +69,9 @@ await f.page.route(
 try {
   await f.ready()
   await f.page.locator('.monaco-editor textarea').focus()
-  await f.page.keyboard.press('Control+End')
+  await f.page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await f.page.keyboard.insertText('-- unsaved before disconnect\n')
   const save = f.page.getByRole('button', { name: 'Save', exact: true })
   await until(() => save.isEnabled(), 'unsaved edit')
@@ -84,8 +87,20 @@ try {
     connections,
     'A rejected source cannot trigger automatic reconnections',
   )
+  await f.page
+    .locator('.autosave-alert')
+    .getByText(/Autosave will retry: Source uploads and saves are busy/)
+    .waitFor()
+  assert(
+    attempts >= 1,
+    'Autosave should remain available when Lean checking is paused',
+  )
+  assert.equal(saves, 0)
+  assert.equal(f.state.files[id]['Main.lean'], source)
   await f.page.locator('.monaco-editor textarea').focus()
-  await f.page.keyboard.press('Control+End')
+  await f.page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await f.page.keyboard.insertText('-- still editable after disconnect\n')
   await save.click()
   await f.page
@@ -96,6 +111,7 @@ try {
     .waitFor()
   assert.equal(f.state.files[id]['Main.lean'], source)
   assert(await save.isEnabled(), 'A rejected save retains the dirty buffer')
+  allowSaves = true
   await save.click()
   await until(async () => saves === 1, 'preserved edits saved')
   assert.equal(
@@ -104,7 +120,7 @@ try {
       '-- unsaved before disconnect\n-- still editable after disconnect\n',
   )
   f.report.checks.push(
-    'A 1009 close displays its actionable reason, stops automatic retries and preserves unsaved editing/saving through a capacity rejection',
+    'A 1009 close explains why Lean checking paused without reconnecting; autosave and manual save report capacity rejection, retain edits, and save both edits once capacity returns',
   )
   f.assertClean()
   f.report.passed = true

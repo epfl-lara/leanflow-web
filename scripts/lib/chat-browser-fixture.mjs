@@ -265,6 +265,8 @@ export async function chatBrowserFixture({
         body: JSON.stringify(value),
       })
     if (method === 'GET') {
+      if (endpoint === '/api/templates')
+        return respond(state.session.templates || [])
       if (endpoint === '/api/session') return respond(state.session)
       if (endpoint === '/api/git-connections')
         return respond({ connections: [], identity: { name: '', email: '' } })

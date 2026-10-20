@@ -188,7 +188,9 @@ try {
   )
 
   await page.locator('.monaco-editor textarea').first().focus()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await page.keyboard.insertText('\n-- Unsaved fixture edit\n')
   await until(
     () => page.getByRole('button', { name: 'Save', exact: true }).isEnabled(),
@@ -217,9 +219,22 @@ try {
     'true',
   )
   assert.equal(await page.getByText('Empty folder', { exact: true }).count(), 1)
-  assert.equal(writes.filter((entry) => entry.kind === 'file').length, 0)
   assert(
-    await page.getByRole('button', { name: 'Save', exact: true }).isEnabled(),
+    writes
+      .filter((entry) => entry.kind === 'file')
+      .every((entry) => entry.path === 'Main.lean'),
+    'Folder creation must not create or alter another file',
+  )
+  assert(
+    (await page.locator('.monaco-editor .view-lines').innerText())
+      .replaceAll('\u00a0', ' ')
+      .includes('Unsaved fixture edit'),
+    'The editor draft survives folder creation, whether pending or autosaved',
+  )
+  assert(
+    (await page
+      .getByRole('button', { name: 'Save', exact: true })
+      .isEnabled()) || sources['Main.lean'].includes('Unsaved fixture edit'),
   )
   report.checks.push(
     'Creating an empty folder shows and expands it, preserves unsaved edits, and guards repeated submissions while pending.',
@@ -234,7 +249,11 @@ try {
   await dialog('folder')
     .getByRole('button', { name: 'Cancel', exact: true })
     .click()
-  const writesBeforeSetupNames = writes.length
+  const creationWrites = () =>
+    writes.filter(
+      (entry) => entry.kind === 'folder' || entry.path !== 'Main.lean',
+    )
+  const writesBeforeSetupNames = creationWrites().length
   for (const kind of ['folder', 'file']) {
     await open(kind)
     await dialog(kind)
@@ -254,7 +273,7 @@ try {
       .getByRole('button', { name: 'Cancel', exact: true })
       .click()
   }
-  assert.equal(writes.length, writesBeforeSetupNames)
+  assert.equal(creationWrites().length, writesBeforeSetupNames)
   failNextFolder = true
   await create('folder', 'Race')
   await dialog('folder').getByRole('alert').waitFor()

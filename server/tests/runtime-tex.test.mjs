@@ -108,8 +108,12 @@ test('missing TeX support caches unavailable checks and does not alter Lean read
 test('TeX workers expose only readonly sources, isolated temporary files, and fixed output storage', async (t) => {
   const f = await fixture(t)
   const visible = []
+  let spawned = false
   const result = await f.runtime.runTex(f.root, f.output, {
     rootFile: 'paper/main draft.tex',
+    onSpawn: () => {
+      spawned = true
+    },
     onOutput: (text) => visible.push(text),
   })
   const args = JSON.parse(await fs.readFile(f.lastRun, 'utf8'))
@@ -133,6 +137,7 @@ test('TeX workers expose only readonly sources, isolated temporary files, and fi
   assert.equal(args.filter((value) => value === '--env').length, 1)
   assert.equal(args[args.indexOf('--env') + 1], 'HOME=/tmp/home')
   assert.equal(result.code, 0)
+  assert.equal(spawned, true)
   assert.match(visible.join(''), /compiler output/)
   assert(!visible.join('').includes('LEANFLOW_TEX_ARTIFACTS'))
   assert(!visible.join('').includes('DOCKER_PRIVATE_PATH'))

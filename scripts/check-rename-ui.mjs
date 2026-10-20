@@ -16,6 +16,8 @@ const directory = path.resolve('.runtime/rename-ui', randomUUID())
 const dataDir = path.join(directory, 'data')
 const toolchain = 'leanprover/lean4:v4.33.0'
 const main = 'def blank : Nat := 7\ndef existing : Nat := 9\n'
+const userNote = '-- user note\n'
+const manualNote = '-- saved explicitly\n'
 const use =
   'import Main\ndef readBlank (blankC : Nat) : Nat := blank + blankC\n#eval readBlank 1\n'
 const report = {
@@ -77,6 +79,16 @@ try {
     data: { token },
   })
   assert(login.ok())
+  // This editor-only fixture has no provider key. Skip account onboarding in
+  // the browser projection without enabling a provider on the real backend.
+  await context.route('**/api/session', async (route) => {
+    const response = await route.fetch()
+    const session = await response.json()
+    await route.fulfill({
+      response,
+      json: { ...session, lemex: { ...session.lemex, configured: true } },
+    })
+  })
   await context.addInitScript(
     ({ id }) => {
       localStorage.setItem('lemex-project', id)
@@ -95,9 +107,9 @@ try {
     .waitFor({ state: 'hidden', timeout: 60000 })
   await editor.focus()
   await page.keyboard.press('Control+End')
-  await page.keyboard.insertText('-- unsaved note\n')
+  await page.keyboard.insertText(userNote)
   const save = page.getByRole('button', { name: 'Save', exact: true })
-  await until(() => save.isEnabled(), 'unsaved user text')
+  await until(() => save.isEnabled(), 'edited user text')
   await page.keyboard.press('Control+Home')
   for (let i = 0; i < 5; i++) await page.keyboard.press('ArrowRight')
   await page.keyboard.press('F2')
@@ -106,8 +118,7 @@ try {
     .filter({ hasText: 'Automatic Lean rename and refactoring are disabled' })
   await disabled.waitFor()
   assert.equal(await page.locator('.rename-box input').count(), 0)
-  assert.equal(await save.isEnabled(), true)
-  assert.match(await page.locator('.view-lines').innerText(), /unsaved\s+note/)
+  assert.match(await page.locator('.view-lines').innerText(), /user\s+note/)
   await page.keyboard.press('Shift+F10')
   const menu = page.getByRole('menuitem', {
     name: /Rename Symbol \(unavailable\)/,
@@ -117,8 +128,9 @@ try {
   await page.keyboard.press('Enter')
   await disabled.waitFor()
   assert.equal(await page.locator('.rename-box input').count(), 0)
+  assert.match(await page.locator('.view-lines').innerText(), /user\s+note/)
   report.checks.push(
-    'F2 and the context menu explain that rename is disabled without opening a rename box or changing the unsaved draft.',
+    'F2 and the context menu explain that rename is disabled without opening a rename box or changing the user’s editor text.',
   )
 
   socket = new WebSocket(
@@ -208,8 +220,15 @@ try {
   report.checks.push(
     'Hover and definition requests still work on the same connection after rejected refactors.',
   )
+  await until(
+    async () =>
+      (await studio.workspaces.readFile(project.id, 'owner', 'Main.lean'))
+        .content ===
+      main + userNote,
+    'autosave retains the user edit after blocked refactors',
+  )
   for (const [filename, expected] of [
-    ['Main.lean', main],
+    ['Main.lean', main + userNote],
     ['Use.lean', use],
   ])
     assert.equal(
@@ -217,12 +236,16 @@ try {
       expected,
     )
   report.checks.push(
-    'Blocked operations leave both saved project files unchanged, and the original evaluation remains 8.',
+    'Autosave retains the user’s comment while blocked operations leave all declarations and the dependent source unchanged.',
   )
   socket.close()
   await once(socket, 'close')
   socket = null
 
+  await editor.focus()
+  await page.keyboard.press('Control+End')
+  await page.keyboard.insertText(manualNote)
+  await until(() => save.isEnabled(), 'explicit-save edit')
   const saved = page.waitForResponse(
     (response) =>
       response.request().method() === 'PUT' &&
@@ -233,7 +256,7 @@ try {
   assert.equal(
     (await studio.workspaces.readFile(project.id, 'owner', 'Main.lean'))
       .content,
-    main + '-- unsaved note\n',
+    main + userNote + manualNote,
   )
   await page.locator('.file-item[title="Use.lean"]').click()
   await page

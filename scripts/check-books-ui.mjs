@@ -65,9 +65,7 @@ app.use((_req, res, next) => {
 installBookRoutes(app, new LeanBooks(realBooks || root))
 app.use(
   express.static(
-    path.resolve(
-      process.env.STUDIO_TEST_CLIENT_DIR || '.runtime/books-feature/client',
-    ),
+    path.resolve(process.env.STUDIO_TEST_CLIENT_DIR || 'client/dist'),
   ),
 )
 app.use((error, _req, res, _next) =>
@@ -91,7 +89,7 @@ const fixture = await chatBrowserFixture({
     ],
     defaultModel: 'fixture-model',
     runtime: { ready: true },
-    lemex: { configured: false },
+    lemex: { configured: true },
   },
   projects: [
     {
@@ -153,7 +151,9 @@ try {
     'Lean docs and search share a row and height',
   )
   await page.locator('.monaco-editor textarea').focus()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await page.keyboard.insertText('\n-- Unsaved doc browsing')
   const socketsBefore = report.sockets.length
   const prompt = page.getByRole('textbox', { name: 'Message Lemex' })

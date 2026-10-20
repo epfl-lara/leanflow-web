@@ -43,6 +43,7 @@ const f = await chatBrowserFixture({
 const { page, state, report } = f
 const requests = []
 let rejectCreate = false
+let rejectSaves = false
 let preparation = 'ready'
 const deleted = new Map()
 await page.route('**/api/projects/*/trash', async (route) => {
@@ -125,6 +126,14 @@ await page.route('**/api/projects/*/file?*', async (route) => {
   const file = url.searchParams.get('path')
   const input = route.request().postDataJSON()
   assert.equal(input.expectedHash, hash(state.files[id][file]))
+  if (rejectSaves)
+    return route.fulfill({
+      status: 429,
+      json: {
+        error:
+          'Fixture save capacity is temporarily full. Your edits are preserved.',
+      },
+    })
   state.files[id][file] = input.content
   await route.fulfill({
     json: {
@@ -153,7 +162,9 @@ const newSingle = () =>
     .click()
 async function edit(marker) {
   await page.locator('.monaco-editor textarea').focus()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await page.keyboard.insertText(marker)
   await until(
     () => page.getByRole('button', { name: 'Save', exact: true }).isEnabled(),
@@ -253,6 +264,9 @@ try {
     'Single-file saves use conflict hashes and reopening restores saved contents',
   )
 
+  // Keep this navigation/download scenario dirty even after the autosave
+  // debounce expires: a real capacity failure must preserve the same draft.
+  rejectSaves = true
   await edit('\n-- unsaved download marker\n')
   const download = page.waitForEvent('download')
   await page
@@ -271,6 +285,7 @@ try {
   assert.equal(requests.length, 1)
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   assert.match(await editorText(), /unsaved download marker/)
+  assert(!state.files[savedId]['Main.lean'].includes('unsaved download marker'))
   report.checks.push(
     'Download includes unsaved text; starting another file asks about unsaved edits and cancel preserves them',
   )
@@ -358,6 +373,7 @@ try {
       .count(),
     1,
   )
+  rejectSaves = false
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   report.checks.push(
     'Conversion reveals project controls and preserves unsaved editor text, chat draft, project identity and deletion controls',
@@ -506,6 +522,7 @@ try {
   preparation = 'failed'
   await page.reload()
   await awaitSingle()
+  rejectSaves = true
   await edit('\n-- preparation retry keeps edits\n')
   await page.getByLabel('Message Lemex').fill('Keep this retry draft')
   await page
@@ -543,6 +560,7 @@ try {
     .getByRole('button', { name: 'Cancel', exact: true })
     .click()
   assert.match(await editorText(), /preparation retry keeps edits/)
+  rejectSaves = false
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   await until(async () => {
     const save = page.getByRole('button', { name: 'Save', exact: true })

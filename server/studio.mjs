@@ -18,7 +18,7 @@ import { staticAssets } from './static-assets.mjs'
 import { TexBuildManager } from './tex-builds.mjs'
 import { AgentManager } from './agents.mjs'
 import { Settings } from './settings.mjs'
-import { Providers } from './providers.mjs'
+import { Providers, providerFor } from './providers.mjs'
 import { ModelDiscovery } from './model-discovery.mjs'
 import { ModelPreferences } from './model-preferences.mjs'
 import { ChatStore } from './chats.mjs'
@@ -305,18 +305,30 @@ export async function createStudio({
     maxConcurrent: capacity.agents,
     maxQueue: capacity.agentQueue,
   })
-  workspaces.setupRepair = (args) =>
-    withSetupRepairDeadline(
-      (boundedSignal) =>
-        agents.runSetupRepair(
-          (signal) => repairProjectSetup({ runtime, config, ...args, signal }),
-          {
-            signal: boundedSignal,
-            onQueued: () => args.onProgress?.('waiting-for-repair'),
-            onStarted: () => args.onProgress?.('repairing-setup'),
-          },
+  workspaces.setupRepair = async (args) =>
+    agents.runSetupRepair(
+      (signal, providerReservation) =>
+        withSetupRepairDeadline(
+          (boundedSignal) =>
+            repairProjectSetup({
+              runtime,
+              config,
+              ...args,
+              signal: boundedSignal,
+              providerReservation,
+            }),
+          { signal, timeoutMs: capacity.setupRepairTimeoutMs },
         ),
-      { signal: args.signal, timeoutMs: capacity.setupRepairTimeoutMs },
+      {
+        signal: args.signal,
+        provider: await providerFor(config, args.owner),
+        onQueued: () => args.onProgress?.('waiting-for-repair'),
+        onProviderQueued: (message) => {
+          args.onProgress?.('waiting-for-rcp')
+          args.onOutput?.(message + '\n')
+        },
+        onStarted: () => args.onProgress?.('repairing-setup'),
+      },
     )
   const jobs = new JobManager({
     runtime,
@@ -1116,9 +1128,19 @@ export async function createStudio({
   app.patch('/api/chats/:id', (req, res) =>
     res.json(chats.rename(req.params.id, req.user.id, req.body)),
   )
-  app.post('/api/chats/:id/title', async (req, res) =>
-    res.json(await chats.suggestTitle(req.params.id, req.user.id)),
-  )
+  app.post('/api/chats/:id/title', async (req, res) => {
+    const controller = new AbortController()
+    const disconnected = () => controller.abort()
+    res.once('close', disconnected)
+    try {
+      const result = await chats.suggestTitle(req.params.id, req.user.id, {
+        signal: controller.signal,
+      })
+      if (!res.destroyed) res.json(result)
+    } finally {
+      res.off('close', disconnected)
+    }
+  })
   app.post('/api/chats/:id/runs', async (req, res) => {
     const chat = chats.get(req.params.id, req.user.id)
     requireNoGit(chat.projectId, req.user.id)

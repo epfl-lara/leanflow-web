@@ -143,6 +143,7 @@ export interface Project {
     | 'checking-environment'
     | 'repairing-setup'
     | 'waiting-for-repair'
+    | 'waiting-for-rcp'
     | 'validating-repair'
   setupRepair?: {
     id: string

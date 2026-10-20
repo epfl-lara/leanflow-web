@@ -1,6 +1,12 @@
 import { writeModelCatalog } from './model-catalog.mjs'
 import { providerFor } from './providers.mjs'
 import { providerToml } from './provider-endpoint.mjs'
+import {
+  providerRequestsFor,
+  providerRequestConfig,
+  providerLimitMessage,
+  RCP_WAIT_MESSAGE,
+} from './provider-requests.mjs'
 import { modelConfigFor } from './model-discovery.mjs'
 import { modelContextConfig } from './model-catalog.mjs'
 import { modeReasoningEffort } from '../shared/mode-reasoning.mjs'
@@ -119,6 +125,10 @@ export class AgentManager {
     this.tasks = new Set()
     this.running = 0
     this.stopping = false
+    this.providerRequests = providerRequestsFor(config)
+    this.providerReservations = new Map()
+    this.providerReady = () => queueMicrotask(() => this.#drain())
+    this.providerRequests.on('available', this.providerReady)
     this.followups = new FollowupInbox({
       events,
       getActive: (id) => this.active.get(id),
@@ -141,7 +151,8 @@ export class AgentManager {
         new Error('Prepare this project before asking Lemex to work on it.'),
         { status: 409 },
       )
-    if (!(await providerFor(this.config, owner))?.LEMEX_API_KEY)
+    const requestProvider = await providerFor(this.config, owner)
+    if (!requestProvider?.LEMEX_API_KEY)
       throw Object.assign(
         new Error(
           'Add your Lemex API key in Assistant settings before starting Lemex.',
@@ -283,44 +294,54 @@ export class AgentManager {
         ),
         { status: 400 },
       )
-    const job = this.events.create(owner, {
-      kind: 'agent',
-      projectId,
-      mode: ['repair', 'prove'].includes(input.mode) ? 'proofs' : input.mode,
-      prompt: input.prompt.trim(),
-      currentFile,
-      ...(proofTarget ? { proofTarget } : {}),
-      file:
-        proofTarget?.path ||
-        input.file ||
-        files.find(
-          (file) => file.endsWith('.lean') && !file.startsWith('.lake/'),
-        ) ||
-        null,
-      files,
-      chatId,
-      model,
-      ...(modelConfig.providerId ? { providerId: modelConfig.providerId } : {}),
-      effort,
-      maxSeconds,
-      liveEdits:
-        input.mode === 'search'
-          ? input.liveEdits === true
-          : input.liveEdits !== false,
-      liveRevision: 0,
-      followups: [],
-      progress: { label: 'Queued', updatedAt: new Date().toISOString() },
-    })
-    if (chatId) {
-      try {
-        this.chats.appendRun(chatId, owner, job)
-      } catch (error) {
+    const reservation = this.providerRequests.reserve(requestProvider)
+    let job
+    try {
+      job = this.events.create(owner, {
+        kind: 'agent',
+        projectId,
+        mode: ['repair', 'prove'].includes(input.mode) ? 'proofs' : input.mode,
+        prompt: input.prompt.trim(),
+        currentFile,
+        ...(proofTarget ? { proofTarget } : {}),
+        file:
+          proofTarget?.path ||
+          input.file ||
+          files.find(
+            (file) => file.endsWith('.lean') && !file.startsWith('.lake/'),
+          ) ||
+          null,
+        files,
+        chatId,
+        model,
+        ...(modelConfig.providerId
+          ? { providerId: modelConfig.providerId }
+          : {}),
+        effort,
+        maxSeconds,
+        liveEdits:
+          input.mode === 'search'
+            ? input.liveEdits === true
+            : input.liveEdits !== false,
+        liveRevision: 0,
+        followups: [],
+        progress: { label: 'Queued', updatedAt: new Date().toISOString() },
+      })
+      this.providerReservations.set(job.id, reservation)
+      if (chatId)
+        this.chats.appendRun(chatId, owner, job, {
+          deferTitle: reservation.limited,
+        })
+    } catch (error) {
+      reservation.release()
+      if (job) {
+        this.providerReservations.delete(job.id)
         this.events.updateMetadata(job.id, {
           status: 'failed',
           error: this.config.redact(error.message),
         })
-        throw error
       }
+      throw error
     }
     this.queue.push(job.id)
     this.#emit(job.id, 'progress', job.progress)
@@ -457,7 +478,10 @@ export class AgentManager {
     if (queued.created) await this.followups.deliver(id)
     return this.events.getMetadata(id, owner)
   }
-  runSetupRepair(execute, { signal, onQueued, onStarted } = {}) {
+  runSetupRepair(
+    execute,
+    { signal, provider, onQueued, onStarted, onProviderQueued } = {},
+  ) {
     if (this.stopping || signal?.aborted)
       return Promise.reject(
         signal?.reason || new Error('The server is shutting down.'),
@@ -473,20 +497,37 @@ export class AgentManager {
       )
     return new Promise((resolve, reject) => {
       const controller = new AbortController()
-      const job = { execute, resolve, reject, controller, signal, onStarted }
+      const reservation = this.providerRequests.reserve(provider)
+      const job = {
+        execute,
+        resolve,
+        reject,
+        controller,
+        signal,
+        onStarted,
+        onProviderQueued,
+        reservation,
+      }
       job.abort = () => {
         controller.abort(signal?.reason || new Error('Setup repair stopped.'))
         const index = this.queue.indexOf(job)
         if (index >= 0) {
           this.queue.splice(index, 1)
+          reservation.release()
           signal?.removeEventListener('abort', job.abort)
           reject(controller.signal.reason)
         }
       }
-      signal?.addEventListener('abort', job.abort, { once: true })
-      onQueued?.()
-      this.queue.push(job)
-      queueMicrotask(() => this.#drain())
+      try {
+        signal?.addEventListener('abort', job.abort, { once: true })
+        onQueued?.()
+        this.queue.push(job)
+        queueMicrotask(() => this.#drain())
+      } catch (error) {
+        signal?.removeEventListener('abort', job.abort)
+        reservation.release()
+        reject(error)
+      }
     })
   }
 
@@ -496,12 +537,33 @@ export class AgentManager {
       this.running < this.maxConcurrent &&
       this.queue.length
     ) {
-      const id = this.queue.shift()
+      const index = this.queue.findIndex((pending) => {
+        if (typeof pending !== 'string') {
+          if (pending.reservation.tryAcquire()) return true
+          if (!pending.providerWaiting) {
+            pending.providerWaiting = true
+            pending.onProviderQueued?.(RCP_WAIT_MESSAGE)
+          }
+          return false
+        }
+        const job = this.events.getMetadata(pending)
+        if (['cancelled', 'stopping'].includes(job.status)) return true
+        const reservation = this.providerReservations.get(pending)
+        if (!reservation || reservation.tryAcquire()) return true
+        if (job.progress?.label !== 'Waiting for RCP key')
+          this.#progress(pending, 'Waiting for RCP key', RCP_WAIT_MESSAGE)
+        return false
+      })
+      if (index < 0) break
+      const [id] = this.queue.splice(index, 1)
       if (
         typeof id === 'string' &&
         ['cancelled', 'stopping'].includes(this.events.getMetadata(id).status)
-      )
+      ) {
+        this.providerReservations.get(id)?.release()
+        this.providerReservations.delete(id)
         continue
+      }
       this.running++
       if (typeof id !== 'string') {
         this.setupRepairs ||= new Set()
@@ -509,12 +571,13 @@ export class AgentManager {
         const task = Promise.resolve()
           .then(() => {
             id.onStarted?.()
-            return id.execute(id.controller.signal)
+            return id.execute(id.controller.signal, id.reservation)
           })
           .then(id.resolve, id.reject)
           .finally(() => {
             id.signal?.removeEventListener('abort', id.abort)
             this.setupRepairs.delete(id)
+            id.reservation.release()
             this.running--
             this.tasks.delete(task)
             this.#drain()
@@ -536,9 +599,12 @@ export class AgentManager {
           }
         })
         .finally(() => {
+          this.providerReservations.get(id)?.release()
+          this.providerReservations.delete(id)
           this.running--
           this.tasks.delete(task)
           this.#drain()
+          if (!this.stopping) this.chats?.finishRun?.(id)
         })
       this.tasks.add(task)
     }
@@ -568,8 +634,13 @@ export class AgentManager {
           () => {},
         )
       }, job.maxSeconds * 1000)
+    let provider
     try {
-      const provider = await providerFor(this.config, job.owner)
+      provider = await providerFor(this.config, job.owner)
+      if (!this.providerReservations.get(id)?.matches(provider))
+        throw new Error(
+          'Your API key or provider changed while this run was queued. Start a new run with the connection you want to use.',
+        )
       const modelConfig = await modelConfigFor(this.config, job.owner)
       if (job.providerId && job.providerId !== modelConfig.providerId)
         throw new Error(
@@ -713,6 +784,7 @@ export class AgentManager {
       const config =
         [
           ...providerToml(provider),
+          ...providerRequestConfig(provider),
           `model = ${JSON.stringify(job.model)}`,
           'model_catalog_json = "models.json"',
           'web_search = "disabled"',
@@ -854,7 +926,13 @@ export class AgentManager {
           ['cancelled', 'stopping'].includes(this.events.getMetadata(id).status)
         )
           return
-        if (output.handle(method, params)) return
+        if (output.handle(method, params)) {
+          if (active.providerWaiting) {
+            active.providerWaiting = false
+            this.#progress(id, 'Working')
+          }
+          return
+        }
         if (method === 'item/started' || method === 'item/completed') {
           output.flushBuffered()
           activity.handle(method, params.item)
@@ -910,11 +988,24 @@ export class AgentManager {
           active.completed = true
           output.flush()
           resolveFinished(params.turn)
-        } else if (method === 'error')
+        } else if (method === 'error') {
+          const raw = params.error || params
+          const notice = providerLimitMessage(raw, provider, {
+            retrying: params.willRetry === true,
+          })
+          if (notice) {
+            active.providerWaiting = params.willRetry === true
+            this.#progress(
+              id,
+              params.willRetry ? 'Waiting for RCP' : 'RCP request limit',
+              notice,
+            )
+          }
           this.#log(
             id,
-            `${params.error?.message || params.message || 'Lemex reported an error'}\n`,
+            `${notice || params.error?.message || params.message || 'Lemex reported an error'}\n`,
           )
+        }
       })
       await rpc.call('initialize', {
         ...(withTex ? { capabilities: { experimentalApi: true } } : {}),
@@ -974,28 +1065,34 @@ export class AgentManager {
         })
         active.mirror.start()
       }
-      const turn = await rpc.call('turn/start', {
-        threadId: active.threadId,
-        ...(job.effort !== null ? { effort: job.effort } : {}),
-        input: [
-          {
-            type: 'text',
-            text: agentConversationContext(job, priorRuns, {
-              sections: contextSections,
-              savedUserGuidance: preferences.extraInstructions,
-            }),
-            textElements: [],
-          },
-        ],
-      })
+      const turn = await rpc
+        .call('turn/start', {
+          threadId: active.threadId,
+          ...(job.effort !== null ? { effort: job.effort } : {}),
+          input: [
+            {
+              type: 'text',
+              text: agentConversationContext(job, priorRuns, {
+                sections: contextSections,
+                savedUserGuidance: preferences.extraInstructions,
+              }),
+              textElements: [],
+            },
+          ],
+        })
+        .catch((error) => {
+          const notice = providerLimitMessage(error, provider)
+          throw notice ? new Error(notice) : error
+        })
       active.turnId = turn.turn.id
       if (!active.completed && !active.controller.signal.aborted) {
         active.accepting = true
-        this.#progress(
-          id,
-          'Working',
-          'Additional messages will reach Lemex at its next decision boundary.',
-        )
+        if (!active.providerWaiting)
+          this.#progress(
+            id,
+            'Working',
+            'Additional messages will reach Lemex at its next decision boundary.',
+          )
         void this.followups
           .deliver(id, active)
           .catch((error) =>
@@ -1017,7 +1114,11 @@ export class AgentManager {
       await active.mirror?.stop({ flush: result.status === 'completed' })
       if (active.controller.signal.aborted) return
       if (result.status !== 'completed')
-        throw new Error(result.error?.message || `Lemex turn ${result.status}.`)
+        throw new Error(
+          providerLimitMessage(result.error, provider) ||
+            result.error?.message ||
+            `Lemex turn ${result.status}.`,
+        )
       this.events.updateMetadata(id, { status: 'verifying' })
       this.#progress(
         id,
@@ -1191,7 +1292,11 @@ export class AgentManager {
       'Waiting for the worker, output, and live file updates to stop.',
     )
     if (active) active.accepting = false
-    if (!active) this.queue = this.queue.filter((queued) => queued !== id)
+    if (!active) {
+      this.queue = this.queue.filter((queued) => queued !== id)
+      this.providerReservations.get(id)?.release()
+      this.providerReservations.delete(id)
+    }
     active?.controller.abort()
     if (active?.rpc && active.threadId && active.turnId)
       active.rpc
@@ -1213,6 +1318,7 @@ export class AgentManager {
       )
       this.events.updateMetadata(id, { status: 'cancelled' })
       this.#progress(id, 'Stopped', reason)
+      this.chats?.finishRun?.(id)
       return this.events.get(id, owner)
     })()
     if (active) active.stopPromise = stopped
@@ -1324,12 +1430,14 @@ export class AgentManager {
   }
   async shutdown() {
     this.stopping = true
+    this.providerRequests.off('available', this.providerReady)
     const stops = []
     for (const repair of this.setupRepairs || [])
       repair.controller.abort(new Error('The server is shutting down.'))
     for (const id of this.queue) {
       if (typeof id !== 'string') {
         id.signal?.removeEventListener('abort', id.abort)
+        id.reservation.release()
         id.reject(new Error('The server is shutting down.'))
         continue
       }

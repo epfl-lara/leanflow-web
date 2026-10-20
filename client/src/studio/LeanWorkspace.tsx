@@ -222,6 +222,7 @@ export function LeanWorkspace({
   onGoalsSizeChange,
   onFocusProof,
   revealTarget,
+  revealPosition,
   onProofStateChange,
   focusEditorRequest,
   onFocusEditorHandled,
@@ -251,6 +252,12 @@ export function LeanWorkspace({
   revealTarget?: {
     id: number
     target: Pick<ProofTarget, 'path' | 'startLine' | 'endLine' | 'name'>
+  } | null
+  revealPosition?: {
+    id: number
+    path: string
+    line: number
+    column: number
   } | null
 }) {
   const workspaceEl = useRef<HTMLDivElement>(null)
@@ -283,6 +290,7 @@ export function LeanWorkspace({
     error?: string
   }>({ target: null })
   const revealed = useRef<number | null>(null)
+  const revealedPosition = useRef<number | null>(null)
   const focusedRequest = useRef<number | null>(null)
   const [failure, setFailure] = useState('')
   const [markdownIssue, setMarkdownIssue] = useState('')
@@ -1033,6 +1041,28 @@ export function LeanWorkspace({
     revealed.current = revealTarget.id
   }, [revealTarget, loading, file?.path, file?.generation])
 
+  useEffect(() => {
+    if (
+      !revealPosition ||
+      loading ||
+      revealedPosition.current === revealPosition.id ||
+      file?.path !== revealPosition.path
+    )
+      return
+    const editor = runtime.current?.editor?.editor
+    const model = editor?.getModel()
+    if (!editor || !model || model.uri.path !== `/workspace/${file.path}`)
+      return
+    const position = model.validatePosition({
+      lineNumber: revealPosition.line,
+      column: revealPosition.column,
+    })
+    editor.setPosition(position)
+    editor.revealPositionInCenter(position)
+    editor.focus()
+    revealedPosition.current = revealPosition.id
+  }, [revealPosition, loading, file?.path, file?.generation])
+
   function focusProof(mode?: ChatMode, request?: ProofEditorRequest) {
     const editor = runtime.current?.editor?.editor
     const current = fileRef.current
@@ -1260,8 +1290,9 @@ export function LeanWorkspace({
             <strong>Editor could not start</strong>
             <p>{failure}</p>
             <p>
-              Try opening another file or reopening the project. Your saved
-              files are preserved.
+              Try opening another file or reopening the project. If the problem
+              persists, save any other pending edits and reload this browser
+              tab. Your saved files are preserved.
             </p>
           </div>
         )}

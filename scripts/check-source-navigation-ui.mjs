@@ -51,6 +51,10 @@ const fixture = await chatBrowserFixture({
   definitionLocations: [],
 })
 const { page, state, report, browser } = fixture
+// Navigation must still protect a draft when autosave cannot finish. Keep the
+// saved source unchanged with a transient server rejection, not a disabled UI.
+state.onSave = ({ respond }) =>
+  respond({ error: 'Fixture save capacity is temporarily full.' }, 429)
 const signature = 'theorem pos_of_neZero (n : Nat) [NeZero n] : 0 < n'
 const source =
   Array.from({ length: 80 }, (_, i) => `-- line ${i + 1}`).join('\n') +
@@ -187,7 +191,9 @@ try {
   await fixture.ready()
   // Navigate within the current file while a draft is present.
   await editor().focus()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await page.keyboard.insertText('-- unsaved navigation marker\n')
   await until(() => save.isEnabled(), 'unsaved editor')
   await definition(location('file:///workspace/Main.lean', 1))
@@ -250,20 +256,23 @@ try {
   )
 
   const cursorPoint = await identifierPoint()
-  await page.keyboard.press('Control+Home')
-  await page.keyboard.down('Control')
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowUp' : 'Control+Home',
+  )
+  const multiCursorKey = process.platform === 'darwin' ? 'Meta' : 'Control'
+  await page.keyboard.down(multiCursorKey)
   try {
     await page.mouse.click(cursorPoint.x, cursorPoint.y)
   } finally {
-    await page.keyboard.up('Control')
+    await page.keyboard.up(multiCursorKey)
   }
   await until(
     async () => (await page.locator('.cursors-layer .cursor').count()) === 2,
-    'Ctrl-click adds a second cursor',
+    'platform multi-cursor modifier adds a second cursor',
   )
   await page.keyboard.press('Escape')
   report.checks.push(
-    'Ctrl-click keeps multi-cursor editing available with the swapped native modifier',
+    'The platform multi-cursor modifier keeps multi-cursor editing available alongside Alt-click navigation',
   )
 
   await altDefinition(location(coreUri, 82))
@@ -284,12 +293,7 @@ try {
   await page.keyboard.insertText('should not edit')
   assert.equal(await viewer.inputValue(), source)
   assert.equal(await save.isEnabled(), true)
-  assert.equal(
-    report.requests.filter(
-      (r) => r.endpoint.endsWith('/file') && r.method === 'PUT',
-    ).length,
-    0,
-  )
+  assert.equal(state.files[projectId]['Main.lean'], main)
   await dialog.getByRole('button', { name: 'Close dialog' }).click()
   report.checks.push(
     'Alt-click opens installed Lean sources at the reported position in a scrollable read-only view without saving the draft',
@@ -325,6 +329,8 @@ try {
   const unsaved = page.getByRole('dialog', { name: 'Save your changes?' })
   await unsaved.waitFor()
   await unsaved.getByRole('button', { name: 'Discard edits' }).click()
+  assert.equal(state.files[projectId]['Main.lean'], main)
+  state.onSave = null
   await until(
     () =>
       page

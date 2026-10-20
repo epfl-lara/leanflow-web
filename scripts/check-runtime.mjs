@@ -8,6 +8,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Runtime } from '../server/runtime.mjs'
+import { verifyPackagedRuntime } from './ci/runtime-provenance.mjs'
 
 const projectDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -24,7 +25,8 @@ await fs.writeFile(
   path.join(root, 'Main.lean'),
   'example (a b : Nat) : a + b = b + a := by\n  exact Nat.add_comm a b\n',
 )
-const runtime = new Runtime({ dataDir, maxConcurrent: 2 })
+const memory = process.env.STUDIO_WORKER_MEMORY || '4g'
+const runtime = new Runtime({ dataDir, maxConcurrent: 2, memory })
 try {
   await runtime.init()
   assert.equal(runtime.info().ready, true, runtime.info().error)
@@ -50,30 +52,8 @@ try {
     actualProvenance.native_build_commit || null,
   )
   assert.equal(runtime.info().lemexVersion, actualProvenance.version || null)
-  if (actualProvenance.provenance_verification === 'npm_registry_integrity') {
-    const release = JSON.parse(
-      await fs.readFile(
-        path.resolve(
-          projectDir,
-          process.env.LEMEX_RUNTIME_DIR || '.runtime/lemex',
-          'manifest.json',
-        ),
-        'utf8',
-      ),
-    )
-    for (const field of [
-      'npm_package',
-      'version',
-      'npm_version',
-      'npm_integrity',
-      'native_target',
-    ])
-      assert.equal(
-        actualProvenance[field],
-        release[field],
-        `Worker differs from the packaged runtime: ${field}`,
-      )
-  }
+  if (actualProvenance.provenance_verification === 'npm_registry_integrity')
+    await verifyPackagedRuntime(actualProvenance, projectDir)
   await runtime.prepareToolchain('leanprover/lean4:v4.34.1')
   const proof = await runtime.run(root, [
     'lean',
@@ -234,7 +214,7 @@ print('readonly packages and immutable cache sharing verified')`,
       'fixture',
     )
   }
-  const secondRuntime = new Runtime({ dataDir })
+  const secondRuntime = new Runtime({ dataDir, memory })
   await secondRuntime.init()
   try {
     await Promise.all([
@@ -267,11 +247,16 @@ print('readonly packages and immutable cache sharing verified')`,
   }
 
   const reapingDir = path.join(dataDir, 'reaping', randomUUID())
-  const priorServer = new Runtime({ dataDir: reapingDir, scope: 'server' })
-  const helper = new Runtime({ dataDir: reapingDir })
+  const priorServer = new Runtime({
+    dataDir: reapingDir,
+    scope: 'server',
+    memory,
+  })
+  const helper = new Runtime({ dataDir: reapingDir, memory })
   const unrelated = new Runtime({
     dataDir: path.join(reapingDir, 'other'),
     scope: 'server',
+    memory,
   })
   const fixtureIds = []
   const exec = promisify(execFile)
@@ -315,7 +300,7 @@ print('readonly packages and immutable cache sharing verified')`,
     const orphan = await fixture(priorServer.instance, 'server')
     const helperWorker = await fixture(helper.instance, 'helper')
     const unrelatedWorker = await fixture(unrelated.instance, 'server')
-    restarted = new Runtime({ dataDir: reapingDir, scope: 'server' })
+    restarted = new Runtime({ dataDir: reapingDir, scope: 'server', memory })
     await restarted.init()
     assert.equal(restarted.info().ready, true, restarted.info().error)
     assert.equal(restarted.instance, priorServer.instance)

@@ -73,6 +73,19 @@ try {
   await f.page
     .getByText('Selecting the project revision', { exact: true })
     .waitFor()
+  project.setupPhase = 'waiting-for-rcp'
+  await f.page.getByText('Waiting for this RCP key', { exact: true }).waitFor()
+  await f.page
+    .getByText(
+      'Another task is using this RCP key. Setup repair will start automatically when it finishes. You can stop setup while it waits.',
+      { exact: true },
+    )
+    .waitFor()
+  assert(
+    await f.page
+      .getByRole('button', { name: 'Stop setup', exact: true })
+      .isEnabled(),
+  )
   project.setupPhase = 'repairing-setup'
   project.setupRepair = {
     id: 'repair-fixture',
@@ -262,7 +275,6 @@ try {
   await until(() => prepares === 1, 'ready project cache preparation')
   await f.page.getByText('Preparing libraries', { exact: true }).waitFor()
   project.status = 'ready'
-  f.state.session.lemex = { configured: false }
   await f.ready()
   await f.page
     .getByRole('button', { name: 'Import or create project', exact: true })
@@ -278,9 +290,22 @@ try {
   await dialog
     .getByText(/Lemex setup repair is unavailable on this server/)
     .waitFor()
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  f.state.session.lemex = { configured: false }
+  await f.page.reload()
+  await f.page
+    .getByRole('heading', { name: 'Welcome, Fixture.', exact: true })
+    .waitFor()
+  await f.page
+    .getByText(
+      'Connect your account to Lemex to open your workspace. You can update your key later in Assistant settings.',
+      { exact: true },
+    )
+    .waitFor()
+  assert.equal(await f.page.locator('.monaco-editor').count(), 0)
   f.assertClean()
   f.report.checks.push(
-    'Setup shows clone and repair progress, Stop and Retry, a version/revision/build summary and contextual output; Refresh setup has clickable cache and repair help; dependency warnings block new checks; unavailable Lemex repair is explained and disabled.',
+    'Setup shows clone, RCP-key waiting and repair progress, Stop and Retry, a version/revision/build summary and contextual output; Refresh setup explains cache reuse; dependency warnings block new checks; unavailable repair is disabled and an unconfigured account is guided to key setup.',
   )
   f.report.passed = true
 } catch (error) {

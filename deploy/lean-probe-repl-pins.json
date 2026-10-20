@@ -13,5 +13,10 @@
     "repository": "https://github.com/leanprover-community/repl.git",
     "revision": "70b404f181ce92effe7d1a1845692f998e1eacf8",
     "upstreamToolchain": "v4.35.0-rc4"
+  },
+  "v4.35.0": {
+    "repository": "https://github.com/leanprover-community/repl.git",
+    "revision": "58bdde1ff173117960083cc5a052a11d51c49ff1",
+    "upstreamToolchain": "v4.35.0"
   }
 }

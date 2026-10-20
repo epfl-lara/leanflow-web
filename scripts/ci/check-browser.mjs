@@ -16,11 +16,12 @@ const server = app.listen(0, '127.0.0.1')
 await once(server, 'listening')
 const base = `http://127.0.0.1:${server.address().port}`
 const execute = promisify(execFile)
-const suites = [
+const chatSuites = [
   'auth-recovery',
   'provider-settings',
   'model-options',
   'chat-naming',
+  'rcp-queue',
   'chat',
   'streaming',
   'ask-search',
@@ -32,9 +33,55 @@ const suites = [
   'reasoning-history',
   'autosave',
   'lean-cache',
+  'chat-recovery',
+  'chat-focus-picker',
+  'proof-chat',
+  'proof-focus-recovery',
+  'current-file',
+  'formalize-documents',
+  'evaluation-recovery',
+  'settings-recovery',
 ]
-const selected = process.argv.slice(2)
+const workspaceSuites = [
+  'account-controls',
+  'file-lifecycle',
+  'books',
+  'downloads',
+  'tex',
+  'terminal',
+  'search-results',
+  'import',
+  'private-import',
+  'import-publishing',
+  'git',
+  'git-connections',
+  'file-creation',
+  'file-tree',
+  'dependency-files',
+  'definition-project-scope',
+  'editor-focus',
+  'help-tips',
+  'lean-oversize',
+  'markdown-files',
+  'setup-progress',
+  'setup-recovery',
+  'sidebar',
+  'single-file',
+  'source-navigation',
+  'trash-delete-all',
+  'trash-processes',
+  'workspace-switch',
+]
+const suites = [...chatSuites, ...workspaceSuites]
+const groups = { chat: chatSuites, workspace: workspaceSuites }
+const args = process.argv.slice(2)
+const group =
+  args.length === 1 && args[0].startsWith('--group=')
+    ? args[0].slice('--group='.length)
+    : null
+const selected = group === null ? args : groups[group]
 try {
+  if (!selected) throw new Error(`Unknown browser group: ${group}`)
   for (const suite of selected)
     if (!suites.includes(suite))
       throw new Error(`Unknown browser suite: ${suite}`)

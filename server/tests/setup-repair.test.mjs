@@ -143,7 +143,7 @@ test('repair writes the normalized model catalog and sends the exact configured 
   )
 })
 
-test('the automatic repair deadline cancels queued or running work and reports a retryable timeout', async (t) => {
+test('the automatic repair execution deadline cancels running work and reports a retryable timeout', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   let signal
   const repair = withSetupRepairDeadline(

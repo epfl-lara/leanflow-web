@@ -43,6 +43,7 @@ const f = await chatBrowserFixture({
         id: 'lean',
         name: 'Lean basics',
         toolchain: 'leanprover/lean4:v4.34.1',
+        versions: ['v4.34.1', 'v4.35.0-rc4', 'v4.33.0'],
         ready: true,
       },
       {
@@ -192,7 +193,9 @@ try {
     60000,
   )
   await f.page.locator('.monaco-editor textarea').focus()
-  await f.page.keyboard.press('Control+End')
+  await f.page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await f.page.keyboard.insertText('-- edited large source\n')
   const saveLarge = f.page.getByRole('button', { name: 'Save', exact: true })
   await until(() => saveLarge.isEnabled(), 'dirty large source')
@@ -397,11 +400,14 @@ try {
       'true',
     )
     assert.deepEqual(await checkedLibraries(), [template.id])
-    if (template.id === 'lean')
+    if (template.id === 'lean') {
+      const version = dialog().getByLabel('Lean version', { exact: true })
+      assert.equal(await version.inputValue(), '')
       assert.equal(
-        await dialog().getByLabel('Lean version', { exact: true }).inputValue(),
-        template.toolchain.replace('leanprover/lean4:', ''),
+        (await version.locator('option:checked').innerText()).trim(),
+        `${template.toolchain.replace('leanprover/lean4:', '')} · Latest stable`,
       )
+    }
     if (template.id === 'mathlib')
       await f.page.screenshot({
         path: path.join(reportDir, 'welcome-mathlib.png'),
@@ -425,6 +431,38 @@ try {
   }
   report.checks.push(
     'Every welcome card opens New project with only its preset selected and submits that choice; Lean basics keeps its pinned version; Enter and Space activate cards',
+  )
+
+  for (const version of ['v4.35.0-rc4', '4.36.0-rc1']) {
+    await welcome()
+    await f.page
+      .getByRole('button', {
+        name: 'Create a Lean basics project',
+        exact: true,
+      })
+      .click()
+    const selection = dialog().getByLabel('Lean version', { exact: true })
+    if (version.startsWith('v')) await selection.selectOption(version)
+    else {
+      await selection.selectOption('custom')
+      await dialog()
+        .getByLabel('Exact Lean version', { exact: true })
+        .fill(version)
+    }
+    const before = requests.length
+    await dialog()
+      .getByRole('button', { name: 'Create project', exact: true })
+      .click()
+    await dialog().waitFor({ state: 'hidden' })
+    assert.equal(requests.length, before + 1)
+    assert.deepEqual(requests.at(-1).libraries, [])
+    assert.equal(
+      requests.at(-1).toolchain,
+      `leanprover/lean4:${version.startsWith('v') ? version : `v${version}`}`,
+    )
+  }
+  report.checks.push(
+    'Lean basics submits both a listed release candidate and an explicitly entered future release as exact toolchain pins.',
   )
 
   await welcome()
@@ -478,7 +516,10 @@ try {
     true,
   )
   await dialog()
-    .getByText(/A selected library is not installed/)
+    .getByText(
+      'This library is not installed on this server. Choose an available library or import an existing repository.',
+      { exact: true },
+    )
     .waitFor()
   await dialog()
     .getByRole('checkbox', { name: /^Physlib/ })

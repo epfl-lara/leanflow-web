@@ -44,6 +44,7 @@ async function fixture(t) {
     },
     async runTex(source, output, options) {
       options.signal.throwIfAborted()
+      options.onSpawn?.()
       await fs.writeFile(path.join(output, 'document.pdf'), pdf)
       await fs.writeFile(
         path.join(output, 'document.txt'),
@@ -135,6 +136,44 @@ async function fixture(t) {
     otherToken,
   }
 }
+
+test('TeX status stays queued until the compiler obtains a worker slot', async (t) => {
+  const f = await fixture(t)
+  const run = f.runtime.runTex
+  let release, entered
+  const waiting = new Promise((resolve) => {
+    entered = resolve
+  })
+  const available = new Promise((resolve) => {
+    release = resolve
+  })
+  f.runtime.runTex = async (...args) => {
+    entered()
+    await available
+    return run(...args)
+  }
+  const job = await f.start()
+  await waiting
+  try {
+    const queued = f.texBuilds.get('owner', job.id)
+    assert.equal(queued.status, 'queued')
+    assert.equal(typeof queued.sourceRevision, 'string')
+    assert.equal(
+      (await f.texBuilds.state('owner', f.project.id)).activeBuild.id,
+      job.id,
+    )
+  } finally {
+    release()
+  }
+  assert.equal((await f.texBuilds.wait('owner', job.id)).status, 'completed')
+  assert(
+    f.events
+      .events(job.id)
+      .some(
+        (event) => event.type === 'status' && event.data?.status === 'running',
+      ),
+  )
+})
 
 test('multi-file TeX uses a bounded immutable capture with exact hashes and protected binary inputs', async (t) => {
   const f = await fixture(t)
@@ -311,7 +350,8 @@ test('failed rebuilds retain the last successful PDF, map diagnostics, and never
 test('assistant mutation endpoints cannot relabel or stop a TeX build', async (t) => {
   const f = await fixture(t)
   const started = new Promise((resolve) => {
-    f.runtime.runTex = async (_source, _output, { signal }) => {
+    f.runtime.runTex = async (_source, _output, { signal, onSpawn }) => {
+      onSpawn()
       resolve()
       await new Promise((stop) =>
         signal.addEventListener('abort', stop, { once: true }),

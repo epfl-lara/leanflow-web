@@ -49,6 +49,7 @@ let rejectBuilds = 0
 let agentOnReject = false
 let failStatus = false
 let failStatusOnReject = false
+let statusAttempts = 0
 let buildAttempts = 0
 const rootInputs = (rootFile) => {
   const folder = rootFile.slice(0, rootFile.lastIndexOf('/') + 1)
@@ -67,8 +68,12 @@ const builds = []
 const writes = []
 const uploads = []
 let rejectSave = false
+let saveBarrier, releaseSave
+let heldSaves = 0
 let stopped = 0
 const pdfRequests = []
+const popupPdfRequests = []
+const popupErrors = []
 try {
   fixture = await chatBrowserFixture({
     base: `http://127.0.0.1:${server.address().port}`,
@@ -88,6 +93,44 @@ try {
     runs: [],
   })
   const { page, report } = fixture
+  const base = `http://127.0.0.1:${server.address().port}`
+  // The first request of a popup does not pass through page.route. Keep it
+  // within this fixture, including any unexpected external destination.
+  await page.context().route('**/*', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    // Chromium's bundled PDF viewer loads local browser resources, not HTTP.
+    if (['chrome:', 'chrome-extension:'].includes(url.protocol))
+      return route.continue()
+    if (url.origin !== base) {
+      report.unexpectedRequests.push({
+        method: request.method(),
+        endpoint: request.url(),
+      })
+      return route.abort()
+    }
+    if (
+      url.pathname.startsWith(`/api/projects/${projectId}/tex/builds/`) &&
+      url.pathname.endsWith('/pdf')
+    ) {
+      popupPdfRequests.push({
+        url: url.href,
+        headers: await request.allHeaders(),
+      })
+      return route.fulfill({
+        contentType: 'application/pdf',
+        body: fixturePdf(),
+      })
+    }
+    if (url.pathname.startsWith('/api/')) {
+      report.unexpectedRequests.push({
+        method: request.method(),
+        endpoint: url.pathname,
+      })
+      return route.abort()
+    }
+    return route.continue()
+  })
   await page.route('**/api/projects/*/upload', async (route) => {
     const input = route.request().postDataJSON()
     uploads.push(input)
@@ -174,6 +217,7 @@ try {
       rootBuilds.set(input.rootFile, build)
       return route.fulfill({ json: build, status: 202 })
     }
+    statusAttempts++
     if (failStatus)
       return route.fulfill({
         status: 503,
@@ -209,6 +253,10 @@ try {
           error: 'Fixture save conflict. Reload the file before building.',
         },
       })
+    if (saveBarrier) {
+      heldSaves++
+      await saveBarrier
+    }
     files[filename] = input.content
     workspaceVersion++
     writes.push({ path: filename, content: input.content })
@@ -256,7 +304,9 @@ try {
   }
   const append = async (text) => {
     await editor().focus()
-    await page.keyboard.press('Control+End')
+    await page.keyboard.press(
+      process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+    )
     await page.keyboard.insertText(text)
     await until(() => save.isEnabled(), 'edited source buffer')
   }
@@ -364,6 +414,70 @@ try {
   assert(
     expandedFrame.height < compactFrame.height - 50,
     'Options collapse restores document space',
+  )
+  const openPdf = panel.getByRole('link', {
+    name: 'Open PDF in new tab',
+    exact: true,
+  })
+  const popupUrl = new URL(await openPdf.getAttribute('href'), page.url())
+  assert.equal(popupUrl.origin, base)
+  assert.equal(
+    popupUrl.pathname,
+    `/api/projects/${projectId}/tex/builds/tex-1/pdf`,
+  )
+  assert.equal(popupUrl.search, '')
+  assert.equal(await openPdf.getAttribute('rel'), 'noopener noreferrer')
+  await page.context().addCookies([
+    {
+      name: 'fixture_pdf_session',
+      value: 'synthetic-browser-session',
+      url: base,
+      httpOnly: true,
+      sameSite: 'Lax',
+    },
+  ])
+  const mainUrl = page.url()
+  const popupPromise = page.waitForEvent('popup')
+  await openPdf.click()
+  const popup = await popupPromise
+  popup.on('pageerror', (error) => popupErrors.push(error.message))
+  try {
+    await popup.waitForURL(popupUrl.href)
+    await popup.waitForLoadState('domcontentloaded')
+    await until(async () => {
+      for (const pdfFrame of popup.frames()) {
+        if (!pdfFrame.url().startsWith('chrome-extension://')) continue
+        if (
+          await pdfFrame
+            .evaluate(
+              () =>
+                document.querySelector('pdf-viewer')?.loadState_ === 'success',
+            )
+            .catch(() => false)
+        )
+          return true
+      }
+      return false
+    }, 'new tab native PDF rendered')
+    assert.equal(await popup.evaluate(() => window.opener), null)
+    assert.equal(popupPdfRequests.length, 1)
+    assert.match(
+      popupPdfRequests[0].headers.cookie,
+      /fixture_pdf_session=synthetic-browser-session/,
+    )
+    assert.equal(popupPdfRequests[0].headers.referer, undefined)
+    assert.equal(page.url(), mainUrl)
+    assert.equal(await frame.getAttribute('src'), firstPdf)
+  } finally {
+    await popup.close()
+    await page.context().clearCookies({ name: 'fixture_pdf_session' })
+  }
+  assert.equal(await editor().isEditable(), true)
+  assert.equal(builds.length, 1)
+  assert.equal(writes.length, 1)
+  assert.equal(popupErrors.length, 0)
+  report.checks.push(
+    'Open PDF in new tab renders the same authenticated same-origin document, sends its cookie without exposing a token in the URL, and removes opener/referrer access; closing the new tab preserves the editor, preview and saved source without another build.',
   )
   await page
     .getByRole('button', { name: 'Close tools panel', exact: true })
@@ -511,14 +625,116 @@ try {
     'diagnostic line 2',
   )
   assert.equal(await optionsButton.getAttribute('aria-expanded'), 'false')
-  await optionsButton.click()
+  // Clicking another diagnostic for the file already open must navigate in
+  // place, even when a redundant source request would be slow. Preserve the
+  // editor instance, edits typed immediately afterward, and the undo stack.
+  const chapterEditor = await editor().elementHandle()
+  const chapterSource = files['chapter.tex']
+  let diagnosticReads = 0,
+    releaseDiagnosticRead
+  const diagnosticRead = new Promise((resolve) => {
+    releaseDiagnosticRead = resolve
+  })
+  const diagnosticRoute = async (route) => {
+    if (
+      route.request().method() === 'GET' &&
+      new URL(route.request().url()).searchParams.get('path') === 'chapter.tex'
+    ) {
+      diagnosticReads++
+      await diagnosticRead
+    }
+    return route.fallback()
+  }
+  await page.route('**/api/projects/*/file?*', diagnosticRoute)
+  rejectSave = true
+  try {
+    await optionsButton.click()
+    await panel
+      .getByRole('button', {
+        name: 'chapter.tex:2 · Undefined control sequence.',
+        exact: true,
+      })
+      .click()
+    await append('% KEEP_DIAGNOSTIC_DRAFT')
+    releaseDiagnosticRead()
+    await until(
+      async () => !(await page.locator('.file-toolbar .spinner').count()),
+      'same-file diagnostic finished without reopening',
+    )
+    assert.equal(
+      diagnosticReads,
+      0,
+      'A same-file diagnostic must not fetch source again',
+    )
+    assert(
+      await chapterEditor.evaluate(
+        (element) =>
+          element === document.querySelector('.monaco-editor textarea'),
+      ),
+      'Diagnostic navigation preserves the mounted editor',
+    )
+    await until(
+      async () =>
+        (await page.locator('.monaco-editor .view-lines').innerText()).includes(
+          'KEEP_DIAGNOSTIC_DRAFT',
+        ),
+      'keystrokes after diagnostic navigation preserved',
+    )
+    const chapterText = async () =>
+      (await page.locator('.monaco-editor .view-line').allTextContents())
+        .map((line) => line.replaceAll('\u00a0', ' '))
+        .join('\n')
+        .trimEnd()
+    await editor().focus()
+    // TeX's comment trigger may split one insertion into multiple undo stops.
+    for (
+      let step = 0;
+      step < 4 && (await chapterText()) !== chapterSource.trimEnd();
+      step++
+    ) {
+      const beforeUndo = await chapterText()
+      await page.keyboard.press('ControlOrMeta+z')
+      await until(
+        async () => (await chapterText()) !== beforeUndo,
+        'diagnostic undo step',
+      )
+    }
+    assert.equal(
+      await chapterText(),
+      chapterSource.trimEnd(),
+      'Undo restores the full original source',
+    )
+    assert.equal(files['chapter.tex'], chapterSource)
+  } finally {
+    releaseDiagnosticRead()
+    await page.unroute('**/api/projects/*/file?*', diagnosticRoute)
+    rejectSave = false
+  }
+  report.checks.push(
+    'Repeated diagnostics for the current file jump in place without fetching or rebuilding the editor; immediate edits and undo history are preserved.',
+  )
+  if ((await optionsButton.getAttribute('aria-expanded')) === 'false')
+    await optionsButton.click()
   await panel
     .getByRole('button', { name: 'Show build log', exact: true })
     .click()
   await panel.getByLabel('LaTeX build log').waitFor()
+  const readableLog = await panel.getByLabel('LaTeX build log').innerText()
+  await panel
+    .getByRole('button', { name: 'Hide build log', exact: true })
+    .click()
+  assert.equal(await panel.getByLabel('LaTeX build log').count(), 0)
+  assert.equal(await frame.getAttribute('src'), firstPdf)
+  await panel
+    .getByRole('button', { name: 'Show build log', exact: true })
+    .click()
+  assert.equal(
+    await panel.getByLabel('LaTeX build log').innerText(),
+    readableLog,
+  )
   await open('main.tex')
   report.checks.push(
-    'Drafts are marked stale; save conflicts prevent compilation, failed builds retain the last PDF, diagnostics navigate to source, and compiler logs remain readable.',
+    'Drafts are marked stale; save conflicts prevent compilation, failed builds retain the last PDF, diagnostics navigate to source, and Hide/Show build log preserves both readable logs and the preview.',
   )
 
   await append('% Auto build remains off.\n')
@@ -545,6 +761,10 @@ try {
   finish('completed')
   await until(() => builds.length === 4, 'coalesced build after active job')
   assert(builds[3].files['main.tex'].includes('Queued latest save.'))
+  const writesBeforeAutosave = writes.length
+  saveBarrier = new Promise((resolve) => {
+    releaseSave = resolve
+  })
   await append('% Newer draft during snapshot compilation.\n')
   finish('completed')
   await until(
@@ -554,19 +774,53 @@ try {
     'latest successful PDF refresh',
   )
   await panel.getByText('PDF may be out of date', { exact: false }).waitFor()
+  await until(() => heldSaves === 1, 'automatic source save begins')
   await sleep(700)
   assert.equal(
     builds.length,
     4,
-    'Unsaved keystrokes cannot trigger or save an automatic build',
+    'Automatic compilation must wait for the source save to succeed',
+  )
+  assert.equal(writes.length, writesBeforeAutosave)
+  assert.equal(heldSaves, 1, 'A pending autosave must not be duplicated')
+  assert(
+    !files['main.tex'].includes('Newer draft during snapshot compilation.'),
+  )
+  assert(
+    !builds[3].files['main.tex'].includes(
+      'Newer draft during snapshot compilation.',
+    ),
+  )
+  saveBarrier = null
+  releaseSave()
+  releaseSave = null
+  await until(
+    () => builds.length === 5,
+    'one rebuild after successful autosave',
+  )
+  assert.equal(writes.length, writesBeforeAutosave + 1)
+  assert.equal(builds[4].writes, writesBeforeAutosave + 1)
+  assert(
+    builds[4].files['main.tex'].includes(
+      'Newer draft during snapshot compilation.',
+    ),
+  )
+  await sleep(1800)
+  assert.equal(
+    writes.length,
+    writesBeforeAutosave + 1,
+    'Clean buffers do not save again',
+  )
+  assert.equal(
+    builds.length,
+    5,
+    'A completed autosave triggers only one rebuild',
   )
   report.checks.push(
-    'Automatic compilation is opt-in, reacts only to successful saves, coalesces saves during a running build, and keeps newer unsaved drafts separate from the completed PDF.',
+    'Automatic compilation is opt-in, coalesces saves during running builds, keeps drafts separate from completed PDFs, and waits for a successful debounced autosave before exactly one rebuild.',
   )
 
   await panel.getByLabel('Rebuild on save').uncheck()
-  await buildButton.click()
-  await until(() => builds.length === 5, 'cancelable build')
   await panel.getByRole('button', { name: 'Stop build', exact: true }).click()
   await until(() => stopped === 1, 'stop request')
   await panel.getByText('Build stopped', { exact: true }).waitFor()
@@ -825,9 +1079,25 @@ try {
     beforePersistent + 1,
     'Failed status polling cannot trigger a blind retry',
   )
+  const refreshStatus = panel.getByRole('button', {
+    name: 'Refresh build status',
+    exact: true,
+  })
+  const beforeFailedRefresh = statusAttempts
+  const previousPdf = await frame.getAttribute('src')
+  await refreshStatus.click()
+  await until(
+    () => statusAttempts > beforeFailedRefresh,
+    'manual failed status refresh',
+  )
+  await panel
+    .getByText('Fixture status poll unavailable.', { exact: true })
+    .waitFor()
+  assert.equal(await frame.getAttribute('src'), previousPdf)
+  assert.equal(buildAttempts, beforePersistent + 1)
   failStatusOnReject = false
   failStatus = false
-  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await refreshStatus.click()
   await until(
     () => buildAttempts === beforePersistent + 2,
     'one retry after successful idle poll',
@@ -839,7 +1109,7 @@ try {
     'Persistent busy responses cannot create an automatic retry loop',
   )
   report.checks.push(
-    'Busy retries wait for successful status polling and stop after one idle retry when a persistent 409 cannot be explained by an active build.',
+    'Refresh build status shows a failed refresh without discarding the last PDF; a successful manual refresh permits one idle retry, while persistent 409 responses cannot create an automatic retry loop.',
   )
   await page.screenshot({ path: path.join(output, 'tex-workspace.png') })
   fixture.assertClean()
@@ -853,6 +1123,7 @@ try {
   }
   throw error
 } finally {
+  releaseSave?.()
   if (fixture) {
     await fs.writeFile(
       path.join(output, 'result.json'),
@@ -862,8 +1133,11 @@ try {
           builds,
           writes,
           pdfRequests,
+          popupPdfRequests,
+          popupErrors,
           uploads,
           statusRoots,
+          statusAttempts,
           buildAttempts,
         },
         null,

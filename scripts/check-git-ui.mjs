@@ -328,7 +328,9 @@ try {
   )
   await page.getByLabel('Close dialog').click()
   await page.locator('.view-lines').click()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await page.keyboard.type('\n-- SAVED_EDITOR_CHANGE\n')
   await open()
   await dialog()
@@ -349,7 +351,14 @@ try {
     'Saving dirty editor committed before review',
   )
   assert(actions.some((value) => value.action === 'save'))
-  assert((await dialog().innerText()).includes('SAVED_EDITOR_CHANGE'))
+  await dialog()
+    .getByRole('list', { name: 'Changed project files' })
+    .getByRole('button', { name: /Main\.lean/ })
+    .click()
+  await until(
+    async () => (await dialog().innerText()).includes('SAVED_EDITOR_CHANGE'),
+    'saved editor diff visible',
+  )
   failCommit = true
   info.reviewToken = hash('files changed after user review')
   await button('Commit saved changes').click()

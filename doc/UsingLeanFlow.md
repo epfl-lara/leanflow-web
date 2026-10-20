@@ -38,7 +38,7 @@ Use **Upload** or drag files/folders into the upload area. **Upload** in the Fil
 
 **Retry setup** reuses a completed clone if fetching the selected revision failed. If repository authentication is needed, use its saved connection or enter another token. If cloning itself was interrupted and left partial files, create a new import as directed by the error. Partial files are preserved. A missing branch or tag needs a new import with an existing revision.
 
-When available on the server, the specialized Lemex setup agent starts automatically after a recoverable setup failure. It diagnoses an isolated copy, proposes configuration repairs and validates them with Lean before they are applied. The progress card shows when repair is queued, its current activity and elapsed time. Repair has a 15-minute default deadline, including its wait for an assistant slot.
+When available on the server, the specialized Lemex setup agent starts automatically after a recoverable setup failure. It diagnoses an isolated copy, proposes configuration repairs and validates them with Lean before they are applied. The progress card shows when repair is queued, its current activity and elapsed time. Repair has a 15-minute default execution budget after an assistant slot and provider key become available; time spent waiting is excluded.
 
 Setup shows its current stage, from preparing Lean and libraries to testing the environment. If automatic setup needs a configuration repair, **Lemex is repairing setup** appears while Lemex diagnoses the problem. **Testing the setup repair** appears before the checked configuration is accepted and setup retries. You can open another project while this runs.
 
@@ -161,6 +161,8 @@ so switching modes does not carry an Ask & Search setting into a proof task.
 The **Model** dropdown shows your saved models. Choose **Add models…** to browse everything available with your API key, select or remove models, then choose **Save models**. This list is saved to your account across projects, browsers, and sign-ins. Editing it keeps your current model, reasoning effort, and default. Models that your key no longer allows stay marked unavailable until you remove them. You can also edit the list in **Assistant settings → Edit saved models**.
 
 Use **Send update** for extra instructions or **Stop** to interrupt. Updates show whether they were accepted. Runs continue until finished or stopped; send another message afterward to continue.
+
+Free RCP keys allow one model request at a time. LeanFlow runs chats and setup repairs using the same RCP key one at a time, even across projects or accounts sharing that key. A waiting task explains why it is queued, starts automatically, and can be stopped. Automatic chat naming waits behind your work. Different keys remain independent, subject to server capacity. If the key is also busy in another app, LeanFlow shows the provider's busy/retry message; quota exhaustion asks you to check the [RCP key portal](https://portal.rcp.epfl.ch/aiaas/keys).
 
 Scroll up freely; **Jump to latest** resumes following output. Reasoning appears between replies in separate Show/Hide sections. Long traces scroll inside their own panel, keeping the Show/Hide controls within the message instead of floating over the chat. Files and chat drafts remain available during a run.
 

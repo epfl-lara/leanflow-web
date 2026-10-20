@@ -26,7 +26,7 @@ try {
       templates: [],
       models: [],
       runtime: { ready: true },
-      lemex: { configured: false },
+      lemex: { configured: true },
     },
     projects: [
       {

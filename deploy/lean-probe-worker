@@ -1,6 +1,7 @@
 #!/opt/lean-probe/bin/python
 """Run the pinned LeanProbe package with private, stdio-safe worker REPLs."""
 import json
+from functools import wraps
 import logging
 import os
 from pathlib import Path
@@ -27,18 +28,25 @@ def configure_worker():
         def __init__(self, **kwargs):
             kwargs.setdefault("cache_dir", cache / "downloads")
             project = kwargs.get("project")
-            version = project.get_lean_version() if project else kwargs.get("lean_version")
+            version = (
+                project.get_lean_version() if project else kwargs.get("lean_version")
+            )
             version = (version or "").removeprefix("leanprover/lean4:")
             if not kwargs.get("local_repl_path") and version in pins:
                 destination = cache / version
                 pin = pins[version]
                 with FileLock(str(destination) + ".lock", timeout=600):
                     marker = destination / ".worker-repl-pin"
-                    if not marker.exists() or marker.read_text().strip() != pin["revision"]:
+                    if (
+                        not marker.exists()
+                        or marker.read_text().strip() != pin["revision"]
+                    ):
                         if destination.exists():
                             shutil.rmtree(destination)
                         shutil.copytree(source_root / version, destination)
-                        (destination / "lean-toolchain").write_text("leanprover/lean4:" + version + "\n")
+                        (destination / "lean-toolchain").write_text(
+                            "leanprover/lean4:" + version + "\n"
+                        )
                         marker.write_text(pin["revision"] + "\n")
                     binary = destination / ".lake" / "build" / "bin" / "repl"
                     if not binary.exists():
@@ -55,9 +63,50 @@ def configure_worker():
     lean_interact.LeanREPLConfig = WorkerREPLConfig
 
 
+def configure_probe_sessions():
+    from lean_probe import errors
+    from lean_probe.probe import LeanProbe
+
+    # The pinned backend runs complete snippets with env=None. The REPL retains
+    # each independent import environment, which exhausts a 6 GiB worker after
+    # two full Mathlib snippets. These scratch environments are stateless: close
+    # them after each request, retaining file checkpoints and interactive proof
+    # sessions. Hold the backend's existing RLock through cleanup so another
+    # request cannot acquire a scratch server that we are about to retire.
+    original_check_code = LeanProbe.check_code
+
+    @wraps(original_check_code)
+    def bounded_check_code(self, code, **kwargs):
+        with self._lock:
+            cwd = kwargs.get("cwd")
+            project_root = self._resolve_project_root(cwd)
+            try:
+                return original_check_code(self, code, **kwargs)
+            finally:
+                if not cwd or project_root is not None:
+                    self._drop_scratch_session(project_root)
+
+    LeanProbe.check_code = bounded_check_code
+
+    # LeanInteract 0.11.5 uses this text for EOF/OOM. Recognizing it enables the
+    # existing one-retry recovery for checks; stateful sessions retain the
+    # backend's normal invalidation/replay rules. Do not retry arbitrary errors.
+    original_dead_server_error = errors._dead_server_error
+
+    def dead_server_error(error):
+        return (
+            original_dead_server_error(error)
+            or "lean server closed unexpectedly" in str(error).lower()
+        )
+
+    errors._dead_server_error = dead_server_error
+
+
 if __name__ == "__main__":
     if "mcp" in sys.argv[1:]:
         os.environ.setdefault("LEAN_PROBE_AUTO_BUILD", "0")
         configure_worker()
+        configure_probe_sessions()
     from lean_probe.cli import main
+
     main()

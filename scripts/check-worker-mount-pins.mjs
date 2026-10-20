@@ -8,7 +8,12 @@ import { Runtime } from '../server/runtime.mjs'
 
 const dataDir = path.resolve(process.env.STUDIO_DATA_DIR || '.data')
 const image = process.env.LEAN_PROBE_TEST_IMAGE || 'lemex-web-worker:local'
-const runtime = new Runtime({ dataDir, image, scope: 'mount-pins-qa' })
+const runtime = new Runtime({
+  dataDir,
+  image,
+  scope: 'mount-pins-qa',
+  memory: process.env.STUDIO_WORKER_MEMORY || '4g',
+})
 const directory = path.join(dataDir, 'runtime/mount-pin-check', randomUUID())
 const checkout = path.join(directory, 'checkout')
 const root = path.join(checkout, 'a/b')

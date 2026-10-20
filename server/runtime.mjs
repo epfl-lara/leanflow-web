@@ -7,7 +7,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
-import { PreparedPresetCache } from './prepared-presets.mjs'
+import {
+  PreparedPresetCache,
+  readPresetConfiguration,
+} from './prepared-presets.mjs'
 import { PresetInstaller } from './preset-installer.mjs'
 import { LeanReleases } from './lean-releases.mjs'
 import {
@@ -790,14 +793,19 @@ export class Runtime {
       path.join(this.runtimeDir, 'templates', id),
     ]) {
       try {
-        const metadata = JSON.parse(
-          fs.readFileSync(path.join(root, '.ready.json'), 'utf8'),
-        )
+        if (fs.realpathSync(root) !== root) continue
+        const marker = path.join(root, '.ready.json')
+        const stat = fs.lstatSync(marker)
+        if (!stat.isFile() || stat.size > 64 * 1024) continue
+        const metadata = JSON.parse(fs.readFileSync(marker, 'utf8'))
         if (
+          metadata.code === 0 &&
           metadata.toolchain === preset.toolchain &&
           (!preset.revision || metadata.revision === preset.revision)
-        )
+        ) {
+          readPresetConfiguration(root, preset)
           return root
+        }
       } catch {
         /* Missing or incomplete installations are not ready. */
       }
@@ -1477,6 +1485,7 @@ export class Runtime {
       {
         signal,
         timeoutMs,
+        onSpawn: options.onSpawn,
         onOutput: (text, stream) => receiver.append(text, stream),
         maxOutputBytes: 512 * 1024,
       },

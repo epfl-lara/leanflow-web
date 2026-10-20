@@ -232,7 +232,7 @@ async function checkTypes(theme) {
     'Convex.image_deriv',
   )
   assert.equal(
-    await docs.locator('pre > code.language-lean').innerText(),
+    await docs.locator('pre[aria-label="Lean code"] > code').innerText(),
     'example : True := by trivial\n',
   )
   const reference = docs.getByRole('link', { name: 'Lean reference' })

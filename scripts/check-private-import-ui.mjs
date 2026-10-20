@@ -36,7 +36,7 @@ try {
       ],
       models: [],
       runtime: { ready: true },
-      lemex: { configured: false },
+      lemex: { configured: true },
     },
     projects: [{ id: projectId, name: 'Import fixture', status: 'ready' }],
     files: { [projectId]: { 'Main.lean': 'example : True := by trivial\n' } },

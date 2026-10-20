@@ -1,6 +1,10 @@
 import { providerFor } from './providers.mjs'
 import { modelConfigFor } from './model-discovery.mjs'
 import { fetchProvider } from './provider-endpoint.mjs'
+import {
+  providerRequestsFor,
+  providerLimitMessage,
+} from './provider-requests.mjs'
 
 const MAX_INPUT_BYTES = 8_000
 const MAX_MESSAGES = 8
@@ -145,10 +149,14 @@ export function sampleChatTitleMessages(messages) {
   })
 }
 
-async function readResponse(response) {
+async function readResponse(response, provider) {
   if (!response.ok) {
     await response.body?.cancel().catch(() => {})
-    throw failure('The title service could not complete the request.')
+    const notice = providerLimitMessage(`HTTP ${response.status}`, provider)
+    throw failure(
+      notice || 'The title service could not complete the request.',
+      notice && response.status === 429 ? 429 : 502,
+    )
   }
   const declaredLength = Number(response.headers.get('content-length'))
   if (declaredLength > MAX_RESPONSE_BYTES) {
@@ -228,7 +236,13 @@ function responseTitle(response, redact = String) {
 // receives full project files, runs tools, or changes the proof agent's time limits.
 export function createChatTitleGenerator(
   config,
-  { fetchImpl = fetchProvider, timeoutMs = 30_000 } = {},
+  {
+    fetchImpl = fetchProvider,
+    timeoutMs = 30_000,
+    waitTimeoutMs = 15_000,
+    requests = providerRequestsFor(config),
+    resolveProvider = (owner) => providerFor(config, owner),
+  } = {},
 ) {
   const selected = chooseModel(config)
   const model = selected?.id || null
@@ -245,6 +259,7 @@ export function createChatTitleGenerator(
   return {
     available,
     model,
+    managesConcurrency: true,
     async generate(messages, { signal, owner } = {}) {
       if (config.modelsForUser) {
         const provider = await providerFor(config, owner)
@@ -269,11 +284,15 @@ export function createChatTitleGenerator(
         return createChatTitleGenerator(scoped, {
           fetchImpl,
           timeoutMs,
+          waitTimeoutMs,
+          requests,
+          resolveProvider,
         }).generate(messages, { signal, owner })
       }
       if (!available)
         throw failure('Chat naming is not configured for this account.', 503)
-      const key = (await providerFor(config, owner))?.LEMEX_API_KEY
+      const provider = await providerFor(config, owner)
+      const key = provider?.LEMEX_API_KEY
       if (!key)
         throw failure(
           'Add your Lemex API key in Assistant settings to name chats.',
@@ -293,6 +312,34 @@ export function createChatTitleGenerator(
           : messages,
       )
       if (signal?.aborted) throw failure('Chat naming was cancelled.', 499)
+      const reservation = requests.reserve(provider, { background: true })
+      const waiting = new AbortController()
+      const waitSignal = signal
+        ? AbortSignal.any([signal, waiting.signal])
+        : waiting.signal
+      const waitTimer = setTimeout(
+        () => waiting.abort(),
+        Math.max(1, Math.min(waitTimeoutMs, 30_000)),
+      )
+      try {
+        await reservation.wait(waitSignal)
+      } catch {
+        reservation.release()
+        if (!signal?.aborted && waiting.signal.aborted)
+          throw failure(
+            reservation.limited
+              ? 'Chat naming is still waiting for this RCP key or a naming slot. Let active requests finish, then try again or enter a name manually.'
+              : 'Chat naming is busy. Try again shortly or enter a name manually.',
+            504,
+          )
+        throw failure('Chat naming was cancelled.', 499)
+      } finally {
+        clearTimeout(waitTimer)
+      }
+      if (signal?.aborted) {
+        reservation.release()
+        throw failure('Chat naming was cancelled.', 499)
+      }
       const controller = new AbortController()
       let timedOut = false
       const timer = setTimeout(
@@ -305,6 +352,11 @@ export function createChatTitleGenerator(
       const abort = () => controller.abort()
       signal?.addEventListener('abort', abort, { once: true })
       try {
+        if (!reservation.matches(await resolveProvider(owner)))
+          throw failure(
+            'Your API key or provider changed while chat naming was queued. Try naming the chat again.',
+            409,
+          )
         const response = await fetchImpl(endpoint, {
           method: 'POST',
           redirect: 'error',
@@ -330,7 +382,10 @@ export function createChatTitleGenerator(
             ...(effort ? { reasoning: { effort } } : {}),
           }),
         })
-        const title = responseTitle(await readResponse(response), redact)
+        const title = responseTitle(
+          await readResponse(response, provider),
+          redact,
+        )
         return { title, model }
       } catch (error) {
         if (timedOut)
@@ -344,6 +399,7 @@ export function createChatTitleGenerator(
         if (error instanceof ChatTitleError) throw error
         throw failure('The title service could not complete the request.')
       } finally {
+        reservation.release()
         clearTimeout(timer)
         signal?.removeEventListener('abort', abort)
       }

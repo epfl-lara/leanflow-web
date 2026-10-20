@@ -10,18 +10,22 @@ import { Runtime } from '../server/runtime.mjs'
 const dataDir = path.resolve(process.env.STUDIO_DATA_DIR || '.data')
 const existingProject = process.env.LEAN_PROBE_EXISTING_PROJECT_ROOT
 const reportDir = path.resolve(
-  existingProject ? '.runtime/lean-probe-jordan' : '.runtime/lean-probe-check',
+  process.env.LEAN_PROBE_TEST_REPORT_DIR ||
+    (existingProject
+      ? '.runtime/lean-probe-jordan'
+      : '.runtime/lean-probe-check'),
 )
 const image =
   process.env.LEAN_PROBE_TEST_IMAGE || 'lemex-web-worker:lean-probe-646cb0ee'
-const runtime = new Runtime({ dataDir, image, scope: 'helper', memory: '6g' })
+const memory = process.env.LEAN_PROBE_TEST_MEMORY || '6g'
+const runtime = new Runtime({ dataDir, image, scope: 'helper', memory })
 const directory = path.join(
   dataDir,
   'runtime',
   'lean-probe-check',
   randomUUID(),
 )
-const results = { image, presets: {}, providerCalls: 0 }
+const results = { image, memory, presets: {}, providerCalls: 0 }
 const roots = []
 
 const mcpCheck = String.raw`
@@ -29,6 +33,21 @@ import asyncio, json, os, time
 from datetime import timedelta
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+def memory_usage():
+    result = {}
+    for name in ['current', 'peak', 'max']:
+        try:
+            with open('/sys/fs/cgroup/memory.' + name) as handle:
+                result[name] = handle.read().strip()
+        except OSError:
+            pass
+    try:
+        with open('/sys/fs/cgroup/memory.events') as handle:
+            result['events'] = {name: int(value) for name, value in (line.split() for line in handle)}
+    except OSError:
+        pass
+    return result
 
 async def main():
     params = StdioServerParameters(command='/opt/tools/bin/lean-probe', args=['mcp'], env={**os.environ, 'LEAN_PROBE_AUTO_BUILD':'0'})
@@ -43,16 +62,19 @@ async def main():
                 data = response.structuredContent
                 if data is None:
                     data = json.loads(next(block.text for block in response.content if block.type == 'text'))
-                result['calls'].append({'tool':name, 'arguments':arguments, 'seconds':round(time.monotonic()-started,3), 'isError':bool(response.isError), 'result':data})
+                result['calls'].append({'tool':name, 'arguments':arguments, 'seconds':round(time.monotonic()-started,3), 'isError':bool(response.isError), 'memory':memory_usage(), 'result':data})
                 return data
             await call('lean_status', {'cwd':'/workspace', 'warm':True})
             existing = os.environ.get('LEAN_PROBE_EXISTING_PROJECT') == '1'
             header = 'import Mathlib\n\n' if existing else open('/workspace/Main.lean').read().split('theorem fixture')[0]
             await call('lean_check', {'cwd':'/workspace', 'code':header + 'example (n : Nat) : n + 0 = n := by rfl', 'timeout_s':90})
-            await call('lean_check', {'cwd':'/workspace', 'code':header + 'example : False := by trivial', 'timeout_s':90})
+            await call('lean_check', {'cwd':'/workspace', 'code':header + 'example : False := by exact (0 : Nat)', 'timeout_s':90})
             await call('lean_check', {'cwd':'/workspace', 'code':header + 'example : False := by sorry', 'timeout_s':90})
             if not existing:
                 await call('lean_check_target', {'cwd':'/workspace', 'file':'Main.lean', 'name':'fixture', 'replacement':'theorem fixture (n : Nat) : n + 0 = n := by rfl', 'timeout_s':90})
+                await call('lean_check_target', {'cwd':'/workspace', 'file':'Main.lean', 'name':'fixture', 'replacement':'theorem fixture (n : Nat) : n + 0 = n := by simp', 'timeout_s':90})
+                for _ in range(4):
+                    await call('lean_check', {'cwd':'/workspace', 'code':header + 'example (n : Nat) : n + 0 = n := by rfl', 'timeout_s':90})
                 await call('lean_check_target', {'cwd':'/workspace', 'file':'Main.lean', 'name':'fixture', 'replacement':'theorem fixture (n : Nat) : n + 0 = n := by simp', 'timeout_s':90})
             await call('lean_status', {'cwd':'/workspace'})
             print('LEAN_PROBE_RESULT=' + json.dumps(result))
@@ -66,9 +88,14 @@ try {
   assert.equal(info.ready, true, info.error)
   results.imageId = runtime.imageId
   results.nativeCommit = runtime.lemexNativeBuildCommit
-  const presets = existingProject ? [] : ['lean', 'mathlib']
+  const presets = existingProject ? [] : ['lean', 'mathlib', 'cslib', 'physlib']
   if (!existingProject && runtime.toolchains.has('leanprover/lean4:v4.29.0'))
     presets.push('lean-4.29')
+  const requested = process.argv.slice(2)
+  assert(
+    requested.every((preset) => presets.includes(preset)),
+    `Choose prepared presets from: ${presets.join(', ')}`,
+  )
   if (existingProject) {
     const root = await fs.realpath(existingProject)
     assert(
@@ -117,6 +144,7 @@ try {
     ).trim()
   }
   for (const preset of presets) {
+    if (requested.length && !requested.includes(preset)) continue
     const template = runtime.templateRoot(
       preset === 'lean-4.29' ? 'lean' : preset,
     )
@@ -147,10 +175,10 @@ try {
         path.join(root, 'lean-toolchain'),
         'leanprover/lean4:v4.29.0\n',
       )
+    const importName =
+      preset === 'lean-4.29' ? 'Lean' : runtime.presetDefinition(preset).import
     const content =
-      (preset === 'mathlib'
-        ? 'import Mathlib.Data.Nat.Basic\n\n'
-        : 'import Lean\n\n') +
+      `import ${importName}\n\n` +
       'theorem fixture (n : Nat) : n + 0 = n := by\n  simp only [Nat.add_zero]\n'
     await fs.writeFile(path.join(root, 'Main.lean'), content)
     const result = await runtime.run(
@@ -192,6 +220,20 @@ try {
     assert.equal(sorry.has_sorry, true, JSON.stringify(sorry))
     assert.equal(target.ok, true, JSON.stringify(target))
     assert.equal(warmTarget.ok, true, JSON.stringify(warmTarget))
+    for (const call of checked.calls.slice(6, -1)) {
+      assert.equal(call.result.success, true, JSON.stringify(call.result))
+      assert.equal(call.result.ok, true, JSON.stringify(call.result))
+      if (call.tool === 'lean_check')
+        assert.equal(call.result.cache.reused_server, false)
+    }
+    const retainedTarget = checked.calls.at(-2).result
+    assert.equal(retainedTarget.cache.cache_hit, true)
+    assert.equal(retainedTarget.cache.env_before, warmTarget.cache.env_before)
+    assert.equal(
+      checked.calls.at(-1).memory.events?.oom_kill || 0,
+      0,
+      `LeanProbe exceeded the ${memory} memory limit for ${preset}`,
+    )
     assert.equal(
       await fs.readFile(path.join(root, 'Main.lean'), 'utf8'),
       content,

@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { Runtime } from '../runtime.mjs'
+import { readPresetConfiguration } from '../prepared-presets.mjs'
 
 async function fixture(t) {
   const dataDir = await fs.mkdtemp(
@@ -115,9 +116,14 @@ test('worker and configuration changes invalidate the prepared certificate', asy
     }),
   )
   assert.equal(f.runtime.preparedPresetEnvironment('mathlib'), null)
+  assert.equal(f.runtime.templateRoot('mathlib'), null)
+  assert.throws(
+    () => readPresetConfiguration(f.root, f.definition),
+    /pinned dependency revision/,
+  )
   await assert.rejects(
     f.runtime.preparePresetEnvironment('mathlib'),
-    /pinned dependency revision/,
+    /unavailable/,
   )
   assert.equal(f.calls(), 3)
 })
@@ -162,8 +168,45 @@ test('symbolic links cannot impersonate a prepared certificate or template marke
     path.join(f.root, '.ready.json'),
   )
   assert.equal(f.runtime.preparedPresetEnvironment('mathlib'), null)
+  assert.equal(f.runtime.templateRoot('mathlib'), null)
   await assert.rejects(
     f.runtime.preparePresetEnvironment('mathlib'),
-    /regular file/,
+    /unavailable/,
   )
+})
+
+test('template readiness checks the successful marker and actual Lean pin', async (t) => {
+  const f = await fixture(t)
+  const markerFile = path.join(f.root, '.ready.json')
+  const marker = JSON.parse(await fs.readFile(markerFile, 'utf8'))
+  assert.equal(f.runtime.templateRoot('mathlib'), f.root)
+  await fs.writeFile(markerFile, JSON.stringify({ ...marker, code: 1 }))
+  assert.equal(f.runtime.templateRoot('mathlib'), null)
+  await fs.writeFile(markerFile, JSON.stringify(marker))
+  await fs.writeFile(
+    path.join(f.root, 'lean-toolchain'),
+    'leanprover/lean4:v4.34.1\n',
+  )
+  assert.equal(f.runtime.templateRoot('mathlib'), null)
+  assert.throws(
+    () => readPresetConfiguration(f.root, f.definition),
+    /pinned version/,
+  )
+})
+
+test('replacing a Lean binary invalidates prepared certificates even with the same size and mtime', async (t) => {
+  const f = await fixture(t)
+  const prepared = await f.runtime.preparePresetEnvironment('mathlib')
+  const binary = path.join(
+    f.runtime.toolchains.get(f.definition.toolchain),
+    'bin/lean',
+  )
+  const old = await fs.stat(binary)
+  await fs.writeFile(binary + '.new', 'fixture Lean binary')
+  await fs.utimes(binary + '.new', old.atime, old.mtime)
+  await fs.rename(binary + '.new', binary)
+  assert.equal(f.runtime.preparedPresetEnvironment('mathlib'), null)
+  const refreshed = await f.runtime.preparePresetEnvironment('mathlib')
+  assert.notEqual(refreshed.key, prepared.key)
+  assert.equal(f.calls(), 2)
 })

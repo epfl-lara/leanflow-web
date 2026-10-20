@@ -102,6 +102,7 @@ const uploads = []
 const terminalSockets = []
 let terminalStops = 0
 let failPdf = false
+let blockSaves = false
 let releaseDelayed
 let delayedFinished = false
 const delayedResponse = new Promise((resolve) => {
@@ -192,6 +193,11 @@ await page.route('**/api/projects/*/file?*', async (route) => {
     if (request.method() === 'GET') fileReads.push(file)
     return route.fallback()
   }
+  if (blockSaves)
+    return route.fulfill({
+      status: 409,
+      json: { error: 'Fixture file changed on disk. Review before saving.' },
+    })
   const input = request.postDataJSON()
   assert.equal(input.expectedHash, hash(state.files[projectId][file]))
   state.files[projectId][file] = input.content
@@ -327,6 +333,25 @@ async function nativeScrollbar() {
   })
   report.scrollbar = geometry
   assert(geometry.scrollHeight > geometry.clientHeight * 3)
+  if (process.platform === 'darwin' && geometry.gutter < 5) {
+    // macOS uses overlay scrollbars even when --hide-scrollbars is removed.
+    const before = await sidebarWidth()
+    await page.mouse.move(
+      geometry.list.x + geometry.list.width / 2,
+      geometry.list.y + geometry.list.height / 2,
+    )
+    await page.mouse.wheel(0, 600)
+    await until(
+      () => list.evaluate((element) => element.scrollTop > 100),
+      'overlay file scrollbar movement',
+    )
+    assert.equal(await sidebarWidth(), before)
+    assert.equal(await page.locator('body.panel-resizing').count(), 0)
+    report.checks.push(
+      'macOS overlay scrolling moves files without resizing the sidebar; Linux separately checks every native gutter pixel',
+    )
+    return
+  }
   assert(geometry.gutter >= 5, 'Chromium must render a native scrollbar gutter')
   assert(geometry.samples.length >= geometry.gutter * 2)
   assert(
@@ -428,6 +453,9 @@ async function markdownFailure() {
     ],
     runs: [],
   })
+  // Keep the draft dirty during extension-failure navigation even if autosave fires.
+  fallback.state.onSave = ({ respond }) =>
+    respond({ error: 'Fixture file changed on disk.' }, 409)
   const blocked = []
   await fallback.page.route('**/assets/index-*.js', async (route) => {
     const response = await route.fetch()
@@ -443,7 +471,9 @@ async function markdownFailure() {
     assert(blocked.length, 'The Markdown extension module must be blocked')
     const field = fallback.page.locator('.monaco-editor textarea').first()
     await field.focus()
-    await fallback.page.keyboard.press('Control+End')
+    await fallback.page.keyboard.press(
+      process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+    )
     await fallback.page.keyboard.insertText('-- Lean stays editable\n')
     const fallbackSave = fallback.page.getByRole('button', {
       name: 'Save',
@@ -471,19 +501,59 @@ async function markdownFailure() {
       ),
     )
     await fallback.page.locator('.editor-loading').waitFor({ state: 'hidden' })
-    await field.focus()
-    await fallback.page.keyboard.press('Control+End')
-    await fallback.page.keyboard.insertText(
-      'Markdown fallback stays editable.\n',
+    const fallbackText = async () =>
+      (
+        await fallback.page.locator('.monaco-editor .view-lines').innerText()
+      ).replaceAll('\u00a0', ' ')
+    await until(
+      async () =>
+        (
+          await fallback.page.locator('.file-toolbar .file-tab').innerText()
+        ).includes('Notes.md') &&
+        (await fallbackText()).includes('# Fixture title'),
+      'Markdown fallback source displayed',
     )
+    await field.focus()
+    await fallback.page.keyboard.press(
+      process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+    )
+    const marker = 'Markdown fallback stays editable.\n'
+    await fallback.page.keyboard.insertText(marker)
     await until(
       () => fallbackSave.isEnabled(),
       'Markdown editable without extension',
     )
-    assert(
-      (await fallback.page.locator('.monaco-editor .view-lines').innerText())
-        .replaceAll('\u00a0', ' ')
-        .includes('Markdown fallback stays editable.'),
+    // Draft state enables Save before Monaco's virtual lines necessarily paint.
+    // Wait for the visible content, then independently verify preview and save.
+    await until(
+      async () => (await fallbackText()).includes(marker.trim()),
+      'Markdown fallback draft rendered',
+    )
+    await fallback.page
+      .getByRole('button', { name: 'Preview Markdown', exact: true })
+      .click()
+    const fallbackPreview = fallback.page.getByRole('region', {
+      name: 'Markdown preview',
+    })
+    await until(
+      async () => (await fallbackPreview.innerText()).includes(marker.trim()),
+      'Markdown fallback preview contains the unsaved draft',
+    )
+    assert.equal(fallback.state.files[id]['Notes.md'], markdown)
+    assert.equal(fallback.state.files[id]['Main.lean'], sources['Main.lean'])
+    await fallback.page
+      .getByRole('button', { name: 'Edit Markdown', exact: true })
+      .click()
+    await fallbackPreview.waitFor({ state: 'hidden' })
+    fallback.state.onSave = null
+    await fallbackSave.click()
+    await until(
+      () => fallback.state.files[id]['Notes.md'] === markdown + marker,
+      'Markdown fallback draft saved with the original conflict hash',
+    )
+    await until(
+      () => fallbackSave.isDisabled(),
+      'Markdown fallback save settled',
     )
     assert.equal(await fallback.page.locator('.editor-failure').count(), 0)
     assert(
@@ -494,8 +564,26 @@ async function markdownFailure() {
     fallback.assertClean()
     report.markdownFailure = { blocked, ...fallback.report }
     report.checks.push(
-      'A failed Markdown extension load leaves Lean connected and editable, and Markdown remains editable with an actionable nonfatal notice',
+      'A failed Markdown extension load leaves Lean connected and editable; Markdown still renders a dirty preview and saves the exact draft with conflict checking and an actionable nonfatal notice',
     )
+  } catch (error) {
+    report.markdownFailure = {
+      blocked,
+      ...fallback.report,
+      failure: error.stack || error.message,
+      toolbar: await fallback.page
+        .locator('.file-toolbar')
+        .innerText()
+        .catch(() => ''),
+      visibleEditor: await fallback.page
+        .locator('.monaco-editor .view-lines')
+        .innerText()
+        .catch(() => ''),
+    }
+    await fallback.page
+      .screenshot({ path: path.join(output, 'markdown-extension-failure.png') })
+      .catch(() => {})
+    throw error
   } finally {
     await fallback.browser.close()
   }
@@ -529,9 +617,14 @@ try {
     'All .md/.markdown extension variants highlight titles and subtitles in the ready-project editor, with correct fenced-code styling in both themes',
   )
 
+  // A paused conflicting save makes unsaved-preview/navigation checks deterministic
+  // while keeping production autosave enabled. Successful autosaves have their own gate.
+  blockSaves = true
   const marker = 'Draft survives Markdown preview.\n'
   await editor().focus()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await page.keyboard.insertText(marker)
   await until(() => save.isEnabled(), 'Markdown draft')
   await page
@@ -596,6 +689,7 @@ try {
   await preview.waitFor({ state: 'hidden' })
   await until(() => tokenStyle(marker.trim()), 'restored Markdown draft')
   assert.equal(await save.isEnabled(), true)
+  blockSaves = false
   await save.click()
   await until(() => save.isDisabled(), 'Markdown save')
   assert.equal(state.files[projectId]['README.md'], markdown + marker)
@@ -604,9 +698,12 @@ try {
     'Markdown preview renders headings and LaTeX math safely, keeps code literal and remote images as links, and preserves unsaved edits across preview toggles and Save',
   )
 
+  blockSaves = true
   const secondMarker = 'Second draft stays during navigation.\n'
   await editor().focus()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await page.keyboard.insertText(secondMarker)
   await until(() => save.isEnabled(), 'second Markdown draft')
   await fileButton('Main.lean').click()
@@ -620,6 +717,7 @@ try {
   assert.equal(await save.isEnabled(), true)
   await fileButton('Main.lean').click()
   await unsaved.waitFor()
+  blockSaves = false
   await unsaved
     .getByRole('button', { name: 'Save & continue', exact: true })
     .click()
@@ -979,7 +1077,9 @@ try {
     'large Markdown source stays readable',
   )
   await editor().focus()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
   await page.keyboard.insertText('Large source stays editable.\n')
   await until(() => save.isEnabled(), 'large Markdown source stays editable')
   await fixture.emit(fixtureRun, 'status', { status: 'completed' })
