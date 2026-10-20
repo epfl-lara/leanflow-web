@@ -683,6 +683,21 @@ test('project polling omits transcripts and chat polling omits traces and diffs 
   f.events.update(job.id, {
     status: 'completed',
     message: 'A saved answer',
+    toolActivity: [
+      {
+        id: 'saved-step',
+        kind: 'check',
+        label: 'Check a proof',
+        status: 'completed',
+        messageOffset: 4,
+        afterFollowups: 0,
+        input: 'example : True := by trivial',
+        inputLanguage: 'lean',
+        output: 'Accepted',
+        checkResult: 'passed',
+      },
+    ],
+    toolActivityTruncated: true,
     reasoning: 'r'.repeat(20_000),
     reasoningSummary: 'Summary',
     log: 'l'.repeat(20_000),
@@ -725,6 +740,13 @@ test('project polling omits transcripts and chat polling omits traces and diffs 
   assert.equal('message' in listed, false)
   assert.equal(history.prompt, 'A saved request')
   assert.equal(history.message, 'A saved answer')
+  assert.equal(listed.toolActivity, undefined)
+  assert.equal(history.toolActivityTruncated, true)
+  assert.equal(history.toolActivity[0].label, 'Check a proof')
+  assert.equal(history.toolActivity[0].messageOffset, 4)
+  assert.equal(history.toolActivity[0].checkResult, 'passed')
+  assert.equal(history.toolActivity[0].input, undefined)
+  assert.equal(history.toolActivity[0].output, undefined)
   assert.equal('verification' in listed, false)
   assert.deepEqual(history.verification, { kind: 'search', complete: true })
   assert.equal(history.changeCount, 1)
@@ -737,6 +759,12 @@ test('project polling omits transcripts and chat polling omits traces and diffs 
   assert.equal(full.log.length, 20_000)
   assert.deepEqual(full.changes, changes)
   assert.deepEqual(full.liveChanges, changes)
+  assert.equal(full.toolActivity[0].input, 'example : True := by trivial')
+  assert.equal(full.toolActivity[0].output, 'Accepted')
+  const receipt = await (
+    await f.request(`/api/runs/${job.id}?view=metadata`)
+  ).json()
+  assert.deepEqual(receipt.toolActivity, full.toolActivity)
   assert(Number.isSafeInteger(full.eventCursor))
   const nonlive = f.events.create('owner', {
     kind: 'agent',

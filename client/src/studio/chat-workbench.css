@@ -5,9 +5,10 @@
 }
 .chat-workbench .assistant-output {
   min-height: min(200px, 30dvh);
+  container-type: size;
 }
 .chat-workbench > .chat-picker {
-  padding: 12px 12px 8px;
+  padding: 10px 12px 8px;
   align-items: center;
 }
 .chat-workbench .chat-picker-field > span {
@@ -364,6 +365,10 @@
 .turn-details > .verification-card,
 .turn-details > .optimization-summary {
   margin-top: 10px;
+}
+.chat-workbench .reasoning-body {
+  /* Keep both collapse controls reachable inside the available chat space. */
+  max-height: min(55vh, 32rem, max(120px, calc(100cqh - 110px)));
 }
 .chat-workbench .reasoning-trace .reasoning-content {
   font-size: 12px;

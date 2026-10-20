@@ -967,7 +967,10 @@ theorem useful : True := by trivial
   assert.match(html, /<code>a \| b<\/code>/)
   assert.match(html, /<ul>/)
   assert.match(html, /target="_blank" rel="noopener noreferrer"/)
-  assert.match(html, /<pre><code class="language-lean">/)
+  assert.match(html, /class="code-language">Lean</)
+  assert.match(html, /aria-label="Lean code"/)
+  assert.match(html, /class="syntax-keyword">theorem</)
+  assert.match(html, /Copy code/)
   assert.doesNotMatch(html, /<img|<script/)
 })
 
@@ -1028,7 +1031,7 @@ test('math parsing preserves code, escaped delimiters and link destinations', ()
   assert.match(html, /<code>\\\(x\\\)<\/code>/)
   assert.match(html, /Escaped \\\(x\\\) and \$5/)
   assert.match(html, /href="https:\/\/example.com\/\$x\$"/)
-  assert.match(html, /<pre><code class="language-lean">-- \$x\$/)
+  assert.match(html, /class="syntax-comment">-- \$x\$/)
 })
 
 test('every streamed LaTeX prefix renders safely, including multiline and CRLF formulas', () => {
@@ -1067,4 +1070,262 @@ test('unsupported and untrusted math stays readable without creating unsafe elem
       /<a[\s>]|<img[\s>]|<script[\s>]|href="javascript:/,
     )
   }
+})
+
+const { codeTokens } = load('./codeTokens.ts')
+const { CodeBlock } = load('./CodeBlock.tsx')
+const { chatFileLink } = load('./chatFileLink.ts')
+const { TurnOutcome } = load('./TurnOutcome.tsx')
+const toolStep = (fields = {}) => ({
+  id: 'tool-1',
+  kind: 'check',
+  label: 'Check Lean code',
+  status: 'running',
+  messageOffset: 0,
+  afterFollowups: 0,
+  ...fields,
+})
+
+test('tool steps follow reply offsets, reasoning and user updates without splitting a continuous group', () => {
+  const value = run({
+    message: 'Before.\n\nAfter.',
+    toolActivity: [
+      toolStep({ id: 'a', messageOffset: 7 }),
+      toolStep({ id: 'b', messageOffset: 7 }),
+      toolStep({ id: 'c', messageOffset: 7, afterFollowups: 1 }),
+    ],
+    followups: [
+      {
+        id: 'followup',
+        text: 'Use the other lemma.',
+        messageOffset: 7,
+        createdAt: '2026-10-20T00:00:00Z',
+      },
+    ],
+    reasoningBlocks: [
+      {
+        id: 'reason',
+        messageOffset: 7,
+        afterFollowups: 0,
+        reasoningOffset: 0,
+        reasoningLength: 5,
+        summaryOffset: 0,
+        summaryLength: 0,
+      },
+    ],
+  })
+  const segments = conversationSegments(value)
+  assert.deepEqual(
+    segments.map((entry) => entry.kind),
+    ['assistant', 'reasoning', 'activity', 'followup', 'activity', 'assistant'],
+  )
+  assert.deepEqual(
+    segments[2].steps.map((step) => step.id),
+    ['a', 'b'],
+  )
+  assert.deepEqual(
+    segments[4].steps.map((step) => step.id),
+    ['c'],
+  )
+  assert.equal(segments[0].text, 'Before.')
+  assert.equal(segments.at(-1).text, 'After.')
+  assert.equal(segments[1].active, false)
+  const tail = conversationSegments({
+    ...value,
+    message: 'After.',
+    messageBaseOffset: 9,
+  })
+  assert.equal(
+    tail.at(-1).text,
+    'After.',
+    'Trimming older text must preserve the retained reply',
+  )
+})
+
+test('tool event replay updates one row, rejects stale polls and ignores malformed events', () => {
+  const started = toolStep({ input: 'example : True := by trivial' })
+  const complete = {
+    ...started,
+    status: 'completed',
+    output: 'Accepted',
+    checkResult: 'passed',
+  }
+  const value = run({ status: 'running', eventCursor: 1 })
+  const next = appendRunEvents(value, [
+    { seq: 2, type: 'tool-step', data: started },
+    { seq: 3, type: 'tool-step', data: complete },
+    { seq: 4, type: 'tool-step', data: { id: 'bad', status: 'running' } },
+  ])
+  assert.deepEqual(next.toolActivity, [complete])
+  assert.equal(
+    appendRunEvents(next, [{ seq: 2, type: 'tool-step', data: started }]),
+    next,
+  )
+  assert.equal(
+    mergeRunSnapshot(next, { ...value, toolActivity: [started] }),
+    next,
+  )
+  assert.equal(
+    value.toolActivity,
+    undefined,
+    'Streaming must not mutate the previous state',
+  )
+})
+
+test('compact chat refreshes retain expanded tool previews and respect explicit history eviction', () => {
+  const step = toolStep({
+    status: 'completed',
+    input: 'code',
+    output: 'result',
+  })
+  const value = run({ eventCursor: 8, toolActivity: [step] })
+  const { input: _input, output: _output, ...summary } = step
+  const refreshed = mergeRunSnapshot(
+    value,
+    run({ eventCursor: 8, toolActivity: [summary] }),
+  )
+  assert.deepEqual(refreshed.toolActivity, [step])
+  const evicted = mergeRunSnapshot(
+    refreshed,
+    run({
+      eventCursor: 9,
+      toolActivity: [{ ...summary, detailsOmitted: true }],
+    }),
+  )
+  assert.equal(evicted.toolActivity[0].input, undefined)
+  assert.equal(evicted.toolActivity[0].output, undefined)
+  assert.equal(evicted.toolActivity[0].detailsOmitted, true)
+})
+
+test('Lean highlighting preserves exact source through nested comments, Unicode and incomplete streams', () => {
+  const sources = [
+    '/- outer /- inner -/ still outer -/\ntheorem α (n : Nat) : n = n := by\n  rfl\n',
+    'def message := "<script>alert(1)</script>"\n-- sorry in a comment\nexample : True := by sorry\n',
+    '/- unclosed /- nested',
+    'def s := "unfinished \\"',
+    '',
+  ]
+  for (const source of sources)
+    assert.equal(
+      codeTokens(source, 'lean')
+        .map((token) => token.text)
+        .join(''),
+      source,
+    )
+  assert.equal(codeTokens(sources[0], 'lean')[0].kind, 'comment')
+  assert(
+    codeTokens(sources[0], 'lean').some(
+      (token) => token.kind === 'tactic' && token.text === 'rfl',
+    ),
+  )
+  assert(
+    codeTokens(sources[1], 'lean').some(
+      (token) => token.kind === 'unfinished' && token.text === 'sorry',
+    ),
+  )
+  for (const language of ['unknown', 'html', 'toString', '__proto__'])
+    assert.deepEqual(codeTokens(sources[0], language), [{ text: sources[0] }])
+  const large = 'theorem '.repeat(6000)
+  assert.deepEqual(codeTokens(large, 'lean'), [{ text: large }])
+  const diff = '@@ -1 +1 @@\n-old\n+new\n unchanged\n'
+  assert.equal(
+    codeTokens(diff, 'diff')
+      .map((token) => token.text)
+      .join(''),
+    diff,
+  )
+})
+
+test('code previews escape markup and expose named copy, wrap, scrolling and expansion controls', () => {
+  const text =
+    '<img src=x onerror=alert(1)>\n' +
+    'example : True := by trivial\n'.repeat(20)
+  const html = renderToStaticMarkup(
+    React.createElement(CodeBlock, { text, language: 'lean' }),
+  )
+  assert.doesNotMatch(html, /<img|<script/)
+  assert.match(html, /&lt;img/)
+  assert.match(html, /aria-label="Lean code"/)
+  assert.match(html, /tab[Ii]ndex="0"/)
+  assert.match(html, /aria-pressed="false"/)
+  assert.match(html, /Copy code/)
+  assert.match(html, /Expand all 21 lines/)
+  for (const language of ['toString', '__proto__'])
+    assert.match(
+      renderToStaticMarkup(
+        React.createElement(CodeBlock, { text: 'test', language }),
+      ),
+      new RegExp(`>${language}<`),
+    )
+})
+
+test('chat file citations accept project locations and reject external or escaping paths', () => {
+  assert.deepEqual(chatFileLink('Proofs/Main.lean#L12-L15'), {
+    path: 'Proofs/Main.lean',
+    startLine: 12,
+    endLine: 15,
+  })
+  assert.deepEqual(chatFileLink('/workspace/Main.lean:7:2'), {
+    path: 'Main.lean',
+    startLine: 7,
+    endLine: 7,
+  })
+  assert.deepEqual(chatFileLink('./Some%20Proof.lean'), {
+    path: 'Some Proof.lean',
+    startLine: 1,
+    endLine: 1,
+  })
+  for (const value of [
+    '',
+    '../secret',
+    '%2e%2e/secret',
+    'https://example.com',
+    'javascript:alert(1)',
+    'file:///etc/passwd',
+    '/tmp/x',
+    'x\\y',
+    'x?query=1',
+    'x#L0',
+    'x#L3-L2',
+    'x#L9007199254740992',
+    'x%00',
+    '%broken',
+    'x//y',
+    'x/./y',
+  ])
+    assert.equal(chatFileLink(value), null, value)
+})
+
+test('final outcome distinguishes proof verification, formalization fidelity and file review', () => {
+  const render = (fields) =>
+    renderToStaticMarkup(
+      React.createElement(TurnOutcome, { run: run(fields), onDetails() {} }),
+    )
+  for (const verification of [
+    undefined,
+    { kind: 'chat', complete: true },
+    { kind: 'search', complete: true },
+  ])
+    assert.equal(render({ verification }), '')
+  const workspace = render({
+    verification: {
+      kind: 'workspace',
+      complete: true,
+      reason: 'No Lean changes.',
+    },
+  })
+  assert.match(workspace, /Ready for file review/)
+  assert.doesNotMatch(
+    workspace,
+    /class="turn-outcome passed"|Final Lean check passed/,
+  )
+  const failed = render({
+    verification: { complete: false, errors: ['Unknown constant useful'] },
+  })
+  assert.match(failed, /Final checks need attention/)
+  assert.match(failed, /Unknown constant useful/)
+  assert.doesNotMatch(failed, /class="turn-outcome passed"/)
+  const formal = render({ mode: 'formalize', verification: { complete: true } })
+  assert.match(formal, /Final Lean check passed/)
+  assert.match(formal, /statement and assumptions match your source/)
 })

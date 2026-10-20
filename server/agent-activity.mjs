@@ -182,6 +182,7 @@ export function createAgentActivityHandler({
       let path = projectPath(args.file || args.file_path || args.path)
       let output = ''
       let checkResult
+      let executionFailed = item.result?.isError === true
       if (item.type === 'commandExecution') {
         const actions = Array.isArray(item.commandActions)
           ? item.commandActions
@@ -239,7 +240,8 @@ export function createAgentActivityHandler({
             /* Only explicit structured check evidence gets a result badge. */
           }
         }
-        if (kind === 'check') {
+        executionFailed ||= result?.success === false
+        if (kind === 'check' && !executionFailed) {
           if (result?.ok === false) checkResult = 'issues'
           else if (result?.success === true && result.ok === true)
             checkResult = 'passed'
@@ -254,6 +256,7 @@ export function createAgentActivityHandler({
       }
       const failed =
         item.status === 'failed' ||
+        executionFailed ||
         !!item.error ||
         item.success === false ||
         (Number.isInteger(item.exitCode) && item.exitCode !== 0)

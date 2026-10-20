@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { chromium } from '@playwright/test'
+import { MAX_TOOL_STEPS, mergeToolStep } from '../../shared/tool-activity.mjs'
 import {
   reasoningBlocksFromEvents,
   recordReasoningBlock,
@@ -103,6 +104,14 @@ export function runTranscript(run) {
     messageTruncated: !!run.messageTruncated,
     followups: run.followups || [],
     reasoningBlocks: run.reasoningBlocks || [],
+    ...(run.toolActivity
+      ? {
+          toolActivity: run.toolActivity.map(
+            ({ input: _input, output: _output, ...step }) => step,
+          ),
+          toolActivityTruncated: !!run.toolActivityTruncated,
+        }
+      : {}),
     ...(run.error ? { error: run.error } : {}),
   }
 }
@@ -147,6 +156,7 @@ export async function chatBrowserFixture({
     onCreateRun: null,
     onCreateChat: null,
     onLeanMessage: null,
+    onSave: null,
   }
   const report = {
     requests: [],
@@ -337,6 +347,53 @@ export async function chatBrowserFixture({
         )
       }
     }
+    if (method === 'PUT') {
+      const project = state.projects.find(
+        (project) =>
+          endpoint === `/api/projects/${project.id}/file` ||
+          endpoint === `/api/projects/${project.id}/files`,
+      )
+      if (project) {
+        const sources = state.files[project.id]
+        const entries = endpoint.endsWith('/files')
+          ? body.files
+          : [{ path: url.searchParams.get('path'), ...body }]
+        const save = () => {
+          for (const entry of entries) {
+            const hash =
+              entry.path in sources
+                ? createHash('sha256').update(sources[entry.path]).digest('hex')
+                : null
+            if (entry.expectedHash !== hash)
+              return respond(
+                { error: 'File changed on disk. Reload it before saving.' },
+                409,
+              )
+          }
+          for (const entry of entries) sources[entry.path] = entry.content
+          const saved = entries.map((entry) => ({
+            path: entry.path,
+            hash: createHash('sha256').update(entry.content).digest('hex'),
+          }))
+          return respond(
+            endpoint.endsWith('/files')
+              ? {
+                  applied: entries.length,
+                  requiresPreparation: false,
+                  files: saved,
+                }
+              : {
+                  content: entries[0].content,
+                  hash: saved[0].hash,
+                  requiresPreparation: false,
+                },
+          )
+        }
+        if (state.onSave)
+          return state.onSave({ project, entries, respond, save })
+        return save()
+      }
+    }
     if (method === 'POST') {
       const project = state.projects.find(
         (project) => endpoint === `/api/projects/${project.id}/chats`,
@@ -442,6 +499,15 @@ export async function chatBrowserFixture({
       run[field] = (String(run[field] || '') + data.text).slice(-250000)
     if (type === 'status') run.status = data.status
     if (type === 'progress') run.progress = data
+    if (type === 'verification') run.verification = data
+    if (type === 'tool-step') {
+      const steps = run.toolActivity || []
+      run.toolActivityTruncated =
+        !!run.toolActivityTruncated ||
+        (steps.length >= MAX_TOOL_STEPS &&
+          !steps.some((step) => step.id === data.id))
+      run.toolActivity = mergeToolStep(steps, data)
+    }
     if (type === 'followup') {
       run.followups ||= []
       const index = run.followups.findIndex((entry) => entry.id === data.id)

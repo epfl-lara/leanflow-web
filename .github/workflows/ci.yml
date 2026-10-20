@@ -122,6 +122,12 @@ jobs:
             .runtime/streaming-ui/
             .runtime/ask-search-ui/
             .runtime/markdown-security-ui/
+            .runtime/chat-readability-ui/
+            .runtime/chat-compact-ui/
+            .runtime/reasoning-ui/
+            .runtime/reasoning-timeline-ui/
+            .runtime/reasoning-history-ui/
+            .runtime/autosave-ui/
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7

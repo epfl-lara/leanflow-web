@@ -332,7 +332,7 @@ test('saving single files preserves conflict and containment checks', async (t) 
   )
 })
 
-test('playgrounds can be renamed, converted, deleted and restored while retaining owner and active-run guards', async (t) => {
+test('playgrounds can be renamed, converted, stopped into trash and restored while retaining owner guards', async (t) => {
   const f = await fixture(t)
   const project = await f.create()
   const original = await f.workspaces.readFile(project.id, 'owner', 'Main.lean')
@@ -344,7 +344,12 @@ test('playgrounds can be renamed, converted, deleted and restored while retainin
   })
   f.events.update(run.id, { status: 'running' })
   const trash = () => f.request(`/api/projects/${project.id}/trash`, {})
-  assert.equal((await trash()).status, 409)
+  assert.equal(
+    (await f.request(`/api/projects/${project.id}/trash`, {}, f.otherToken))
+      .status,
+    404,
+  )
+  assert.equal(f.events.snapshot(run.id, 'owner').status, 'running')
   assert.equal(
     (
       await f.request(
@@ -382,13 +387,13 @@ test('playgrounds can be renamed, converted, deleted and restored while retainin
   assert.notEqual(value.protected, true)
   assert.equal(value.id, project.id)
   assert.equal(value.toolchain, TOOLCHAIN)
-  f.events.update(run.id, { status: 'completed' })
   const deleted = await trash()
   assert.equal(deleted.status, 200)
   const receipt = await deleted.json()
   assert.equal(f.workspaces.list('owner').length, 0)
   assert.throws(() => f.workspaces.get(project.id, 'owner'), { status: 404 })
   await f.workspaces.restore(receipt.trashId, 'owner')
+  assert.equal(f.events.snapshot(run.id, 'owner').status, 'cancelled')
   assert.equal(f.workspaces.get(project.id, 'owner').name, 'My proof')
   assert.equal(
     (await f.workspaces.readFile(project.id, 'owner', 'Main.lean')).hash,

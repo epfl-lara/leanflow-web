@@ -101,29 +101,33 @@ async function exercise(run, label) {
     toggle = trace.locator('summary')
   await toggle.click()
   await trace.locator('.reasoning-content').waitFor()
-  // Read far enough that the original header would have scrolled away.
-  await conversation.evaluate((element, id) => {
-    const trace = element.querySelector(
-      `[data-run-id="${id}"] .reasoning-trace`,
-    )
-    element.scrollTop +=
-      trace.getBoundingClientRect().top -
-      element.getBoundingClientRect().top +
-      1400
-  }, run.id)
-  await until(async () => {
-    const bounds = await conversation.boundingBox(),
-      box = await toggle.boundingBox(),
-      traceBounds = await trace.boundingBox()
-    return (
-      box &&
-      bounds &&
-      traceBounds &&
-      traceBounds.y < bounds.y - 1000 &&
-      box.y >= bounds.y &&
-      box.y + box.height <= bounds.y + bounds.height
-    )
-  }, 'sticky reasoning toggle while reading')
+  // The trace scrolls internally; its header stays in the document flow.
+  await toggle.scrollIntoViewIfNeeded()
+  const body = trace.locator('.reasoning-body')
+  const layout = await body.evaluate((element) => ({
+    height: element.clientHeight,
+    contentHeight: element.scrollHeight,
+    viewport: window.innerHeight,
+    overflow: getComputedStyle(element).overflowY,
+    summaryPosition: getComputedStyle(
+      element.closest('details').querySelector('summary'),
+    ).position,
+  }))
+  assert(layout.contentHeight > layout.height + 1000)
+  assert(layout.height <= layout.viewport * 0.55 + 2)
+  assert.equal(layout.overflow, 'auto')
+  assert(!['sticky', 'fixed'].includes(layout.summaryPosition))
+  const outerScroll = await conversation.evaluate(
+    (element) => element.scrollTop,
+  )
+  await body.evaluate((element) => {
+    element.scrollTop = 1400
+  })
+  assert.equal(
+    await conversation.evaluate((element) => element.scrollTop),
+    outerScroll,
+  )
+  await visibleToggle(trace)
   if (run === active) {
     await emit(
       active,
@@ -150,15 +154,7 @@ async function exercise(run, label) {
     await latest
       .getByRole('button', { name: 'Hide reasoning trace', exact: true })
       .click()
-    await conversation.evaluate((element, id) => {
-      const trace = element.querySelector(
-        `[data-run-id="${id}"] .reasoning-trace`,
-      )
-      element.scrollTop +=
-        trace.getBoundingClientRect().top -
-        element.getBoundingClientRect().top +
-        1400
-    }, run.id)
+    await toggle.scrollIntoViewIfNeeded()
     assert(
       !(await trace.textContent()).includes('STREAMED_REASONING'),
       'Later reasoning must belong to its own section',
@@ -201,7 +197,7 @@ async function exercise(run, label) {
     assert.equal(await trace.getAttribute('open'), null)
   }
   report.checks.push(
-    `${label}: sticky toggle, keyboard reopening, bottom collapse, focus and viewport restoration`,
+    `${label}: bounded trace scrolling, nonfloating toggle, keyboard reopening, bottom collapse, focus and viewport restoration`,
   )
 }
 try {

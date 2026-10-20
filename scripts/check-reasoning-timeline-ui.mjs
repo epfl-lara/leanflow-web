@@ -388,7 +388,7 @@ try {
     ],
   }
   await emit(active, 'status', { status: 'completed' })
-  const issue = liveTurn.locator('.turn-verification-issue')
+  const issue = liveTurn.locator('.turn-outcome.attention')
   await issue.waitFor()
   await until(
     async () =>

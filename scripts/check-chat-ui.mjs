@@ -928,13 +928,13 @@ try {
     !(await currentTurn().textContent()).includes('TRACE_FIXTURE'),
     'Streaming reopened collapsed reasoning',
   )
-  await currentTurn().getByText('Activity', { exact: true }).click()
+  await currentTurn().locator('.activity-log > summary').click()
   await until(
     async () =>
       (await currentTurn().textContent()).includes('ACTIVITY_FIXTURE'),
     'expanded activity content',
   )
-  await currentTurn().getByText('Activity', { exact: true }).click()
+  await currentTurn().locator('.activity-log > summary').click()
   await currentTurn().locator('.turn-details > summary').click()
   await page.setViewportSize({ width: 1366, height: 768 })
   await sleep(300)

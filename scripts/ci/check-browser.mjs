@@ -25,9 +25,19 @@ const suites = [
   'streaming',
   'ask-search',
   'markdown-security',
+  'chat-readability',
+  'chat-compact',
+  'reasoning',
+  'reasoning-timeline',
+  'reasoning-history',
+  'autosave',
 ]
+const selected = process.argv.slice(2)
 try {
-  for (const suite of suites) {
+  for (const suite of selected)
+    if (!suites.includes(suite))
+      throw new Error(`Unknown browser suite: ${suite}`)
+  for (const suite of selected.length ? selected : suites) {
     console.log(`Checking ${suite}`)
     try {
       const result = await execute(

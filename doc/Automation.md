@@ -12,6 +12,12 @@ Before the first run, allow Actions for the repository in its organization setti
 
 Dependabot proposes weekly updates for npm packages, actions, and Docker base images. Review and merge them through the same checks. Worker builds resolve npm's latest Lemex release and verify its integrity. Each release manifest records the version and provenance from the actual worker image, so downloaded artifacts retain the verified runtime. See [Lemex updates](NativeLemex.md#updates).
 
+## Run checks locally
+
+Use Linux and Node.js 24 or newer for the full server suite; containment checks require Linux filesystem support. After `npm ci`, run `npm test`, `npm run check`, `npm run lint`, and `npm run build`.
+
+For browser checks, install Chromium with `npx --no-install playwright install chromium`, then run `node scripts/ci/check-browser.mjs`. The runner starts its own local server and mocks APIs, Lean and providers. It covers accounts, models, chat, code previews, reasoning, narrow layouts, and autosave recovery and conflicts. Reports and screenshots are saved under `.runtime/` and uploaded by CI. To focus a run, append suite names, for example `chat-readability autosave`.
+
 ## Prepare a release
 
 1. Run **Actions → Release → Run workflow** on `main` to prepare a candidate. Download `release-candidate` from the completed run; artifacts are retained for seven days.
