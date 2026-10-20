@@ -3,7 +3,7 @@
     "id": "lean",
     "name": "Lean basics",
     "description": "A fast, minimal Lean project for learning and small proofs.",
-    "toolchain": "leanprover/lean4:v4.34.1",
+    "toolchain": "leanprover/lean4:v4.35.0",
     "import": "Lean"
   },
   {

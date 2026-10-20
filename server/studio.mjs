@@ -212,6 +212,37 @@ export async function createStudio({
         ?.playgroundState || 'unavailable',
   })
   preparePlayground()
+  // Startup stays responsive while shared, pinned library caches are prepared.
+  // Injected runtimes are controlled by their caller (for example fixtures).
+  const presetPreparation = suppliedRuntime
+    ? Promise.resolve()
+    : (async () => {
+        if (!runtime.info().ready) return
+        try {
+          await runtime.leanReleases.refresh(
+            runtime.presetInstaller.controller.signal,
+          )
+        } catch (error) {
+          console.warn(
+            'Using cached Lean releases:',
+            config.redact(error.message),
+          )
+        }
+        if (runtime.stopping || process.env.STUDIO_AUTO_PREPARE_PRESETS === '0')
+          return
+        await runtime.presetInstaller.prepareAll({
+          onProgress: (id, message) =>
+            console.info(`Preset ${id}:`, config.redact(message)),
+          onReady: (id) => {
+            if (id === 'mathlib') preparePlayground()
+          },
+        })
+      })().catch((error) =>
+        console.warn(
+          'Preset preparation failed:',
+          config.redact(error.message),
+        ),
+      )
   const gitConnections =
     suppliedGitConnections ||
     (await new GitConnections({ dataDir, validateRepository }).init())
@@ -467,6 +498,7 @@ export async function createStudio({
     )
     res.json({ ok: true })
   })
+  app.get('/api/templates', (_req, res) => res.json(runtime.templates()))
   app.get('/api/session', async (req, res) => {
     let modelAccess
     try {
@@ -1361,6 +1393,7 @@ export async function createStudio({
         agentsStopped,
         texStopped,
         playgroundPreparation,
+        presetPreparation,
         ...workspaces.jobs.values(),
       ])
       await stopped

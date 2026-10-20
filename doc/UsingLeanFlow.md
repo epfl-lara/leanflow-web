@@ -16,6 +16,8 @@ The shared Mathlib template stays protected; your own playgrounds can be deleted
 
 Choose **Import or create project**. Create a project with compatible library presets, paste an HTTPS repository URL, or upload a local folder.
 
+The **Project name** field is at the top. Lean, Mathlib, CSLib, and Physlib prepare automatically on the server; the picker updates when each library is ready. **Lean basics** defaults to the latest stable release, with other releases and an exact-version option in **Lean version**. Library presets use their compatible versions, and existing projects keep their pins.
+
 GitHub and GitLab subdirectory links work too, such as `https://github.com/epfl-lara/jordan-curve-theorem/tree/main/HOLLight-Lean` or `https://gitlab.com/group/project/-/tree/main/Lean`. For branch names containing `/`, use **More options → Branch, tag, or commit**. Imports keep their Lean version and dependency pins.
 
 For a private repository, choose **Git connections** and save a token for its host. Imports, publishing and terminal Git commands use the same account connection. A [GitHub fine-grained token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) needs access to the repository and **Contents: Read and write** to push, or **Read-only** to clone. A [GitLab token](https://docs.gitlab.com/user/profile/personal_access_tokens/) needs **write_repository** to push, or **read_repository** to clone. Enter the matching username for a deploy token. Select GitHub or GitLab and enter your own host for a self-hosted installation.

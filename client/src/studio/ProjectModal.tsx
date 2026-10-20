@@ -54,11 +54,8 @@ export function ProjectModal({
       : libraries.length
         ? 'mathlib'
         : 'lean'
-  const [leanVersion, setLeanVersion] = useState(
-    templates
-      .find((template) => template.id === 'lean')
-      ?.toolchain?.replace('leanprover/lean4:', '') || '',
-  )
+  const [leanVersion, setLeanVersion] = useState('')
+  const [customLeanVersion, setCustomLeanVersion] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const { data: gitConnections } = useGitConnections()
@@ -100,7 +97,9 @@ export function ProjectModal({
         version = selected?.toolchain?.replace('leanprover/lean4:', '') || ''
       if (version.startsWith('4.')) version = `v${version}`
       if (!/^v4\.\d+\.\d+(?:-rc\d+)?$/.test(version)) {
-        setError('Use an exact Lean 4 release, such as v4.34.1 or v4.35.0-rc4.')
+        setError(
+          'Choose a Lean release or enter an exact version, such as v4.35.0 or v4.36.0-rc1.',
+        )
         return
       }
       toolchain = `leanprover/lean4:${version}`
@@ -353,7 +352,15 @@ export function ProjectModal({
                     <span className="tag success">Prepared</span>
                   )}
                   {!template.ready && template.id !== 'lean' && (
-                    <span className="tag">Not installed</span>
+                    <span className="tag" role="status">
+                      {template.preparationState === 'preparing'
+                        ? 'Preparing…'
+                        : template.preparationState === 'queued'
+                          ? 'Queued'
+                          : template.preparationState === 'failed'
+                            ? 'Setup failed'
+                            : 'Not installed'}
+                    </span>
                   )}
                 </label>
               ))}
@@ -365,8 +372,12 @@ export function ProjectModal({
             )}
             {unavailableLibrary && (
               <p className="error-message" aria-live="polite">
-                A selected library is not installed on this server. Choose an
-                available library or import an existing repository.
+                {selected?.preparationState === 'preparing' ||
+                selected?.preparationState === 'queued'
+                  ? 'This library is being prepared automatically. You can select it as soon as setup finishes.'
+                  : selected?.preparationState === 'failed'
+                    ? 'Library setup failed. Ask the administrator to retry preparation. You can use another library or import a project.'
+                    : 'This library is not installed on this server. Choose an available library or import an existing repository.'}
               </p>
             )}
             {selected && (
@@ -392,23 +403,61 @@ export function ProjectModal({
                 <label className="field-label" htmlFor="lean-version">
                   Lean version
                 </label>
-                <input
+                <select
                   id="lean-version"
-                  value={leanVersion}
-                  placeholder={
-                    selected?.toolchain?.replace('leanprover/lean4:', '') ||
-                    'v4.34.1'
-                  }
-                  onChange={(event) => setLeanVersion(event.target.value)}
+                  value={customLeanVersion ? 'custom' : leanVersion}
+                  onChange={(event) => {
+                    const value = event.target.value
+                    setCustomLeanVersion(value === 'custom')
+                    setLeanVersion(value === 'custom' ? '' : value)
+                  }}
                   disabled={busy}
-                  autoComplete="off"
-                  spellCheck={false}
                   aria-describedby="lean-version-help"
-                />
+                >
+                  <option value="">
+                    {selected?.toolchain?.replace('leanprover/lean4:', '')} ·
+                    Latest stable
+                  </option>
+                  {selected?.versions
+                    ?.filter(
+                      (version) =>
+                        version !==
+                        selected.toolchain?.replace('leanprover/lean4:', ''),
+                    )
+                    .map((version) => (
+                      <option key={version} value={version}>
+                        {version}
+                        {version.includes('-rc') ? ' · Release candidate' : ''}
+                      </option>
+                    ))}
+                  <option value="custom">Another exact version…</option>
+                </select>
+                {customLeanVersion && (
+                  <>
+                    <label
+                      className="field-label"
+                      htmlFor="custom-lean-version"
+                    >
+                      Exact Lean version
+                    </label>
+                    <input
+                      id="custom-lean-version"
+                      value={leanVersion}
+                      placeholder="e.g. v4.36.0-rc1"
+                      required
+                      onChange={(event) => setLeanVersion(event.target.value)}
+                      disabled={busy}
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  </>
+                )}
                 <p id="lean-version-help" className="field-help">
-                  Use an exact release, such as v4.34.1. The server installs and
-                  caches it when needed. Library presets use their tested Lean
-                  versions.
+                  Defaults to the latest stable Lean release. Choose another
+                  release or type an exact version, including a release
+                  candidate. The server installs and caches it when needed.
+                  Library presets use their compatible Lean versions; existing
+                  projects keep theirs.
                 </p>
               </>
             )}

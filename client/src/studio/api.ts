@@ -29,6 +29,8 @@ export interface Preset {
   description: string
   toolchain?: string
   ready?: boolean
+  preparationState?: 'queued' | 'preparing' | 'ready' | 'failed' | 'unavailable'
+  versions?: string[]
   playgroundReady?: boolean
   playgroundState?: PlaygroundPreparationState
 }

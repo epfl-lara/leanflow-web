@@ -8,6 +8,8 @@ import fs from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { PreparedPresetCache } from './prepared-presets.mjs'
+import { PresetInstaller } from './preset-installer.mjs'
+import { LeanReleases } from './lean-releases.mjs'
 import {
   managedWorkerDirectory,
   managedWorkerFile,
@@ -210,6 +212,11 @@ export class Runtime {
     this.leanCheckSupport = new LeanCheckSupport(this)
     this.apparmorEnabled = false
     this.toolchains = new Map()
+    this.leanReleases = new LeanReleases(
+      this.runtimeDir,
+      presetDefinitions.find((p) => p.id === 'lean').toolchain,
+    )
+    this.presetInstaller = new PresetInstaller(this)
     this.dependencies = new Map()
     this.dependencyRegistryStamp = null
     this.sharedCache = new SharedDependencyCache(this, (relative) =>
@@ -227,6 +234,7 @@ export class Runtime {
     this.temporaryWorkspaces = new TemporaryWorkspaces({
       directory: path.join(this.runtimeDir, 'temporary-workspaces'),
       allowedRoots: [
+        path.join(this.runtimeDir, 'template-check'),
         path.join(this.runtimeDir, 'shared-dependency-stages'),
         path.join(this.dataDir, 'setup-repairs'),
       ],
@@ -239,11 +247,16 @@ export class Runtime {
     await fsp.mkdir(this.dataDir, { recursive: true, mode: 0o700 })
     this.dataDir = await fsp.realpath(this.dataDir)
     this.runtimeDir = path.join(this.dataDir, 'runtime')
+    this.leanReleases.filename = path.join(
+      this.runtimeDir,
+      'lean-releases.json',
+    )
     this.temporaryWorkspaces.directory = path.join(
       this.runtimeDir,
       'temporary-workspaces',
     )
     this.temporaryWorkspaces.allowedRoots = [
+      path.join(this.runtimeDir, 'template-check'),
       path.join(this.runtimeDir, 'shared-dependency-stages'),
       path.join(this.dataDir, 'setup-repairs'),
     ]
@@ -730,8 +743,10 @@ export class Runtime {
 
   templates() {
     return presetDefinitions.map((preset) => ({
-      ...preset,
+      ...this.presetDefinition(preset.id),
       ready: Boolean(this.templateRoot(preset.id)),
+      preparationState: this.presetInstaller.state(preset.id),
+      ...(preset.id === 'lean' ? { versions: this.leanReleases.versions } : {}),
       ...(preset.id === 'mathlib'
         ? {
             playgroundReady: Boolean(this.preparedPresetEnvironment(preset.id)),
@@ -742,7 +757,20 @@ export class Runtime {
   }
 
   presetDefinition(id) {
-    return presetDefinitions.find((preset) => preset.id === id)
+    const preset = presetDefinitions.find((preset) => preset.id === id)
+    return id === 'lean'
+      ? { ...preset, toolchain: `leanprover/lean4:${this.leanReleases.latest}` }
+      : preset
+  }
+
+  templateInstallRoot(id) {
+    const preset = this.presetDefinition(id)
+    if (!preset) throw new Error('Unknown preset')
+    const key = createHash('sha256')
+      .update(JSON.stringify(preset))
+      .digest('hex')
+      .slice(0, 20)
+    return path.join(this.runtimeDir, 'templates', `${id}-${key}`)
   }
 
   preparedPresetEnvironment(id) {
@@ -755,21 +783,26 @@ export class Runtime {
   }
 
   templateRoot(id) {
-    if (!presetDefinitions.some((preset) => preset.id === id)) return null
-    const root = path.join(this.runtimeDir, 'templates', id)
-    const marker = path.join(root, '.ready.json')
-    try {
-      const metadata = JSON.parse(fs.readFileSync(marker, 'utf8'))
-      const preset = presetDefinitions.find((item) => item.id === id)
-      if (
-        metadata.toolchain !== preset.toolchain ||
-        (preset.revision && metadata.revision !== preset.revision)
-      )
-        return null
-      return root
-    } catch {
-      return null
+    const preset = this.presetDefinition(id)
+    if (!preset) return null
+    for (const root of [
+      this.templateInstallRoot(id),
+      path.join(this.runtimeDir, 'templates', id),
+    ]) {
+      try {
+        const metadata = JSON.parse(
+          fs.readFileSync(path.join(root, '.ready.json'), 'utf8'),
+        )
+        if (
+          metadata.toolchain === preset.toolchain &&
+          (!preset.revision || metadata.revision === preset.revision)
+        )
+          return root
+      } catch {
+        /* Missing or incomplete installations are not ready. */
+      }
     }
+    return null
   }
 
   async home(root) {
@@ -1833,6 +1866,7 @@ export class Runtime {
 
   async shutdown() {
     this.stopping = true
+    this.presetInstaller.stop()
     for (const job of this.queue.splice(0)) {
       job.options.signal?.removeEventListener('abort', job.abort)
       job.reject(new Error('Runtime is shutting down'))
@@ -1849,6 +1883,7 @@ export class Runtime {
     if (containers.length) await this.#host(['rm', '-f', ...containers])
     await Promise.allSettled(children.map((child) => child.workerStopped))
     await Promise.allSettled([...this.sharedCache.building.values()])
+    await this.presetInstaller.close()
   }
 
   async stopProject(root) {

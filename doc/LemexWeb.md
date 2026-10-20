@@ -33,20 +33,23 @@ npm run worker:build
 
 See [Prepare Lemex](NativeLemex.md) for release details and updates. The first Docker build also installs the Lean tools and can take a while.
 
-Then prepare a basic Lean project and build the app:
+Then build the app:
 
 ```bash
-node --env-file=.env scripts/bootstrap-presets.mjs lean
 npm run build
 ```
 
-For Mathlib Playground, also run:
+On startup, LeanFlow automatically prepares missing Lean, Mathlib, CSLib, and Physlib presets in the background. The project picker shows their progress; prepared libraries are reused by new projects. Initial downloads can take a while and use many gigabytes.
+
+To prepare everything before starting the app, or retry a failed library:
 
 ```bash
-node --env-file=.env scripts/bootstrap-presets.mjs mathlib
+node --env-file=.env scripts/bootstrap-presets.mjs
 ```
 
-Omit the final preset name to prepare Lean, Mathlib, CSLib, and Physlib together. Their downloads take more time and disk space. These commands load `.env` so they use your chosen data directory.
+Append `mathlib`, `cslib`, or `physlib` to prepare just that library. Set `STUDIO_AUTO_PREPARE_PRESETS=0` in `.env` if you prefer manual provisioning.
+
+New Lean basics projects default to the latest stable official release, discovered at startup with a cached fallback when offline. You can choose another exact release, including release candidates. Library presets and existing projects keep their compatible, pinned versions.
 
 ### 4. Start the app
 

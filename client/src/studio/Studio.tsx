@@ -20,6 +20,7 @@ import {
   type FileEntry,
   type GitInfo,
   type Project,
+  type Preset,
   type Session,
   type TrashItem,
   type TrashDeleteResult,
@@ -557,6 +558,36 @@ export function Studio() {
   useEffect(() => {
     void loadSession()
   }, [loadSession])
+  const preparingTemplates = session?.templates.some(
+    (p) =>
+      p.preparationState === 'queued' || p.preparationState === 'preparing',
+  )
+  const sessionUser = session?.user.id
+  useEffect(() => {
+    if (!sessionUser || authRequired || (!projectModal && !preparingTemplates))
+      return
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout>
+    const refresh = async () => {
+      try {
+        const templates = await api<Preset[]>('/api/templates')
+        if (!disposed)
+          setSession((current) =>
+            current?.user.id === sessionUser
+              ? { ...current, templates }
+              : current,
+          )
+      } catch {
+        /* Keep existing choices during a temporary connection failure. */
+      }
+      if (!disposed) timer = setTimeout(() => void refresh(), 5000)
+    }
+    void refresh()
+    return () => {
+      disposed = true
+      clearTimeout(timer)
+    }
+  }, [sessionUser, authRequired, projectModal, preparingTemplates])
   useEffect(() => {
     const expired = () => setAuthRequired(true)
     const restored = () => {
