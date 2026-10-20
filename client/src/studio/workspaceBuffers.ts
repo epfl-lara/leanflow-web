@@ -59,7 +59,7 @@ export function renameSources(value: unknown): RenameSource[] {
 }
 
 // One store owns visible and retained native editor models. A multi-file rename
-// stays unsaved until one Save commits every dirty buffer, or Discard resets all.
+// is saved as one batch by autosave or Save; Discard resets every dirty buffer.
 export class WorkspaceBuffers {
   private state: {
     scope: WorkspaceScope

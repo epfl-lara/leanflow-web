@@ -2,7 +2,9 @@
 
 ## Start in Mathlib Playground
 
-Choose **Mathlib Playground** on the welcome screen, or expand **Playgrounds** in the sidebar and choose **New playground**. It opens a private scratch file with `import Mathlib`, using the prepared Lean and Mathlib versions. New playgrounds have distinct names such as `Scratch.lean` and `Scratch2.lean`. Paste your code and choose **Save**, or press **Ctrl+S** (**Cmd+S** on macOS).
+Choose **Mathlib Playground** on the welcome screen, or expand **Playgrounds** in the sidebar and choose **New playground**. It opens a private scratch file with `import Mathlib`, using the prepared Lean and Mathlib versions. New playgrounds have distinct names such as `Scratch.lean` and `Scratch2.lean`. Paste your code; files save automatically after a short pause. **Save** or **Ctrl+S** (**Cmd+S** on macOS) saves immediately.
+
+Autosave is enabled for editable files, including Lean, Markdown, and TeX. It waits about 1.5 seconds after typing, saves periodically during longer edits, and finishes pending saves before changing workspaces. The status bar shows **Saving…**, **All changes saved**, or a save problem. Connection failures retry with a delay. Conflicts pause autosave and preserve your edits in the current tab; resolve the conflict or use **Reload file** to discard local changes. Keep the tab open until saving succeeds. Read-only library sources are never saved.
 
 Choose **Open .lean file** to upload one UTF-8 Lean file of at most 2 MiB. Its contents open as `Main.lean` in a new workspace. Files importing other modules from your own project need the full project instead.
 
@@ -60,7 +62,7 @@ With a prepared project open, choose **Ask Lemex** to add the current chapter to
 
 If a book is missing, ask the server administrator to [install the local books](Configuration.md#local-lean-books).
 
-Choose a Markdown file such as `README.md` in **Files**. The editor highlights headings, emphasis, links, lists, and code fences. Choose **Preview Markdown** to read the formatted document, including tables and math written as `$x^2$`, `$$x^2$$`, `\(x^2\)`, or `\[x^2\]`. **Edit Markdown** returns to the same editor with your unsaved changes intact. Choose **Save** to save them.
+Choose a Markdown file such as `README.md` in **Files**. The editor highlights headings, emphasis, links, lists, and code fences. Choose **Preview Markdown** to read the formatted document, including tables and math written as `$x^2$`, `$$x^2$$`, `\(x^2\)`, or `\[x^2\]`. **Edit Markdown** returns to the same editor. Changes save automatically.
 
 Formatted previews support documents up to 512 KiB. Larger Markdown files stay available in the editor.
 
@@ -160,7 +162,7 @@ The **Model** dropdown shows your saved models. Choose **Add models…** to brow
 
 Use **Send update** for extra instructions or **Stop** to interrupt. Updates show whether they were accepted. Runs continue until finished or stopped; send another message afterward to continue.
 
-Scroll up freely; **Jump to latest** resumes following output. Reasoning appears between replies in separate Show/Hide sections. Files and chat drafts remain available during a run.
+Scroll up freely; **Jump to latest** resumes following output. Reasoning appears between replies in separate Show/Hide sections. Long traces scroll inside their own panel, keeping the Show/Hide controls within the message instead of floating over the chat. Files and chat drafts remain available during a run.
 
 With live edits on, the work status shows whether any files have been updated. Scratch checks do not change your editor; changes appear when Lemex writes to a project file. Saved edits still need final Lean verification. In review-first mode, files update after you accept the candidate changes.
 
@@ -180,7 +182,7 @@ Results show a **Type** or **Signature** and available documentation/source link
 
 Choose **Open locally** to view a module from the project's pinned Lean installation or installed library packages. The viewer is read only and leaves your editor's unsaved changes intact. It selects the declaration when its signature matches the local file; otherwise it shows the module without guessing a line from another version. **Open source** opens the search index's version on the web.
 
-To jump to a declaration from the editor, hold **Alt** (**Option** on macOS) and click its name. You can also press **F12** or right-click and choose **Go to Definition**. Project files open in the editor; definitions in Lean's installed library open in the scrollable read-only viewer at the position reported by Lean. Navigation between project files uses the usual unsaved-edit prompt. Use **Ctrl+click** (**Cmd+click** on macOS) to add a cursor for editing.
+To jump to a declaration from the editor, hold **Alt** (**Option** on macOS) and click its name. You can also press **F12** or right-click and choose **Go to Definition**. Project files open in the editor; definitions in Lean's installed library open in the scrollable read-only viewer at the position reported by Lean. Pending edits save when navigating away; a save problem keeps your edits open for review. Use **Ctrl+click** (**Cmd+click** on macOS) to add a cursor for editing.
 
 Returning to a recently opened Lean file can reuse its proof-checking state. The editor keeps one recent project source warm for up to a minute. Saving source changes and refreshing file listings invalidate cached imports; switching projects releases the cache. Large files are excluded. While **Terminal** is open, its automatic file refreshes also clear the cache.
 

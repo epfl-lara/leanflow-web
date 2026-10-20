@@ -192,36 +192,42 @@ export function ReasoningTrace({
       </summary>
       {open && (
         <>
-          {loading && <p className="field-help">Loading reasoning…</p>}
-          {error && <p className="error-message">{error}</p>}
-          {!run.reasoningHistoryAvailable &&
-            run.reasoningTruncated &&
-            (!block ||
-              block.reasoningOffset < (run.reasoningBaseOffset || 0)) && (
-              <p className="field-help">
-                Earlier reasoning output was trimmed.
-              </p>
+          <section
+            className="reasoning-body"
+            aria-label="Reasoning trace"
+            tabIndex={0}
+          >
+            {loading && <p className="field-help">Loading reasoning…</p>}
+            {error && <p className="error-message">{error}</p>}
+            {!run.reasoningHistoryAvailable &&
+              run.reasoningTruncated &&
+              (!block ||
+                block.reasoningOffset < (run.reasoningBaseOffset || 0)) && (
+                <p className="field-help">
+                  Earlier reasoning output was trimmed.
+                </p>
+              )}
+            {reasoningSummary && (
+              <div className="markdown-body reasoning-summary">
+                <OutputText text={reasoningSummary} streaming={active} />
+              </div>
             )}
-          {reasoningSummary && (
-            <div className="markdown-body reasoning-summary">
-              <OutputText text={reasoningSummary} streaming={active} />
-            </div>
-          )}
-          {reasoning && (
-            <div className="markdown-body reasoning-content">
-              <OutputText text={reasoning} streaming={active} />
-            </div>
-          )}
-          {nextOffset != null && (
-            <button
-              type="button"
-              className="turn-action"
-              disabled={loading}
-              onClick={() => void loadPage(nextOffset)}
-            >
-              Load more reasoning
-            </button>
-          )}
+            {reasoning && (
+              <div className="markdown-body reasoning-content">
+                <OutputText text={reasoning} streaming={active} />
+              </div>
+            )}
+            {nextOffset != null && (
+              <button
+                type="button"
+                className="turn-action"
+                disabled={loading}
+                onClick={() => void loadPage(nextOffset)}
+              >
+                Load more reasoning
+              </button>
+            )}
+          </section>
           <button
             type="button"
             className="turn-action reasoning-collapse"

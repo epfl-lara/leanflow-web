@@ -31,10 +31,10 @@ import { Dialog } from './Dialog'
 import { CheckControls } from './CheckControls'
 import { TrashDialog } from './TrashDialog'
 import { Icon } from './Icons'
-import { HelpTip } from './HelpTip'
 import { ToolbarAction } from './ToolbarAction'
 import { LeanWorkspace } from './LeanWorkspace'
 import { WorkspaceBuffers, type WorkspaceScope } from './workspaceBuffers'
+import { useAutosave } from './useAutosave'
 import { PdfFileViewer } from './PdfFileViewer'
 import { MarkdownFilePreview } from './MarkdownFilePreview'
 import { TexPanel } from './TexPanel'
@@ -379,6 +379,7 @@ export function Studio() {
     >
   } | null>(null)
   const openRequest = useRef(0)
+  const navigationRequest = useRef(0)
   const generation = useRef(0)
   const savePromise = useRef<{
     scope: WorkspaceScope
@@ -862,69 +863,102 @@ export function Studio() {
       : downloadArchive(item)
   }
 
-  const saveFile = useCallback(async () => {
-    if (savePromise.current) return savePromise.current.promise
-    const expected = bufferStore.getSnapshot().scope
-    const snapshots = bufferStore.dirty()
-    const snapshot = snapshots[0]
-    const id = projectIdRef.current
-    if (!snapshot || !id || snapshot.readOnly || !snapshots.length) return
-    const task = (async () => {
-      setSaving(true)
-      try {
-        if (snapshots.length > 1 || snapshot.path !== fileRef.current?.path) {
+  const saveFile = useCallback(
+    async ({ automatic = false } = {}) => {
+      if (savePromise.current) return savePromise.current.promise
+      const expected = bufferStore.getSnapshot().scope
+      const snapshots = bufferStore.dirty()
+      const snapshot = snapshots[0]
+      const id = projectIdRef.current
+      if (!snapshot || !id || snapshot.readOnly || !snapshots.length) return
+      const task = (async () => {
+        setSaving(true)
+        try {
+          if (snapshots.length > 1 || snapshot.path !== fileRef.current?.path) {
+            const value = await api<{
+              applied: number
+              requiresPreparation: boolean
+              files: { path: string; hash: string }[]
+            }>(`/api/projects/${encodeURIComponent(id)}/files`, {
+              method: 'PUT',
+              signal: AbortSignal.timeout(60_000),
+              body: JSON.stringify({
+                files: snapshots.map((file) => ({
+                  path: file.path,
+                  content: file.content,
+                  expectedHash: file.hash,
+                })),
+              }),
+            })
+            if (!bufferStore.isCurrent(expected)) return
+            bufferStore.saved(snapshots, value.files)
+            if (!automatic) setNotice(`Saved ${snapshots.length} files`)
+            if (value.requiresPreparation) await loadProjects()
+            else if (!automatic) void loadGit(id)
+            return
+          }
           const value = await api<{
-            applied: number
+            content: string
+            hash: string
             requiresPreparation: boolean
-            files: { path: string; hash: string }[]
-          }>(`/api/projects/${encodeURIComponent(id)}/files`, {
-            method: 'PUT',
-            body: JSON.stringify({
-              files: snapshots.map((file) => ({
-                path: file.path,
-                content: file.content,
-                expectedHash: file.hash,
-              })),
-            }),
-          })
+          }>(
+            `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(snapshot.path)}`,
+            {
+              method: 'PUT',
+              signal: AbortSignal.timeout(60_000),
+              body: JSON.stringify({
+                content: snapshot.content,
+                expectedHash: snapshot.hash,
+              }),
+            },
+          )
           if (!bufferStore.isCurrent(expected)) return
-          bufferStore.saved(snapshots, value.files)
-          setNotice(`Saved ${snapshots.length} files`)
+          bufferStore.saved(snapshots, [
+            { path: snapshot.path, hash: value.hash },
+          ])
+          if (!automatic) setNotice('File saved')
           if (value.requiresPreparation) await loadProjects()
-          else void loadGit(id)
-          return
+          else if (!automatic) void loadGit(id)
+        } finally {
+          if (savePromise.current?.scope === expected) {
+            setSaving(false)
+            savePromise.current = null
+          }
         }
-        const value = await api<{
-          content: string
-          hash: string
-          requiresPreparation: boolean
-        }>(
-          `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(snapshot.path)}`,
-          {
-            method: 'PUT',
-            body: JSON.stringify({
-              content: snapshot.content,
-              expectedHash: snapshot.hash,
-            }),
-          },
-        )
-        if (!bufferStore.isCurrent(expected)) return
-        bufferStore.saved(snapshots, [
-          { path: snapshot.path, hash: value.hash },
-        ])
-        setNotice('File saved')
-        if (value.requiresPreparation) await loadProjects()
-        else void loadGit(id)
-      } finally {
-        if (savePromise.current?.scope === expected) {
-          setSaving(false)
-          savePromise.current = null
-        }
-      }
-    })()
-    savePromise.current = { scope: expected, promise: task }
-    return task
-  }, [loadGit, loadProjects, bufferStore])
+      })()
+      savePromise.current = { scope: expected, promise: task }
+      return task
+    },
+    [loadGit, loadProjects, bufferStore],
+  )
+
+  const automaticSave = useCallback(
+    () => saveFile({ automatic: true }),
+    [saveFile],
+  )
+  const autosave = useAutosave({
+    store: bufferStore,
+    scope,
+    save: automaticSave,
+    enabled:
+      !!session &&
+      !authRequired &&
+      workspaceEditable &&
+      !opening &&
+      !pendingAction &&
+      !reloadTarget &&
+      !deleteTarget &&
+      !deleteBusy &&
+      !gitOpen,
+  })
+  useEffect(() => {
+    if (!saveVersion || !scope.projectId) return
+    // Coalesce source-control refreshes while the user is making small edits.
+    const timer = setTimeout(() => {
+      if (bufferStore.isCurrent(scope)) void loadGit(scope.projectId!)
+    }, 2500)
+    return () => clearTimeout(timer)
+  }, [saveVersion, scope, bufferStore, loadGit])
 
   const saveCompletely = useCallback(async () => {
     const expected = bufferStore.getSnapshot().scope
@@ -977,7 +1011,7 @@ export function Studio() {
       }
     }
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (bufferStore.dirty().length) {
+      if (bufferStore.dirty().length || savePromise.current) {
         event.preventDefault()
         event.returnValue = ''
       }
@@ -998,12 +1032,36 @@ export function Studio() {
 
   const navigate = useCallback(
     (action: () => Promise<void>, destination = '') => {
+      const expected = bufferStore.getSnapshot().scope
+      const request = ++navigationRequest.current
+      const openingRequest = openRequest.current
       setNavigationError('')
       setNavigationTarget(destination)
-      if (bufferStore.dirty().length) setPendingAction(() => action)
-      else void action().catch((error) => setError(errorText(error)))
+      void (async () => {
+        try {
+          if (bufferStore.dirty().length || savePromise.current)
+            await saveCompletely()
+          if (
+            request !== navigationRequest.current ||
+            openRequest.current !== openingRequest ||
+            !bufferStore.isCurrent(expected)
+          )
+            return
+          await action()
+        } catch (error) {
+          if (
+            request !== navigationRequest.current ||
+            !bufferStore.isCurrent(expected)
+          )
+            return
+          if (bufferStore.dirty().length) {
+            setNavigationError(errorText(error))
+            setPendingAction(() => action)
+          } else setError(errorText(error))
+        }
+      })()
     },
-    [bufferStore],
+    [bufferStore, saveCompletely],
   )
 
   const chooseFile = useCallback(
@@ -2148,6 +2206,20 @@ export function Studio() {
             </span>
           </div>
         )}
+        {autosave.issue && dirty && (
+          <div className="workspace-alert autosave-alert" role="status">
+            <span>{autosave.issue.message}</span>
+            <button
+              className="button small secondary"
+              disabled={
+                saving || authRequired || !!reloadTarget || !!pendingAction
+              }
+              onClick={autosave.retry}
+            >
+              Retry save
+            </button>
+          </div>
+        )}
         {agentPendingFile && file?.path === agentPendingFile && (
           <div className="workspace-alert live-edit-alert" role="status">
             <span>
@@ -2364,7 +2436,11 @@ export function Studio() {
                 <span title={file?.path}>{file?.path || 'Choose a file'}</span>
                 {file?.readOnly && <span className="tag">Read only</span>}
                 {dirty && (
-                  <span className="dirty-dot" aria-label="Unsaved changes" />
+                  <span
+                    className="dirty-dot"
+                    aria-label="Unsaved changes"
+                    title="Autosave pending"
+                  />
                 )}
                 {opening && <span className="spinner" />}
               </div>
@@ -2416,6 +2492,7 @@ export function Studio() {
                     void saveFile().catch((error) => setError(errorText(error)))
                   }
                   disabled={!dirty || saving || opening || file?.readOnly}
+                  title="Autosave is enabled. Save now with Ctrl+S or ⌘S."
                 >
                   <Icon name="save" size={14} />
                   {saving
@@ -2678,7 +2755,15 @@ export function Studio() {
                 : 'Ready to open a project'}
           </span>
           <span className="statusbar-notice" role="status">
-            {notice || (dirty ? 'Unsaved changes' : file ? 'Saved' : '')}
+            {saving
+              ? 'Saving…'
+              : dirty
+                ? autosave.issue
+                  ? autosave.issue.retrying
+                    ? 'Waiting to save'
+                    : 'Autosave paused'
+                  : 'Autosave pending…'
+                : notice || (file ? 'All changes saved' : '')}
           </span>
           <span title={project?.toolchain}>
             {project?.toolchain?.replace('leanprover/lean4:', 'Lean ')}

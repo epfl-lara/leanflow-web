@@ -4,12 +4,7 @@
   font-display: swap;
 }
 :root {
-  font-family:
-    Inter,
-    -apple-system,
-    BlinkMacSystemFont,
-    'Segoe UI',
-    sans-serif;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   color: #222b3d;
   background: #f6f7fa;
   font-synthesis: none;
@@ -2725,11 +2720,18 @@ body.panel-resizing iframe {
   min-height: 32px;
   background: var(--surface);
 }
-.reasoning-trace[open] > summary {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  box-shadow: 0 1px 0 var(--border);
+.reasoning-body {
+  max-height: min(55vh, 32rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  margin-top: 10px;
+  padding-right: 8px;
+  border-top: 1px solid var(--border);
+}
+.reasoning-body:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 .reasoning-toggle-label {
   margin-left: auto;

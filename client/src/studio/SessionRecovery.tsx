@@ -81,8 +81,8 @@ export function SessionRecovery({ user }: { user: Session['user'] }) {
           </p>
         )}
         <p className="field-help">
-          After signing in, retry the action you were taking. Nothing is sent
-          again automatically.
+          After signing in, autosave resumes. Retry other actions, such as
+          sending a message or starting a check, when you are ready.
         </p>
         <footer className="dialog-actions">
           <button className="button primary" disabled={busy || !token.trim()}>
