@@ -1864,6 +1864,25 @@ export class Runtime {
     })
   }
 
+  async stopOrphanedPresetWorkers(owner) {
+    if (!/^[a-f0-9-]{36}$/.test(owner) || owner === this.owner)
+      throw new Error('Invalid abandoned preset worker owner')
+    const list = await this.#host([
+      'ps',
+      '-aq',
+      '--filter',
+      `label=lemex-web.owner=${owner}`,
+    ])
+    if (list.code !== 0)
+      throw new Error('Cannot inspect abandoned preset workers')
+    const ids = list.stdout.trim().split(/\s+/).filter(Boolean)
+    if (ids.length) {
+      const stopped = await this.#host(['rm', '-f', ...ids])
+      if (stopped.code !== 0)
+        throw new Error('Cannot stop abandoned preset workers')
+    }
+  }
+
   async shutdown() {
     this.stopping = true
     this.presetInstaller.stop()

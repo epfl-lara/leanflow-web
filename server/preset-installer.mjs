@@ -31,7 +31,9 @@ export class PresetInstaller {
     const saved = JSON.parse(owner),
       current = processIdentity(saved.pid)
     return (
-      current?.bootId === saved.bootId && current?.startTime === saved.startTime
+      Boolean(current) &&
+      current.bootId === saved.bootId &&
+      current.startTime === saved.startTime
     )
   }
 
@@ -60,8 +62,12 @@ export class PresetInstaller {
         .prepare(
           "INSERT INTO installs VALUES (?, ?, ?, 'preparing') ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, token=excluded.token, state=excluded.state",
         )
-        .run(id, JSON.stringify(owner), token)
-      return true
+        .run(
+          id,
+          JSON.stringify({ ...owner, workerOwner: this.runtime.owner }),
+          token,
+        )
+      return { previous: row?.owner ? JSON.parse(row.owner) : null }
     } finally {
       this.db.exec('COMMIT')
     }
@@ -87,8 +93,15 @@ export class PresetInstaller {
         try {
           while (!this.runtime.templateRoot(preset.id)) {
             signal.throwIfAborted()
-            if (this.claim(preset.id, token)) {
+            const lease = this.claim(preset.id, token)
+            if (lease) {
               claimed = true
+              // Docker jobs can outlive a killed provisioning CLI. Stop only
+              // workers owned by the dead lease holder before resuming writes.
+              if (lease.previous?.workerOwner)
+                await this.runtime.stopOrphanedPresetWorkers(
+                  lease.previous.workerOwner,
+                )
               break
             }
             await delay(2000, undefined, { signal })
