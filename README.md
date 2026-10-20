@@ -14,6 +14,8 @@ Developed by [EPFL LARA](https://epfl-lara.github.io/).
 
 ## Get started
 
+**EPFL early access:** [Open LeanFlow](https://leanflow.epfl.ch/), available only from the **EPFL network or VPN**. Contact [lazar.milikic@epfl.ch](mailto:lazar.milikic@epfl.ch) for an early-access key.
+
 Self-host LeanFlow Web for yourself or trusted collaborators on Linux with Node.js 24+, Python 3.11+, Git, and Docker. Setup uses a precompiled Lemex release; no Rust build is needed.
 
 - **[Install](doc/LemexWeb.md#install-and-run):** prepare the app and sign in.
@@ -22,11 +24,15 @@ Self-host LeanFlow Web for yourself or trusted collaborators on Linux with Node.
 
 Each collaborator signs in with an individual access token and saves their own provider API key; EPFL RCP is the default. Before inviting a team, complete the short [installation verification](doc/Verification.md).
 
-## Contribute
+## Contributions and issues
+
+- **Bugs and ideas:** search [existing issues](https://github.com/epfl-lara/leanflow-web/issues) before [opening an issue](https://github.com/epfl-lara/leanflow-web/issues/new). For bugs, include steps to reproduce, expected and actual behavior, and your browser and Lean version when relevant.
+- **Contribute:** fork the repository, create a branch, and submit a focused pull request explaining the change and how you checked it. Discuss larger changes in an issue first.
+- **Security:** report vulnerabilities privately using the [security policy](SECURITY.md). Keep access tokens, API keys, and private project content out of issues and pull requests.
 
 After setup, use `npm run dev` for development with your settings exported. See [AGENTS.md](AGENTS.md) for code practices, formatting, and checks.
 
-See [Configuration](doc/Configuration.md) for advanced settings, [Checks and releases](doc/Automation.md) for GitHub Actions, and [Security](SECURITY.md) for private vulnerability reporting.
+See [Configuration](doc/Configuration.md) for advanced settings and [Checks and releases](doc/Automation.md) for GitHub Actions.
 
 ## Credits
 
