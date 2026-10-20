@@ -162,6 +162,23 @@ export function createAgentActivityHandler({
           args.path,
       )
       let input = item.arguments == null ? '' : preview(item.arguments, 1600)
+      let inputLanguage = 'json'
+      let inputLabel = 'Input'
+      if (shortTool.startsWith('lean_')) {
+        const sourceField = ['code', 'replacement', 'tactic'].find(
+          (key) => typeof args[key] === 'string',
+        )
+        if (sourceField) {
+          input = clip(args[sourceField], 4000)
+          inputLanguage = 'lean'
+          inputLabel =
+            sourceField === 'tactic'
+              ? 'Tactic'
+              : sourceField === 'replacement'
+                ? 'Candidate declaration'
+                : 'Lean code'
+        }
+      }
       let path = projectPath(args.file || args.file_path || args.path)
       let output = ''
       let checkResult
@@ -181,6 +198,8 @@ export function createAgentActivityHandler({
         detail = text(action?.query || action?.path || item.command)
         path = projectPath(action?.path)
         input = clip(item.command, 1600)
+        inputLanguage = 'shell'
+        inputLabel = 'Command'
         output = clip(item.aggregatedOutput, 4000)
       } else if (item.type === 'fileChange') {
         kind = 'edit'
@@ -191,6 +210,8 @@ export function createAgentActivityHandler({
         detail = paths.join(', ')
         path = paths.length === 1 ? projectPath(paths[0]) : undefined
         input = clip(paths.join('\n'), 1600)
+        inputLanguage = 'text'
+        inputLabel = 'Files'
       } else if (item.type === 'webSearch') {
         kind = 'search'
         label = 'Search the web'
@@ -276,7 +297,7 @@ export function createAgentActivityHandler({
                   : 1,
             }
           : {}),
-        ...(input ? { input } : {}),
+        ...(input ? { input, inputLanguage, inputLabel } : {}),
         ...(output ? { output } : {}),
       }
       const steps = job.toolActivity || []

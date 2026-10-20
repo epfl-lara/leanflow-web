@@ -14,6 +14,8 @@ export interface ToolStep {
   path?: string
   line?: number
   input?: string
+  inputLanguage?: 'lean' | 'json' | 'shell' | 'text'
+  inputLabel?: string
   output?: string
   detailsOmitted?: boolean
 }

@@ -137,10 +137,10 @@ const ActivityStep = memo(function ActivityStep({
           )}
           {step.input && (
             <>
-              <h4>{step.kind === 'command' ? 'Command' : 'Input'}</h4>
+              <h4>{step.inputLabel || 'Input'}</h4>
               <CodeBlock
                 text={step.input}
-                language={step.kind === 'command' ? 'shell' : 'text'}
+                language={step.inputLanguage || 'text'}
               />
             </>
           )}
