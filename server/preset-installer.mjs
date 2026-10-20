@@ -90,6 +90,7 @@ export class PresetInstaller {
         if (signal.aborted) break
         const token = randomUUID()
         let claimed = false
+        let abandoned = null
         try {
           while (!this.runtime.templateRoot(preset.id)) {
             signal.throwIfAborted()
@@ -98,10 +99,13 @@ export class PresetInstaller {
               claimed = true
               // Docker jobs can outlive a killed provisioning CLI. Stop only
               // workers owned by the dead lease holder before resuming writes.
-              if (lease.previous?.workerOwner)
+              if (lease.previous?.workerOwner) {
+                abandoned = lease.previous
                 await this.runtime.stopOrphanedPresetWorkers(
                   lease.previous.workerOwner,
                 )
+                abandoned = null
+              }
               break
             }
             await delay(2000, undefined, { signal })
@@ -124,9 +128,14 @@ export class PresetInstaller {
           if (claimed)
             this.db
               .prepare(
-                'UPDATE installs SET owner=NULL, token=NULL, state=? WHERE id=? AND token=?',
+                'UPDATE installs SET owner=?, token=NULL, state=? WHERE id=? AND token=?',
               )
-              .run(this.states.get(preset.id) || 'failed', preset.id, token)
+              .run(
+                abandoned ? JSON.stringify(abandoned) : null,
+                this.states.get(preset.id) || 'failed',
+                preset.id,
+                token,
+              )
         }
       }
       return { failures }
