@@ -1,8 +1,8 @@
 {
   "package": "@lemmy00/lemex",
-  "version": "0.1.1",
+  "version": "0.1.4",
   "integrity": {
-    "x64": "sha512-6uR7C/CapTQbZ7GNr0bTvwQPuTGX8iV8TIlibrtEGg4YuG2cRqiTUaOJdvmdCVCZZbEOXbKM3VorVSLkOhBFBA==",
-    "arm64": "sha512-c6J2xgxnN5OKfPAcaad13QtZMfVlBf4pAoIPUZit/W/ThsP3MiZsb4EeOrO0yOpGMIK7U1hpA4+7W745M6Jnwg=="
+    "x64": "sha512-gmDqyRww/kY3aBUfLyeR29HN1nD5Ta+/sclJNQSilXor9sXKKFqq4Vnxsa3DrIHZ06f+xmbhXT7Pi7iEAm4mpg==",
+    "arm64": "sha512-t8Y1VIUxsTDJAS8RZiVx2sZ66s052fQ31mYP06MsyohrLTjgA4wnC/8953EdZJgZrDol/Mm6HOuK0Qnx2avn0g=="
   }
 }
