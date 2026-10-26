@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { Runtime } from '../server/runtime.mjs'
+import { dependencyBuildCommand } from '../server/project-libraries.mjs'
 
 const execute = promisify(execFile)
 const reportDir = path.resolve('.runtime/shared-dependency-check')
@@ -20,6 +21,9 @@ const runtime = new Runtime({
   maxConcurrent: 1,
   cpus: 1,
   memory: '2g',
+  ...(process.env.LEAN_TEST_TOOLCHAIN_DIR
+    ? { hostToolchainDir: process.env.LEAN_TEST_TOOLCHAIN_DIR }
+    : {}),
 })
 const toolchain = 'leanprover/lean4:v4.34.1'
 const report = {
@@ -63,9 +67,38 @@ await git([
   'Offline dependency fixture',
 ])
 const revision = (await git(['rev-parse', 'HEAD'])).stdout.trim()
+const emptySource = path.join(dataDir, 'empty-fixture')
+await fs.mkdir(emptySource, { recursive: true })
+await fs.writeFile(path.join(emptySource, 'lean-toolchain'), toolchain + '\n')
+await fs.writeFile(
+  path.join(emptySource, 'lakefile.toml'),
+  'name = "empty-dependency"\n\n[[lean_lib]]\nname = "Unused"\n',
+)
+await fs.writeFile(
+  path.join(emptySource, 'Unused.lean'),
+  'invalid proof source\n',
+)
+await execute('git', ['-C', emptySource, 'init', '-b', 'main'])
+await execute('git', ['-C', emptySource, 'add', '.'])
+await execute('git', [
+  '-c',
+  'core.hooksPath=/dev/null',
+  '-C',
+  emptySource,
+  '-c',
+  'user.name=Fixture',
+  '-c',
+  'user.email=fixture@example.invalid',
+  'commit',
+  '-m',
+  'Escaped package without default targets',
+])
+const emptyRevision = (
+  await execute('git', ['-C', emptySource, 'rev-parse', 'HEAD'])
+).stdout.trim()
 const configuration = {
   'lean-toolchain': toolchain + '\n',
-  'lakefile.toml': `name = "First"\ndefaultTargets = ["Main"]\n\n[[lean_lib]]\nname = "Main"\n\n[[require]]\nname = "mathlib"\ngit = "https://github.com/leanprover-community/mathlib4"\nrev = "${revision}"\n`,
+  'lakefile.toml': `name = "First"\ndefaultTargets = ["Main"]\n\n[[lean_lib]]\nname = "Main"\n\n[[require]]\nname = "mathlib"\ngit = "https://github.com/leanprover-community/mathlib4"\nrev = "${revision}"\n\n[[require]]\nname = "empty-dependency"\ngit = "https://github.com/example/empty-dependency"\nrev = "${emptyRevision}"\n`,
   'lake-manifest.json': JSON.stringify({
     version: '1.2.0',
     name: 'First',
@@ -83,11 +116,25 @@ const configuration = {
         configFile: 'lakefile.toml',
         manifestFile: 'lake-manifest.json',
       },
+      {
+        name: '«empty-dependency»',
+        type: 'git',
+        url: 'https://github.com/example/empty-dependency',
+        rev: emptyRevision,
+        inputRev: emptyRevision,
+        inherited: false,
+        subDir: null,
+        configFile: 'lakefile.toml',
+        manifestFile: 'lake-manifest.json',
+      },
     ],
   }),
 }
 const realRun = runtime.run.bind(runtime)
 let downloads = 0
+let removedHash = false
+let readOnlyFailures = 0
+let recoveryBuilds = 0
 try {
   assert.equal((await runtime.init()).ready, true, runtime.error)
   await runtime.prepareToolchain(toolchain)
@@ -99,17 +146,46 @@ try {
         await fs.cp(source, path.join(root, '.lake/packages/mathlib'), {
           recursive: true,
         })
+        await fs.cp(
+          emptySource,
+          path.join(root, '.lake/packages/empty-dependency'),
+          {
+            recursive: true,
+          },
+        )
       }
       if (command === 'lake exe cache get') {
         downloads++
         // Compile the fixture instead of downloading real Mathlib artifacts.
-        return realRun(root, ['lake', 'build', 'mathlib'], {
+        return realRun(root, dependencyBuildCommand('@mathlib'), {
           ...options,
           network: 'none',
         })
       }
+      if (args.includes('build') && options.readOnlyWorkspace && !removedHash) {
+        // Reproduce the production failure with a real Lake replay, after the
+        // initial writable build succeeded and before certification.
+        await fs.unlink(
+          path.join(
+            root,
+            '.lake/packages/mathlib/.lake/build/lib/lean/Mathlib.olean.hash',
+          ),
+        )
+        removedHash = true
+      } else if (
+        removedHash &&
+        args.includes('@mathlib') &&
+        !options.readOnlyWorkspace
+      ) {
+        recoveryBuilds++
+      }
     }
-    return realRun(root, args, { ...options, network: 'none' })
+    const result = await realRun(root, args, { ...options, network: 'none' })
+    if (options.readOnlyWorkspace && result.code !== 0) {
+      assert.match(result.stderr + result.stdout, /read.only file system/i)
+      readOnlyFailures++
+    }
+    return result
   }
   const roots = ['first', 'second'].map((name) => path.join(dataDir, name))
   let shared
@@ -160,6 +236,9 @@ try {
     assert.equal(proof.code, 0, proof.stderr + proof.stdout)
   }
   assert.equal(downloads, 1)
+  assert.equal(removedHash, true)
+  assert.equal(readOnlyFailures, 1)
+  assert.equal(recoveryBuilds, 1)
   const denied = await runtime.run(
     roots[0],
     [
@@ -186,6 +265,9 @@ print('readonly and isolated')`,
     sharedWritesDenied: true,
     siblingProjectHidden: true,
     cleanWorkerHome: true,
+    missingHashRecovered: true,
+    boundedArtifactRebuild: true,
+    escapedPackageWithoutDefaults: true,
     downloads,
   }
   report.passed = true

@@ -95,6 +95,76 @@ const redirectResult = {
     'fatal: unable to access repository: The requested URL returned error: 301',
 }
 
+test('private setup and isolated repair build the entire dependency graph before readonly checks', async (t) => {
+  for (const repair of [false, true]) {
+    const manifest = {
+      name: 'fixture',
+      packages: ['mathlib', 'verso', '«verso-slides»'].map((name, index) => ({
+        type: 'git',
+        name,
+        inherited: index > 0,
+        url: `https://github.com/example/library-${index}`,
+        rev: 'a'.repeat(40),
+      })),
+    }
+    let repairs = 0
+    const f = await fixture(t, {
+      broken: repair,
+      setupRepair: async ({ root }) => {
+        repairs++
+        await fs.writeFile(path.join(root, 'lakefile.toml'), sources[1].content)
+      },
+    })
+    const inherited = new Set()
+    const built = new Map()
+    f.runtime.inheritDependencies = async (_source, root) => inherited.add(root)
+    const run = f.runtime.run
+    f.runtime.run = async (root, args, options) => {
+      if (
+        args.includes('build') &&
+        args.at(-1).startsWith('@') &&
+        !inherited.has(root)
+      ) {
+        assert.equal(args.at(-2), `${args.at(-1)}:extraDep`)
+        if (!built.has(root)) built.set(root, new Set())
+        built.get(root).add(args.at(-1))
+      }
+      if (
+        inherited.has(root) &&
+        (args.includes('build') || args.at(-1) === '--stdin')
+      ) {
+        for (const pkg of manifest.packages) {
+          if (!built.get(root)?.has(`@${pkg.name}`))
+            return {
+              code: 1,
+              stdout: '',
+              stderr:
+                'error: read-only file system\n file: /workspace/.lake/packages/mathlib/missing.hash',
+            }
+        }
+      }
+      return run(root, args, options)
+    }
+    const project = await f.create({
+      files: [
+        ...sources.map((file) =>
+          file.path === 'lakefile.toml' && repair
+            ? { ...file, content: 'name = "broken"\n' }
+            : file,
+        ),
+        { path: 'lake-manifest.json', content: JSON.stringify(manifest) },
+      ],
+    })
+    assert.equal(project.status, 'ready', project.error)
+    assert.equal(repairs, repair ? 1 : 0)
+    assert.equal(
+      await fs.readFile(path.join(project.root, 'Main.lean'), 'utf8'),
+      sources[2].content,
+    )
+    assert.equal(built.size, repair ? 2 : 1)
+  }
+})
+
 test('GitLab redirect retries the validated .git URL once and retains revision and Git protections', async (t) => {
   const f = await fixture(t, { cloneFiles: sources })
   const run = f.runtime.run

@@ -2428,7 +2428,10 @@ export class WorkspaceStore {
         onOutput: (message) => this.#event(project, 'setup-repair', message),
       })
     }
-    for (const target of dependencyBuildTargets(repairedManifest)) {
+    for (const target of dependencyBuildTargets(repairedManifest, {
+      includeInherited: true,
+      includeMathlib: true,
+    })) {
       const onOutput = (message) =>
         this.#event(project, 'setup-repair', message)
       const built = await runSetupStep(
@@ -3200,6 +3203,7 @@ export class WorkspaceStore {
       if (!shared)
         for (const target of dependencyBuildTargets(manifest, {
           includeInherited: true,
+          includeMathlib: true,
         }))
           await this.#command(
             project,
