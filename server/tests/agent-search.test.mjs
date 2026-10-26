@@ -304,10 +304,22 @@ test(
         await fs.unlink(path.join(workspace, 'Obsolete.txt'))
         await fs.writeFile(path.join(workspace, 'Summary.md'), '# Summary\n')
         const deadline = Date.now() + 5000
-        while (
-          (await workspaces.readFile(project.id, 'alice', 'Notes.md'))
-            .content !== '# Updated notes\n'
-        ) {
+        while (true) {
+          try {
+            if (
+              (await workspaces.readFile(project.id, 'alice', 'Notes.md'))
+                .content === '# Updated notes\n'
+            )
+              break
+          } catch (error) {
+            // Live publication can atomically replace this path while the
+            // polling read holds its old handle. Wait for a stable read.
+            if (
+              error.status !== 409 ||
+              error.message !== 'File path changed during access'
+            )
+              throw error
+          }
           assert(
             Date.now() < deadline,
             'Text edits should reach the saved project while the turn is running',
