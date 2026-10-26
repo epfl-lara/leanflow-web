@@ -31,6 +31,7 @@ import {
   projectEnvironmentImports,
   environmentSmokeProof,
   dependencyBuildTargets,
+  dependencyBuildCommand,
 } from './project-libraries.mjs'
 import {
   runPinnedLake,
@@ -2433,12 +2434,17 @@ export class WorkspaceStore {
       const built = await runSetupStep(
         `Testing repair: building dependency ${target.replace(/^@/, '')}`,
         () =>
-          runPinnedLake(this.runtime, candidate, ['lake', 'build', target], {
-            signal,
-            network: 'bridge',
-            timeoutMs: 1800000,
-            onOutput,
-          }),
+          runPinnedLake(
+            this.runtime,
+            candidate,
+            dependencyBuildCommand(target),
+            {
+              signal,
+              network: 'bridge',
+              timeoutMs: 1800000,
+              onOutput,
+            },
+          ),
         { onOutput, signal },
       )
       signal.throwIfAborted()
@@ -2870,8 +2876,8 @@ export class WorkspaceStore {
       project,
       'output',
       shared.reused
-        ? 'Using the shared, verified Mathlib dependency cache.\n'
-        : 'Prepared a shared, verified Mathlib dependency cache.\n',
+        ? 'Using the shared, verified dependency cache.\n'
+        : 'Prepared a shared, verified dependency cache.\n',
     )
     return shared
   }
@@ -3197,7 +3203,7 @@ export class WorkspaceStore {
         }))
           await this.#command(
             project,
-            ['lake', 'build', target],
+            dependencyBuildCommand(target),
             1800000,
             'bridge',
           )

@@ -66,18 +66,34 @@ export function environmentSmokeProof(imports) {
   )
 }
 
+// Lake serializes escaped names with guillemets, but materializes their
+// directories using Name.toString (escape := false). Keep target syntax intact
+// and decode only safe, single-component dependency directory names.
+export function dependencyPackageDirectory(value) {
+  if (typeof value !== 'string' || value.length > 128) return null
+  const name =
+    value.startsWith('«') && value.endsWith('»') ? value.slice(1, -1) : value
+  return /^[\p{L}_][\p{L}\p{N}_'-]*$/u.test(name) ? name : null
+}
+
 export function dependencyBuildTargets(
   manifest,
-  { includeInherited = false } = {},
+  { includeInherited = false, includeMathlib = false } = {},
 ) {
   if (!Array.isArray(manifest?.packages)) return []
   return manifest.packages
     .filter(
       (pkg) =>
         pkg?.type === 'git' &&
-        pkg.name !== 'mathlib' &&
+        (includeMathlib || pkg.name !== 'mathlib') &&
         (includeInherited || pkg.inherited !== true) &&
-        /^[A-Za-z][A-Za-z0-9_-]*$/.test(pkg.name),
+        dependencyPackageDirectory(pkg.name),
     )
-    .map((pkg) => pkg.name)
+    .map((pkg) => `@${pkg.name}`)
+}
+
+export function dependencyBuildCommand(target) {
+  // A package with no default targets must not make Lake fall back to the
+  // root project's proofs. The explicit facet always contributes a build job.
+  return ['lake', 'build', `${target}:extraDep`, target]
 }

@@ -269,6 +269,108 @@ test('unsupported or unpinned dependency graphs keep their private preparation p
   }
 })
 
+test('pinned dependency graphs accept quoted package directories and non-Mathlib projects', async () => {
+  const extra = {
+    ...manifest.packages[0],
+    name: '«verso-slides»',
+    url: 'https://github.com/leanprover/verso-slides',
+  }
+  const specFor = (packages) =>
+    sharedDependencySpec(
+      request({
+        configuration: {
+          ...configuration,
+          'lake-manifest.json': JSON.stringify({ ...manifest, packages }),
+        },
+      }),
+    )
+  assert(await specFor([...manifest.packages, extra]))
+  assert(await specFor([extra]))
+  assert.equal(await specFor([extra, { ...extra, name: 'verso-slides' }]), null)
+  assert.equal(await specFor([{ ...extra, name: '«../outside»' }]), null)
+})
+
+test('quoted dependencies recover missing artifacts in staging before publishing a readonly cache', async (t) => {
+  let builds = 0,
+    replays = 0
+  const output = []
+  const { runtime, root, calls } = await fixture(
+    t,
+    async (stage, args, options) => {
+      if (args.at(-1) === '--version')
+        await fs.mkdir(path.join(stage, '.lake/packages/verso-slides'), {
+          recursive: true,
+        })
+      if (!args.includes('@«verso-slides»')) return
+      if (!options.readOnlyWorkspace) {
+        builds++
+        return
+      }
+      replays++
+      if (builds < 2)
+        return {
+          code: 1,
+          stdout: '',
+          stderr:
+            'read-only file system: /workspace/.lake/packages/verso-slides/generated.hash',
+        }
+    },
+  )
+  const config = {
+    ...configuration,
+    'lake-manifest.json': JSON.stringify({
+      ...manifest,
+      packages: [
+        ...manifest.packages,
+        {
+          ...manifest.packages[0],
+          name: '«verso-slides»',
+          url: 'https://github.com/leanprover/verso-slides',
+          inherited: true,
+        },
+      ],
+    }),
+  }
+  await writeConfig(root, config)
+  const shared = await runtime.prepareSharedDependencies(
+    root,
+    request({
+      configuration: config,
+      onOutput: (text) => output.push(text),
+    }),
+  )
+  assert.equal(builds, 2)
+  assert.equal(replays, 2)
+  assert.match(output.join(''), /Preparing additional dependency build files/)
+  assert(
+    calls.some(({ args }) =>
+      args.includes('/workspace/.lake/packages/verso-slides'),
+    ),
+  )
+  assert(
+    !calls.some(({ args }) =>
+      args.includes('/workspace/.lake/packages/«verso-slides»'),
+    ),
+  )
+  assert.equal(
+    (await fs.stat(path.join(shared.root, '.lake/packages/verso-slides')))
+      .mode & 0o222,
+    0,
+  )
+  assert.equal(
+    await fs.readFile(path.join(root, 'Main.lean'), 'utf8'),
+    'PRIVATE PROOF SOURCE',
+  )
+  const commands = calls.length
+  const reused = await runtime.prepareSharedDependencies(
+    root,
+    request({ configuration: config }),
+  )
+  assert.equal(reused.root, shared.root)
+  assert.equal(reused.reused, true)
+  assert.equal(calls.length, commands)
+})
+
 test('Mathlib dependency traces are complete before imported projects build with readonly packages', async (t) => {
   const widgetLock = '.lake/packages/proofwidgets/widget/package-lock.json'
   const { runtime, root, calls } = await fixture(
@@ -280,7 +382,7 @@ test('Mathlib dependency traces are complete before imported projects build with
         await fs.mkdir(path.dirname(lock), { recursive: true })
         await fs.writeFile(lock, '{"lockfileVersion":3}\n')
       }
-      if (command === 'lake build @mathlib') {
+      if (command === 'lake build @mathlib:extraDep @mathlib') {
         const lock = await fs.readFile(path.join(stage, widgetLock))
         const expected = createHash('sha256').update(lock).digest('hex')
         if (options.readOnlyWorkspace) {
@@ -315,7 +417,8 @@ test('Mathlib dependency traces are complete before imported projects build with
     request({ configuration: config }),
   )
   const widgetBuilds = calls.filter(
-    (call) => call.args.includes('build') && call.args.includes('proofwidgets'),
+    (call) =>
+      call.args.includes('build') && call.args.includes('@proofwidgets'),
   )
   assert.equal(
     widgetBuilds.length,
@@ -390,7 +493,7 @@ test('complete-build caches use new entries while existing import-only bindings 
   const marker = JSON.parse(
     await fs.readFile(path.join(shared.root, '.ready.json'), 'utf8'),
   )
-  assert.equal(marker.schema, 4)
+  assert.equal(marker.schema, 5)
   assert.match(marker.check, /lake build @mathlib/)
   const preparedCommands = calls.length
   const hit = await runtime.prepareSharedDependencies(root, request())
@@ -400,25 +503,62 @@ test('complete-build caches use new entries while existing import-only bindings 
 })
 
 test('a dependency cache is not published when build replay needs a write under the readonly mounts', async (t) => {
+  let builds = 0
   const { runtime, root, dataDir } = await fixture(
     t,
     async (_stage, args, options) => {
+      if (args.includes('@mathlib') && !options.readOnlyWorkspace) builds++
       if (args.includes('@mathlib') && options.readOnlyWorkspace)
         return {
           code: 1,
           stdout: '',
           stderr:
-            'read-only file system: proofwidgets/widget/package-lock.json.hash',
+            'read-only file system: /workspace/.lake/packages/proofwidgets/widget/package-lock.json.hash',
         }
     },
   )
   await assert.rejects(
     runtime.prepareSharedDependencies(root, request()),
-    /read-only file system/,
+    /Refresh setup/,
   )
+  assert.equal(builds, 2, 'One initial build and one bounded artifact rebuild')
   assert.deepEqual(
     await fs.readdir(path.join(dataDir, 'runtime/shared-dependencies')),
     [],
+  )
+})
+
+test('artifact recovery cannot publish dependencies whose tracked source changed during rebuilding', async (t) => {
+  let builds = 0
+  const { runtime, root, dataDir } = await fixture(
+    t,
+    async (_stage, args, options) => {
+      if (args.includes('@mathlib')) {
+        if (!options.readOnlyWorkspace) builds++
+        else
+          return {
+            code: 1,
+            stdout: '',
+            stderr:
+              'read-only file system: /workspace/.lake/packages/mathlib/generated.hash',
+          }
+      }
+      if (builds > 1 && args.includes('status'))
+        return { code: 0, stdout: ' M Mathlib.lean\n', stderr: '' }
+    },
+  )
+  await assert.rejects(
+    runtime.prepareSharedDependencies(root, request()),
+    /dependency sources were modified/,
+  )
+  assert.equal(builds, 2)
+  assert.deepEqual(
+    await fs.readdir(path.join(dataDir, 'runtime/shared-dependencies')),
+    [],
+  )
+  assert.equal(
+    await fs.readFile(path.join(root, 'Main.lean'), 'utf8'),
+    'PRIVATE PROOF SOURCE',
   )
 })
 
@@ -578,7 +718,7 @@ test('a cancelled cache waiter cannot cancel another import and remaining waiter
 test('download, dependency build and import failures never publish entries and can be retried', async (t) => {
   for (const failing of [
     'lake exe cache get',
-    'lake build @mathlib',
+    'lake build @mathlib:extraDep @mathlib',
     'lake env lean --stdin',
   ]) {
     let fail = true

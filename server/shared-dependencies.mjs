@@ -17,6 +17,8 @@ import {
   environmentSmokeProof,
   projectEnvironmentImports,
   dependencyBuildTargets,
+  dependencyBuildCommand,
+  dependencyPackageDirectory,
 } from './project-libraries.mjs'
 
 const configFiles = [
@@ -25,9 +27,9 @@ const configFiles = [
   'lakefile.lean',
   'lakefile.toml',
 ]
-// Version 4 also replays builds with the final read-only dependency mounts.
-// Earlier import-only entries remain immutable for projects already using them.
-export const sharedDependencyCacheSchema = 4
+// Version 5 builds explicit package targets, including escaped names, and can
+// regenerate missing artifacts in staging. Existing bindings stay immutable.
+export const sharedDependencyCacheSchema = 5
 const cacheSchema = sharedDependencyCacheSchema
 const digest = (value) => createHash('sha256').update(value).digest('hex')
 const canonical = (value) => JSON.stringify(sort(value))
@@ -138,7 +140,7 @@ export async function sharedDependencySpec({
   }
   if (
     !Array.isArray(manifest?.packages) ||
-    !manifest.packages.some((pkg) => pkg?.name === 'mathlib') ||
+    !manifest.packages.length ||
     manifest.packages.length > 100
   )
     return null
@@ -149,18 +151,19 @@ export async function sharedDependencySpec({
     return null
   const names = new Set()
   for (const pkg of manifest.packages) {
+    const directory = dependencyPackageDirectory(pkg?.name)
     if (
       !pkg ||
       pkg.type !== 'git' ||
-      !/^[A-Za-z][A-Za-z0-9_-]*$/.test(pkg.name) ||
-      names.has(pkg.name) ||
+      !directory ||
+      names.has(directory) ||
       !/^[a-f0-9]{40}$/.test(pkg.rev) ||
       pkg.subDir ||
       !['lakefile.lean', 'lakefile.toml'].includes(pkg.configFile) ||
       (pkg.manifestFile && pkg.manifestFile !== 'lake-manifest.json')
     )
       return null
-    names.add(pkg.name)
+    names.add(directory)
     try {
       const url = new URL(pkg.url)
       if (
@@ -385,54 +388,74 @@ export class SharedDependencyCache {
       // Cache downloads provide oleans, but Lake can still need to replay
       // dependency traces (for example ProofWidgets' package-lock hash).
       // Finish that work while the stage is writable before sharing it.
-      await run(['lake', 'build', '@mathlib'], {
-        network: 'bridge',
-        timeoutMs: 5400000,
-      })
       const targets = dependencyBuildTargets(spec.manifest, {
         includeInherited: true,
+        includeMathlib: true,
       })
       for (const target of targets)
-        await run(['lake', 'build', target], { network: 'bridge' })
+        await run(dependencyBuildCommand(target), {
+          network: 'bridge',
+          timeoutMs: target === '@mathlib' ? 5400000 : 1800000,
+        })
       if (configurationDigest(readDependencyConfiguration(stage)) !== original)
         throw new Error('Lake changed the pinned dependency configuration')
       const packages = path.join(stage, '.lake/packages')
       await inspectPackages(packages)
-      for (const pkg of spec.manifest.packages) {
-        const checkout = path.join(packages, pkg.name)
-        const head = await run([
-          'git',
-          '-C',
-          `/workspace/.lake/packages/${pkg.name}`,
-          'rev-parse',
-          'HEAD',
-        ])
-        if (head.stdout.trim() !== pkg.rev)
-          throw new Error(
-            'Downloaded dependency revision does not match the lockfile',
-          )
-        onOutput?.(`Verified dependency revision ${pkg.name}: ${pkg.rev}\n`)
-        const status = await run([
-          'git',
-          '-C',
-          `/workspace/.lake/packages/${pkg.name}`,
-          'status',
-          '--porcelain',
-          '--untracked-files=no',
-        ])
-        if (status.stdout.trim())
-          throw new Error(
-            'Downloaded dependency sources were modified during preparation',
-          )
-        if (!(await fsp.lstat(checkout)).isDirectory())
-          throw new Error('Missing pinned dependency checkout')
+      const verifyPackages = async () => {
+        for (const pkg of spec.manifest.packages) {
+          const directory = dependencyPackageDirectory(pkg.name)
+          const checkout = path.join(packages, directory)
+          const head = await run([
+            'git',
+            '-C',
+            `/workspace/.lake/packages/${directory}`,
+            'rev-parse',
+            'HEAD',
+          ])
+          if (head.stdout.trim() !== pkg.rev)
+            throw new Error(
+              'Downloaded dependency revision does not match the lockfile',
+            )
+          onOutput?.(`Verified dependency revision ${pkg.name}: ${pkg.rev}\n`)
+          const status = await run([
+            'git',
+            '-C',
+            `/workspace/.lake/packages/${directory}`,
+            'status',
+            '--porcelain',
+            '--untracked-files=no',
+          ])
+          if (status.stdout.trim())
+            throw new Error(
+              'Downloaded dependency sources were modified during preparation',
+            )
+          if (!(await fsp.lstat(checkout)).isDirectory())
+            throw new Error('Missing pinned dependency checkout')
+        }
       }
+      await verifyPackages()
       await this.runtime.inheritDependencies(stage, stage)
       // A successful writable build alone does not prove that replay has every
       // hash it will need. Certify the same mounts used by editors and checks.
       await certifyDependencyBuilds(this.runtime, stage, spec.manifest, {
         onOutput,
         cleanHome: true,
+        rebuild: async () => {
+          // Only this unpublished stage becomes writable. No user sources or
+          // existing dependency cache entries are present in it.
+          await this.runtime.clearInheritedDependencies(stage)
+          try {
+            for (const target of targets)
+              await run(dependencyBuildCommand(target), {
+                network: 'bridge',
+                timeoutMs: target === '@mathlib' ? 5400000 : 1800000,
+              })
+            await inspectPackages(packages)
+            await verifyPackages()
+          } finally {
+            await this.runtime.inheritDependencies(stage, stage)
+          }
+        },
       })
       await run(['lake', 'env', 'lean', '--stdin'], {
         readOnlyWorkspace: true,
@@ -458,7 +481,7 @@ export class SharedDependencyCache {
           key: spec.key,
           schema: cacheSchema,
           verifiedAt: new Date().toISOString(),
-          check: 'read-only lake build @mathlib; import Mathlib',
+          check: `read-only lake build ${targets.join(' ')}; library imports`,
         }) + '\n',
         { mode: 0o400, flag: 'wx' },
       )

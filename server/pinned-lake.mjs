@@ -2,7 +2,10 @@ import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { dependencyBuildTargets } from './project-libraries.mjs'
+import {
+  dependencyBuildTargets,
+  dependencyBuildCommand,
+} from './project-libraries.mjs'
 import { runSetupStep } from './setup-output.mjs'
 
 async function pinnedText(filename, missing = false) {
@@ -212,35 +215,57 @@ export async function certifyDependencyBuilds(
   manifest,
   options = {},
 ) {
-  const targets = dependencyBuildTargets(manifest, { includeInherited: true })
-  if (manifest?.packages?.some((pkg) => pkg.name === 'mathlib'))
-    targets.unshift('@mathlib')
-  for (const target of targets) {
-    const result = await runSetupStep(
-      `Verifying dependency build ${target.replace(/^@/, '')}`,
-      () =>
-        runPinnedLake(runtime, root, ['lake', 'build', target], {
-          ...options,
-          network: 'none',
-          readOnlyWorkspace: true,
-          writeLakeCache: true,
-          timeoutMs: 5400000,
-        }),
-      options,
-    )
-    options.signal?.throwIfAborted()
-    if (result.code !== 0)
-      throw Object.assign(
-        new Error(
-          setupFailureMessage(result) ||
-            `Dependency build replay failed: ${(result.stderr || result.stdout || '').slice(-2000)}`,
-        ),
-        {
-          setupEnvironment: true,
-          infrastructure: setupInfrastructureFailure(result),
-        },
+  const { rebuild, ...runOptions } = options
+  const targets = dependencyBuildTargets(manifest, {
+    includeInherited: true,
+    includeMathlib: true,
+  })
+  const check = async () => {
+    for (const target of targets) {
+      const result = await runSetupStep(
+        `Verifying dependency build ${target.replace(/^@/, '')}`,
+        () =>
+          runPinnedLake(runtime, root, dependencyBuildCommand(target), {
+            ...runOptions,
+            network: 'none',
+            readOnlyWorkspace: true,
+            writeLakeCache: true,
+            timeoutMs: 5400000,
+          }),
+        runOptions,
       )
+      options.signal?.throwIfAborted()
+      if (result.code !== 0) return result
+    }
+    return null
   }
+  let failure = await check()
+  if (
+    failure &&
+    rebuild &&
+    !setupInfrastructureFailure(failure) &&
+    readOnlyDependencyFailure(failure)
+  ) {
+    options.onOutput?.(
+      'Preparing additional dependency build files before checking the read-only environment again.\n',
+    )
+    await rebuild()
+    options.signal?.throwIfAborted()
+    // A writable rebuild may invalidate a previously checked target. Certify
+    // the entire graph again, with no further rebuild attempts.
+    failure = await check()
+  }
+  if (failure)
+    throw Object.assign(
+      new Error(
+        setupFailureMessage(failure) ||
+          `Dependency build replay failed: ${(failure.stderr || failure.stdout || '').slice(-2000)}`,
+      ),
+      {
+        setupEnvironment: true,
+        infrastructure: setupInfrastructureFailure(failure),
+      },
+    )
 }
 
 export function setupInfrastructureFailure(result) {
