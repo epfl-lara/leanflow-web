@@ -73,6 +73,7 @@ async function fixture(t, command = async () => null) {
   )
   await fs.mkdir(path.join(dataDir, 'runtime'), { recursive: true })
   const runtime = new Runtime({ dataDir, docker })
+  runtime.dependencyBuildPlan = async () => null
   runtime.ready = true
   runtime.imageId = 'fixture-image'
   const run = runtime.run.bind(runtime)
@@ -1035,6 +1036,7 @@ test('simultaneous builders in separate runtimes publish one complete entry with
     await waiting
   })
   const other = new Runtime({ dataDir, docker: runtime.docker })
+  other.dependencyBuildPlan = runtime.dependencyBuildPlan
   other.ready = true
   other.imageId = runtime.imageId
   other.run = runtime.run.bind(runtime)

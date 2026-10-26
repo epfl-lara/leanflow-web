@@ -13,6 +13,7 @@ import {
 } from './prepared-presets.mjs'
 import { PresetInstaller } from './preset-installer.mjs'
 import { LeanReleases } from './lean-releases.mjs'
+import { dependencyBuildPlan } from './dependency-targets.mjs'
 import {
   managedWorkerDirectory,
   managedWorkerFile,
@@ -564,6 +565,10 @@ export class Runtime {
       return path.join(source, '.dependency-lake-cache')
     const key = createHash('sha256').update(source).digest('hex')
     return path.join(this.runtimeDir, 'homes', key, '.cache/lake')
+  }
+
+  async dependencyBuildPlan(root, options) {
+    return dependencyBuildPlan(this, root, options)
   }
 
   async prepareSharedDependencies(root, options) {

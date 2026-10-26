@@ -392,8 +392,12 @@ export class SharedDependencyCache {
         includeInherited: true,
         includeMathlib: true,
       })
+      const buildPlan = await this.runtime.dependencyBuildPlan?.(stage, {
+        onOutput,
+        cleanHome: true,
+      })
       for (const target of targets)
-        await run(dependencyBuildCommand(target), {
+        await run(dependencyBuildCommand(target, buildPlan), {
           network: 'bridge',
           timeoutMs: target === '@mathlib' ? 5400000 : 1800000,
         })
@@ -440,13 +444,14 @@ export class SharedDependencyCache {
       await certifyDependencyBuilds(this.runtime, stage, spec.manifest, {
         onOutput,
         cleanHome: true,
+        buildPlan,
         rebuild: async () => {
           // Only this unpublished stage becomes writable. No user sources or
           // existing dependency cache entries are present in it.
           await this.runtime.clearInheritedDependencies(stage)
           try {
             for (const target of targets)
-              await run(dependencyBuildCommand(target), {
+              await run(dependencyBuildCommand(target, buildPlan), {
                 network: 'bridge',
                 timeoutMs: target === '@mathlib' ? 5400000 : 1800000,
               })

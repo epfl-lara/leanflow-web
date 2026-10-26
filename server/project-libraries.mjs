@@ -92,8 +92,15 @@ export function dependencyBuildTargets(
     .map((pkg) => `@${pkg.name}`)
 }
 
-export function dependencyBuildCommand(target) {
+export function dependencyBuildCommand(target, plan) {
   // A package with no default targets must not make Lake fall back to the
   // root project's proofs. The explicit facet always contributes a build job.
-  return ['lake', 'build', `${target}:extraDep`, target]
+  if (plan && !Object.hasOwn(plan, target))
+    throw new Error(`Lake did not report library targets for ${target}.`)
+  return [
+    'lake',
+    'build',
+    `${target}:extraDep`,
+    ...(plan ? plan[target] : [target]),
+  ]
 }

@@ -2428,6 +2428,13 @@ export class WorkspaceStore {
         onOutput: (message) => this.#event(project, 'setup-repair', message),
       })
     }
+    const repairBuildPlan = await this.runtime.dependencyBuildPlan?.(
+      candidate,
+      {
+        signal,
+        onOutput: (message) => this.#event(project, 'setup-repair', message),
+      },
+    )
     for (const target of dependencyBuildTargets(repairedManifest, {
       includeInherited: true,
       includeMathlib: true,
@@ -2440,7 +2447,7 @@ export class WorkspaceStore {
           runPinnedLake(
             this.runtime,
             candidate,
-            dependencyBuildCommand(target),
+            dependencyBuildCommand(target, repairBuildPlan),
             {
               signal,
               network: 'bridge',
@@ -3200,6 +3207,12 @@ export class WorkspaceStore {
             onOutput: (message) => this.#event(project, 'output', message),
           })
       // Imported projects need their own compiled modules for cross-file imports.
+      const buildPlan = !shared
+        ? await this.runtime.dependencyBuildPlan?.(project.root, {
+            signal,
+            onOutput: (message) => this.#event(project, 'output', message),
+          })
+        : undefined
       if (!shared)
         for (const target of dependencyBuildTargets(manifest, {
           includeInherited: true,
@@ -3207,7 +3220,7 @@ export class WorkspaceStore {
         }))
           await this.#command(
             project,
-            dependencyBuildCommand(target),
+            dependencyBuildCommand(target, buildPlan),
             1800000,
             'bridge',
           )
@@ -3264,6 +3277,7 @@ export class WorkspaceStore {
         await this.runtime.inheritDependencies?.(project.root, project.root)
         await certifyDependencyBuilds(this.runtime, project.root, manifest, {
           signal,
+          buildPlan,
           onOutput: (message) => this.#event(project, 'output', message),
         })
       }

@@ -25,7 +25,7 @@ const runtime = new Runtime({
     ? { hostToolchainDir: process.env.LEAN_TEST_TOOLCHAIN_DIR }
     : {}),
 })
-const toolchain = 'leanprover/lean4:v4.34.1'
+const toolchain = process.env.LEAN_TEST_TOOLCHAIN || 'leanprover/lean4:v4.34.1'
 const report = {
   providerCalls: 0,
   network: 'none',
@@ -96,6 +96,30 @@ await execute('git', [
 const emptyRevision = (
   await execute('git', ['-C', emptySource, 'rev-parse', 'HEAD'])
 ).stdout.trim()
+const demoSource = path.join(dataDir, 'demo-fixture')
+await fs.cp(emptySource, demoSource, { recursive: true })
+await fs.rm(path.join(demoSource, 'lakefile.toml'))
+await fs.writeFile(
+  path.join(demoSource, 'lakefile.lean'),
+  'import Lake\nopen Lake DSL\npackage «demo-dependency»\n@[default_target]\nlean_exe demo where\n  root := `Unused\n',
+)
+await execute('git', ['-C', demoSource, 'add', '-A'])
+await execute('git', [
+  '-c',
+  'core.hooksPath=/dev/null',
+  '-C',
+  demoSource,
+  '-c',
+  'user.name=Fixture',
+  '-c',
+  'user.email=fixture@example.invalid',
+  'commit',
+  '-m',
+  'Dependency with an unusable standalone demo',
+])
+const demoRevision = (
+  await execute('git', ['-C', demoSource, 'rev-parse', 'HEAD'])
+).stdout.trim()
 const configuration = {
   'lean-toolchain': toolchain + '\n',
   'lakefile.toml': `name = "First"\ndefaultTargets = ["Main"]\n\n[[lean_lib]]\nname = "Main"\n\n[[require]]\nname = "mathlib"\ngit = "https://github.com/leanprover-community/mathlib4"\nrev = "${revision}"\n\n[[require]]\nname = "empty-dependency"\ngit = "https://github.com/example/empty-dependency"\nrev = "${emptyRevision}"\n`,
@@ -127,9 +151,22 @@ const configuration = {
         configFile: 'lakefile.toml',
         manifestFile: 'lake-manifest.json',
       },
+      {
+        name: '«demo-dependency»',
+        type: 'git',
+        url: 'https://github.com/example/demo-dependency',
+        rev: demoRevision,
+        inputRev: demoRevision,
+        inherited: false,
+        subDir: null,
+        configFile: 'lakefile.lean',
+        manifestFile: 'lake-manifest.json',
+      },
     ],
   }),
 }
+configuration['lakefile.toml'] +=
+  `\n[[require]]\nname = "demo-dependency"\ngit = "https://github.com/example/demo-dependency"\nrev = "${demoRevision}"\n`
 const realRun = runtime.run.bind(runtime)
 let downloads = 0
 let removedHash = false
@@ -153,6 +190,11 @@ try {
             recursive: true,
           },
         )
+        await fs.cp(
+          demoSource,
+          path.join(root, '.lake/packages/demo-dependency'),
+          { recursive: true },
+        )
       }
       if (command === 'lake exe cache get') {
         downloads++
@@ -174,7 +216,7 @@ try {
         removedHash = true
       } else if (
         removedHash &&
-        args.includes('@mathlib') &&
+        args.includes('@mathlib:extraDep') &&
         !options.readOnlyWorkspace
       ) {
         recoveryBuilds++
@@ -268,6 +310,7 @@ print('readonly and isolated')`,
     missingHashRecovered: true,
     boundedArtifactRebuild: true,
     escapedPackageWithoutDefaults: true,
+    standaloneDependencyDemosExcluded: true,
     downloads,
   }
   report.passed = true

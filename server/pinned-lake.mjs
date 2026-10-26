@@ -215,7 +215,7 @@ export async function certifyDependencyBuilds(
   manifest,
   options = {},
 ) {
-  const { rebuild, ...runOptions } = options
+  const { rebuild, buildPlan, ...runOptions } = options
   const targets = dependencyBuildTargets(manifest, {
     includeInherited: true,
     includeMathlib: true,
@@ -225,13 +225,18 @@ export async function certifyDependencyBuilds(
       const result = await runSetupStep(
         `Verifying dependency build ${target.replace(/^@/, '')}`,
         () =>
-          runPinnedLake(runtime, root, dependencyBuildCommand(target), {
-            ...runOptions,
-            network: 'none',
-            readOnlyWorkspace: true,
-            writeLakeCache: true,
-            timeoutMs: 5400000,
-          }),
+          runPinnedLake(
+            runtime,
+            root,
+            dependencyBuildCommand(target, buildPlan),
+            {
+              ...runOptions,
+              network: 'none',
+              readOnlyWorkspace: true,
+              writeLakeCache: true,
+              timeoutMs: 5400000,
+            },
+          ),
         runOptions,
       )
       options.signal?.throwIfAborted()
