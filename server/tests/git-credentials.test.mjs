@@ -254,3 +254,35 @@ test('worker-home cleanup deletes only canonical worker directories inside the d
   await cleanupGitWorkerHome({ workerHome: home }, dataDir)
   await cleanupGitWorkerHome(undefined, dataDir)
 })
+
+test('worker-home cleanup waits for container removal and preserves homes when stopping fails', async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-git-stop-'))
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }))
+  const home = path.join(dataDir, 'runtime/homes', 'a'.repeat(64))
+  await fs.mkdir(home, { recursive: true })
+  let stopped
+  const workerStopped = new Promise((resolve) => {
+    stopped = resolve
+  })
+  const cleanup = cleanupGitWorkerHome(
+    { workerHome: home, workerStopped },
+    dataDir,
+  )
+  assert((await fs.stat(home)).isDirectory())
+  stopped()
+  await cleanup
+  await assert.rejects(fs.stat(home), { code: 'ENOENT' })
+
+  await fs.mkdir(home)
+  await assert.rejects(
+    cleanupGitWorkerHome(
+      {
+        workerHome: home,
+        workerStopped: Promise.reject(new Error('Container removal failed')),
+      },
+      dataDir,
+    ),
+    /Container removal failed/,
+  )
+  assert((await fs.stat(home)).isDirectory())
+})

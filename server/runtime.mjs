@@ -1065,6 +1065,7 @@ export class Runtime {
       readOnlyWorkspace = false,
       writeLakeCache = false,
       freshHome = false,
+      retainHome = false,
       readOnlyHome = false,
       cleanHome = false,
       kernelCheck = false,
@@ -1086,6 +1087,7 @@ export class Runtime {
         readOnlyWorkspace,
         writeLakeCache,
         freshHome,
+        retainHome,
         readOnlyHome,
         cleanHome,
         kernelCheck,
@@ -1095,6 +1097,8 @@ export class Runtime {
       throw new Error('Worker mount options must be booleans')
     if (writeLakeCache && !readOnlyWorkspace)
       throw new Error('A writable Lake cache requires a read-only workspace')
+    if (retainHome && !freshHome)
+      throw new Error('Only a fresh worker home can be retained for export')
     const projectCheck =
       args.length === PROJECT_CHECK_COMMAND.length &&
       args.every((value, index) => value === PROJECT_CHECK_COMMAND[index])
@@ -1105,6 +1109,7 @@ export class Runtime {
         !readOnlyWorkspace ||
         !writeLakeCache ||
         !freshHome ||
+        retainHome ||
         network !== 'none')
     )
       throw new Error(
@@ -1326,6 +1331,7 @@ export class Runtime {
       timeoutMs,
       onOutput,
       freshHome,
+      retainHome,
       workerSlots,
       kernelCheck,
     })
@@ -1342,6 +1348,7 @@ export class Runtime {
       timeoutMs,
       onOutput,
       freshHome = false,
+      retainHome = false,
       workerSlots = 1,
       kernelCheck = false,
     },
@@ -1416,7 +1423,9 @@ export class Runtime {
         // The final removal happens after the Docker client has exited, so a
         // cancelled launch cannot create its container after this check.
         await removeWorker()
-        if (freshHome) await removeDisposableTree(home)
+        // Export callers own a retained fresh home until they have transferred
+        // its output. Every other fresh home is removed when the worker stops.
+        if (freshHome && !retainHome) await removeDisposableTree(home)
         this.children.delete(child)
         this.#drain()
       })().catch((error) => {

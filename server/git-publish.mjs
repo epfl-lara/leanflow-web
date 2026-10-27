@@ -321,6 +321,7 @@ export class GitPublisher {
     try {
       result = await this.runtime.run(root, args, {
         ...options,
+        retainHome: keepHome,
         signal,
         maxOutputBytes: 1024 * 1024,
         onSpawn: (worker) => {

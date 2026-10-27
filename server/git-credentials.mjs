@@ -160,6 +160,7 @@ export async function cleanupGitWorkerHome(worker, dataDir) {
     !/^[a-f0-9]{64}$/.test(path.basename(home))
   )
     return
+  await worker.workerStopped
   try {
     if ((await fs.realpath(home)) === path.resolve(home))
       await fs.rm(home, { recursive: true, force: true })

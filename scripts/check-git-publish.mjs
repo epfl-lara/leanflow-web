@@ -183,6 +183,7 @@ async function publishTransport({ root, args, env, credentials }) {
     {
       env,
       freshHome: true,
+      retainHome: true,
       cleanHome: true,
       readOnlyWorkspace: true,
       network: 'none',

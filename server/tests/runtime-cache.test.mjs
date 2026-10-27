@@ -5,6 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { Runtime } from '../runtime.mjs'
 import { PROJECT_CHECK_COMMAND } from '../lean-check.mjs'
+import { cleanupGitWorkerHome } from '../git-credentials.mjs'
 
 async function fixture(t) {
   const directory = await fs.mkdtemp(
@@ -64,6 +65,32 @@ test('fresh verification homes are removed after success or failure without dele
   }
 })
 
+test('export callers can retain only a fresh home until its output has been transferred', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  let child
+  await assert.rejects(
+    runtime.run(root, ['true'], { retainHome: true }),
+    /Only a fresh worker home/,
+  )
+  await assert.rejects(
+    runtime.run(root, ['true'], { freshHome: true, retainHome: 'true' }),
+    /must be booleans/,
+  )
+  const result = await runtime.run(root, ['true'], {
+    freshHome: true,
+    cleanHome: true,
+    retainHome: true,
+    onSpawn: (worker) => {
+      child = worker
+    },
+  })
+  assert.equal(result.code, 0)
+  assert.equal(runtime.children.size, 0)
+  assert((await fs.stat(child.workerHome)).isDirectory())
+  await cleanupGitWorkerHome(child, dataDir)
+  await assert.rejects(fs.stat(child.workerHome), { code: 'ENOENT' })
+})
+
 test('nested sandbox permissions apply only to isolated lake check workers', async (t) => {
   const { runtime, root } = await fixture(t)
   runtime.apparmorEnabled = true
@@ -77,6 +104,7 @@ test('nested sandbox permissions apply only to isolated lake check workers', asy
     [['true'], {}],
     [['lake', 'check'], { network: 'bridge' }],
     [['lake', 'check'], { freshHome: false }],
+    [['lake', 'check'], { retainHome: true }],
     [['lake', 'check'], { readOnlyWorkspace: false, writeLakeCache: false }],
   ])
     await assert.rejects(

@@ -11,6 +11,7 @@ import { createStudio } from '../studio.mjs'
 import { GitPublisher } from '../git-publish.mjs'
 import { gitCredentialsRunner } from '../git-credentials.mjs'
 import { gitReviewLink, gitReviewProvider } from '../git-review.mjs'
+import { Runtime } from '../runtime.mjs'
 
 const execute = promisify(execFile)
 const DEST = 'https://git.example.invalid/alice/proofs.git'
@@ -199,6 +200,80 @@ async function fixture(t) {
     remotes,
   }
 }
+
+async function useRuntimeCleanup(f, { failExport = false } = {}) {
+  const docker = path.join(f.dataDir, 'git-docker-fixture')
+  await fs.writeFile(
+    docker,
+    `#!${process.execPath}
+const { spawnSync } = require('node:child_process')
+const args = process.argv.slice(2)
+if (args[0] !== 'run') process.exit(0)
+const image = args.indexOf('fixture-image')
+const mounts = args.flatMap((value, i) => value === '--mount' ? [args[i + 1]] : [])
+const source = (destination) => mounts.find((mount) => mount.includes('dst=' + destination + ',') || mount.endsWith('dst=' + destination)).split(',')[1].slice(4)
+const root = source('/workspace'), home = source('/home/worker')
+const command = args.slice(image + 1).map((value) => value.replaceAll('/workspace', root).replaceAll('/home/worker', home))
+if (${failExport} && command.includes('bundle')) process.exit(17)
+const env = { PATH: process.env.PATH, HOME: home }
+for (let i = 0; i < image; i++) if (args[i] === '--env') {
+  const value = args[++i], split = value.indexOf('=')
+  if (split < 0) env[value] = process.env[value]
+  else env[value.slice(0, split)] = value.slice(split + 1)
+}
+const result = spawnSync(command[0], command.slice(1), { cwd: root, env, stdio: 'inherit' })
+if (result.error) throw result.error
+process.exit(result.status ?? 1)
+`,
+    { mode: 0o700 },
+  )
+  const runtime = new Runtime({ dataDir: f.publisher.dataDir, docker })
+  runtime.ready = true
+  runtime.imageId = 'fixture-image'
+  f.publisher.runtime = runtime
+  f.workspaces.runtime = runtime
+  await runtime.home(f.workspaces.repositoryRoot(f.project))
+  const shutdown = f.runtime.shutdown.bind(f.runtime)
+  f.runtime.shutdown = async () => {
+    await runtime.shutdown()
+    await shutdown()
+  }
+  return runtime
+}
+
+test('publish preview transfers its bundle before real runtime cleanup and releases every temporary home', async (t) => {
+  const f = await fixture(t)
+  const runtime = await useRuntimeCleanup(f)
+  const homes = path.join(f.dataDir, 'runtime/homes')
+  const before = (await fs.readdir(homes).catch(() => [])).sort()
+  const head = (await f.git('rev-parse', 'HEAD')).stdout.trim()
+  const status = (await f.git('status', '--porcelain')).stdout
+  const preview = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: DEST,
+  })
+  assert.equal(preview.head, head)
+  assert.equal(preview.historyCount, 1)
+  assert.equal(runtime.children.size, 0)
+  assert.deepEqual((await fs.readdir(homes)).sort(), before)
+  const root = f.publisher.previews.get(preview.previewId).root
+  assert((await fs.stat(path.join(root, 'export.bundle'))).size > 0)
+  assert.equal((await f.git('status', '--porcelain')).stdout, status)
+})
+
+test('a failed export releases its retained home and unfinished preview', async (t) => {
+  const f = await fixture(t)
+  const runtime = await useRuntimeCleanup(f, { failExport: true })
+  const homes = path.join(f.dataDir, 'runtime/homes')
+  const before = (await fs.readdir(homes).catch(() => [])).sort()
+  await assert.rejects(
+    f.publisher.preview('owner', f.project.id, { remoteUrl: DEST }),
+    /Git export failed/,
+  )
+  assert.equal(runtime.children.size, 0)
+  assert.deepEqual((await fs.readdir(homes)).sort(), before)
+  assert.equal(f.publisher.previews.size, 0)
+  assert.deepEqual(await fs.readdir(f.publisher.dir), [])
+})
 
 test('preview exports committed objects only and publishes the exact reviewed HEAD without retaining a token', async (t) => {
   const f = await fixture(t)
