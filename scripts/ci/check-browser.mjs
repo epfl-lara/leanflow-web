@@ -51,6 +51,7 @@ const workspaceSuites = [
   'terminal',
   'search-results',
   'import',
+  'import-environment',
   'private-import',
   'import-publishing',
   'git',

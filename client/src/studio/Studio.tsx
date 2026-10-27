@@ -44,6 +44,7 @@ import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configurati
 import { isPdfFile, isBinaryAssetFile } from '../../../shared/file-previews.mjs'
 import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
+import { ImportedProjectSetup } from './ImportedProjectSetup'
 import { RepositoryCredentialsDialog } from './RepositoryCredentialsDialog'
 import type { RepositoryCredentials } from './RepositoryCredentialsFields'
 import { ProjectSetupDetails, ProjectSetupPanel } from './ProjectSetupDetails'
@@ -418,6 +419,9 @@ export function Studio() {
     project?.status === 'ready' ||
     (project?.status === 'error' &&
       (singleFileMode || project.needsPreparation === true))
+  useEffect(() => {
+    if (project?.status === 'needs-setup') setToolsOpen(false)
+  }, [project?.id, project?.status])
   const currentEditorProof =
     editorProof?.path === file?.path ? editorProof : null
   const sidebarMaximum = Math.min(
@@ -2432,6 +2436,17 @@ export function Studio() {
               ))}
             </div>
           </div>
+        ) : project.status === 'needs-setup' ? (
+          <ImportedProjectSetup
+            key={project.id}
+            project={project}
+            templates={session.templates}
+            onConfigured={(value) =>
+              setProjects((previous) =>
+                previous.map((item) => (item.id === value.id ? value : item)),
+              )
+            }
+          />
         ) : !workspaceEditable ? (
           <div className="preparation-state">
             {project.status === 'preparing' ? (
@@ -2826,9 +2841,11 @@ export function Studio() {
             />
             {project?.status === 'ready'
               ? leanState || 'Connecting to Lean'
-              : project
-                ? project.status
-                : 'Ready to open a project'}
+              : project?.status === 'needs-setup'
+                ? 'Choose a Lean environment'
+                : project
+                  ? project.status
+                  : 'Ready to open a project'}
           </span>
           <span className="statusbar-notice" role="status">
             {saving

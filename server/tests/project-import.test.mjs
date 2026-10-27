@@ -1688,3 +1688,443 @@ test('import preparation uses its configured root build timeout while dependency
       /setupBuildTimeoutMs/,
     )
 })
+
+test('non-Lean Git imports wait for an environment choice without Lake or AI repair', async (t) => {
+  let repairs = 0
+  const documents = [
+    { path: 'README.md', content: '# My ETL project\n' },
+    { path: 'etl/pipeline.py', content: 'print("original")\n' },
+  ]
+  const f = await fixture(t, {
+    cloneFiles: documents,
+    setupRepair: async () => {
+      repairs++
+    },
+  })
+  const project = await f.create({
+    repository: 'https://github.com/example/etl',
+    autoRepair: true,
+  })
+  assert.equal(project.status, 'needs-setup', project.error)
+  assert.equal(project.error, undefined)
+  assert.equal(repairs, 0)
+  assert(!f.calls.some(({ args }) => args[0] === 'lake'))
+  for (const file of documents)
+    assert.equal(
+      await fs.readFile(path.join(project.root, file.path), 'utf8'),
+      file.content,
+    )
+  assert.equal(
+    await fs.stat(path.join(project.root, 'lean-toolchain')).catch(() => null),
+    null,
+  )
+  const restored = await new WorkspaceStore({
+    dataDir: f.dataDir,
+    runtime: f.runtime,
+  }).init()
+  t.after(() => restored.close())
+  assert.equal(restored.get(project.id, 'alice').status, 'needs-setup')
+})
+
+test('choosing Lean for an imported repository preserves content and uses the chosen exact version', async (t) => {
+  const documents = [
+    { path: 'Main.lean', content: '-- Already present, do not overwrite\n' },
+    { path: '.gitignore', content: 'output/\n' },
+    { path: 'paper.md', content: 'Original mathematics\n' },
+  ]
+  const f = await fixture(t, { cloneFiles: documents })
+  const project = await f.create({
+    repository: 'https://github.com/example/paper',
+  })
+  const selected = 'leanprover/lean4:v4.35.0-rc4'
+  let installations = 0
+  f.runtime.prepareToolchain = async (value) => {
+    assert.equal(value, selected)
+    installations++
+  }
+  await f.store.initializeEnvironment(project.id, 'alice', {
+    libraries: [],
+    toolchain: selected,
+  })
+  await f.store.jobs.get(project.id)
+  const ready = f.store.get(project.id, 'alice')
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.equal(ready.toolchain, selected)
+  assert.equal(installations, 1)
+  assert.equal(f.calls.filter(({ args }) => args.includes('clone')).length, 1)
+  assert.equal(
+    await fs.readFile(path.join(project.root, 'lean-toolchain'), 'utf8'),
+    selected + '\n',
+  )
+  for (const file of documents)
+    assert.equal(
+      await fs.readFile(path.join(project.root, file.path), 'utf8'),
+      file.content,
+    )
+  await assert.rejects(
+    f.store.initializeEnvironment(project.id, 'alice', { libraries: [] }),
+    { status: 409 },
+  )
+})
+
+test('imported library setup reuses its prepared graph without replacing repository sources', async (t) => {
+  for (const preset of ['mathlib', 'cslib', 'physlib']) {
+    const f = await fixture(t, {
+      cloneFiles: [{ path: 'paper.md', content: 'Keep this\n' }],
+    })
+    const template = path.join(f.dataDir, 'prepared')
+    await fs.mkdir(template)
+    for (const [name, content] of Object.entries({
+      'lean-toolchain': toolchain + '\n',
+      'lakefile.toml': 'name = "ProofWorkspace"\n[[lean_lib]]\nname = "Main"\n',
+      'lake-manifest.json': JSON.stringify({
+        name: 'ProofWorkspace',
+        packages: [
+          {
+            type: 'git',
+            name: preset,
+            url: `https://github.com/example/${preset}`,
+            rev: 'a'.repeat(40),
+          },
+        ],
+      }),
+    }))
+      await fs.writeFile(path.join(template, name), content)
+    const bindings = new Map()
+    f.runtime.templates = () =>
+      ['lean', 'mathlib', 'cslib', 'physlib'].map((id) => ({
+        id,
+        toolchain,
+        ready: true,
+      }))
+    f.runtime.templateRoot = () => template
+    f.runtime.inheritDependencies = async (source, root) =>
+      bindings.set(root, source)
+    f.runtime.dependencyRoot = (root) => bindings.get(root)
+    const project = await f.create({
+      repository: 'https://github.com/example/paper',
+    })
+    await f.store.initializeEnvironment(project.id, 'alice', {
+      libraries: preset === 'mathlib' ? [preset] : ['mathlib', preset],
+    })
+    await f.store.jobs.get(project.id)
+    const ready = f.store.get(project.id, 'alice')
+    assert.equal(ready.status, 'ready', ready.error)
+    assert.equal(bindings.get(project.root), template)
+    assert.equal(ready.setupBuildStatus, 'passed')
+    assert.equal(
+      await fs.readFile(path.join(project.root, 'paper.md'), 'utf8'),
+      'Keep this\n',
+    )
+    assert.match(
+      await fs.readFile(path.join(project.root, 'Main.lean'), 'utf8'),
+      /import Mathlib/,
+    )
+    assert(
+      !f.calls.some(
+        ({ args }) =>
+          args.includes('cache') || args.some((arg) => arg.startsWith('@')),
+      ),
+    )
+  }
+})
+
+test('environment selection enforces ownership, idle state and validation before writing files', async (t) => {
+  const f = await fixture(t, {
+    cloneFiles: [{ path: 'README.md', content: 'original' }],
+  })
+  const project = await f.create({
+    repository: 'https://github.com/example/etl',
+  })
+  await assert.rejects(
+    f.store.initializeEnvironment(project.id, 'bob', { libraries: [] }),
+    { status: 404 },
+  )
+  await assert.rejects(
+    f.store.initializeEnvironment(
+      project.id,
+      'alice',
+      { libraries: [] },
+      {
+        assertIdle: () => {
+          throw Object.assign(new Error('busy'), { status: 409 })
+        },
+      },
+    ),
+    { status: 409 },
+  )
+  for (const input of [
+    null,
+    [],
+    {},
+    { libraries: [], unexpected: true },
+    { libraries: ['cslib', 'physlib'] },
+    { libraries: [], toolchain: 'latest' },
+    { libraries: ['mathlib'], toolchain: 'leanprover/lean4:v4.33.0' },
+  ])
+    await assert.rejects(
+      f.store.initializeEnvironment(project.id, 'alice', input),
+      { status: 400 },
+    )
+  await assert.rejects(
+    f.store.initializeEnvironment(project.id, 'alice', {
+      libraries: ['mathlib'],
+    }),
+    { status: 503 },
+  )
+  assert.equal(f.store.get(project.id, 'alice').status, 'needs-setup')
+  assert.equal(
+    await fs.stat(path.join(project.root, 'lean-toolchain')).catch(() => null),
+    null,
+  )
+})
+
+test('a partial or newly added Lean setup keeps its pins and never gets initialized over', async (t) => {
+  for (const prefix of ['', 'formalization/']) {
+    const f = await fixture(t, {
+      cloneFiles: [
+        { path: prefix + 'lakefile.toml', content: 'name = "existing"\n' },
+      ],
+    })
+    const project = await f.create({
+      repository: 'https://github.com/example/partial',
+    })
+    assert.equal(project.status, 'error')
+    assert.match(project.error, /no lean-toolchain/)
+    await assert.rejects(
+      f.store.initializeEnvironment(project.id, 'alice', { libraries: [] }),
+      { status: 409 },
+    )
+    assert.equal(
+      await fs.readFile(path.join(project.root, 'lakefile.toml'), 'utf8'),
+      'name = "existing"\n',
+    )
+  }
+  const f = await fixture(t, {
+    cloneFiles: [{ path: 'paper.md', content: 'original' }],
+  })
+  const project = await f.create({
+    repository: 'https://github.com/example/paper',
+  })
+  await fs.mkdir(path.join(project.root, 'formalization'))
+  await fs.writeFile(
+    path.join(project.root, 'formalization', 'lean-toolchain'),
+    toolchain + '\n',
+  )
+  await fs.writeFile(
+    path.join(project.root, 'formalization', 'lakefile.toml'),
+    'name = "existing"\n',
+  )
+  await f.store.initializeEnvironment(project.id, 'alice', {
+    libraries: [],
+    toolchain: 'leanprover/lean4:v4.33.0',
+  })
+  await f.store.jobs.get(project.id)
+  const ready = f.store.get(project.id, 'alice')
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.equal(ready.toolchain, toolchain)
+  assert.equal(ready.subdirectory, 'formalization')
+  assert.equal(
+    await fs.stat(path.join(project.root, 'lean-toolchain')).catch(() => null),
+    null,
+  )
+})
+
+test('an interrupted initialization resumes existing configuration rather than trapping the setup page', async (t) => {
+  const f = await fixture(t, {
+    cloneFiles: [{ path: 'paper.md', content: 'original' }],
+  })
+  const project = await f.create({
+    repository: 'https://github.com/example/paper',
+  })
+  const pin = 'leanprover/lean4:v4.33.0'
+  for (const [name, content] of Object.entries({
+    'lean-toolchain': pin + '\n',
+    'lakefile.toml': 'name = "existing"\n',
+    'Main.lean': '-- preserved\n',
+  }))
+    await fs.writeFile(path.join(project.root, name), content)
+  await f.store.initializeEnvironment(project.id, 'alice', {
+    libraries: ['mathlib'],
+  })
+  await f.store.jobs.get(project.id)
+  const ready = f.store.get(project.id, 'alice')
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.equal(ready.toolchain, pin)
+  assert.equal(
+    await fs.readFile(path.join(project.root, 'Main.lean'), 'utf8'),
+    '-- preserved\n',
+  )
+})
+
+test('a selected parent folder finds its nested pinned project; complete projects take priority over partial examples', async (t) => {
+  for (const input of [{ subdirectory: 'work' }, {}]) {
+    const f = await fixture(t, {
+      cloneFiles: [
+        ...sources.map((file) => ({ ...file, path: 'work/lean/' + file.path })),
+        { path: 'examples/demo/lakefile.lean', content: 'import Lake\n' },
+      ],
+    })
+    const project = await f.create({
+      repository: 'https://github.com/example/paper',
+      ...input,
+    })
+    assert.equal(project.status, 'ready', project.error)
+    assert.equal(project.subdirectory, 'work/lean')
+    assert.equal(
+      await fs
+        .stat(path.join(f.store.repositoryRoot(project), 'lean-toolchain'))
+        .catch(() => null),
+      null,
+    )
+  }
+})
+
+test('incomplete detection warns without blocking root setup; submodules are explained before choosing an environment', async (t) => {
+  const deep = await fixture(t, {
+    cloneFiles: sources.map((file) => ({
+      ...file,
+      path: 'a/b/c/d/e/f/' + file.path,
+    })),
+  })
+  const stopped = await deep.create({
+    repository: 'https://github.com/example/deep',
+  })
+  assert.equal(stopped.status, 'needs-setup')
+  assert.match(stopped.importWarning, /Only part of this repository/)
+  assert.equal(
+    await fs.stat(path.join(stopped.root, 'lean-toolchain')).catch(() => null),
+    null,
+  )
+  const f = await fixture(t, {
+    cloneFiles: [
+      { path: 'paper.md', content: 'original' },
+      {
+        path: '.gitmodules',
+        content:
+          '[submodule "formalization"]\npath = formalization\nurl = https://github.com/example/lean\n',
+      },
+    ],
+  })
+  const pending = await f.create({
+    repository: 'https://github.com/example/paper',
+  })
+  assert.equal(pending.status, 'needs-setup')
+  assert.match(pending.importWarning, /Git submodules were not imported/)
+  assert.equal(
+    await fs.stat(path.join(pending.root, 'lean-toolchain')).catch(() => null),
+    null,
+  )
+})
+
+test('changed repair configuration or a missing preset cannot reuse an old template binding', async (t) => {
+  for (const missing of [false, true]) {
+    let repairs = 0
+    const added = {
+      type: 'git',
+      name: 'extra',
+      url: 'https://github.com/example/extra',
+      rev: 'b'.repeat(40),
+    }
+    const manifest = {
+      name: 'fixture',
+      packages: [
+        {
+          type: 'git',
+          name: 'mathlib',
+          url: 'https://github.com/example/mathlib',
+          rev: 'a'.repeat(40),
+        },
+      ],
+    }
+    const f = await fixture(t, {
+      cloneFiles: [{ path: 'paper.md', content: 'original' }],
+      broken: !missing,
+      setupRepair: async ({ root }) => {
+        repairs++
+        await fs.writeFile(path.join(root, 'lakefile.toml'), 'name = "fixed"\n')
+        await fs.writeFile(
+          path.join(root, 'lake-manifest.json'),
+          JSON.stringify({
+            ...manifest,
+            packages: [...manifest.packages, added],
+          }),
+        )
+      },
+    })
+    const template = path.join(f.dataDir, 'template')
+    await fs.mkdir(template)
+    for (const [name, content] of Object.entries({
+      'lean-toolchain': toolchain + '\n',
+      'lakefile.toml': `name = "${missing ? 'fixture' : 'broken'}"\n`,
+      'lake-manifest.json': JSON.stringify(manifest),
+    }))
+      await fs.writeFile(path.join(template, name), content)
+    let selections = 0
+    f.runtime.templateRoot = () =>
+      missing && selections++ > 0 ? null : template
+    const bindings = new Map(),
+      cleared = []
+    f.runtime.inheritDependencies = async (source, root) =>
+      bindings.set(root, source)
+    f.runtime.dependencyRoot = (root) => bindings.get(root) ?? null
+    f.runtime.clearInheritedDependencies = async (root, options) => {
+      if (options?.force) {
+        cleared.push(root)
+        bindings.delete(root)
+      }
+    }
+    const project = await f.create({
+      repository: 'https://github.com/example/paper',
+      autoRepair: true,
+    })
+    await f.store.initializeEnvironment(project.id, 'alice', {
+      libraries: ['mathlib'],
+    })
+    await f.store.jobs.get(project.id)
+    const ready = f.store.get(project.id, 'alice')
+    assert.equal(ready.status, 'ready', ready.error)
+    assert.equal(repairs, missing ? 0 : 1)
+    assert(cleared.includes(project.root))
+    assert.notEqual(bindings.get(project.root), template)
+    assert(
+      f.calls.some(
+        ({ root, args }) => root === project.root && args.includes('@mathlib'),
+      ),
+    )
+    if (!missing)
+      assert(
+        f.calls.some(
+          ({ root, args }) => root === project.root && args.includes('@extra'),
+        ),
+      )
+    assert.match(
+      ready.log,
+      /Added the selected Lean environment. Imported files were preserved/,
+    )
+  }
+})
+
+test('a deeply nested ETL repository without Lean can choose and prepare an environment at its root', async (t) => {
+  const content = 'print("original pipeline")\n',
+    relative = 'src/main/python/com/acme/etl/pipeline.py'
+  const f = await fixture(t, { cloneFiles: [{ path: relative, content }] })
+  const project = await f.create({
+    repository: 'https://github.com/example/etl',
+  })
+  assert.equal(project.status, 'needs-setup', project.error)
+  assert.match(project.importWarning, /Only part of this repository/)
+  await f.store.initializeEnvironment(project.id, 'alice', { libraries: [] })
+  await f.store.jobs.get(project.id)
+  const ready = f.store.get(project.id, 'alice')
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.equal(ready.root, project.root)
+  assert.equal(
+    await fs.readFile(path.join(project.root, relative), 'utf8'),
+    content,
+  )
+  assert.equal(
+    await fs.readFile(path.join(project.root, 'lean-toolchain'), 'utf8'),
+    toolchain + '\n',
+  )
+})

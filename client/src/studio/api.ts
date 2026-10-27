@@ -110,13 +110,14 @@ export interface Project {
   kind?: 'project' | 'single-file'
   protected?: boolean
   name: string
-  status: 'preparing' | 'ready' | 'error'
+  status: 'preparing' | 'needs-setup' | 'ready' | 'error'
   needsPreparation?: boolean
   toolchain?: string
   preset?: string
   libraries?: string[]
   repository?: string
   repositoryAuthenticationRequired?: boolean
+  importWarning?: string
   revision?: string
   publishingEnabled?: boolean
   workingBranch?: string

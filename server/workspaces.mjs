@@ -44,10 +44,17 @@ import {
   changedDependencyPin,
   readOnlyDependencyFailure,
 } from './pinned-lake.mjs'
-import { configurationDigest } from './shared-dependencies.mjs'
+import {
+  configurationDigest,
+  readDependencyConfiguration,
+} from './shared-dependencies.mjs'
 import { singleFileSource, availablePlaygroundName } from './single-files.mjs'
 import { sourceFingerprint } from './source-fingerprint.mjs'
-import { readDependencyConfiguration } from './shared-dependencies.mjs'
+import {
+  hasLeanConfiguration,
+  initializeLeanEnvironment,
+  leanBasicsLakefile,
+} from './project-initialization.mjs'
 import {
   libraryModulePath,
   sourceSelection,
@@ -2043,6 +2050,96 @@ export class WorkspaceStore {
     })
   }
 
+  async initializeEnvironment(
+    id,
+    owner,
+    input,
+    { assertIdle = () => {} } = {},
+  ) {
+    this.get(id, owner)
+    return this.#locked(id, async () => {
+      const project = this.get(id, owner)
+      if (project.status !== 'needs-setup' || this.jobs.has(id))
+        fail(
+          'Choose an environment only for an imported repository without Lean setup.',
+          409,
+        )
+      if (
+        !input ||
+        typeof input !== 'object' ||
+        Array.isArray(input) ||
+        Object.keys(input).some(
+          (key) => !['libraries', 'toolchain'].includes(key),
+        )
+      )
+        fail('Choose the Lean version and libraries for this project.')
+      assertIdle()
+      // Recover a save interrupted after files were added, or a setup supplied
+      // while this page was open. Normal preparation preserves its own pins.
+      if (
+        (await hasLeanConfiguration(project.root)) ||
+        (await this.#detectImportedProject(project, project.root))
+      ) {
+        project.status = 'preparing'
+        delete project.error
+        delete project.needsPreparation
+        this.#beginPrepare(project)
+        this.#event(
+          project,
+          'output',
+          'Existing Lean configuration detected. Continuing setup with its pinned environment.\n',
+        )
+        return clone(project)
+      }
+      const definitions = await this.runtime.templates()
+      const selection = projectLibraries(input.libraries, definitions)
+      if (!selection)
+        fail('Choose the libraries for this project, or Lean basics.')
+      const definition = definitions.find(
+        (item) => item.id === selection.preset,
+      )
+      const toolchain = validateToolchain(
+        input.toolchain || definition.toolchain,
+      )
+      if (selection.preset !== 'lean' && toolchain !== definition.toolchain)
+        fail('The selected libraries require their compatible Lean version.')
+      let template = await this.runtime.templateRoot(selection.preset)
+      if (
+        template &&
+        selection.preset === 'lean' &&
+        readDependencyConfiguration(template)['lean-toolchain']?.trim() !==
+          toolchain
+      )
+        template = null
+      if (selection.preset !== 'lean' && !template)
+        fail(
+          'This library is not prepared. Choose an available library or try again later.',
+          503,
+        )
+      const changed = await initializeLeanEnvironment(project.root, {
+        template,
+        toolchain,
+        imports: selection.imports.length ? selection.imports : ['Lean'],
+      })
+      project.preset = selection.preset
+      project.libraries = selection.libraries
+      project.toolchain = toolchain
+      project.initializedEnvironment = true
+      project.environmentFiles = changed
+      delete project.error
+      delete project.needsPreparation
+      project.status = 'preparing'
+      this.#save(project)
+      this.#beginPrepare(project)
+      this.#event(
+        project,
+        'output',
+        `Added the selected Lean environment. Imported files were preserved.\n`,
+      )
+      return clone(project)
+    })
+  }
+
   async stopPreparation(id, owner) {
     const project = this.get(id, owner)
     this.preparationControllers
@@ -2972,7 +3069,39 @@ export class WorkspaceStore {
       )
   }
 
+  #importWarning(project, message) {
+    if (project.importWarning?.includes(message)) return
+    project.importWarning = [project.importWarning, message]
+      .filter(Boolean)
+      .join('\n')
+    this.#save(project)
+    this.#event(project, 'warning', message + '\n')
+  }
+
+  #detectImportedProject(project, root) {
+    return detectProjectDirectory(root, {
+      onWarning: (message) => this.#importWarning(project, message),
+    })
+  }
+
   async #prepareProject(project, credentials) {
+    let presetImport =
+      project.initializedEnvironment && !project.customEnvironment
+    if (presetImport) {
+      const template = await this.runtime.templateRoot(project.preset)
+      if (
+        template &&
+        configurationDigest(readDependencyConfiguration(template)) ===
+          configurationDigest(readDependencyConfiguration(project.root))
+      )
+        await this.runtime.inheritDependencies?.(template, project.root)
+      else {
+        await this.runtime.clearInheritedDependencies?.(project.root, {
+          force: true,
+        })
+        presetImport = false
+      }
+    }
     this.preparationControllers.get(project.id)?.signal.throwIfAborted()
     this.#setupPhase(project, 'reading-project')
     this.#event(project, 'preparing', 'Preparing the project environment.\n')
@@ -2987,7 +3116,10 @@ export class WorkspaceStore {
         await this.runtime.inheritDependencies?.(template, project.root)
       }
     }
-    if (project.repository || project.uploaded || project.customEnvironment)
+    if (
+      (!presetImport && (project.repository || project.uploaded)) ||
+      project.customEnvironment
+    )
       await this.runtime.clearInheritedDependencies?.(project.root, {
         force: project.customEnvironment === true,
       })
@@ -3057,7 +3189,7 @@ export class WorkspaceStore {
         )
         await fs.writeFile(
           path.join(project.root, 'lakefile.toml'),
-          'name = "lean_workspace"\nversion = "0.1.0"\ndefaultTargets = ["Main"]\n\n[[lean_lib]]\nname = "Main"\n',
+          leanBasicsLakefile,
           { mode: 0o600 },
         )
         await fs.writeFile(
@@ -3073,12 +3205,27 @@ export class WorkspaceStore {
     }
     if (project.repository || project.uploaded) {
       if (!project.subdirectory)
-        project.subdirectory = await detectProjectDirectory(checkout)
-      const selected = project.subdirectory
+        project.subdirectory = await this.#detectImportedProject(
+          project,
+          checkout,
+        )
+      let selected = project.subdirectory
         ? await guarded(checkout, projectDirectory(project.subdirectory))
         : checkout
       if (!(await exists(selected))?.isDirectory())
         fail('The selected project subdirectory was not found.', 404)
+      if (selected !== checkout && !(await hasLeanConfiguration(selected))) {
+        const nested = await this.#detectImportedProject(project, selected)
+        if (nested) {
+          project.subdirectory = [project.subdirectory, nested]
+            .filter(Boolean)
+            .join('/')
+          selected = await guarded(
+            checkout,
+            projectDirectory(project.subdirectory),
+          )
+        }
+      }
       if (selected !== project.root)
         this.#event(
           project,
@@ -3087,6 +3234,24 @@ export class WorkspaceStore {
         )
       project.root = selected
       this.#save(project)
+      if (!(await hasLeanConfiguration(project.root))) {
+        if (await exists(path.join(checkout, '.gitmodules')))
+          this.#importWarning(
+            project,
+            'Git submodules were not imported. If the Lean project is in a submodule, import that repository directly. Otherwise, choose a new Lean environment for these files.',
+          )
+        project.status = 'needs-setup'
+        delete project.error
+        delete project.needsPreparation
+        delete project.toolchain
+        this.#save(project)
+        this.#event(
+          project,
+          'output',
+          'Repository imported. Choose a Lean version and libraries to start formalizing its contents.\n',
+        )
+        return
+      }
     }
     await this.#preparePublishingBranch(project)
     if (
@@ -3167,13 +3332,29 @@ export class WorkspaceStore {
     await this.#validateDependencyRepositories(project)
     if (!(await exists(path.join(project.root, 'lake-manifest.json'))))
       await this.#command(project, ['lake', 'update'], 900000, 'bridge')
+    let selectedTemplate = presetImport
+      ? await this.runtime.templateRoot(project.preset)
+      : null
+    if (
+      selectedTemplate &&
+      configurationDigest(readDependencyConfiguration(selectedTemplate)) !==
+        configurationDigest(readDependencyConfiguration(project.root))
+    ) {
+      await this.runtime.clearInheritedDependencies?.(project.root, {
+        force: true,
+      })
+      selectedTemplate = null
+    }
     const shared =
-      project.repository ||
-      project.uploaded ||
-      project.customEnvironment ||
-      project.setupRepair?.status === 'running'
-        ? await this.#sharedDependencies(project, signal)
-        : null
+      selectedTemplate &&
+      this.runtime.dependencyRoot?.(project.root) === selectedTemplate
+        ? { reused: true }
+        : project.repository ||
+            project.uploaded ||
+            project.customEnvironment ||
+            project.setupRepair?.status === 'running'
+          ? await this.#sharedDependencies(project, signal)
+          : null
     // Building a imported project's user proofs may fail legitimately. Preparation
     // requires usable dependencies and a Lake environment; proof errors belong in LSP.
     await this.#command(
@@ -3330,9 +3511,11 @@ export class WorkspaceStore {
       )
     )
       fail(
-        project.status === 'error'
-          ? project.error || 'Project needs preparation'
-          : 'Project is still being prepared',
+        project.status === 'needs-setup'
+          ? 'Choose a Lean environment to finish setting up this imported project.'
+          : project.status === 'error'
+            ? project.error || 'Project needs preparation'
+            : 'Project is still being prepared',
         409,
       )
   }

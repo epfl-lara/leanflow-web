@@ -6,6 +6,7 @@ import {
 } from '../shared/source-limits.mjs'
 import { isBinaryAssetFile } from '../shared/file-previews.mjs'
 import { decodeBinaryAsset } from './binary-assets.mjs'
+import { leanConfigurationFiles } from './project-initialization.mjs'
 
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status })
@@ -245,18 +246,26 @@ export function uploadedFiles(input, validatePath) {
     })
 }
 
-export async function detectProjectDirectory(root) {
-  const candidates = []
+export async function detectProjectDirectory(
+  root,
+  { onWarning = () => {} } = {},
+) {
+  const pinned = [],
+    partial = []
   let visited = 0
+  let truncated = false
   const visit = async (directory, prefix = '', depth = 0) => {
-    if (++visited > 2500 || depth > 5) return
-    const entries = await fs.readdir(directory, { withFileTypes: true })
-    if (
-      entries.some((entry) => entry.name === 'lean-toolchain' && entry.isFile())
-    ) {
-      candidates.push(prefix)
+    if (++visited > 2500 || depth > 5) {
+      truncated = true
       return
     }
+    const entries = await fs.readdir(directory, { withFileTypes: true })
+    if (entries.some((entry) => entry.name === 'lean-toolchain')) {
+      pinned.push(prefix)
+      return
+    }
+    if (entries.some((entry) => leanConfigurationFiles.includes(entry.name)))
+      partial.push(prefix)
     for (const entry of entries)
       if (
         entry.isDirectory() &&
@@ -270,6 +279,11 @@ export async function detectProjectDirectory(root) {
         )
   }
   await visit(root)
+  if (truncated)
+    onWarning(
+      'Only part of this repository could be checked for Lean configuration. If an existing Lean project is deeper in the tree, import its folder instead. Choose a new environment here to add Lean at this project root.',
+    )
+  const candidates = pinned.length ? pinned : partial
   if (candidates.length > 1)
     fail(
       `Several Lean projects were found: ${candidates.slice(0, 8).join(', ')}. Choose a project subdirectory in the import options.`,

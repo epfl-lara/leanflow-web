@@ -12,6 +12,8 @@ Developed by [EPFL LARA](https://epfl-lara.github.io/).
 - **Write LaTeX:** edit documents beside their PDF with the optional TeX worker.
 - **Stay in control:** review edits, steer separate chats, and commit or push your work.
 
+If your imported repository has no Lean setup, choose a Lean version and libraries after import. LeanFlow adds the selected environment while keeping your existing files. Repositories with Lean configuration keep their pinned environment.
+
 ## Get started
 
 **EPFL early access:** [Open LeanFlow](https://leanflow.epfl.ch/), available only from the **EPFL network or VPN**. Contact [lazar.milikic@epfl.ch](mailto:lazar.milikic@epfl.ch) for an early-access key.

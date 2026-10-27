@@ -131,10 +131,14 @@ export function WorkspaceList({
                     <span>
                       {item.status === 'preparing'
                         ? 'Preparing dependencies…'
-                        : item.status === 'error'
-                          ? 'Needs attention'
-                          : item.toolchain?.replace('leanprover/lean4:', '') ||
-                            'Lean project'}
+                        : item.status === 'needs-setup'
+                          ? 'Choose Lean environment'
+                          : item.status === 'error'
+                            ? 'Needs attention'
+                            : item.toolchain?.replace(
+                                'leanprover/lean4:',
+                                '',
+                              ) || 'Lean project'}
                     </span>
                   </span>
                   {item.status === 'preparing' && <span className="spinner" />}

@@ -904,6 +904,32 @@ textarea {
   color: var(--muted);
   margin: 7px 0 0;
 }
+.import-environment-setup {
+  overflow: auto;
+  margin: auto;
+  width: 100%;
+  max-width: 780px;
+  padding: clamp(20px, 4vw, 40px);
+}
+.import-environment-setup h1 {
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: -0.6px;
+  overflow-wrap: anywhere;
+}
+.import-environment-setup > p {
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.import-environment-setup form > .button {
+  margin-top: 24px;
+}
+.import-environment-setup input:not([type='checkbox']),
+.import-environment-setup select {
+  width: 100%;
+}
 .preparation-state {
   overflow: auto;
   margin: auto;

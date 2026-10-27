@@ -682,6 +682,19 @@ export async function createStudio({
       ),
     )
   })
+  app.post('/api/projects/:id/environment', async (req, res) => {
+    requireNoRun(req.params.id, req.user.id)
+    res.json(
+      publicProject(
+        await workspaces.initializeEnvironment(
+          req.params.id,
+          req.user.id,
+          req.body,
+          { assertIdle: () => requireNoRun(req.params.id, req.user.id) },
+        ),
+      ),
+    )
+  })
   app.post('/api/projects/:id/prepare/stop', async (req, res) =>
     res.json(
       publicProject(
