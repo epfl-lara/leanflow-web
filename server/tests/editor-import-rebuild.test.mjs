@@ -202,3 +202,29 @@ test('failed import builds keep saved sources available with a recovery action',
     status: 404,
   })
 })
+
+test('assistant import refresh includes optional project modules outside the default build', async (t) => {
+  const { store, project, runtime, calls } = await fixture(t)
+  const manifest = { name: 'fixture', packages: [] }
+  await fs.writeFile(
+    path.join(project.root, 'lake-manifest.json'),
+    JSON.stringify(manifest),
+  )
+  runtime.projectImportRequirements = async () => ['Main.Optional']
+  runtime.dependencyBuildPlan = async (_root, options) => {
+    assert.equal(options.includeRoot, true)
+    assert.deepEqual(options.requiredImports, ['Main.Optional'])
+    return { '@fixture': ['@fixture/Main', '@fixture/+Main.Optional'] }
+  }
+  assert.equal(
+    (await store.refreshEditorImports(project.id, 'alice')).ready,
+    true,
+  )
+  assert(
+    calls.some(
+      (call) =>
+        call.args.includes('@fixture') &&
+        call.args.includes('@fixture/+Main.Optional'),
+    ),
+  )
+})

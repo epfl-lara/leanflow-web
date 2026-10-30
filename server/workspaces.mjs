@@ -3105,10 +3105,24 @@ export class WorkspaceStore {
     // and do not hold a workspace lock while waiting for a worker or compiler.
     let readiness
     try {
+      const requiredImports = await this.runtime.projectImportRequirements?.(
+        project.root,
+        { signal },
+      )
+      const plan = requiredImports?.length
+        ? await this.runtime.dependencyBuildPlan?.(project.root, {
+            signal,
+            requiredImports,
+            includeRoot: true,
+            onOutput: output,
+          })
+        : null
+      const configuration = await this.#dependencyConfiguration(project)
+      const manifest = JSON.parse(configuration['lake-manifest.json'] || 'null')
       const build = await runPinnedLake(
         this.runtime,
         project.root,
-        ['lake', 'build'],
+        projectBuildCommand(manifest, plan),
         {
           network: 'none',
           readOnlyWorkspace: true,

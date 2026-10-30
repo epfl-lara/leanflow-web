@@ -92,6 +92,57 @@ try {
   report.checks.push(
     'Rebuilding the saved workspace regenerates its own module and the importer compiles.',
   )
+  const optional = 'Helper/Optional.lean'
+  await store.writeFile(
+    project.id,
+    'imports-fixture',
+    optional,
+    'def optionalValue : Nat := 7\n',
+    null,
+  )
+  await store.writeFile(
+    project.id,
+    'imports-fixture',
+    'Notes.lean',
+    'import Helper.Optional\nexample : optionalValue = 8 := by rfl\n',
+    null,
+  )
+  assert.equal(
+    (await store.refreshEditorImports(project.id, 'imports-fixture')).ready,
+    true,
+  )
+  const before = await store.readFile(project.id, 'imports-fixture', optional)
+  await store.writeFile(
+    project.id,
+    'imports-fixture',
+    optional,
+    'def optionalValue : Nat := 8\n',
+    before.hash,
+  )
+  const refreshed = await store.refreshEditorImports(
+    project.id,
+    'imports-fixture',
+  )
+  assert.equal(refreshed.ready, true, refreshed.message)
+  const optionalCheck = await runPinnedLake(
+    runtime,
+    ready.root,
+    ['lake', 'env', 'lean', 'Notes.lean'],
+    {
+      network: 'none',
+      readOnlyWorkspace: true,
+      writeLakeCache: true,
+      timeoutMs: 30000,
+    },
+  )
+  assert.equal(
+    optionalCheck.code,
+    0,
+    optionalCheck.stdout + optionalCheck.stderr,
+  )
+  report.checks.push(
+    'Later edits to optional project modules regenerate their compiled imports, even outside the default targets.',
+  )
   const source = await store.readFile(
     project.id,
     'imports-fixture',
