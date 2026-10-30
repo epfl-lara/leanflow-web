@@ -120,7 +120,7 @@ try {
     ['Terminal', /run commands and inspect their output/],
     ['Refresh setup', /reuse valid compiled caches/],
     ['Publish', /pull request or merge request/],
-    ['Assistant modes', /preserving its statement/],
+    ['Assistant modes', /helper lemmas while preserving existing statements/],
     ['Reasoning effort', /next run/],
     ['Edit files live', /review changes before applying/],
     ['Proof tokens', /size of the proof text/],
