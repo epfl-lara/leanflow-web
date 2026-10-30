@@ -25,8 +25,10 @@ RUN python3 -m venv /opt/lean-probe \
 # LeanInteract's published REPL releases currently stop before our newest
 # toolchains. Ship exact compatible upstream sources; compile per toolchain in
 # the private worker home on first use, with no network or project source writes.
-COPY deploy/lean-probe-repl-pins.json /opt/lean-probe-repls/pins.json
+COPY --chmod=644 deploy/lean-probe-repl-pins.json /opt/lean-probe-repls/pins.json
 RUN /opt/lean-probe/bin/python -c 'import json,pathlib,subprocess; root=pathlib.Path("/opt/lean-probe-repls"); pins=json.loads((root/"pins.json").read_text()); [(subprocess.run(["git","clone","--quiet","--no-checkout",pin["repository"],str(root/version)],check=True), subprocess.run(["git","-C",str(root/version),"checkout","--quiet",pin["revision"]],check=True)) for version,pin in pins.items()]'
+# Runtime workers use an unprivileged uid; root-only build checks miss unreadable COPY inputs.
+RUN python3 -c 'import json,os,pathlib; os.setgroups([]); os.setgid(65534); os.setuid(65534); root=pathlib.Path("/opt/lean-probe-repls"); pins=json.loads((root/"pins.json").read_text()); [(root/version/"lean-toolchain").read_text() for version in pins]'
 COPY deploy/lean-probe-worker /opt/tools/bin/lean-probe
 ARG LEMEX_RUNTIME_DIR=.runtime/lemex
 COPY ${LEMEX_RUNTIME_DIR} /opt/lemex

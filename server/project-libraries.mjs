@@ -84,7 +84,7 @@ export function dependencyBuildTargets(
   return manifest.packages
     .filter(
       (pkg) =>
-        pkg?.type === 'git' &&
+        ['git', 'path'].includes(pkg?.type) &&
         (includeMathlib || pkg.name !== 'mathlib') &&
         (includeInherited || pkg.inherited !== true) &&
         dependencyPackageDirectory(pkg.name),

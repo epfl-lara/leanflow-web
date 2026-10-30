@@ -14,13 +14,13 @@ test('dependency builds address packages explicitly and preserve escaped Lake na
       { type: 'path', name: 'local' },
     ],
   }
-  assert.deepEqual(dependencyBuildTargets(manifest), ['@verso'])
+  assert.deepEqual(dependencyBuildTargets(manifest), ['@verso', '@local'])
   assert.deepEqual(
     dependencyBuildTargets(manifest, {
       includeInherited: true,
       includeMathlib: true,
     }),
-    ['@mathlib', '@verso', '@«verso-slides»'],
+    ['@mathlib', '@verso', '@«verso-slides»', '@local'],
   )
   assert.equal(dependencyPackageDirectory('«verso-slides»'), 'verso-slides')
   assert.equal(dependencyPackageDirectory('Mathlib'), 'Mathlib')

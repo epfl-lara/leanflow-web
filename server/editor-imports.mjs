@@ -93,7 +93,10 @@ def compiler_detail(proc):
             line = line.strip()
             if line:
                 lines.append(line)
-    return clip(' '.join(lines[-4:]), 400)
+    # --deps can print search paths and resolved oleans after an error. Keep
+    # the diagnostic instead of letting that trailing output hide its module.
+    diagnostics = [line for line in lines if re.search(r'\berror:|object file .* does not exist|unknown module prefix', line, re.IGNORECASE)]
+    return clip(' '.join(diagnostics or lines[-4:]), 400)
 
 def missing_module(detail):
     for pattern, group in (

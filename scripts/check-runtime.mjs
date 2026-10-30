@@ -30,6 +30,17 @@ const runtime = new Runtime({ dataDir, maxConcurrent: 2, memory })
 try {
   await runtime.init()
   assert.equal(runtime.info().ready, true, runtime.info().error)
+  const probeFiles = await runtime.run(
+    root,
+    [
+      'python3',
+      '-I',
+      '-c',
+      'import json, os, pathlib; assert os.getuid() != 0; root = pathlib.Path("/opt/lean-probe-repls"); pins = json.loads((root / "pins.json").read_text()); [(root / version / "lean-toolchain").read_text() for version in pins]',
+    ],
+    { network: 'none', cleanHome: true },
+  )
+  assert.equal(probeFiles.code, 0, probeFiles.stderr)
   const actualNative = await promisify(execFile)('docker', [
     'run',
     '--rm',

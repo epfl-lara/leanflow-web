@@ -34,7 +34,7 @@ async function fixture(
       if (args[0] === 'git' && args.includes('rev-parse'))
         return { code: 1, stdout: '', stderr: '' }
       if (args[0] === 'lake' && args.includes('build')) {
-        if (runtime.build) await runtime.build(root, options)
+        if (runtime.build) await runtime.build(root, options, args)
       }
       if (args.includes('python3'))
         return {
@@ -57,7 +57,10 @@ async function fixture(
     autoRepair: false,
     files: [
       { path: 'lean-toolchain', content: toolchain + '\n' },
-      { path: 'lake-manifest.json', content: '{"packages":[]}' },
+      {
+        path: 'lake-manifest.json',
+        content: '{"name":"fixture","packages":[]}',
+      },
       {
         path: 'lakefile.toml',
         content:
@@ -85,6 +88,61 @@ test('setup reports unresolved local imports even when the project build and ext
         (event) => event.type === 'warning' && event.message.includes('Helper'),
       ),
   )
+})
+
+test('private setup and shared-cache fallback prepare optional imports outside default targets', async (t) => {
+  for (const fallback of [false, true]) {
+    const { store, project, runtime } = await fixture(t)
+    await store.writeFile(
+      project.id,
+      'alice',
+      'Helper/Optional.lean',
+      'theorem helper : True := by trivial\n',
+      null,
+    )
+    await store.writeFile(
+      project.id,
+      'alice',
+      'Notes.lean',
+      'import Helper.Optional\nexample : True := helper\n',
+      null,
+    )
+    runtime.readiness = {
+      ready: false,
+      message: 'Helper.Optional is not compiled.',
+    }
+    if (fallback)
+      runtime.prepareSharedDependencies = async () => {
+        throw new Error('Shared cache is unavailable')
+      }
+    runtime.projectImportRequirements = async () => ['Init', 'Helper.Optional']
+    runtime.dependencyBuildPlan = async (
+      _root,
+      { requiredImports = [], includeRoot },
+    ) => ({
+      '@fixture':
+        includeRoot && requiredImports.includes('Helper.Optional')
+          ? ['@fixture/+Helper.Optional']
+          : [],
+    })
+    runtime.build = async (_root, _options, args) => {
+      if (args.includes('@fixture/+Helper.Optional'))
+        runtime.readiness = {
+          ready: true,
+          message: 'Project imports are ready.',
+        }
+    }
+    await store.prepare(project.id, 'alice')
+    await store.jobs.get(project.id)
+    const ready = store.get(project.id, 'alice')
+    assert.equal(ready.status, 'ready', ready.error)
+    assert.equal(ready.setupBuildStatus, 'passed', ready.buildWarning)
+    assert.equal(ready.buildWarning, undefined)
+    assert.equal(
+      (await store.readFile(project.id, 'alice', 'Notes.lean')).content,
+      'import Helper.Optional\nexample : True := helper\n',
+    )
+  }
 })
 
 test('saved assistant modules are rebuilt in the saved workspace without copying candidate artifacts', async (t) => {

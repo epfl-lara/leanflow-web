@@ -75,6 +75,9 @@ for module in imports:
     if found is None:
         expected = pathlib.Path('/workspace/.lake/build/lib/lean') / pathlib.Path(*module.split('.')).with_suffix('.olean')
         print("error: object file '" + str(expected) + "' of module " + module + " does not exist", file=sys.stderr)
+        if os.environ.get('FIXTURE_SEARCH_PATH_NOISE'):
+            for _ in range(6):
+                print('/opt/lean-toolchains/fixture/lib/lean/Init.olean')
         sys.exit(1)
     print(found)
 sys.exit(0)
@@ -241,6 +244,20 @@ test('an imported module with an unfinished sorry proof is ready when its olean 
   assert.equal(result.ready, true)
   assert.match(result.message, /ready/)
   assert.match(result.message, /2 Lean files checked/)
+})
+
+test('missing import errors retain the module name when Lean prints trailing resolved paths', async (t) => {
+  const { root } = await project(t)
+  const lean = await fakeToolchain(t)
+  await fs.writeFile(path.join(root, 'Notes.lean'), 'import Helper.Optional\n')
+  const result = await checkEditorImports(
+    workerRuntime(root, lean, { FIXTURE_SEARCH_PATH_NOISE: '1' }),
+    root,
+  )
+  assert.equal(result.ready, false)
+  assert.match(result.message, /Notes\.lean imports Helper\.Optional/)
+  assert.match(result.message, /Rebuild/)
+  assert.doesNotMatch(result.message, /\/opt\/lean-toolchains/)
 })
 
 test('a project without local Lean sources needs no import check', async (t) => {

@@ -8,11 +8,28 @@ import { parseArgs } from 'node:util'
 import { Runtime } from '../server/runtime.mjs'
 import { WorkspaceStore } from '../server/workspaces.mjs'
 import { runPinnedLake } from '../server/pinned-lake.mjs'
+import { checkEditorImports } from '../server/editor-imports.mjs'
+import {
+  checkSetupCompiler,
+  checkSetupEditor,
+  checkSetupLemex,
+  checkSetupProbe,
+} from './lib/setup-readiness.mjs'
 
-const { values } = parseArgs({ options: { repository: { type: 'string' } } })
-const reportDir = path.resolve('.runtime/project-setup-check')
-const dataDir = path.join(reportDir, randomUUID())
-const toolchain = 'leanprover/lean4:v4.34.1'
+const { values } = parseArgs({
+  options: {
+    repository: { type: 'string' },
+    dependencies: { type: 'boolean', default: false },
+    probe: { type: 'boolean', default: false },
+    toolchain: { type: 'string', default: 'leanprover/lean4:v4.34.1' },
+  },
+})
+const reportDir = path.resolve(
+  process.env.LEAN_TEST_REPORT_DIR || '.runtime/project-setup-check',
+  randomUUID(),
+)
+const dataDir = path.join(reportDir, 'data')
+const toolchain = values.toolchain
 const source = 'theorem preserved (n : Nat) : n + 0 = n := by rfl\n'
 const configuration =
   'name = "SetupFixture"\ndefaultTargets = ["Main"]\n[[lean_lib]]\nname = "Main"\n'
@@ -31,6 +48,9 @@ const runtime = new Runtime({
     ? { hostToolchainDir: process.env.LEAN_TEST_TOOLCHAIN_DIR }
     : {}),
 })
+const spawn = runtime.spawn.bind(runtime)
+runtime.spawn = (root, args, options) =>
+  spawn(root, args, { ...options, cleanHome: true })
 const report = {
   dataDir,
   providerCalls: 0,
@@ -43,6 +63,7 @@ await fs.mkdir(reportDir, { recursive: true })
 try {
   const status = await runtime.init()
   assert.equal(status.ready, true, status.error)
+  report.imageId = runtime.imageId
   store = await new WorkspaceStore({
     dataDir,
     runtime,
@@ -140,6 +161,141 @@ try {
   await store.jobs.get(valid.id)
   assert.equal(store.get(valid.id, 'setup-fixture').status, 'ready')
   report.checks.push({ name: 'refresh-valid-upload', status: 'ready' })
+  const verifyReadiness = async (project, file, line) => {
+    assert.equal(project.setupBuildStatus, 'passed', project.buildWarning)
+    const check = report.checks.find((entry) => entry.name === project.name)
+    const ready = await checkEditorImports(runtime, project.root)
+    assert.equal(ready.ready, true, ready.message)
+    await checkSetupCompiler(runtime, project.root, file)
+    check.editor = await checkSetupEditor(runtime, project.root, file, {
+      line,
+      character: 2,
+    })
+    const snapshot = await store.snapshot(
+      project.id,
+      'setup-fixture',
+      randomUUID(),
+    )
+    await checkSetupCompiler(runtime, snapshot.root, file)
+    check.lemex = await checkSetupLemex(runtime, snapshot.root)
+    if (values.probe)
+      check.probe = await checkSetupProbe(runtime, snapshot.root, file)
+    check.snapshotImports = true
+    console.log(JSON.stringify({ name: project.name, readiness: check }))
+  }
+  const optionalFiles = [
+    ...files(source, configuration + '\n[[lean_lib]]\nname = "Helper"\n'),
+    {
+      path: 'Helper/Optional.lean',
+      content: 'theorem helper : True := by trivial\n',
+    },
+    {
+      path: 'Notes.lean',
+      content: 'import Helper.Optional\nexample : True := by\n  exact helper\n',
+    },
+  ]
+  const optional = await prepare('optional-local-import', {
+    files: optionalFiles,
+  })
+  await verifyReadiness(optional, 'Notes.lean', 2)
+  for (const file of optionalFiles)
+    assert.equal(
+      await fs.readFile(path.join(optional.root, file.path), 'utf8'),
+      file.content,
+    )
+  const pathFiles = [
+    ...files(
+      source,
+      configuration + '\n[[require]]\nname = "local"\npath = "vendor/local"\n',
+    ),
+    {
+      path: 'vendor/local/lakefile.toml',
+      content:
+        'name = "local"\ndefaultTargets = ["Local"]\n[[lean_lib]]\nname = "Local"\n',
+    },
+    {
+      path: 'vendor/local/Local.lean',
+      content: 'theorem localReady : True := by trivial\n',
+    },
+    {
+      path: 'vendor/local/Local/Optional.lean',
+      content: 'theorem localOptional : True := by trivial\n',
+    },
+    {
+      path: 'Notes.lean',
+      content:
+        'import Local.Optional\nexample : True := by\n  exact localOptional\n',
+    },
+  ]
+  const local = await prepare('local-path-dependency', { files: pathFiles })
+  await verifyReadiness(local, 'Notes.lean', 2)
+  for (const file of pathFiles)
+    assert.equal(
+      await fs.readFile(path.join(local.root, file.path), 'utf8'),
+      file.content,
+    )
+  if (values.dependencies) {
+    // Small public dependency: real HTTPS download, exact revision, no preset or
+    // compiled artifacts. Two concurrent warm imports exercise cache reuse.
+    const revision = 'e92c9f15fdfacc8536f31cfb3b7ad26c3c8cd204'
+    const dependencyFiles = [
+      ...files(
+        source,
+        configuration +
+          `\n[[require]]\nname = "Cli"\ngit = "https://github.com/leanprover/lean4-cli"\nrev = "${revision}"\n`,
+      ),
+      {
+        path: 'Notes.lean',
+        content:
+          'import Cli\nexample (n : Nat) : n + 0 = n := by\n  exact Nat.add_zero n\n',
+      },
+    ]
+    const cold = await prepare('git-dependency-cold', {
+      files: dependencyFiles,
+    })
+    await verifyReadiness(cold, 'Notes.lean', 2)
+    const manifest = await fs.readFile(
+      path.join(cold.root, 'lake-manifest.json'),
+      'utf8',
+    )
+    assert.equal(
+      JSON.parse(manifest).packages.find((pkg) => pkg.name === 'Cli').rev,
+      revision,
+    )
+    const cached = runtime.dependencyRoot(cold.root)
+    assert(cached && cached !== cold.root)
+    await fs.writeFile(
+      path.join(cold.root, 'private-fixture.txt'),
+      'Only the cold project owns this file.\n',
+    )
+    const warm = await Promise.all(
+      ['a', 'b'].map((suffix) =>
+        prepare(`git-dependency-warm-${suffix}`, {
+          files: [
+            ...dependencyFiles,
+            { path: 'lake-manifest.json', content: manifest },
+          ],
+        }),
+      ),
+    )
+    for (const project of warm) {
+      assert.equal(runtime.dependencyRoot(project.root), cached)
+      await assert.rejects(
+        fs.stat(path.join(project.root, 'private-fixture.txt')),
+        { code: 'ENOENT' },
+      )
+      assert.equal(
+        await fs.readFile(
+          path.join(project.root, 'lake-manifest.json'),
+          'utf8',
+        ),
+        manifest,
+      )
+      await verifyReadiness(project, 'Notes.lean', 2)
+    }
+    report.concurrentWarmImports = warm.length
+    report.sharedCacheReused = true
+  }
   // A miniature dependency exercises actual native artifact writes through the
   // same read-only package overlay, without downloading a full Mathlib cache.
   const nativeCache = path.join(dataDir, 'native-dependency-cache')

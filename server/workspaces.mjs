@@ -3497,12 +3497,20 @@ export class WorkspaceStore {
             onOutput: (message) => this.#event(project, 'output', message),
           })
       // Imported projects need their own compiled modules for cross-file imports.
-      const buildPlan = !shared
-        ? await this.runtime.dependencyBuildPlan?.(project.root, {
-            signal,
-            onOutput: (message) => this.#event(project, 'output', message),
-          })
-        : undefined
+      const requiredImports =
+        shared?.requiredImports ??
+        (await this.runtime.projectImportRequirements?.(project.root, {
+          signal,
+        }))
+      // Private environments need the same import coverage as shared caches.
+      // Files outside the default targets can import optional local modules or
+      // dependency libraries that an ordinary `lake build` never prepares.
+      const buildPlan = await this.runtime.dependencyBuildPlan?.(project.root, {
+        signal,
+        requiredImports,
+        includeRoot: true,
+        onOutput: (message) => this.#event(project, 'output', message),
+      })
       if (!shared)
         for (const target of dependencyBuildTargets(manifest, {
           includeInherited: true,
@@ -3517,21 +3525,13 @@ export class WorkspaceStore {
       // Failed user proofs remain repairable, so they do not make an otherwise
       // usable environment unavailable in the editor.
       this.#setupPhase(project, 'building-project')
-      const projectPlan = shared?.requiredImports?.length
-        ? await this.runtime.dependencyBuildPlan?.(project.root, {
-            signal,
-            requiredImports: shared.requiredImports,
-            includeRoot: true,
-            onOutput: (message) => this.#event(project, 'output', message),
-          })
-        : null
       const build = await runSetupStep(
         `Building project ${project.name}`,
         () =>
           runPinnedLake(
             this.runtime,
             project.root,
-            projectBuildCommand(manifest, projectPlan),
+            projectBuildCommand(manifest, buildPlan),
             {
               timeoutMs: this.setupBuildTimeoutMs,
               network: 'none',
