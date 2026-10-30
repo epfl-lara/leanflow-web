@@ -208,6 +208,7 @@ export function LeanWorkspace({
   buffers,
   bufferDiscardVersion,
   bufferSaveVersion,
+  editorImportsVersion,
   savedPaths,
   bufferRemoveVersion,
   removedPaths,
@@ -233,6 +234,7 @@ export function LeanWorkspace({
   buffers: ReadonlyMap<string, OpenFile>
   bufferDiscardVersion: number
   bufferSaveVersion: number
+  editorImportsVersion?: number
   savedPaths: readonly string[]
   bufferRemoveVersion: number
   removedPaths: readonly string[]
@@ -605,6 +607,26 @@ export function LeanWorkspace({
       cancelled = true
     }
   }, [bufferSaveVersion, projectId, savedPaths])
+
+  useEffect(() => {
+    if (!editorImportsVersion) return
+    let cancelled = false
+    void serialize(async () => {
+      if (cancelled) return
+      const active = runtime.current
+      active?.modelCache.invalidate()
+      await active?.lean.closeHiddenDocuments()
+      await active?.lean.refreshVisibleDocument()
+    }).catch(() => {
+      if (!cancelled)
+        setRestartIssue(
+          'Project imports were rebuilt, but Lean could not refresh this file. Use Restart Lean to reconnect.',
+        )
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [editorImportsVersion, projectId])
 
   useEffect(() => {
     runtime.current?.modelCache.removePaths(removedPaths)

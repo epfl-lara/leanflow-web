@@ -65,6 +65,15 @@ async function fixture(
         )
       )
         return { code: 1, stderr: 'Invalid Lake configuration', stdout: '' }
+      if (args.includes('env') && args.includes('python3'))
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            ready: true,
+            message: 'Project imports are ready.',
+          }),
+          stderr: '',
+        }
       return { code: 0, stdout: 'Lean version 4.34.1', stderr: '' }
     },
   }

@@ -367,6 +367,42 @@ export class AgentManager {
     this.events.updateMetadata(id, { progress })
     this.#emit(id, 'progress', progress)
   }
+  async #refreshEditorImports(job, signal) {
+    const paths = (job.liveEdits ? job.liveChanges : job.changes)
+      ?.map((change) => change.path)
+      .filter((file) => file.endsWith('.lean'))
+    if (!paths?.length) return
+    this.#progress(
+      job.id,
+      'Preparing editor imports',
+      'Building the saved project so its modules can load in the editor.',
+    )
+    let result
+    try {
+      result = await this.workspaces.refreshEditorImports(
+        job.projectId,
+        job.owner,
+        { signal, onOutput: (text) => this.#log(job.id, text) },
+      )
+    } catch {
+      signal?.throwIfAborted()
+      result = {
+        ready: false,
+        message:
+          'Saved files could not be prepared for editor imports. Run Check project, then Restart Lean.',
+      }
+    }
+    signal?.throwIfAborted()
+    if (!result.ready) this.#log(job.id, result.message + '\n')
+    this.events.updateMetadata(job.id, {
+      liveRevision: (this.events.getMetadata(job.id).liveRevision || 0) + 1,
+    })
+    this.#emit(job.id, 'files-updated', {
+      paths,
+      live: !!job.liveEdits,
+      reason: 'imports',
+    })
+  }
   async message(owner, id, input) {
     const job = this.events.getMetadata(id, owner)
     assertAgentJob(job)
@@ -1129,6 +1165,11 @@ export class AgentManager {
       if (active.controller.signal.aborted) return
       this.events.updateMetadata(id, { changes })
       this.#emit(id, 'changes', { changes })
+      if (job.liveEdits)
+        await this.#refreshEditorImports(
+          this.events.getMetadata(id),
+          active.controller.signal,
+        )
       if (['search', 'formalize'].includes(job.mode) && !changes.length) {
         const verification =
           job.mode === 'formalize'
@@ -1369,7 +1410,8 @@ export class AgentManager {
         ),
         { status: 409 },
       )
-    if (job.liveEdits && job.liveChanges?.length)
+    const alreadyLive = job.liveEdits && job.liveChanges?.length
+    if (alreadyLive)
       await this.workspaces.assertLive(job.snapshot, job.liveChanges, {
         allowProjectFiles: job.mode === 'search',
       })
@@ -1378,7 +1420,13 @@ export class AgentManager {
         snapshot: job.snapshot,
       })
     this.#log(id, 'Accepted candidate changes.\n')
-    return this.events.update(id, { status: 'applied' })
+    this.events.update(id, { status: 'applied' })
+    // Live edits were rebuilt when the turn finished. Review-first edits reach
+    // the saved workspace here and need their own build before editor refresh.
+    if (!alreadyLive)
+      await this.#refreshEditorImports({ ...job, liveEdits: false })
+    this.#progress(id, 'Applied', 'Candidate changes are saved in the project.')
+    return this.events.get(id, owner)
   }
   async undo(owner, id) {
     const job = this.events.get(id, owner)

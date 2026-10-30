@@ -98,10 +98,16 @@ export async function runPinnedLake(runtime, root, args, options = {}) {
     const messages = []
     const current = await pinnedText(filename, true)
     if (current !== original) {
-      await restorePinnedText(filename, original)
-      messages.push(
-        'Lake changed the pinned Lean release. The original release was restored. Check that the dependencies support it, then retry setup.',
-      )
+      if (options.readOnlyWorkspace)
+        messages.push(
+          'The pinned Lean release changed during checking. Your saved configuration was retained. Retry with the current environment.',
+        )
+      else {
+        await restorePinnedText(filename, original)
+        messages.push(
+          'Lake changed the pinned Lean release. The original release was restored. Check that the dependencies support it, then retry setup.',
+        )
+      }
     }
     const lock = parsedManifest(originalManifest)
     if (
@@ -111,10 +117,16 @@ export async function runPinnedLake(runtime, root, args, options = {}) {
         parsedManifest(await pinnedText(manifestFile, true)),
       )
     ) {
-      await restorePinnedText(manifestFile, originalManifest)
-      messages.push(
-        'Lake changed a pinned dependency revision. The original lockfile was restored. Check the dependency configuration before retrying setup.',
-      )
+      if (options.readOnlyWorkspace)
+        messages.push(
+          'Pinned dependencies changed during checking. Your saved lockfile was retained. Retry with the current environment.',
+        )
+      else {
+        await restorePinnedText(manifestFile, originalManifest)
+        messages.push(
+          'Lake changed a pinned dependency revision. The original lockfile was restored. Check the dependency configuration before retrying setup.',
+        )
+      }
     }
     if (messages.length)
       throw Object.assign(new Error(messages.join('\n')), {

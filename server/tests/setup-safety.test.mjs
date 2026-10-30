@@ -205,6 +205,48 @@ test('setup retains Lean pins through implicit updates and restores an unexpecte
   )
 })
 
+test('read-only checks retain configuration saved concurrently by the user', async (t) => {
+  const root = await fixture(t)
+  await fs.writeFile(path.join(root, 'lean-toolchain'), toolchain)
+  const manifest = {
+    packages: [
+      {
+        type: 'git',
+        name: 'library',
+        url: 'https://github.com/example/library',
+        rev: 'a'.repeat(40),
+      },
+    ],
+  }
+  await fs.writeFile(
+    path.join(root, 'lake-manifest.json'),
+    JSON.stringify(manifest),
+  )
+  const nextToolchain = 'leanprover/lean4:v4.35.0\n'
+  const nextManifest = JSON.stringify({
+    packages: [{ ...manifest.packages[0], rev: 'b'.repeat(40) }],
+  })
+  const worker = {
+    run: async () => {
+      await fs.writeFile(path.join(root, 'lean-toolchain'), nextToolchain)
+      await fs.writeFile(path.join(root, 'lake-manifest.json'), nextManifest)
+      return { code: 0 }
+    },
+  }
+  await assert.rejects(
+    runPinnedLake(worker, root, ['lake', 'build'], { readOnlyWorkspace: true }),
+    /saved configuration was retained/,
+  )
+  assert.equal(
+    await fs.readFile(path.join(root, 'lean-toolchain'), 'utf8'),
+    nextToolchain,
+  )
+  assert.equal(
+    await fs.readFile(path.join(root, 'lake-manifest.json'), 'utf8'),
+    nextManifest,
+  )
+})
+
 test('Physlib cache uses the outer project pin and packages without creating a nested Lake workspace', () => {
   const commands = dependencyCacheCommands(
     { packages: [{ name: 'mathlib' }, { name: 'Physlib' }] },

@@ -327,6 +327,39 @@ test('accepting verified live edits validates current saved state without replay
   assert.equal((await manager.apply('alice', job.id)).status, 'applied')
 })
 
+test('accepting reviewed Lean changes rebuilds saved imports before refreshing the editor', async (t) => {
+  const { manager, events, calls } = await fixture(t, {
+    refreshEditorImports: async (projectId, owner) => {
+      assert.equal(calls.at(-1)[0], 'apply')
+      calls.push(['imports', projectId, owner])
+      return { ready: true, message: 'Project imports are ready.' }
+    },
+  })
+  const job = events.create('alice', {
+    kind: 'agent',
+    projectId: 'p',
+    snapshot,
+    liveEdits: false,
+  })
+  events.update(job.id, {
+    status: 'completed',
+    changes: [
+      { path: 'New.lean', before: null, after: 'example : True := by trivial' },
+    ],
+    verification: { complete: true },
+  })
+  assert.equal((await manager.apply('alice', job.id)).status, 'applied')
+  assert.deepEqual(
+    calls.map((call) => call[0]),
+    ['apply', 'imports'],
+  )
+  assert.deepEqual(
+    events.events(job.id).find((event) => event.type === 'files-updated').data,
+    { paths: ['New.lean'], live: false, reason: 'imports' },
+  )
+  assert.equal(events.get(job.id).liveRevision, 1)
+})
+
 test('Undo is guarded by owner and stopped state, delegates protected restoration, and emits updates', async (t) => {
   const { manager, events, calls } = await fixture(t)
   const changes = [{ path: 'Main.lean', before: 'old', after: 'candidate' }]

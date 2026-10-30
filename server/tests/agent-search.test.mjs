@@ -167,6 +167,35 @@ async function fixture(t, edit = async () => {}, { buildFails = false } = {}) {
   return { manager, workspaces, project, calls, requests, events, execute }
 }
 
+test('finishing live Lean edits rebuilds the saved workspace before publishing the final editor refresh', async (t) => {
+  const { execute, project, calls, workspaces, events } = await fixture(
+    t,
+    async (root) => {
+      await fs.writeFile(
+        path.join(root, 'Helper.lean'),
+        'theorem helper : True := by trivial\n',
+      )
+    },
+  )
+  const result = await execute('Add a helper module.', { liveEdits: true })
+  assert.equal(result.status, 'completed', result.error)
+  const builds = calls.filter(
+    (call) => call.workspace === project.root && call.args.includes('build'),
+  )
+  assert.equal(builds.length, 1)
+  assert.equal(builds[0].options.readOnlyWorkspace, true)
+  assert.equal(builds[0].options.writeLakeCache, true)
+  assert.equal(workspaces.get(project.id, 'alice').editorImportsVersion, 1)
+  assert(
+    events
+      .events(result.id)
+      .some(
+        (event) =>
+          event.type === 'files-updated' && event.data.reason === 'imports',
+      ),
+  )
+})
+
 test('Formalize receives open or attached documents and independently verifies new Lean output', async (t) => {
   for (const document of [
     'Paper.PDF',
@@ -443,7 +472,9 @@ test(
     assert.equal(result.verification.complete, false)
     assert.equal(result.liveChanges.length, 2)
     assert.deepEqual(
-      calls.map((call) => call.args.slice(0, 2)),
+      calls
+        .filter((call) => call.workspace !== project.root)
+        .map((call) => call.args.slice(0, 2)),
       [
         ['lake', 'env'],
         ['lake', 'build'],

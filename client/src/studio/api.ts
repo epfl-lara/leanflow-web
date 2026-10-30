@@ -129,6 +129,7 @@ export interface Project {
   setupStartedAt?: string
   setupEventAfter?: number
   setupBuildStatus?: 'passed' | 'warnings' | 'reused'
+  editorImportsVersion?: number
   sourceRevision?: string
   log?: string
   subdirectory?: string

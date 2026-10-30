@@ -50,6 +50,7 @@ import {
 } from './shared-dependencies.mjs'
 import { singleFileSource, availablePlaygroundName } from './single-files.mjs'
 import { sourceFingerprint } from './source-fingerprint.mjs'
+import { checkEditorImports } from './editor-imports.mjs'
 import {
   hasLeanConfiguration,
   initializeLeanEnvironment,
@@ -3069,6 +3070,99 @@ export class WorkspaceStore {
       )
   }
 
+  async #checkEditorImports(project, options = {}) {
+    const result = await runSetupStep(
+      'Checking project module imports',
+      async () => {
+        const readiness = await checkEditorImports(this.runtime, project.root, {
+          ...options,
+          onOutput: undefined,
+        })
+        return { ...readiness, code: readiness.ready ? 0 : 1 }
+      },
+      options,
+    )
+    if (!result.ready) {
+      project.setupBuildStatus = 'warnings'
+      project.buildWarning = [project.buildWarning, result.message]
+        .filter(Boolean)
+        .join('\n')
+      this.#event(project, 'warning', result.message + '\n')
+    } else this.#event(project, 'output', result.message + '\n')
+    return result
+  }
+
+  async refreshEditorImports(id, owner, { signal, onOutput } = {}) {
+    const project = this.get(id, owner)
+    this.#ready(project)
+    if (project.kind === 'single-file') return { ready: true, message: '' }
+    signal?.throwIfAborted()
+    const fingerprint = await this.checkFingerprint(id, owner, { signal })
+    const output = onOutput || (() => {})
+    // Build saved sources in their own cache. Candidate artifacts are untrusted
+    // inputs and belong to a different workspace. Keep the source mount read only
+    // and do not hold a workspace lock while waiting for a worker or compiler.
+    let readiness
+    try {
+      const build = await runPinnedLake(
+        this.runtime,
+        project.root,
+        ['lake', 'build'],
+        {
+          network: 'none',
+          readOnlyWorkspace: true,
+          writeLakeCache: true,
+          timeoutMs: Math.min(this.setupBuildTimeoutMs, 180000),
+          signal,
+          onOutput: output,
+        },
+      )
+      signal?.throwIfAborted()
+      readiness =
+        build.code === 0
+          ? await checkEditorImports(this.runtime, project.root, {
+              signal,
+            })
+          : {
+              ready: false,
+              message:
+                'Saved files need a successful project build before all imports can load in the editor. Fix the build errors and run Check project, then Restart Lean.',
+            }
+    } catch {
+      signal?.throwIfAborted()
+      readiness = {
+        ready: false,
+        message:
+          'Editor imports could not be rebuilt. Run Check project to inspect the failure, then Restart Lean.',
+      }
+    }
+    signal?.throwIfAborted()
+    return this.#locked(id, async () => {
+      const current = this.get(id, owner)
+      this.#ready(current)
+      if (fingerprint !== (await sourceFingerprint(current.root, { signal })))
+        readiness = {
+          ready: false,
+          message:
+            'Saved files changed while editor imports were being built. Run Check project for the latest files, then Restart Lean.',
+        }
+      signal?.throwIfAborted()
+      current.setupBuildStatus = readiness.ready ? 'passed' : 'warnings'
+      current.editorImportsVersion = (current.editorImportsVersion || 0) + 1
+      if (readiness.ready) delete current.buildWarning
+      else current.buildWarning = readiness.message
+      this.#save(current)
+      this.#event(
+        current,
+        readiness.ready ? 'output' : 'warning',
+        readiness.ready
+          ? 'Saved project modules are ready for editor imports.\n'
+          : readiness.message + '\n',
+      )
+      return readiness
+    })
+  }
+
   #importWarning(project, message) {
     if (project.importWarning?.includes(message)) return
     project.importWarning = [project.importWarning, message]
@@ -3465,6 +3559,10 @@ export class WorkspaceStore {
     }
     this.#setupPhase(project, 'checking-environment')
     await this.#checkProjectEnvironment(project, signal)
+    await this.#checkEditorImports(project, {
+      signal,
+      onOutput: (message) => this.#event(project, 'output', message),
+    })
     await this.#initializeRepository(project)
     if (await exists(path.join(checkout, '.git'))) {
       try {

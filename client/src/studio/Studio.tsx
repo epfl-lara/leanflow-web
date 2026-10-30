@@ -1410,8 +1410,17 @@ export function Studio() {
       if (!bufferStore.isCurrent(expected)) return
       const id = expected.projectId
       if (!id) return
-      const listing = await loadFiles(id)
+      const [listing, updated] = await Promise.all([
+        loadFiles(id),
+        source === 'agent'
+          ? api<Project>(`/api/projects/${encodeURIComponent(id)}`)
+          : Promise.resolve(null),
+      ])
       if (!bufferStore.isCurrent(expected)) return
+      if (updated)
+        setProjects((previous) =>
+          previous.map((item) => (item.id === id ? updated : item)),
+        )
       if (source === 'agent') void loadGit(id)
       const current = fileRef.current
       if (!current || (paths.length && !paths.includes(current.path))) return
@@ -2632,6 +2641,7 @@ export function Studio() {
                   buffers={buffers}
                   bufferDiscardVersion={discardVersion}
                   bufferSaveVersion={saveVersion}
+                  editorImportsVersion={project.editorImportsVersion}
                   savedPaths={savedPaths}
                   bufferRemoveVersion={removeVersion}
                   removedPaths={removedPaths}
