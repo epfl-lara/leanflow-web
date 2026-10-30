@@ -176,21 +176,37 @@ function contrast(a, b) {
   return (values[1] + 0.05) / (values[0] + 0.05)
 }
 async function checkTheme(theme) {
+  let settled
+  let previous
   await until(async () => {
     const value = await samples()
-    return (
+    const ready =
+      Object.values(value).every(
+        (token) => typeof token === 'string' || token,
+      ) &&
       value.local &&
       value.type &&
       value.tactic &&
       value.local.color !== value.type.color &&
       value.keyword.color !== value.type.color &&
+      value.name.color !== value.type.color &&
       value.tactic.color === value.keyword.color &&
+      contrast(value.type.color, value.background) >= 4.5 &&
       (theme === 'dark'
         ? luminance(value.background) < 0.1
         : luminance(value.background) > 0.9)
-    )
+    if (!ready) {
+      previous = undefined
+      return false
+    }
+    const signature = JSON.stringify(value)
+    const stable = signature === previous
+    previous = signature
+    if (stable) settled = value
+    return stable
   }, `${theme} syntax and semantic palette`)
-  const value = await samples()
+  const value = settled
+  assert(value, 'The rendered theme should have settled before sampling it')
   assert(semanticRequests > 0, 'The editor must request Lean semantic tokens')
   assert.notEqual(value.keyword.color, value.type.color)
   assert.notEqual(value.name.color, value.type.color)
