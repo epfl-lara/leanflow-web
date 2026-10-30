@@ -56,6 +56,10 @@ async function closedPicker() {
     () => picker.evaluate((node) => !node.open),
     'file picker dismissed',
   )
+  await until(
+    () => popup.isVisible().then((visible) => !visible),
+    'file picker contents dismissed',
+  )
   assert.equal(await popup.isVisible(), false)
 }
 async function width() {
