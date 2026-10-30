@@ -65,7 +65,7 @@ export function declarationNames(source) {
     if (scope) scopes.push(scope[1] === 'namespace' ? scope[2] : '')
     if (/^\s*end\b/.test(line)) scopes.pop()
     const match =
-      /^\s*(?:(?:private|protected|noncomputable|unsafe|partial)\s+)*(?:theorem|lemma|def|opaque|abbrev)\s+([\p{L}_][\p{L}\p{N}_'.]*)/u.exec(
+      /^\s*(?:@\[[^\]\n]*\][ \t]*)*(?:(?:private|protected|noncomputable|unsafe|partial)\s+){0,8}(?:theorem|lemma|def|opaque|abbrev)\s+([\p{L}_][\p{L}\p{N}_'.]*)/u.exec(
         line,
       )
     if (match) result.push([...scopes.filter(Boolean), match[1]].join('.'))
@@ -142,7 +142,8 @@ export function proofRisks(changes, mode) {
         continue
       }
       const before = theoremHeaders(change.before),
-        after = theoremHeaders(change.after)
+        declarations = theoremHeaderEntries(change.after),
+        after = new Map(declarations.map(({ name, header }) => [name, header]))
       for (const [name, header] of before)
         if (after.get(name) !== header)
           problems.push(
@@ -166,9 +167,20 @@ export function proofRisks(changes, mode) {
         problems.push(
           `${change.path} includes a command inside a proof span. Review command changes manually.`,
         )
-      if (proofSkeleton(change.before) !== proofSkeleton(change.after))
+      const additions = new Set(
+        mode === 'optimize'
+          ? []
+          : declarations
+              .filter(({ name }) => !before.has(name))
+              .map(({ start }) => start),
+      )
+      if (
+        proofSkeleton(change.before) !== proofSkeleton(change.after, additions)
+      )
         problems.push(
-          `${change.path} changes code outside existing theorem proof bodies. Use formalization mode for new declarations or edit the project manually.`,
+          mode === 'optimize'
+            ? `${change.path}: LeanFlow could not confirm that only existing proof bodies changed. Keep surrounding code unchanged in Optimize mode.`
+            : `${change.path}: LeanFlow could not confirm that only proofs and new theorem declarations changed. The edit may use unsupported proof syntax or change code outside proofs. Keep existing definitions and imports unchanged; use Formalize for intended changes to that code.`,
         )
     }
   }
@@ -184,7 +196,7 @@ function ambiguousTheoremStatement(source) {
   // redundant modifiers so invalid multiline prefixes cannot cause quadratic
   // retries at each line. Unsupported syntax stays outside editable spans.
   const declarations =
-    /^[ \t]*(?:@\[[^\]\n]*\][ \t]*)*(?:(?:private|protected|noncomputable)\s+){0,8}(?:theorem|lemma)\b/gm
+    /^[ \t]*(?:@\[[^\]\n]*\][ \t]*)*(?:(?:private|protected|noncomputable)\s+){0,8}(?:theorem|lemma|example)\b/gm
   for (const match of masked.matchAll(declarations)) {
     let depth = 0
     for (let i = match.index + match[0].length; i < masked.length; i++) {
@@ -207,7 +219,7 @@ function proofSpans(source) {
   const masked = maskLean(source),
     spans = []
   const pattern =
-    /^[ \t]*(?:@\[[^\]\n]*\][ \t]*)*(?:(?:private|protected|noncomputable)\s+){0,8}(?:theorem|lemma)\b/gm
+    /^[ \t]*(?:@\[[^\]\n]*\][ \t]*)*(?:(?:private|protected|noncomputable)\s+){0,8}(theorem|lemma|example)\b/gm
   for (const match of masked.matchAll(pattern)) {
     let depth = 0,
       start = -1
@@ -221,6 +233,7 @@ function proofSpans(source) {
     }
     if (start === -1) continue
     const indent = /^[ \t]*/.exec(match[0])[0].length
+    const firstToken = start + masked.slice(start).search(/\S/)
     let end = source.length
     for (
       let at = masked.indexOf('\n', start) + 1;
@@ -228,14 +241,24 @@ function proofSpans(source) {
     ) {
       const next = masked.indexOf('\n', at),
         line = masked.slice(at, next === -1 ? masked.length : next)
-      if (line.trim() && /^[ \t]*/.exec(line)[0].length <= indent) {
+      if (
+        at > firstToken &&
+        line.trim() &&
+        !/^\s*where\b/.test(line) &&
+        /^[ \t]*/.exec(line)[0].length <= indent
+      ) {
         end = at
         break
       }
       if (next === -1) break
       at = next + 1
     }
-    spans.push({ start, end })
+    spans.push({
+      start,
+      end,
+      declarationStart: match.index,
+      keywordStart: match.index + match[0].length - match[1].length,
+    })
   }
   return spans
 }
@@ -249,28 +272,41 @@ function hiddenProofCommands(source) {
   )
 }
 
-export function proofSkeleton(source) {
+export function proofSkeleton(source, addedDeclarations = new Set()) {
   const spans = proofSpans(source)
   let outside = '',
     previous = 0
-  for (const { start, end } of spans) {
+  for (const { start, end, declarationStart, keywordStart } of spans) {
     if (start < previous) continue
-    outside += source.slice(previous, start) + ' __PROOF__\n'
+    outside += addedDeclarations.has(keywordStart)
+      ? source.slice(previous, declarationStart)
+      : source.slice(previous, start) + ' __PROOF__\n'
     previous = end
   }
   outside += source.slice(previous)
-  const stripped = maskLean(outside, true)
-  // String literals remain exact; formatting and comments elsewhere are ignored.
-  return (
-    stripped.match(
-      /"(?:\\.|[^"\\])*"|'(?:\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)|[^'\\\r\n])'|[^\s]/gu,
-    ) || []
-  ).join('')
+  return leanSourceKey(outside)
+}
+
+function leanSourceKey(source) {
+  // Ignore comments and ordinary layout while preserving literals, identifier
+  // boundaries, and adjacent operator characters. This is a conservative key;
+  // the pinned compiler still parses and independently checks the candidate.
+  return JSON.stringify(
+    maskLean(source, true).match(
+      /"(?:\\.|[^"\\])*"|'(?:\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)|[^'\\\r\n])'|«[^»]*»|[\p{L}\p{N}_][\p{L}\p{N}_'!?]*(?:\.[\p{L}\p{N}_][\p{L}\p{N}_'!?]*)*|[^\s\p{L}\p{N}_«»"'()[\]{},;]+|[^\s]/gu,
+    ) || [],
+  )
 }
 
 export function theoremHeaders(source) {
+  return new Map(
+    theoremHeaderEntries(source).map(({ name, header }) => [name, header]),
+  )
+}
+
+function theoremHeaderEntries(source) {
   const masked = maskLean(source),
-    result = new Map()
+    result = []
   const scopes = [],
     commands = [
       ...masked.matchAll(/^\s*(namespace|section|end)\b\s*([^\s]*)/gm),
@@ -300,10 +336,11 @@ export function theoremHeaders(source) {
       ? match[1].slice(7)
       : [...scopes.filter(Boolean), match[1]].join('.')
     if (end !== -1)
-      result.set(
+      result.push({
         name,
-        source.slice(match.index, end).replace(/\s+/g, ' ').trim(),
-      )
+        start: match.index,
+        header: leanSourceKey(source.slice(match.index, end)),
+      })
   }
   return result
 }
@@ -404,7 +441,7 @@ with tempfile.TemporaryDirectory(prefix='lean-web-audit-') as temp:
                     unexpected=[name.strip() for name in actual.split(',') if name.strip() and name.strip() not in allowed]
                     if unexpected: result['complete']=False; result['errors'].append('Nonstandard axioms: '+', '.join(unexpected))
             elif item.get('severity')=='error': result['complete']=False; result['errors'].append(text)
-    if result['warnings']: result['reason']='Review compiler warnings before accepting the result.'
+    if result['warnings']: result['reason']='Lean verification passed with compiler warnings.'
     if not result['complete']: result['reason']='The candidate is incomplete or did not pass the proof integrity checks.'
 print(json.dumps(result))
 `
@@ -424,7 +461,8 @@ export async function verifyCandidate(
       complete: false,
       files: [],
       errors: risks,
-      reason: 'Candidate requires manual review.',
+      reason:
+        'Final verification stopped before Lean could check these changes.',
     }
   const entries = changes
     .filter((change) => change.after !== null && change.path.endsWith('.lean'))
@@ -523,7 +561,8 @@ export async function verifyCandidate(
       complete: false,
       files: [],
       errors: ['The candidate build changed project source or configuration.'],
-      reason: 'Candidate requires manual review.',
+      reason:
+        'The candidate build changed project files, so final verification stopped.',
     }
   const audit = await runtime.run(
     root,

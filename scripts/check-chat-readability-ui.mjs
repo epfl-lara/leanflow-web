@@ -119,7 +119,7 @@ try {
     4,
     'Keep latest steps, active calls and the latest failure visible',
   )
-  await step(1).getByText('Needs attention', { exact: true }).waitFor()
+  await step(1).getByText('Attempt failed', { exact: true }).waitFor()
   await step(5).getByText('Running', { exact: true }).waitFor()
   assert.equal(await turn(active).locator('.turn-details[open]').count(), 0)
   assert.equal(await turn(active).locator('.turn-outcome').count(), 0)

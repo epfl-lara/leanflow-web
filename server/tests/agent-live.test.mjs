@@ -327,6 +327,29 @@ test('accepting verified live edits validates current saved state without replay
   assert.equal((await manager.apply('alice', job.id)).status, 'applied')
 })
 
+test('compiler warnings permit applying verified candidates while failed final checks remain blocked', async (t) => {
+  const { manager, events, calls } = await fixture(t)
+  const job = events.create('alice', {
+    kind: 'agent',
+    projectId: 'p',
+    snapshot,
+    liveEdits: false,
+  })
+  events.update(job.id, {
+    status: 'completed',
+    changes: [{ path: 'Main.lean', before: 'old', after: 'new' }],
+    verification: { complete: false, errors: ['Definition changed.'] },
+  })
+  await assert.rejects(manager.apply('alice', job.id), { status: 409 })
+  assert.deepEqual(calls, [])
+  events.update(job.id, {
+    verification: { complete: true, warnings: ['Unused variable.'] },
+  })
+  assert.equal((await manager.apply('alice', job.id)).status, 'applied')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0][0], 'apply')
+})
+
 test('accepting reviewed Lean changes rebuilds saved imports before refreshing the editor', async (t) => {
   const { manager, events, calls } = await fixture(t, {
     refreshEditorImports: async (projectId, owner) => {

@@ -98,6 +98,19 @@ export function agentConversationContext(
           : run.verification
             ? 'did not pass'
             : 'not checked',
+      ...(run.verification?.complete === false
+        ? {
+            finalCheckIssues: [
+              run.verification.reason,
+              ...(Array.isArray(run.verification.errors)
+                ? run.verification.errors
+                : []),
+            ]
+              .filter((value) => typeof value === 'string' && value.trim())
+              .slice(0, 4)
+              .map((value) => value.slice(0, 2000)),
+          }
+        : {}),
     }
     const guidance = []
     let guidanceSize = 0

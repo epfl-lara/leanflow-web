@@ -27,6 +27,7 @@ const chatSuites = [
   'ask-search',
   'markdown-security',
   'chat-readability',
+  'run-review',
   'chat-compact',
   'reasoning',
   'reasoning-timeline',

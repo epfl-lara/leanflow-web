@@ -38,7 +38,7 @@ export const chatModes: {
   {
     id: 'proofs',
     name: 'Proofs',
-    hint: 'Find, complete, or repair a proof while preserving its statement.',
+    hint: 'Find, complete, or repair a proof. Add helper lemmas while preserving existing statements and definitions.',
     placeholder: 'Describe the proof or Lean error you want help with…',
     suggestions: [
       {

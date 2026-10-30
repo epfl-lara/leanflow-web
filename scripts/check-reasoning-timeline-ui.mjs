@@ -395,9 +395,9 @@ try {
       (await issue.innerText()).includes('VERIFICATION_BLOCKED_FIXTURE'),
     'visible final verification failure',
   )
-  assert.match(await liveTurn.innerText(), /Finished · checks need attention/)
+  assert.match(await liveTurn.innerText(), /Finished · Lean check did not pass/)
   await issue
-    .getByRole('button', { name: 'Review checks', exact: true })
+    .getByRole('button', { name: 'View check details', exact: true })
     .click()
   await liveTurn.locator('.turn-details[open] .verification-card').waitFor()
   report.checks.push(

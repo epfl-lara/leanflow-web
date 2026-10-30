@@ -101,21 +101,23 @@ export function conversationSegments(run: Run): ConversationSegment[] {
 }
 
 export function runStatusLabel(run: Run) {
+  if (run.liveUndone) return 'Finished'
   if (run.status === 'completed') {
     const verification = run.verification as
       | { complete?: boolean; kind?: string }
       | undefined
     if (verification?.complete === false)
-      return 'Finished · checks need attention'
+      return 'Finished · Lean check did not pass'
     if (['chat', 'search'].includes(verification?.kind || '')) return 'Finished'
-    if (verification?.kind === 'workspace') return 'Ready to review'
+    if (verification?.kind === 'workspace')
+      return run.liveEdits ? 'Files saved' : 'Ready to review'
     if (run.mode === 'search' && verification?.complete === undefined)
       return 'Finished'
     return verification?.complete
       ? run.mode === 'formalize'
         ? 'Checked with Lean'
         : 'Verified'
-      : 'Finished · review checks'
+      : 'Finished · Lean check unavailable'
   }
   return (
     (

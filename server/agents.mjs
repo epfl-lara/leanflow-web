@@ -1202,10 +1202,11 @@ export class AgentManager {
           complete: false,
           files: [],
           errors: risks,
-          reason: 'Candidate requires manual review.',
+          reason:
+            'Final verification stopped before Lean could check these changes.',
         }
         this.events.updateMetadata(id, { verification, status: 'completed' })
-        this.#progress(id, 'Review needed', verification.reason)
+        this.#progress(id, 'Checks did not pass', verification.reason)
         this.#emit(id, 'verification', verification)
         return
       }
@@ -1279,7 +1280,7 @@ export class AgentManager {
       this.events.updateMetadata(id, { verification, status: 'completed' })
       this.#progress(
         id,
-        verification.complete ? 'Completed' : 'Review needed',
+        verification.complete ? 'Completed' : 'Checks did not pass',
         verification.reason || 'Independent Lean verification finished.',
       )
       this.#emit(id, 'verification', verification)

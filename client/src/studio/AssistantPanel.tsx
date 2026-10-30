@@ -33,6 +33,7 @@ import {
   liveEditStatus,
   runChangePaths,
   runChangeCount,
+  finalVerificationIssue,
 } from './chatTimeline'
 import type {
   EditorProofState,
@@ -129,6 +130,13 @@ export function AssistantPanel({
   backgroundErrorsRef.current = backgroundErrors
   const [dialogId, setDialogId] = useState<string | null>(null),
     [actionError, setActionError] = useState('')
+  const focusAfterReview = useRef(false)
+  useEffect(() => {
+    if (dialogId === null && focusAfterReview.current) {
+      focusAfterReview.current = false
+      document.getElementById('assistant-prompt')?.focus()
+    }
+  }, [dialogId])
   const [applying, setApplying] = useState(false),
     [undoingId, setUndoingId] = useState<string | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false),
@@ -249,6 +257,8 @@ export function AssistantPanel({
   const dialogRun = [...runs, ...projectRuns].find(
     (item) => item.id === dialogId,
   )
+  const dialogIssue =
+    dialogRun && !dialogRun.liveUndone ? finalVerificationIssue(dialogRun) : ''
   const error =
     errors[draft.key] ||
     streamError ||
@@ -784,6 +794,15 @@ export function AssistantPanel({
       if (mounted.current) setApplying(false)
     }
   }
+  function continueInChat() {
+    if (!dialogRun) return
+    if (!draft.value.text.trim())
+      draft.setText(
+        `Please address the final LeanFlow check for the previous task and verify the result.\n\nOriginal request: ${(dialogRun.prompt || '').slice(0, 8000)}\n\nCheck result: ${dialogIssue.slice(0, 2000)}`,
+      )
+    focusAfterReview.current = true
+    setDialogId(null)
+  }
   async function undo(id: string) {
     if (undoingId || dirty || hasActive) return
     setUndoingId(id)
@@ -1208,11 +1227,21 @@ export function AssistantPanel({
       {dialogRun && (
         <Dialog
           title={
-            dialogRun.liveEdits
-              ? 'Review saved edits'
-              : 'Review candidate changes'
+            dialogRun.liveUndone
+              ? 'Review undone edits'
+              : dialogRun.liveEdits
+                ? 'Review saved edits'
+                : 'Review candidate changes'
           }
-          subtitle="Review requested edits before applying. Lean edits also require proof verification."
+          subtitle={
+            dialogRun.liveUndone
+              ? 'These edits were undone. The check results below describe the earlier candidate.'
+              : dialogRun.liveEdits
+                ? 'These edits are already saved in your project. You can undo them from the chat.'
+                : dialogRun.status === 'applied'
+                  ? 'These edits have been applied to your project.'
+                  : 'Review the proposed edits before applying them.'
+          }
           onClose={() => setDialogId(null)}
           busy={applying || discarding}
         >
@@ -1224,6 +1253,18 @@ export function AssistantPanel({
               </p>
             )}
             <Verification value={dialogRun.verification} />
+            {!!dialogIssue && (
+              <p className="review-note">
+                {dialogRun.liveEdits
+                  ? 'Lemex has finished this run. The edits are saved, but the final Lean check did not pass. Continue in chat to request a correction, or undo the edits from the chat.'
+                  : 'Lemex has finished this run. These edits cannot be applied because the final Lean check did not pass. Continue in chat to request a correction.'}
+              </p>
+            )}
+            {hasActive && !dialogRun.liveEdits && (
+              <p className="review-note">
+                Wait for the running task to finish before applying changes.
+              </p>
+            )}
             {dialogRun.mode === 'formalize' && (
               <p className="review-note">
                 Check that the statements express your intended mathematics.
@@ -1305,7 +1346,16 @@ export function AssistantPanel({
             >
               Close
             </button>
-            {!dialogRun.liveEdits && (
+            {!!dialogIssue && (
+              <button
+                className="button primary"
+                disabled={applying || discarding}
+                onClick={continueInChat}
+              >
+                Continue in chat
+              </button>
+            )}
+            {!dialogRun.liveEdits && !dialogIssue && (
               <button
                 className="button primary"
                 disabled={!canApply || applying || dirty || discarding}

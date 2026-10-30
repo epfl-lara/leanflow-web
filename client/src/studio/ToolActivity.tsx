@@ -41,7 +41,7 @@ const ActivityStep = memo(function ActivityStep({
     : step.status === 'running'
       ? 'No result recorded'
       : step.status === 'failed'
-        ? 'Needs attention'
+        ? 'Attempt failed'
         : step.status === 'declined'
           ? 'Declined'
           : step.checkResult === 'issues'
@@ -103,6 +103,12 @@ const ActivityStep = memo(function ActivityStep({
       </summary>
       {open && (
         <div className="tool-step-body">
+          {step.status === 'failed' && (
+            <p className="field-help">
+              This tool attempt failed. Lemex can try another approach; no
+              approval is requested.
+            </p>
+          )}
           {step.tool && <p className="tool-identity">{step.tool}</p>}
           {step.checkResult && (
             <p className="field-help">

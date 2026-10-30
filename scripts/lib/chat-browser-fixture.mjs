@@ -153,6 +153,7 @@ export async function chatBrowserFixture({
     onMessage: null,
     onStop: null,
     onUndo: null,
+    onApply: null,
     onCreateRun: null,
     onCreateChat: null,
     onLeanMessage: null,
@@ -425,6 +426,8 @@ export async function chatBrowserFixture({
         return state.onStop({ run: target, body, respond })
       if (target && endpoint.endsWith('/undo') && state.onUndo)
         return state.onUndo({ run: target, body, respond })
+      if (target && endpoint.endsWith('/apply') && state.onApply)
+        return state.onApply({ run: target, body, respond })
     }
     report.unexpectedRequests.push({ method, endpoint })
     return respond({ error: 'Blocked by isolated chat browser fixture.' }, 409)

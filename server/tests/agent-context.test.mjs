@@ -112,6 +112,37 @@ test('chat continuation carries prior user and assistant messages but excludes r
     assert(!text.includes(excluded))
 })
 
+test('continuation receives bounded final check issues rather than only the assistant’s success claim', () => {
+  const previous = {
+    id: 'old',
+    status: 'completed',
+    message: 'Everything passed.',
+    verification: {
+      complete: false,
+      reason: 'Final verification stopped.',
+      errors: [
+        'Main.lean changes an existing definition.',
+        null,
+        'x'.repeat(9000),
+      ],
+    },
+  }
+  const envelope = JSON.parse(
+    agentConversationContext({ id: 'new', prompt: 'Fix the checks.' }, [
+      previous,
+    ]),
+  )
+  const history = JSON.parse(
+    envelope.leanflowContext.sections[0].split(':\n').slice(1).join(':\n'),
+  )
+  assert.equal(history[0].verificationAtThatTime, 'did not pass')
+  assert.deepEqual(history[0].finalCheckIssues.slice(0, 2), [
+    'Final verification stopped.',
+    'Main.lean changes an existing definition.',
+  ])
+  assert.equal(history[0].finalCheckIssues[2].length, 2000)
+})
+
 test('history is bounded, retains recent context, and leaves markup inside quoted user content', () => {
   const runs = Array.from({ length: 50 }, (_, index) => ({
     id: String(index),

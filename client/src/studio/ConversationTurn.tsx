@@ -287,13 +287,6 @@ export const ConversationTurn = memo(function ConversationTurn({
             {detailsError && <p className="error-message">{detailsError}</p>}
             <Verification value={run.verification} />
             {active && <OptimizationSummary value={run.optimization} active />}
-            {run.liveEdits && (
-              <p className="field-help">
-                {run.liveUndone
-                  ? 'The run’s saved edits were restored.'
-                  : 'Edits are saved live; final Lean verification is independent.'}
-              </p>
-            )}
             {!!run.log && (
               <details
                 className="activity-log"

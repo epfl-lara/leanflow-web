@@ -6,6 +6,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Runtime } from '../server/runtime.mjs'
 import { verifyCandidate } from '../server/verification.mjs'
+import { proofLayouts } from '../server/tests/fixtures/proof-layouts.mjs'
 
 const directory = new URL('../.runtime/verification-check/', import.meta.url)
   .pathname
@@ -108,12 +109,38 @@ finally:
   assert.equal(axiom.compiled, true, JSON.stringify(axiom))
   assert.equal(axiom.complete, false)
   assert(axiom.errors.some((text) => text.includes('Nonstandard axioms')))
+  await fs.writeFile(path.join(root, 'Helper.lean'), helper)
+  const layouts = []
+  for (const { name, before, after } of proofLayouts) {
+    await fs.writeFile(path.join(root, 'Main.lean'), before)
+    const baseline = await runtime.run(
+      root,
+      ['lake', 'env', 'lean', 'Main.lean'],
+      { network: 'none' },
+    )
+    assert.equal(
+      baseline.code,
+      0,
+      `${name}: ${baseline.stdout}\n${baseline.stderr}`,
+    )
+    await fs.writeFile(path.join(root, 'Main.lean'), after)
+    const result = await verifyCandidate(
+      runtime,
+      root,
+      [{ path: 'Main.lean', before, after }],
+      'proofs',
+      () => {},
+    )
+    assert.equal(result.complete, true, `${name}: ${JSON.stringify(result)}`)
+    assert.equal(result.kernelChecked, true, name)
+    layouts.push(name)
+  }
   console.log(
-    'PASS: readonly independent audit, local import source replay, poisoned olean exclusion, transitive axiom rejection',
+    `PASS: readonly independent audit, local import source replay, poisoned olean exclusion, transitive axiom rejection, ${layouts.length} real Lean proof-layout regressions`,
   )
   await fs.writeFile(
     path.join(directory, 'result.json'),
-    JSON.stringify({ root, valid, replayed, axiom }, null, 2),
+    JSON.stringify({ root, valid, replayed, axiom, layouts }, null, 2),
   )
 } finally {
   await runtime.shutdown()

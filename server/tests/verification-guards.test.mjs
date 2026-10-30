@@ -1,10 +1,212 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { maskLean, proofRisks } from '../verification.mjs'
+import { maskLean, proofRisks, verifyCandidate } from '../verification.mjs'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { proofLayouts } from './fixtures/proof-layouts.mjs'
 
 const modes = ['repair', 'prove', 'optimize']
 const risks = (before, after, mode = 'repair') =>
   proofRisks([{ path: 'Main.lean', before, after }], mode)
+
+test('valid proof layouts and unchanged statement formatting do not cause false rejections', () => {
+  for (const { name, before, after } of proofLayouts)
+    for (const mode of ['proofs', 'prove', 'repair', 'optimize'])
+      assert.deepEqual(risks(before, after, mode), [], `${mode}: ${name}`)
+})
+
+test('layout support still catches changes after a proof and changes to literal and identifier boundaries', () => {
+  for (const { name, before, after } of proofLayouts) {
+    const surrounding = 'def fixed : Nat := 42\n'
+    assert(
+      risks(before + surrounding, after + surrounding.replace('42', '0'))
+        .length,
+      name,
+    )
+    assert(
+      risks(
+        before + surrounding,
+        after + surrounding.replace('fixed', 'changed'),
+      ).length,
+      name,
+    )
+  }
+  for (const [before, after] of [
+    ['def word : String := "a  b"\n', 'def word : String := "a b"\n'],
+    ['def word : String := "keep"\n', 'def word : String := "changed"\n'],
+    [
+      'def a : Nat := 1\ndef f a : Nat := a\n',
+      'def a : Nat := 1\ndef fa : Nat := a\n',
+    ],
+    ['def f? : Nat := 0\n', 'def f ? : Nat := 0\n'],
+  ])
+    assert(risks(before, after).length, after)
+})
+
+const helperBefore = `namespace Proofs
+def targetValue : Nat := 42
+theorem target : targetValue = 42 := by
+  sorry
+end Proofs
+`
+const helperAfter = `namespace Proofs
+def targetValue : Nat := 42
+private theorem helper : targetValue = 42 := by
+  rfl
+theorem target : targetValue = 42 := by
+  exact helper
+@[simp] theorem another (n : Nat) : n = n := by
+  rfl
+end Proofs
+`
+
+test('unsupported embedded proof terms report an inconclusive boundary check rather than a definite code change', () => {
+  const before = 'def bounded : {n : Nat // n = 0} := ⟨0, by sorry⟩\n'
+  const problems = risks(before, before.replace('sorry', 'rfl'))
+  assert.equal(problems.length, 1)
+  assert.match(problems[0], /could not confirm/)
+  assert.match(problems[0], /unsupported proof syntax/)
+  assert.doesNotMatch(problems[0], /changes code outside/)
+})
+
+test('Proofs can add checked theorems and helper lemmas around existing proofs', () => {
+  for (const mode of ['proofs', 'prove', 'repair']) {
+    assert.deepEqual(risks(helperBefore, helperAfter, mode), [], mode)
+    assert.deepEqual(
+      risks(
+        'def value : Nat := 42\n',
+        'def value : Nat := 42\ntheorem spec : value = 42 := by rfl\n',
+        mode,
+      ),
+      [],
+      mode,
+    )
+    assert.deepEqual(
+      risks(
+        helperBefore,
+        helperAfter.replace('private theorem helper', 'private lemma helper'),
+        mode,
+      ),
+      [],
+      mode,
+    )
+  }
+  assert(risks(helperBefore, helperAfter, 'optimize').length)
+})
+
+test('adding lemmas cannot hide changed statements, assumptions, definitions, imports, or commands', () => {
+  const before = 'import Lean\n' + helperBefore
+  for (const after of [
+    helperAfter,
+    'import Lean\n' +
+      helperAfter.replace('target : targetValue = 42', 'target : True'),
+    'import Lean\n' +
+      helperAfter.replace('targetValue : Nat := 42', 'targetValue : Nat := 0'),
+    'import Lean\n' +
+      helperAfter.replace('namespace Proofs', 'namespace Other'),
+    'import Lean\n' +
+      helperAfter.replace(
+        'namespace Proofs',
+        'namespace Proofs\nvariable (h : False)',
+      ),
+    'import Lean\n' +
+      helperAfter.replace(
+        '  rfl\ntheorem target',
+        '  rfl\n  attribute [simp] helper\ntheorem target',
+      ),
+    'import Lean\n' +
+      helperAfter.replace(
+        '  rfl\ntheorem target',
+        '  rfl set_option maxHeartbeats 0\ntheorem target',
+      ),
+    'import Lean\n' +
+      helperAfter.replace('  rfl\ntheorem target', '  sorry\ntheorem target'),
+    'import Lean\n' +
+      helperAfter.replace('private theorem helper', 'axiom helper'),
+  ]) {
+    for (const mode of ['proofs', 'prove', 'repair', 'optimize'])
+      assert(risks(before, after, mode).length, `${mode}: ${after}`)
+  }
+})
+
+test('new helpers with matching short names preserve each namespace’s original theorem', () => {
+  const before =
+    'namespace A\ntheorem helper : True := by trivial\nend A\nnamespace B\ntheorem target : True := by sorry\nend B\n'
+  const after = before
+    .replace(
+      'theorem target',
+      'private theorem helper : True := by trivial\ntheorem target',
+    )
+    .replace('by sorry', 'by exact helper')
+  assert.deepEqual(risks(before, after), [])
+  assert(
+    risks(
+      before,
+      after.replace('theorem helper : True', 'theorem helper : False'),
+    ).some((problem) => problem.includes('statement')),
+  )
+})
+
+test('new helper declarations reach the independent build and kernel audit', async (t) => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'leanflow-helper-check-'),
+  )
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const calls = []
+  const runtime = {
+    async run(_root, args) {
+      calls.push(args)
+      if (args[1] === 'env')
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            LEAN_SYSROOT: '/opt/lean-toolchains/pinned',
+            LEAN_PATH: '/workspace/.lake/build/lib/lean',
+            LEAN_SRC_PATH: '/workspace',
+          }),
+          stderr: '',
+        }
+      if (args.includes('build')) return { code: 0, stdout: '', stderr: '' }
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          complete: true,
+          compiled: true,
+          kernelChecked: true,
+          files: [],
+          axioms: [],
+          errors: [],
+          warnings: ['Unused variable.'],
+        }),
+        stderr: '',
+      }
+    },
+  }
+  const result = await verifyCandidate(
+    runtime,
+    root,
+    [{ path: 'Main.lean', before: helperBefore, after: helperAfter }],
+    'proofs',
+  )
+  assert.equal(
+    result.complete,
+    true,
+    'Ordinary compiler warnings do not block acceptance',
+  )
+  assert.deepEqual(calls[1], ['lake', 'build'])
+  assert.deepEqual(JSON.parse(calls[2].at(-1)), [
+    {
+      path: 'Main.lean',
+      names: [
+        'Proofs.targetValue',
+        'Proofs.helper',
+        'Proofs.target',
+        'Proofs.another',
+      ],
+    },
+  ])
+})
 
 test('numeric shifts and evaluation commands reach Lean verification in every mode', () => {
   const before = `import Mathlib

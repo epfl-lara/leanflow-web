@@ -103,7 +103,7 @@ test('Ask & Search reports conversation and file review separately from Lean ver
       errors: ['The candidate project does not build.'],
     },
   })
-  assert.equal(runStatusLabel(failed), 'Finished · checks need attention')
+  assert.equal(runStatusLabel(failed), 'Finished · Lean check did not pass')
   assert.equal(
     finalVerificationIssue(failed),
     'The candidate project does not build.',
@@ -226,7 +226,7 @@ test('final verification rejection is reported independently of saved files and 
       errors: ['Main.lean changes code outside existing theorem proof bodies.'],
     },
   })
-  assert.equal(runStatusLabel(completed), 'Finished · checks need attention')
+  assert.equal(runStatusLabel(completed), 'Finished · Lean check did not pass')
   assert.equal(
     finalVerificationIssue(completed),
     completed.verification.errors[0],
@@ -1322,10 +1322,62 @@ test('final outcome distinguishes proof verification, formalization fidelity and
   const failed = render({
     verification: { complete: false, errors: ['Unknown constant useful'] },
   })
-  assert.match(failed, /Final checks need attention/)
+  assert.match(failed, /Final Lean check did not pass/)
+  assert.match(failed, /Lemex has finished this run/)
   assert.match(failed, /Unknown constant useful/)
   assert.doesNotMatch(failed, /class="turn-outcome passed"/)
   const formal = render({ mode: 'formalize', verification: { complete: true } })
   assert.match(formal, /Final Lean check passed/)
   assert.match(formal, /statement and assumptions match your source/)
+})
+
+test('saved live edits do not request approval and recovered tool failures do not spoil a passed final check', () => {
+  const fields = {
+    liveEdits: true,
+    liveChangeCount: 1,
+    toolActivity: [
+      { id: 'read', kind: 'read', label: 'Read a file', status: 'failed' },
+    ],
+    verification: { complete: true, compiled: true },
+  }
+  const render = (value) =>
+    renderToStaticMarkup(
+      React.createElement(TurnOutcome, { run: run(value), onDetails() {} }),
+    )
+  assert.match(render(fields), /Final Lean check passed/)
+  assert.doesNotMatch(render(fields), /need attention|Review checks|approval/)
+  const failed = render({
+    ...fields,
+    verification: { complete: false, errors: ['Definition changed.'] },
+  })
+  assert.match(failed, /edits are already saved/)
+  assert.match(failed, /undo its edits/)
+  const workspace = {
+    ...fields,
+    verification: { kind: 'workspace', complete: true },
+  }
+  assert.match(render(workspace), /Project files saved/)
+  assert.equal(runStatusLabel(run(workspace)), 'Files saved')
+  assert.equal(render({ ...fields, liveUndone: true }), '')
+  assert.equal(runStatusLabel(run({ ...fields, liveUndone: true })), 'Finished')
+})
+
+test('a failed tool attempt is labelled as activity rather than a request for human attention', () => {
+  const { ToolActivity } = load('./ToolActivity.tsx')
+  const html = renderToStaticMarkup(
+    React.createElement(ToolActivity, {
+      steps: [
+        {
+          id: 'missing-file',
+          kind: 'read',
+          label: 'Read a file',
+          status: 'failed',
+        },
+      ],
+      active: false,
+      async onInspect() {},
+    }),
+  )
+  assert.match(html, /Attempt failed/)
+  assert.doesNotMatch(html, /Needs attention/)
 })

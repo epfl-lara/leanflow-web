@@ -1,5 +1,5 @@
 import type { Run } from './api'
-import { finalVerificationIssue } from './chatTimeline'
+import { finalVerificationIssue, runChangeCount } from './chatTimeline'
 import { Icon } from './Icons'
 
 export function TurnOutcome({
@@ -10,12 +10,16 @@ export function TurnOutcome({
   onDetails: () => void
 }) {
   const value = run.verification
+  if (run.liveUndone) return null
   if (!value || typeof value !== 'object' || !('complete' in value)) return null
   const kind = 'kind' in value ? value.kind : undefined
   if (kind === 'chat' || kind === 'search') return null
   const lean = kind !== 'workspace'
   const passed = lean && value.complete === true
   const issue = finalVerificationIssue(run)
+  const saved =
+    run.status === 'applied' ||
+    (run.liveEdits && !run.liveUndone && runChangeCount(run, true) > 0)
   return (
     <div
       className={`turn-outcome ${passed ? 'passed' : issue ? 'attention' : ''}`}
@@ -26,8 +30,10 @@ export function TurnOutcome({
           {passed
             ? 'Final Lean check passed'
             : issue
-              ? 'Final checks need attention'
-              : 'Ready for file review'}
+              ? 'Final Lean check did not pass'
+              : saved
+                ? 'Project files saved'
+                : 'Ready for file review'}
         </strong>
         <p>
           {passed
@@ -39,8 +45,15 @@ export function TurnOutcome({
                 ? value.reason
                 : 'Review the proposed changes before applying them.')}
         </p>
+        {issue && (
+          <p>
+            {saved
+              ? 'The edits are already saved. You can ask Lemex to fix the checks or undo its edits.'
+              : 'Lemex has finished this run. Ask it to fix the checks before applying these changes.'}
+          </p>
+        )}
         <button type="button" className="turn-action" onClick={onDetails}>
-          {passed ? 'Check details' : 'Review checks'}
+          {passed ? 'Check details' : 'View check details'}
         </button>
       </div>
     </div>
