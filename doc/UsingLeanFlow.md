@@ -93,6 +93,8 @@ Put the cursor on a completed `#eval` command to see its output in **Goals & dia
   IO.println "Hello"
 ```
 
+Numeric shifts (`n <<< bits`), `#eval`, `#reduce`, IO, and ordinary Lean metaprogramming are supported in files Lemex edits, including Mathlib projects. Final checks compile the code and independently verify its proofs.
+
 An interactive program such as LeanTui's `#eval chessMain []` waits for keyboard input. Remove that command, then use **Restart Lean** to recover the editor. Unsaved edits stay in the editor. Save your changes and open **Terminal** to run the project's executable, for example `lake exe chess-demo`.
 
 **Check Project** uses the project's pinned native `lake check` when available. It builds the default targets and independently rechecks every project declaration and its complete dependency chain, including referenced Mathlib declarations. Unused imported declarations are excluded. Older releases keep their existing build check. The selected file is also compiled if it is outside the default targets. Single-file playgrounds retain **Check File**. See [Project checks and Lean caches](ProjectChecks.md) for scope, compatibility and worker setup.

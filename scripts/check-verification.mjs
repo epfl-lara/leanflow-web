@@ -12,7 +12,7 @@ const directory = new URL('../.runtime/verification-check/', import.meta.url)
 const root = path.join(directory, randomUUID())
 await fs.mkdir(root, { recursive: true })
 const main =
-  'import Helper\n\ntheorem target : True := by\n  exact imported_fact\n'
+  'import Lean\nimport Helper\n\ndef shifted (n bits : Nat) : Nat := n <<< bits\n#eval shifted 3 4\n#reduce shifted 3 4\nprivate def localShift : Nat := shifted 3 4\n\ntheorem target : True := by\n  exact imported_fact\n'
 const helper = 'theorem imported_fact : True := by trivial\n'
 await Promise.all([
   fs.writeFile(path.join(root, 'lean-toolchain'), 'leanprover/lean4:v4.34.1\n'),
@@ -23,7 +23,10 @@ await Promise.all([
   fs.writeFile(path.join(root, 'Main.lean'), main),
   fs.writeFile(path.join(root, 'Helper.lean'), helper),
 ])
-const runtime = new Runtime({ dataDir: directory })
+const runtime = new Runtime({
+  dataDir: directory,
+  hostToolchainDir: process.env.STUDIO_TEST_TOOLCHAIN_DIR,
+})
 const changes = [{ path: 'Main.lean', before: main, after: main }]
 try {
   await runtime.init()
@@ -38,6 +41,11 @@ try {
   )
   assert.equal(valid.complete, true, JSON.stringify(valid))
   assert.equal(valid.kernelChecked, true)
+  for (const name of ['imported_fact', 'shifted', 'localShift', 'target']) {
+    assert(
+      valid.axioms.some((text) => text.includes(`${name} depends on axioms:`)),
+    )
+  }
   assert.deepEqual(
     valid.files.map((f) => f.module),
     ['Helper', 'Main'],
