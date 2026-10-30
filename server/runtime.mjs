@@ -14,6 +14,7 @@ import {
 import { PresetInstaller } from './preset-installer.mjs'
 import { LeanReleases } from './lean-releases.mjs'
 import { dependencyBuildPlan } from './dependency-targets.mjs'
+import { projectImportRequirements } from './editor-imports.mjs'
 import {
   managedWorkerDirectory,
   managedWorkerFile,
@@ -573,8 +574,11 @@ export class Runtime {
 
   async prepareSharedDependencies(root, options) {
     this.#assertReady()
-    this.#root(root)
-    return this.sharedCache.prepare(options)
+    return this.sharedCache.prepare({ ...options, root: this.#root(root) })
+  }
+
+  async projectImportRequirements(root, options) {
+    return projectImportRequirements(this, root, options)
   }
 
   #checkSharedBinding(root, source) {

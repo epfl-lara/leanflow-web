@@ -4,7 +4,10 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
-import { checkEditorImports } from '../editor-imports.mjs'
+import {
+  checkEditorImports,
+  projectImportRequirements,
+} from '../editor-imports.mjs'
 
 const toolchain = 'leanprover/lean4:v4.34.1\n'
 
@@ -23,7 +26,12 @@ async function project(t) {
 }
 
 const fakeLean = String.raw`#!/usr/bin/env python3
-import os, pathlib, stat, sys
+import json, os, pathlib, stat, sys
+
+if sys.argv[1:3] == ['--deps-json', '--stdin']:
+    paths = sys.stdin.read().splitlines()
+    print(json.dumps({'imports': [{'errors': [], 'result': {'imports': [{'module': name} for name in ['Init', 'Optional.Theorem', 'Optional.Theorem']]}} for _ in paths]}))
+    sys.exit(0)
 
 if sys.argv[1:2] != ['--deps']:
     print('fixture Lean only supports --deps', file=sys.stderr)
@@ -422,4 +430,37 @@ test('symlinked, hidden, excluded, and nonregular Lean paths are not inspected',
   if (!madeFifo) return
   // The FIFO was skipped rather than opened or traversed.
   assert.equal((await fs.lstat(fifo)).isFIFO(), true)
+})
+
+test('dependency import requirements are collected before Lake or compiled modules are available', async (t) => {
+  const { root } = await project(t)
+  const lean = await fakeToolchain(t)
+  await fs.writeFile(
+    path.join(root, 'Main.lean'),
+    'import Optional.Theorem\nexample : False := by sorry\n',
+  )
+  const runtime = workerRuntime(root, lean)
+  assert.deepEqual(await projectImportRequirements(runtime, root), [
+    'Init',
+    'Optional.Theorem',
+  ])
+  assert.equal(runtime.calls[0].args[0], 'python3')
+  assert.equal(runtime.calls[0].options.network, 'none')
+  assert.equal(runtime.calls[0].options.cleanHome, true)
+  assert.equal(runtime.calls[0].options.readOnlyWorkspace, true)
+})
+
+test('failed or malformed dependency import requirements cannot certify cache coverage', async (t) => {
+  const { root } = await project(t)
+  for (const result of [
+    { code: 1, stdout: '' },
+    { code: 0, stdout: '{"ready":false,"modules":[]}' },
+    { code: 0, stdout: '{"ready":true,"modules":[false]}' },
+    { code: 0, stdout: 'unstructured compiler output' },
+    { code: 0, stdout: '{"ready":true,"modules":[]}', truncated: true },
+  ])
+    await assert.rejects(
+      projectImportRequirements({ run: async () => result }, root),
+      /Could not inspect/,
+    )
 })

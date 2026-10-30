@@ -25,8 +25,11 @@ def clip(value, limit=700):
     value = ' '.join(str(value).split())
     return value if len(value) <= limit else value[:limit - 3] + '...'
 
-def finish(ready, message):
-    print(json.dumps({'ready': bool(ready), 'message': clip(message)}))
+def finish(ready, message, modules=None):
+    result = {'ready': bool(ready), 'message': clip(message)}
+    if modules is not None:
+        result['modules'] = modules
+    print(json.dumps(result))
     sys.exit(0)
 
 def timed_out():
@@ -161,6 +164,41 @@ def inspect(file):
             finish(False, 'The project imports are not ready: ' + name + ' imports ' + module + ', but its compiled module is missing. Rebuild the project, then retry.')
 
 sources = walk_sources()
+if config.get('collectImports'):
+    if not sources:
+        finish(True, 'No local Lean imports.', [])
+    try:
+        proc = subprocess.run(
+            [lean, '--deps-json', '--stdin'],
+            input='\n'.join(str(source) for source in sources) + '\n',
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding='utf-8', errors='replace',
+            timeout=max(0.001, deadline - time.monotonic()),
+        )
+        if proc.returncode or len(proc.stdout) > 4 * 1024 * 1024:
+            finish(False, 'Could not inspect project import headers with the pinned Lean compiler. Use Refresh setup and inspect the setup output.')
+        report = json.loads(proc.stdout)
+        headers = report['imports']
+        if not isinstance(headers, list) or len(headers) != len(sources):
+            raise ValueError('Invalid import header report')
+        modules = set()
+        for header in headers:
+            # Malformed source headers remain editable; usable headers still
+            # describe the dependency modules that can be prepared now.
+            if header.get('errors'):
+                continue
+            for item in header['result']['imports']:
+                name = item['module']
+                if not isinstance(name, str):
+                    raise ValueError('Invalid imported module')
+                modules.add(name)
+        if len(modules) > max_files:
+            raise ValueError('Too many imported modules')
+        finish(True, 'Project import headers inspected.', sorted(modules))
+    except subprocess.TimeoutExpired:
+        timed_out()
+    except (OSError, ValueError, KeyError, TypeError):
+        finish(False, 'Could not inspect project import headers with the pinned Lean compiler. Use Refresh setup and inspect the setup output.')
 if not sources:
     finish(True, 'No local Lean source files need import checks; the project environment is ready.')
 for source in sources:
@@ -255,6 +293,7 @@ export async function checkEditorImports(runtime, root, options = {}) {
       onOutput,
       timeoutMs,
       network: 'none',
+      cleanHome: true,
       readOnlyWorkspace: true,
       writeLakeCache: true,
       maxOutputBytes: MAX_WORKER_OUTPUT_BYTES,
@@ -274,4 +313,49 @@ export async function checkEditorImports(runtime, root, options = {}) {
         'The project import check did not return a usable result. Rebuild the project and retry.',
     }
   return parsed
+}
+
+// Read headers before loading Lake or downloading packages. The compiler's
+// parser handles comments and module syntax even when no oleans exist yet.
+export async function projectImportRequirements(runtime, root, options = {}) {
+  const { signal } = options
+  signal?.throwIfAborted()
+  const timeoutMs = validTimeout(options.timeoutMs)
+  const config = JSON.parse(workerConfig(timeoutMs))
+  config.collectImports = true
+  const result = await runtime.run(
+    root,
+    ['python3', '-I', '-c', workerScript, JSON.stringify(config)],
+    {
+      signal,
+      timeoutMs,
+      network: 'none',
+      cleanHome: true,
+      readOnlyWorkspace: true,
+      writeLakeCache: true,
+      maxOutputBytes: 2 * 1024 * 1024,
+    },
+  )
+  cancelled(signal, result)
+  let report
+  try {
+    report = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1))
+  } catch {
+    /* A failed compiler or malformed worker output cannot certify coverage. */
+  }
+  if (
+    result.code !== 0 ||
+    result.truncated ||
+    report?.ready !== true ||
+    !Array.isArray(report.modules) ||
+    report.modules.length > MAX_SOURCE_FILES ||
+    report.modules.some((name) => typeof name !== 'string' || name.length > 256)
+  )
+    throw Object.assign(
+      new Error(
+        'Could not inspect the project imports needed by its dependencies. Use Refresh setup and inspect Setup output if this repeats.',
+      ),
+      { setupEnvironment: true },
+    )
+  return [...new Set(report.modules)].sort()
 }

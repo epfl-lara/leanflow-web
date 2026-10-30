@@ -104,3 +104,14 @@ export function dependencyBuildCommand(target, plan) {
     ...(plan ? plan[target] : [target]),
   ]
 }
+
+export function projectBuildCommand(manifest, plan) {
+  const name = dependencyPackageDirectory(manifest?.name)
+  const target = name ? `@${manifest.name}` : null
+  const modules = target
+    ? plan?.[target]?.filter((value) => value.startsWith(`${target}/+`)) || []
+    : []
+  return modules.length
+    ? ['lake', 'build', target, ...modules]
+    : ['lake', 'build']
+}

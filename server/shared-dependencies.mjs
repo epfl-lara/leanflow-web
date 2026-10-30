@@ -27,9 +27,9 @@ const configFiles = [
   'lakefile.lean',
   'lakefile.toml',
 ]
-// Version 5 builds explicit package targets, including escaped names, and can
-// regenerate missing artifacts in staging. Existing bindings stay immutable.
-export const sharedDependencyCacheSchema = 5
+// Version 6 includes the project's imported modules in cache identity and
+// compiles their dependency targets before publication. Existing entries stay immutable.
+export const sharedDependencyCacheSchema = 6
 const cacheSchema = sharedDependencyCacheSchema
 const digest = (value) => createHash('sha256').update(value).digest('hex')
 const canonical = (value) => JSON.stringify(sort(value))
@@ -119,6 +119,7 @@ export async function sharedDependencySpec({
   toolchain,
   image,
   configuration,
+  requiredImports = [],
 }) {
   if (
     !configuration ||
@@ -130,6 +131,18 @@ export async function sharedDependencySpec({
     )
   )
     return null
+  if (
+    !Array.isArray(requiredImports) ||
+    requiredImports.length > 4096 ||
+    requiredImports.some(
+      (name) =>
+        typeof name !== 'string' ||
+        name.length > 256 ||
+        !name.split('.').every(dependencyPackageDirectory),
+    )
+  )
+    return null
+  requiredImports = [...new Set(requiredImports)].sort()
   if (!owner || !image || configuration['lean-toolchain']?.trim() !== toolchain)
     return null
   let manifest
@@ -205,12 +218,14 @@ export async function sharedDependencySpec({
       image,
       environment,
       settings,
+      requiredImports,
     }),
   )
   return {
     key,
     manifest,
     configuration,
+    requiredImports,
     toolchain,
   }
 }
@@ -265,7 +280,7 @@ export class SharedDependencyCache {
 
   async prepare(options) {
     options.signal?.throwIfAborted()
-    const spec = await sharedDependencySpec({
+    let spec = await sharedDependencySpec({
       ...options,
       image: this.runtime.imageId,
     })
@@ -274,6 +289,18 @@ export class SharedDependencyCache {
     for (const pkg of spec.manifest.packages)
       await options.validateRepository(pkg.url)
     options.signal?.throwIfAborted()
+    if (options.root) {
+      const requiredImports = await this.runtime.projectImportRequirements(
+        options.root,
+        { signal: options.signal },
+      )
+      spec = await sharedDependencySpec({
+        ...options,
+        image: this.runtime.imageId,
+        requiredImports,
+      })
+      if (!spec) return null
+    }
     const base = this.directory('shared-dependencies')
     const root = path.join(base, spec.key)
     const ready = () => {
@@ -297,7 +324,8 @@ export class SharedDependencyCache {
         throw error
       }
     }
-    if (ready()) return { root, reused: true }
+    if (ready())
+      return { root, reused: true, requiredImports: spec.requiredImports }
     let outputs = this.outputs.get(spec.key)
     if (!outputs) this.outputs.set(spec.key, (outputs = new Set()))
     if (options.onOutput) outputs.add(options.onOutput)
@@ -327,7 +355,7 @@ export class SharedDependencyCache {
         throw new Error(
           'Shared dependency preparation did not publish a verified entry',
         )
-      return { root, reused: false }
+      return { root, reused: false, requiredImports: spec.requiredImports }
     } finally {
       options.signal?.removeEventListener('abort', abort)
       if (options.onOutput) outputs.delete(options.onOutput)
@@ -395,6 +423,7 @@ export class SharedDependencyCache {
       const buildPlan = await this.runtime.dependencyBuildPlan?.(stage, {
         onOutput,
         cleanHome: true,
+        requiredImports: spec.requiredImports,
       })
       for (const target of targets)
         await run(dependencyBuildCommand(target, buildPlan), {

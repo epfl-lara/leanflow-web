@@ -5,7 +5,10 @@ import path from 'node:path'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
 import { Runtime } from '../runtime.mjs'
-import { sharedDependencySpec } from '../shared-dependencies.mjs'
+import {
+  sharedDependencySpec,
+  sharedDependencyCacheSchema,
+} from '../shared-dependencies.mjs'
 import { WorkspaceStore } from '../workspaces.mjs'
 
 const toolchain = 'leanprover/lean4:v4.34.1'
@@ -73,6 +76,7 @@ async function fixture(t, command = async () => null) {
   )
   await fs.mkdir(path.join(dataDir, 'runtime'), { recursive: true })
   const runtime = new Runtime({ dataDir, docker })
+  runtime.projectImportRequirements = async () => []
   runtime.dependencyBuildPlan = async () => null
   runtime.ready = true
   runtime.imageId = 'fixture-image'
@@ -494,7 +498,7 @@ test('complete-build caches use new entries while existing import-only bindings 
   const marker = JSON.parse(
     await fs.readFile(path.join(shared.root, '.ready.json'), 'utf8'),
   )
-  assert.equal(marker.schema, 5)
+  assert.equal(marker.schema, sharedDependencyCacheSchema)
   assert.match(marker.check, /lake build @mathlib/)
   const preparedCommands = calls.length
   const hit = await runtime.prepareSharedDependencies(root, request())
@@ -692,7 +696,18 @@ test('a cancelled cache waiter cannot cancel another import and remaining waiter
     }),
   )
   await secondValidated
-  await new Promise(setImmediate)
+  const deadline = Date.now() + 5000
+  while (
+    ![...runtime.sharedCache.outputs.values()].some(
+      (outputs) => outputs.size === 2,
+    )
+  ) {
+    assert(
+      Date.now() < deadline,
+      'The second cache waiter must join the pending build',
+    )
+    await new Promise(setImmediate)
+  }
   controller.abort(new Error('Stopped fixture'))
   await assert.rejects(first, /Stopped fixture/)
   const stoppedOutput = [...firstOutput]
@@ -1037,6 +1052,7 @@ test('simultaneous builders in separate runtimes publish one complete entry with
   })
   const other = new Runtime({ dataDir, docker: runtime.docker })
   other.dependencyBuildPlan = runtime.dependencyBuildPlan
+  other.projectImportRequirements = runtime.projectImportRequirements
   other.ready = true
   other.imageId = runtime.imageId
   other.run = runtime.run.bind(runtime)
@@ -1072,4 +1088,26 @@ test('cleanup failure after atomic publication does not discard a verified share
   assert.equal(first.root, second.root)
   assert.equal(second.reused, true)
   assert((await fs.stat(path.join(first.root, '.ready.json'))).isFile())
+})
+
+test('dependency cache identity includes required optional imports and normalizes duplicates and ordering', async () => {
+  const baseline = await sharedDependencySpec(
+    request({ requiredImports: ['Mathlib', 'Library.Optional'] }),
+  )
+  const duplicate = await sharedDependencySpec(
+    request({
+      requiredImports: ['Library.Optional', 'Mathlib', 'Library.Optional'],
+    }),
+  )
+  assert.equal(duplicate.key, baseline.key)
+  assert.deepEqual(duplicate.requiredImports, ['Library.Optional', 'Mathlib'])
+  const other = await sharedDependencySpec(
+    request({ requiredImports: ['Mathlib', 'Library.AnotherOptional'] }),
+  )
+  assert.notEqual(other.key, baseline.key)
+  for (const imports of [['Library:exe'], ['../Library'], [false], 'Mathlib'])
+    assert.equal(
+      await sharedDependencySpec(request({ requiredImports: imports })),
+      null,
+    )
 })

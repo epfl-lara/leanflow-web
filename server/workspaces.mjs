@@ -32,6 +32,7 @@ import {
   environmentSmokeProof,
   dependencyBuildTargets,
   dependencyBuildCommand,
+  projectBuildCommand,
 } from './project-libraries.mjs'
 import {
   runPinnedLake,
@@ -3502,25 +3503,38 @@ export class WorkspaceStore {
       // Failed user proofs remain repairable, so they do not make an otherwise
       // usable environment unavailable in the editor.
       this.#setupPhase(project, 'building-project')
+      const projectPlan = shared?.requiredImports?.length
+        ? await this.runtime.dependencyBuildPlan?.(project.root, {
+            signal,
+            requiredImports: shared.requiredImports,
+            includeRoot: true,
+            onOutput: (message) => this.#event(project, 'output', message),
+          })
+        : null
       const build = await runSetupStep(
         `Building project ${project.name}`,
         () =>
-          runPinnedLake(this.runtime, project.root, ['lake', 'build'], {
-            timeoutMs: this.setupBuildTimeoutMs,
-            network: 'none',
-            signal: this.preparationControllers.get(project.id)?.signal,
-            ...(project.repairedConfiguration
-              ? { readOnlyWorkspace: true, writeLakeCache: true }
-              : {}),
-            onOutput: (output) =>
-              this.#event(
-                project,
-                'output',
-                typeof output === 'string'
-                  ? output
-                  : output?.text || output?.data || '',
-              ),
-          }),
+          runPinnedLake(
+            this.runtime,
+            project.root,
+            projectBuildCommand(manifest, projectPlan),
+            {
+              timeoutMs: this.setupBuildTimeoutMs,
+              network: 'none',
+              signal: this.preparationControllers.get(project.id)?.signal,
+              ...(project.repairedConfiguration
+                ? { readOnlyWorkspace: true, writeLakeCache: true }
+                : {}),
+              onOutput: (output) =>
+                this.#event(
+                  project,
+                  'output',
+                  typeof output === 'string'
+                    ? output
+                    : output?.text || output?.data || '',
+                ),
+            },
+          ),
         {
           onOutput: (message) => this.#event(project, 'output', message),
           signal,

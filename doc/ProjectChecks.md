@@ -43,7 +43,9 @@ worker cache registries do, and support cancellation.
 - **Dependencies:** prepared presets and immutable shared dependency stores keep
   compiled packages separate from project source. Reuse is scoped by exact
   dependency configuration, pinned Lean release, worker image and, for imported
-  environments, account. Shared packages are mounted read only. These remain
+  environments, account and required module imports. Setup builds imported
+  dependency modules even when the library's lightweight default omits them.
+  Shared packages are mounted read only after those builds pass. These remain
   build-environment certificates, not proof-verification certificates.
 - **Checker support:** a bounded in-memory cache records the capabilities of an
   exact Lake installation. Replacing its binary, changing the project toolchain

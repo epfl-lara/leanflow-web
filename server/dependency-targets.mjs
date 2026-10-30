@@ -7,7 +7,9 @@ import { runSetupStep } from './setup-output.mjs'
 const inspectLibraries = `import Lake
 import Lake.Load.Workspace
 open Lake
-unsafe def main : IO Unit := do
+unsafe def main (imports : List String) : IO Unit := do
+  let includeRoot := imports.head? == some "--include-root"
+  let imports := imports.filter (· != "--include-root")
   Lean.enableInitializersExecution
   let (elanInstall?, leanInstall?, lakeInstall?) ← findInstall?
   let some lean := leanInstall? | throw (IO.userError "Lean unavailable")
@@ -19,16 +21,20 @@ unsafe def main : IO Unit := do
     { lakeEnv := env, wsDir := ← IO.currentDir, updateToolchain := false }
   let some workspace ← (loadWorkspace config).run?'
     | throw (IO.userError "Could not inspect Lake dependency targets")
-  let packages := workspace.packages.filter fun pkg => pkg.baseName != workspace.root.baseName
+  let packages := workspace.packages.filter fun pkg => includeRoot || pkg.baseName != workspace.root.baseName
   let plan := packages.map fun pkg =>
-    (pkg.baseName.toString,
-      (pkg.defaultTargets.filter fun target => (pkg.findLeanLib? target).isSome).map toString)
+    let libraries := (pkg.defaultTargets.filter fun target => (pkg.findLeanLib? target).isSome).map toString
+    let modules := imports.toArray.filterMap fun name =>
+      match workspace.findModule? name.toName with
+      | some mod => if mod.pkg.baseName == pkg.baseName then some ("+" ++ mod.name.toString) else none
+      | none => none
+    (pkg.baseName.toString, libraries ++ modules)
   IO.println ("LEANFLOW_DEPENDENCY_TARGETS=" ++ (Lean.toJson plan).compress)
 `
 
 // Executable Lake configurations need native code when loaded outside Lake.
 // Keep the helper in the private worker home; /tmp deliberately forbids exec.
-const compileInspector = `import pathlib, subprocess, sys, tempfile
+const compileInspector = `import json, pathlib, subprocess, sys, tempfile
 with tempfile.TemporaryDirectory(prefix='lake-inspect-', dir='/home/worker') as directory:
     root = pathlib.Path(directory)
     source = root / 'Main.lean'
@@ -38,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix='lake-inspect-', dir='/home/worker') as 
     commands = [
         (['lean', '-c', str(generated), str(source)], root),
         (['leanc', '-o', str(executable), str(generated), '-lLake', '-rdynamic'], root),
-        ([str(executable)], None),
+        ([str(executable)] + json.loads(sys.argv[1]), None),
     ]
     for command, cwd in commands:
         result = subprocess.run(command, cwd=cwd)
@@ -70,7 +76,7 @@ export function parseDependencyBuildPlan(output) {
         (name) =>
           typeof name !== 'string' ||
           name.length > 256 ||
-          !name.split('.').every(dependencyPackageDirectory),
+          !name.replace(/^\+/, '').split('.').every(dependencyPackageDirectory),
       )
     )
       throw new Error('Invalid Lake dependency library targets.')
@@ -82,7 +88,13 @@ export function parseDependencyBuildPlan(output) {
 export async function dependencyBuildPlan(
   runtime,
   root,
-  { signal, onOutput, cleanHome = true } = {},
+  {
+    signal,
+    onOutput,
+    cleanHome = true,
+    requiredImports = [],
+    includeRoot = false,
+  } = {},
 ) {
   const result = await runSetupStep(
     'Inspecting dependency libraries',
@@ -90,7 +102,18 @@ export async function dependencyBuildPlan(
       runPinnedLake(
         runtime,
         root,
-        ['lake', 'env', 'python3', '-c', compileInspector],
+        [
+          'lake',
+          'env',
+          'python3',
+          '-c',
+          compileInspector,
+          JSON.stringify(
+            includeRoot
+              ? ['--include-root', ...requiredImports]
+              : requiredImports,
+          ),
+        ],
         {
           signal,
           cleanHome,

@@ -8,7 +8,11 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { Runtime } from '../server/runtime.mjs'
-import { dependencyBuildCommand } from '../server/project-libraries.mjs'
+import {
+  dependencyBuildCommand,
+  projectBuildCommand,
+} from '../server/project-libraries.mjs'
+import { checkEditorImports } from '../server/editor-imports.mjs'
 
 const execute = promisify(execFile)
 const reportDir = path.resolve('.runtime/shared-dependency-check')
@@ -51,6 +55,15 @@ await fs.writeFile(
 await fs.writeFile(
   path.join(source, 'Mathlib.lean'),
   'import Lean\ndef shared_fixture_value : Nat := 42\n',
+)
+await fs.mkdir(path.join(source, 'Mathlib'))
+await fs.writeFile(
+  path.join(source, 'Mathlib/Optional.lean'),
+  'import Mathlib\ndef optional_fixture_value : Nat := shared_fixture_value\n',
+)
+await fs.writeFile(
+  path.join(source, 'Mathlib/UnusedBroken.lean'),
+  'This optional module is deliberately invalid and must not be built.\n',
 )
 await fs.writeFile(path.join(source, '.gitignore'), '.lake/\n')
 const git = (args) =>
@@ -237,7 +250,16 @@ try {
       await fs.writeFile(path.join(root, name), content)
     await fs.writeFile(
       path.join(root, 'Main.lean'),
-      'import Mathlib\nexample : shared_fixture_value = 42 := rfl\n',
+      'import Mathlib.Optional\nexample : optional_fixture_value = 42 := rfl\n',
+    )
+    await fs.mkdir(path.join(root, 'Main'))
+    await fs.writeFile(
+      path.join(root, 'Main/Optional.lean'),
+      'theorem project_optional : True := by trivial\n',
+    )
+    await fs.writeFile(
+      path.join(root, 'Consumer.lean'),
+      'import Main.Optional\nexample : True := project_optional\n',
     )
     const prepared = await runtime.prepareSharedDependencies(root, {
       owner: 'fixture',
@@ -252,13 +274,30 @@ try {
     }
     shared = prepared
     await runtime.inheritDependencies(shared.root, root)
-    const build = await runtime.run(root, ['lake', 'build'], {
-      cleanHome: true,
-      readOnlyWorkspace: true,
-      writeLakeCache: true,
-      timeoutMs: 120000,
+    const plan = await runtime.dependencyBuildPlan(root, {
+      requiredImports: prepared.requiredImports,
+      includeRoot: true,
     })
+    const build = await runtime.run(
+      root,
+      projectBuildCommand({ name: 'First' }, plan),
+      {
+        cleanHome: true,
+        readOnlyWorkspace: true,
+        writeLakeCache: true,
+        timeoutMs: 120000,
+      },
+    )
     assert.equal(build.code, 0, build.stderr + build.stdout)
+    assert(
+      (
+        await fs.stat(
+          path.join(root, '.lake/build/lib/lean/Main/Optional.olean'),
+        )
+      ).isFile(),
+    )
+    const imports = await checkEditorImports(runtime, root)
+    assert.equal(imports.ready, true, imports.message)
     assert(
       (
         await fs.stat(path.join(root, '.lake/build/lib/lean/Main.olean'))
@@ -311,6 +350,9 @@ print('readonly and isolated')`,
     boundedArtifactRebuild: true,
     escapedPackageWithoutDefaults: true,
     standaloneDependencyDemosExcluded: true,
+    nonDefaultImportedDependencyModules: true,
+    unrelatedBrokenModulesExcluded: true,
+    optionalLocalImportsBuilt: true,
     downloads,
   }
   report.passed = true
