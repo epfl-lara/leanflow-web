@@ -213,7 +213,7 @@ export function Studio() {
     'lemex-layout-assistant',
     DEFAULT_LAYOUT.assistant,
     280,
-    640,
+    Number.POSITIVE_INFINITY,
   )
   const [goalsSize, setGoalsSize] = useStoredSize(
     'lemex-layout-goals',
@@ -322,6 +322,7 @@ export function Studio() {
   const [fileFilter, setFileFilter] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(() => window.innerWidth > 1000)
+  const [editorHidden, setEditorHidden] = useState(false)
   const [booksOpen, setBooksOpen] = useState(false)
   const [booksMounted, setBooksMounted] = useState(false)
   const [bookChatRequest, setBookChatRequest] =
@@ -429,12 +430,9 @@ export function Studio() {
     studioSize.width - 360 - (toolsOpen && !overlayTools ? 280 : 0),
   )
   const sidebarWidth = clamp(sidebarSize, 180, sidebarMaximum)
-  const assistantMaximum = Math.min(
-    640,
-    overlayTools
-      ? studioSize.width - 40
-      : studioSize.width - sidebarWidth - 360,
-  )
+  const assistantMaximum = overlayTools
+    ? studioSize.width - 40
+    : studioSize.width - sidebarWidth - 280
   const assistantWidth = clamp(assistantSize, 280, assistantMaximum)
   const filesMinimum = Math.min(
     65,
@@ -1805,7 +1803,7 @@ export function Studio() {
         setBooksMounted(true)
         setBooksOpen(true)
       }}
-      className={`studio ${toolsOpen ? '' : 'tools-hidden'} ${singleFileView ? 'single-file-mode' : ''}`}
+      className={`studio ${toolsOpen ? '' : 'tools-hidden'} ${toolsOpen && editorHidden ? 'editor-hidden' : ''} ${singleFileView ? 'single-file-mode' : ''}`}
       style={
         {
           '--sidebar-width': `${sidebarWidth}px`,
@@ -2140,7 +2138,11 @@ export function Studio() {
           onClick={() => setSidebarOpen(false)}
         />
       )}
-      <main className="workbench">
+      <main
+        className="workbench"
+        inert={toolsOpen && editorHidden}
+        aria-hidden={toolsOpen && editorHidden}
+      >
         <header ref={setHeaderElement} className="workbench-header">
           <button
             className="icon-button mobile-only"
@@ -2877,7 +2879,7 @@ export function Studio() {
         className={`tools-panel ${toolsOpen ? '' : 'closed'}`}
         aria-label="Lemex assistant"
       >
-        {!mobileLayout && toolsOpen && (
+        {!mobileLayout && toolsOpen && !editorHidden && (
           <ResizeHandle
             label="Resize assistant panel"
             orientation="vertical"
@@ -2895,6 +2897,14 @@ export function Studio() {
             <Icon name="bot" size={16} />
             Lemex
           </div>
+          <button
+            type="button"
+            className="button small subtle assistant-editor-toggle"
+            onClick={() => setEditorHidden((value) => !value)}
+            aria-pressed={editorHidden}
+          >
+            {editorHidden ? 'Show editor' : 'Hide editor'}
+          </button>
           <button
             className="icon-button"
             onClick={() => setToolsOpen(false)}

@@ -715,28 +715,11 @@
   order: -1;
   flex-shrink: 0;
 }
-.chat-workbench .file-context-popover {
-  position: absolute;
-  z-index: 15;
-  bottom: calc(100% + 8px);
-  left: 0;
-  right: 0;
-  margin: 0;
-  max-height: min(380px, 60vh);
-  overflow: hidden;
-  box-shadow: 0 8px 26px #0003;
-}
-.chat-workbench .file-context-results {
-  max-height: min(240px, 35vh);
-}
 .chat-workbench .file-context-more {
   border: 0;
   background: transparent;
   color: var(--accent);
   padding: 4px;
-  font-size: 11px;
-}
-.chat-workbench .file-context-help {
   font-size: 11px;
 }
 .inline-reasoning {

@@ -1,6 +1,15 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import { createPortal } from 'react-dom'
 import type { FileEntry } from './api'
 import { Icon } from './Icons'
+import { useComposerPopoverPosition } from './useComposerPopoverPosition'
 import './chat-controls.css'
 
 const MAX_FILES = 12
@@ -22,6 +31,10 @@ export function FileContextPicker({
   const id = useId()
   const details = useRef<HTMLDetailsElement>(null)
   const filterInput = useRef<HTMLInputElement>(null)
+  const popup = useRef<HTMLDivElement>(null)
+  const [open, setOpen] = useState(false)
+  const position = useComposerPopoverPosition(open, details)
+  const positioned = position !== null
   const [filter, setFilter] = useState('')
   const selectedPaths = useMemo(() => [...new Set(selected)], [selected])
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths])
@@ -50,17 +63,46 @@ export function FileContextPicker({
   useEffect(() => {
     if (disabled && details.current) details.current.open = false
   }, [disabled])
+  useLayoutEffect(() => {
+    if (open && positioned) filterInput.current?.focus({ preventScroll: true })
+  }, [open, positioned])
   useEffect(() => {
     const closeOutside = (event: PointerEvent) => {
       if (
         details.current?.open &&
         event.target instanceof Node &&
-        !details.current.parentElement?.contains(event.target)
-      )
+        !details.current.contains(event.target) &&
+        !popup.current?.contains(event.target)
+      ) {
         details.current.open = false
+        setOpen(false)
+      }
     }
-    document.addEventListener('pointerdown', closeOutside)
-    return () => document.removeEventListener('pointerdown', closeOutside)
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || !details.current?.open) return
+      event.preventDefault()
+      event.stopPropagation()
+      details.current.open = false
+      setOpen(false)
+      details.current.querySelector('summary')?.focus({ preventScroll: true })
+    }
+    const closeInFrame = () => {
+      if (
+        details.current?.open &&
+        document.activeElement instanceof HTMLIFrameElement
+      ) {
+        details.current.open = false
+        setOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', closeOutside, true)
+    document.addEventListener('keydown', closeOnEscape, true)
+    window.addEventListener('blur', closeInFrame)
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside, true)
+      document.removeEventListener('keydown', closeOnEscape, true)
+      window.removeEventListener('blur', closeInFrame)
+    }
   }, [])
 
   function change(path: string, checked: boolean) {
@@ -149,22 +191,14 @@ export function FileContextPicker({
       <details
         ref={details}
         className="file-context-picker"
-        onToggle={(event) => {
-          if (event.currentTarget.open) filterInput.current?.focus()
-        }}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape' && details.current?.open) {
-            event.preventDefault()
-            event.stopPropagation()
-            details.current.open = false
-            details.current.querySelector('summary')?.focus()
-          }
-        }}
+        onToggle={(event) => setOpen(event.currentTarget.open)}
       >
         <summary
           aria-label="Select files"
           title="The open file is included automatically. Select extra files, or type @ in your message."
           aria-controls={`${id}-panel`}
+          aria-expanded={open}
+          aria-haspopup="dialog"
           aria-disabled={disabled}
           tabIndex={disabled ? -1 : 0}
           onClick={(event) => {
@@ -182,62 +216,78 @@ export function FileContextPicker({
           </span>
           <Icon name="chevron" size={11} />
         </summary>
-        <div className="file-context-popover" id={`${id}-panel`}>
-          <label className="chat-controls-sr-only" htmlFor={`${id}-filter`}>
-            Filter context files
-          </label>
-          <div className="file-context-filter">
-            <Icon name="search" size={13} />
-            <input
-              id={`${id}-filter`}
-              ref={filterInput}
-              type="search"
-              value={filter}
-              onChange={(event) => setFilter(event.target.value)}
-              placeholder="Find a project or library file…"
-              disabled={disabled}
-              autoComplete="off"
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') event.preventDefault()
+        {open &&
+          createPortal(
+            <div
+              ref={popup}
+              className="file-context-popover"
+              id={`${id}-panel`}
+              style={{
+                ...position,
+                visibility: positioned ? 'visible' : 'hidden',
               }}
-            />
-          </div>
-          <p className="file-context-help" role="status">
-            {atLimit
-              ? `${selectedPaths.length} files selected. ${selectedPaths.length === MAX_FILES ? 'Remove one to attach another.' : 'Choose no more than 12 files.'}`
-              : 'The open file is included automatically. Choose up to 12 extra files.'}
-          </p>
-          <div className="file-context-results">
-            {selectedFiles.length > 0 && (
-              <>
-                <div className="file-context-section">Selected</div>
-                {selectedFiles.map(option)}
-              </>
-            )}
-            {visibleMatches.length > 0 && (
-              <>
-                <div className="file-context-section">
-                  {filter.trim() ? 'Matching files' : 'Project and libraries'}
-                </div>
-                {visibleMatches.map(option)}
-              </>
-            )}
-            {matches.length === 0 && (
-              <p className="file-context-help">
-                {filter.trim()
-                  ? 'No more files match this filter.'
-                  : files.length
-                    ? 'All available files are selected.'
-                    : 'No files are available yet.'}
+              role="dialog"
+              aria-label="Choose extra files"
+            >
+              <label className="chat-controls-sr-only" htmlFor={`${id}-filter`}>
+                Filter context files
+              </label>
+              <div className="file-context-filter">
+                <Icon name="search" size={13} />
+                <input
+                  id={`${id}-filter`}
+                  ref={filterInput}
+                  type="search"
+                  value={filter}
+                  onChange={(event) => setFilter(event.target.value)}
+                  placeholder="Find a project or library file…"
+                  disabled={disabled}
+                  autoComplete="off"
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') event.preventDefault()
+                  }}
+                />
+              </div>
+              <p className="file-context-help" role="status">
+                {atLimit
+                  ? `${selectedPaths.length} files selected. ${selectedPaths.length === MAX_FILES ? 'Remove one to attach another.' : 'Choose no more than 12 files.'}`
+                  : 'The open file is included automatically. Choose up to 12 extra files.'}
               </p>
-            )}
-          </div>
-          {matches.length > visibleMatches.length && (
-            <p className="file-context-help">
-              More matches are available. Narrow the filter to find them.
-            </p>
+              <div className="file-context-results">
+                {selectedFiles.length > 0 && (
+                  <>
+                    <div className="file-context-section">Selected</div>
+                    {selectedFiles.map(option)}
+                  </>
+                )}
+                {visibleMatches.length > 0 && (
+                  <>
+                    <div className="file-context-section">
+                      {filter.trim()
+                        ? 'Matching files'
+                        : 'Project and libraries'}
+                    </div>
+                    {visibleMatches.map(option)}
+                  </>
+                )}
+                {matches.length === 0 && (
+                  <p className="file-context-help">
+                    {filter.trim()
+                      ? 'No more files match this filter.'
+                      : files.length
+                        ? 'All available files are selected.'
+                        : 'No files are available yet.'}
+                  </p>
+                )}
+              </div>
+              {matches.length > visibleMatches.length && (
+                <p className="file-context-help">
+                  More matches are available. Narrow the filter to find them.
+                </p>
+              )}
+            </div>,
+            document.body,
           )}
-        </div>
       </details>
     </div>
   )

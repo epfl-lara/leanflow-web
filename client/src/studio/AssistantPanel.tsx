@@ -1125,7 +1125,7 @@ export function AssistantPanel({
             }
           >
             {currentFile
-              ? `Current file: ${currentFile}`
+              ? `Current file: ${currentFile} (included automatically)`
               : target || 'Project context'}
           </span>
           {dirty && !hasActive && (

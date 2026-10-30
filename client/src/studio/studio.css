@@ -996,6 +996,9 @@ textarea {
   font-weight: 550;
   color: var(--accent);
 }
+.assistant-editor-toggle {
+  margin-left: auto;
+}
 .tools-content {
   flex: 1;
   min-height: 0;
@@ -2528,6 +2531,31 @@ body.panel-resizing iframe {
   }
   .tools-panel {
     width: min(100%, 390px);
+  }
+}
+.studio.editor-hidden {
+  grid-template-columns: var(--sidebar-width, 238px) minmax(0, 1fr);
+}
+.studio.editor-hidden > .workbench {
+  visibility: hidden;
+  grid-column: 2;
+  grid-row: 1;
+  width: 0;
+}
+.studio.editor-hidden > .tools-panel {
+  position: relative;
+  inset: auto;
+  grid-column: 2;
+  grid-row: 1;
+  width: auto;
+}
+@media (max-width: 720px) {
+  .studio.editor-hidden {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .studio.editor-hidden > .workbench,
+  .studio.editor-hidden > .tools-panel {
+    grid-column: 1;
   }
 }
 .project-row,

@@ -239,13 +239,18 @@
   transform: rotate(90deg);
 }
 .file-context-popover {
-  margin-top: 8px;
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  overscroll-behavior: contain;
   padding: 10px;
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 7px;
-  box-shadow: 0 4px 18px #00000012;
+  box-shadow: 0 8px 26px #0003;
 }
 .file-context-filter {
   display: flex;
@@ -255,6 +260,7 @@
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 0 8px;
+  flex-shrink: 0;
 }
 .file-context-filter > svg {
   flex-shrink: 0;
@@ -272,11 +278,14 @@
 .file-context-help {
   margin: 8px 1px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.6;
+  flex-shrink: 0;
 }
 .file-context-results {
-  max-height: 240px;
+  flex: 1;
+  min-height: 0;
+  max-height: min(240px, 35vh);
   overflow: auto;
 }
 .file-context-section {
