@@ -86,6 +86,7 @@ export interface Session {
     setupBuildTimeoutMs: number
     workerCpus: number
     workerMemory: string
+    workerMemoryBudget: string | null
   }
   lemex?: {
     revision?: string

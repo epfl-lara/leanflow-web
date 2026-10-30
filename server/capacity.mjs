@@ -1,3 +1,5 @@
+import { memoryBytes } from './worker-memory.mjs'
+
 function positiveNumber(env, name, fallback, integer = true) {
   const raw = env[name]?.trim()
   if (!raw) return fallback
@@ -26,10 +28,10 @@ export function validateSetupBuildTimeout(
 
 export function loadCapacity(env = process.env) {
   const workerMemory = env.STUDIO_WORKER_MEMORY?.trim() || '4g'
-  if (!/^[1-9][0-9]*[bkmg]?$/i.test(workerMemory))
-    throw new Error(
-      'STUDIO_WORKER_MEMORY must be a positive Docker memory size, such as 4g or 8192m.',
-    )
+  memoryBytes(workerMemory, 'STUDIO_WORKER_MEMORY')
+  const workerMemoryBudget = env.STUDIO_WORKER_MEMORY_BUDGET?.trim() || null
+  if (workerMemoryBudget)
+    memoryBytes(workerMemoryBudget, 'STUDIO_WORKER_MEMORY_BUDGET')
   return {
     workers: positiveNumber(env, 'STUDIO_MAX_WORKERS', 6),
     workerQueue: positiveNumber(env, 'STUDIO_MAX_WORKER_QUEUE', 24),
@@ -78,6 +80,7 @@ export function loadCapacity(env = process.env) {
     ),
     workerCpus: positiveNumber(env, 'STUDIO_WORKER_CPUS', 2, false),
     workerMemory,
+    workerMemoryBudget,
     kernelExportMaxBytes: positiveNumber(
       env,
       'STUDIO_KERNEL_EXPORT_MAX_BYTES',

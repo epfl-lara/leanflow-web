@@ -26,7 +26,10 @@ const runtime = new Runtime({
   scope: 'helper',
   maxConcurrent: 1,
   cpus: 2,
-  memory: '8g',
+  memory: process.env.STUDIO_WORKER_MEMORY || '8g',
+  ...(process.env.LEAN_TEST_TOOLCHAIN_DIR
+    ? { hostToolchainDir: process.env.LEAN_TEST_TOOLCHAIN_DIR }
+    : {}),
 })
 const report = {
   dataDir,
@@ -89,6 +92,11 @@ try {
   }
   const valid = await prepare('valid-upload', { files: files() })
   assert.equal(valid.setupBuildStatus, 'passed')
+  for (const file of files())
+    assert.equal(
+      await fs.readFile(path.join(valid.root, file.path), 'utf8'),
+      file.content,
+    )
   const proof = await runPinnedLake(
     runtime,
     valid.root,
@@ -96,6 +104,19 @@ try {
     { network: 'none', timeoutMs: 120000 },
   )
   assert.equal(proof.code, 0, proof.stderr + proof.stdout)
+  const leanConfiguration =
+    'import Lake\nopen Lake DSL\n\npackage SetupLeanFixture where\n  moreLeanArgs := #["-j2"]\n\n@[default_target] lean_lib Main\n'
+  const leanFiles = [
+    ...files().filter((file) => file.path !== 'lakefile.toml'),
+    { path: 'lakefile.lean', content: leanConfiguration },
+  ]
+  const leanProject = await prepare('lean-config-upload', { files: leanFiles })
+  assert.equal(leanProject.setupBuildStatus, 'passed')
+  for (const file of leanFiles)
+    assert.equal(
+      await fs.readFile(path.join(leanProject.root, file.path), 'utf8'),
+      file.content,
+    )
   const unfinished = await prepare('unfinished-proof', {
     files: files('theorem unfinished : False := by\n  trivial\n'),
   })

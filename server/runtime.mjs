@@ -14,6 +14,7 @@ import {
 import { PresetInstaller } from './preset-installer.mjs'
 import { LeanReleases } from './lean-releases.mjs'
 import { dependencyBuildPlan } from './dependency-targets.mjs'
+import { workerMemoryCapacity } from './worker-memory.mjs'
 import { projectImportRequirements } from './editor-imports.mjs'
 import {
   managedWorkerDirectory,
@@ -179,6 +180,7 @@ export class Runtime {
     maxQueue = 24,
     cpus = 2,
     memory = '4g',
+    memoryBudget = null,
     kernelExportMaxBytes = 8 * 1024 ** 3,
     pidsLimit = 512,
     docker = 'docker',
@@ -194,6 +196,9 @@ export class Runtime {
     this.maxQueue = maxQueue
     this.cpus = cpus
     this.memory = memory
+    this.memoryBudget = memoryBudget
+    this.memoryCapacity = null
+    this.capacityError = null
     if (
       !Number.isSafeInteger(kernelExportMaxBytes) ||
       kernelExportMaxBytes <= 0
@@ -278,9 +283,27 @@ export class Runtime {
         mode: 0o700,
       })
     try {
-      const info = await this.#host(['info', '--format', '{{.ServerVersion}}'])
+      this.capacityError =
+        'Worker memory limits could not be verified. Ask the server administrator to check Docker and restart LeanFlow.'
+      const info = await this.#host(['info', '--format', '{{json .}}'])
       if (info.code !== 0)
         throw new Error(info.stderr || 'Docker Engine is unavailable')
+      const engine = JSON.parse(info.stdout)
+      try {
+        if (engine.MemoryLimit !== true || engine.SwapLimit !== true)
+          throw new Error(
+            'Docker must support memory and swap limits before workers can start. Ask the server administrator to enable these limits.',
+          )
+        this.memoryCapacity = workerMemoryCapacity({
+          memory: this.memory,
+          memoryBudget: this.memoryBudget,
+          hostMemory: engine.MemTotal,
+        })
+      } catch (error) {
+        this.capacityError = error.message
+        throw error
+      }
+      this.capacityError = null
       if (this.scope === 'server') await this.#reapOrphans()
       const image = await this.#host([
         'image',
@@ -294,7 +317,7 @@ export class Runtime {
           info.stderr || image.stderr || 'Docker worker image is unavailable',
         )
       this.imageId = image.stdout.trim()
-      this.dockerVersion = info.stdout.trim()
+      this.dockerVersion = engine.ServerVersion
       const native = await this.#host([
         'run',
         '--rm',
@@ -311,6 +334,7 @@ export class Runtime {
         'ALL',
         '--security-opt',
         'no-new-privileges',
+        ...this.#resourceArgs(),
         this.imageId,
         '/usr/bin/cat',
         '/opt/lemex/lemex-install.json',
@@ -338,7 +362,9 @@ export class Runtime {
       }
     } catch (error) {
       this.ready = false
-      this.error = `Worker unavailable: ${error.message}. Run scripts/build-worker.sh.`
+      this.error = this.capacityError
+        ? `Worker unavailable: ${this.capacityError}`
+        : `Worker unavailable: ${error.message}. Run scripts/build-worker.sh.`
     }
     try {
       const registry = JSON.parse(
@@ -711,8 +737,15 @@ export class Runtime {
       active: this.children.size,
       usedSlots: this.#usedSlots(),
       queued: this.queue.length,
-      maxConcurrent: this.maxConcurrent,
-      limits: { cpus: this.cpus, memory: this.memory, pids: this.pidsLimit },
+      maxConcurrent: this.#slotLimit(),
+      configuredMaxConcurrent: this.maxConcurrent,
+      limits: {
+        cpus: this.cpus,
+        memory: this.memory,
+        pids: this.pidsLimit,
+        memoryBudgetBytes: this.memoryCapacity?.memoryBudgetBytes ?? null,
+        hostMemoryBytes: this.memoryCapacity?.hostMemoryBytes ?? null,
+      },
       toolchains: [...this.toolchains.keys()],
     }
   }
@@ -1036,8 +1069,29 @@ export class Runtime {
       })
   }
 
+  #slotLimit() {
+    if (this.capacityError) return 0
+    return Math.min(
+      this.maxConcurrent,
+      this.memoryCapacity?.slots ?? this.maxConcurrent,
+    )
+  }
+
   #workerSlots(options = {}) {
-    return options.kernelCheck ? Math.min(3, this.maxConcurrent) : 1
+    return options.kernelCheck ? Math.min(3, this.#slotLimit()) : 1
+  }
+
+  #resourceArgs(memory = this.memory, cpus = this.cpus, pids = this.pidsLimit) {
+    return [
+      '--cpus',
+      String(cpus),
+      '--memory',
+      memory,
+      '--memory-swap',
+      memory,
+      '--pids-limit',
+      String(pids),
+    ]
   }
 
   #usedSlots() {
@@ -1048,12 +1102,20 @@ export class Runtime {
   }
 
   #hasCapacity(options = {}) {
+    if (this.capacityError || (!this.ready && !this.memoryCapacity))
+      throw Object.assign(
+        new Error(
+          this.capacityError ||
+            'Worker memory limits have not been initialized. Ask the server administrator to initialize the runtime before starting workers.',
+        ),
+        { status: 503 },
+      )
     // Keep only one large export on disk, and charge its larger RAM/CPU budget
     // to the same pool as editors and ordinary workers.
     return (
       (!options.kernelCheck ||
         ![...this.children].some((child) => child.kernelCheck)) &&
-      this.#usedSlots() + this.#workerSlots(options) <= this.maxConcurrent
+      this.#usedSlots() + this.#workerSlots(options) <= this.#slotLimit()
     )
   }
 
@@ -1185,14 +1247,7 @@ export class Runtime {
       'ALL',
       '--security-opt',
       'no-new-privileges',
-      '--cpus',
-      String(this.cpus * workerSlots),
-      '--memory',
-      workerMemory,
-      '--memory-swap',
-      workerMemory,
-      '--pids-limit',
-      String(this.pidsLimit),
+      ...this.#resourceArgs(workerMemory, this.cpus * workerSlots),
       '--network',
       network,
       ...(kernelTemp
@@ -1357,6 +1412,11 @@ export class Runtime {
       kernelCheck = false,
     },
   ) {
+    if (!this.#hasCapacity({ kernelCheck }))
+      throw Object.assign(
+        new Error('All workspace workers are busy; try again shortly'),
+        { status: 503 },
+      )
     const child = spawnChild(this.docker, dockerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
@@ -1565,14 +1625,11 @@ export class Runtime {
       'ALL',
       '--security-opt',
       'no-new-privileges',
-      '--cpus',
-      String(this.cpus),
-      '--memory',
-      this.memory,
-      '--memory-swap',
-      this.memory,
-      '--pids-limit',
-      String(Math.min(this.pidsLimit, 128)),
+      ...this.#resourceArgs(
+        this.memory,
+        this.cpus,
+        Math.min(this.pidsLimit, 128),
+      ),
       '--ulimit',
       'fsize=33554432:33554432',
       '--network',
@@ -1598,6 +1655,12 @@ export class Runtime {
   }
 
   #spawnScheduled(root, args, options, worker) {
+    if (worker?.kind === 'maintenance')
+      return this.#launchWorker(root, args, {
+        ...options,
+        name: worker.name,
+        childEnv: { ...process.env },
+      })
     return worker?.kind === 'tex'
       ? this.#spawnTex(root, args, options, worker)
       : this.spawn(root, args, options)
@@ -1698,7 +1761,7 @@ export class Runtime {
   #drain() {
     while (
       !this.stopping &&
-      this.#usedSlots() < this.maxConcurrent &&
+      this.#usedSlots() < this.#slotLimit() &&
       this.queue.length
     ) {
       const index = this.queue.findIndex((job) =>
@@ -1727,6 +1790,17 @@ export class Runtime {
           job.reject,
         )
     }
+  }
+
+  #runMaintenance(root, args, options = {}) {
+    const name = `lemex-maintenance-${this.owner.slice(0, 8)}-${randomUUID().slice(0, 8)}`
+    return this.#schedule(
+      root,
+      ['run', '--name', name, ...this.#resourceArgs(), ...args],
+      options,
+      false,
+      { kind: 'maintenance', name },
+    )
   }
 
   async prepareToolchain(toolchain, { onOutput } = {}) {
@@ -1768,13 +1842,11 @@ export class Runtime {
         `Downloading pinned toolchain ${toolchain} into the server cache.\n`,
         'stdout',
       )
-      const result = await this.#host(
+      const result = await this.#runMaintenance(
+        cache,
         [
-          'run',
           '--rm',
           '--init',
-          '--name',
-          `lemex-elan-${this.owner.slice(0, 8)}-${randomUUID().slice(0, 8)}`,
           '--label',
           `lemex-web.owner=${this.owner}`,
           '--label',
@@ -1788,12 +1860,6 @@ export class Runtime {
           'ALL',
           '--security-opt',
           'no-new-privileges',
-          '--cpus',
-          String(this.cpus),
-          '--memory',
-          this.memory,
-          '--pids-limit',
-          String(this.pidsLimit),
           '--tmpfs',
           '/tmp:rw,nosuid,size=1g',
           '--mount',
@@ -1819,28 +1885,31 @@ export class Runtime {
         )
     }
     // Verify the binary in a read-only container before trusting a cache entry.
-    const check = await this.#host([
-      'run',
-      '--rm',
-      '--label',
-      `lemex-web.owner=${this.owner}`,
-      '--label',
-      `lemex-web.instance=${this.instance}`,
-      '--label',
-      `lemex-web.scope=${this.scope}`,
-      '--read-only',
-      '--cap-drop',
-      'ALL',
-      '--security-opt',
-      'no-new-privileges',
-      '--network',
-      'none',
-      '--mount',
-      `type=bind,src=${source},dst=/verify,readonly`,
-      this.imageId || this.image,
-      '/verify/bin/lean',
-      '--version',
-    ])
+    const check = await this.#runMaintenance(
+      source,
+      [
+        '--rm',
+        '--label',
+        `lemex-web.owner=${this.owner}`,
+        '--label',
+        `lemex-web.instance=${this.instance}`,
+        '--label',
+        `lemex-web.scope=${this.scope}`,
+        '--read-only',
+        '--cap-drop',
+        'ALL',
+        '--security-opt',
+        'no-new-privileges',
+        '--network',
+        'none',
+        '--mount',
+        `type=bind,src=${source},dst=/verify,readonly`,
+        this.imageId || this.image,
+        '/verify/bin/lean',
+        '--version',
+      ],
+      { timeoutMs: 60_000 },
+    )
     if (check.code !== 0 || !check.stdout.includes(toolchain.split(':v')[1]))
       throw new Error(`Toolchain version verification failed for ${toolchain}`)
     this.toolchains.set(toolchain, source)

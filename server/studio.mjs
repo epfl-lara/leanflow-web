@@ -201,6 +201,7 @@ export async function createStudio({
       maxQueue: capacity.workerQueue,
       cpus: capacity.workerCpus,
       memory: capacity.workerMemory,
+      memoryBudget: capacity.workerMemoryBudget,
       kernelExportMaxBytes: capacity.kernelExportMaxBytes,
     })
   await runtime.init()

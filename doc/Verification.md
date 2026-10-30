@@ -26,6 +26,8 @@ For repeatable Linux checks against your configured worker, run these from the a
 
 ```sh
 node --env-file=.env scripts/check-runtime.mjs
+node --env-file=.env scripts/check-worker-memory.mjs
+node --env-file=.env scripts/check-project-setup.mjs
 LEAN_PROBE_TEST_IMAGE=your-worker:tag node --env-file=.env scripts/check-shared-dependencies.mjs
 LEAN_PROBE_TEST_IMAGE=your-worker:tag node --env-file=.env scripts/check-lean-probe.mjs
 LEAN_PROBE_TEST_IMAGE=your-worker:tag node --env-file=.env scripts/check-repaired-editor.mjs
@@ -34,6 +36,10 @@ node --env-file=.env scripts/check-playground.mjs
 ```
 
 Replace `your-worker:tag` with the installed `LEMEX_WORKER_IMAGE`. These checks create isolated fixtures and make no model requests. LeanProbe checks valid, invalid, and unfinished proofs with each library's full default import, repeated snippets, retained theorem caches, and memory-limit events. Append library IDs to focus the LeanProbe or prepared-library check, for example `mathlib cslib`. The prepared-library check opens two disposable projects per library, compiles their default imports offline, checks cache reuse, and cleans up its projects. The playground check uses the configured data directory's prepared Mathlib environment and also cleans up its temporary projects. Runtime and shared-dependency checks may download a missing test toolchain. Reports remain under `.runtime/` and must not be published without review.
+
+The worker-memory check uses two small offline workers. It verifies enforced CPU, RAM, process, and swap limits, then exceeds one worker's 96 MiB allowance. The other worker must keep running and a subsequent job must succeed. It uses a temporary data directory and saves its report to `.runtime/worker-memory-check/result.json`.
+
+The project-setup check covers TOML and Lean Lake files, preserves valid configuration and source files, and exercises unfinished proofs, setup repair, refresh, and native targets. To reuse an installed toolchain without downloading it, set `LEAN_TEST_TOOLCHAIN_DIR=/path/to/toolchains` for the project-setup and shared-dependency checks. Set `STUDIO_WORKER_MEMORY=4g` to check setup at the ordinary worker default.
 
 LeanProbe's check uses a 6 GiB limit by default; set `LEAN_PROBE_TEST_MEMORY` to match your worker limit when comparing capacity. Whole-snippet checks release temporary imports after each request; repeated theorem edits retain their warm environment. This prevents separate snippet imports accumulating; complex proofs and large projects can still exceed the worker limit.
 
