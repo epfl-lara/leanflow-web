@@ -124,6 +124,7 @@ export async function chatBrowserFixture({
   files,
   chats,
   runs,
+  semanticTokens = null,
   documentSymbols = [],
   definitionLocations = null,
   legacyReasoning = false,
@@ -148,6 +149,7 @@ export async function chatBrowserFixture({
     files,
     chats,
     runs,
+    semanticTokens,
     documentSymbols,
     definitionLocations,
     onMessage: null,
@@ -446,6 +448,14 @@ export async function chatBrowserFixture({
           capabilities: {
             textDocumentSync: 1,
             ...(state.definitionLocations ? { definitionProvider: true } : {}),
+            ...(state.semanticTokens
+              ? {
+                  semanticTokensProvider: {
+                    legend: state.semanticTokens.legend,
+                    full: true,
+                  },
+                }
+              : {}),
           },
           serverInfo: { name: 'Browser fixture', version: '0.2.0' },
         }
@@ -454,6 +464,8 @@ export async function chatBrowserFixture({
       if (/plainGoal/.test(message.method || '')) result = { goals: [] }
       if (message.method === 'textDocument/documentSymbol')
         result = state.documentSymbols
+      if (message.method === 'textDocument/semanticTokens/full')
+        result = { data: state.semanticTokens?.data || [] }
       if (message.method === 'textDocument/definition') {
         result = state.definitionLocations || []
         report.requests.push({

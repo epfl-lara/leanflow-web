@@ -21,6 +21,8 @@ import {
 } from 'react'
 import type { FileEntry, OpenFile } from './api'
 import { connectInfoviewTheme } from './infoviewTheme'
+import { leanEditorTheme } from './leanEditorTheme'
+import './leanEditorTheme.css'
 import { ResizeHandle } from './ResizeHandle'
 import { DEFAULT_LAYOUT, useMediaQuery } from './layout'
 import { isMarkdownPath } from './fileReading'
@@ -406,10 +408,7 @@ export function LeanWorkspace({
           // Global VS Code UI services retain this element across projects.
           htmlElement: document.getElementById('root') ?? editorEl.current,
           vscode: {
-            'workbench.colorTheme':
-              themeRef.current === 'dark'
-                ? 'Visual Studio Dark'
-                : 'Visual Studio Light',
+            ...leanEditorTheme(themeRef.current),
             'editor.tabSize': 2,
             'editor.fontSize': 14,
             'editor.wordWrap': 'on',
@@ -1024,10 +1023,7 @@ export function LeanWorkspace({
 
   useEffect(() => {
     void serialize(() =>
-      runtime.current?.lean.updateVSCodeOptions({
-        'workbench.colorTheme':
-          theme === 'dark' ? 'Visual Studio Dark' : 'Visual Studio Light',
-      }),
+      runtime.current?.lean.updateVSCodeOptions(leanEditorTheme(theme)),
     ).catch(() => undefined)
   }, [theme])
 

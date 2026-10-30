@@ -1,0 +1,5 @@
+/* LeanMonaco bundles JuliaMono Regular. Allow the browser to render token
+   emphasis even though the surrounding application disables font synthesis. */
+.monaco-host .monaco-editor {
+  font-synthesis: weight style;
+}

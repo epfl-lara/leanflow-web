@@ -6,6 +6,7 @@ import getThemeServiceOverride from '@codingame/monaco-vscode-theme-service-over
 import getLanguagesServiceOverride from '@codingame/monaco-vscode-languages-service-override'
 import getModelServiceOverride from '@codingame/monaco-vscode-model-service-override'
 import { Uri } from 'monaco-editor'
+import { registerLeanEditorThemes } from './leanEditorTheme'
 
 let ready: Promise<void> | undefined
 
@@ -55,5 +56,6 @@ export function initializeLeanEditor(element: HTMLElement | undefined) {
         },
       },
     )
+    await registerLeanEditorThemes()
   })())
 }

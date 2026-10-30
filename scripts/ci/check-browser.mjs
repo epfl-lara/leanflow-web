@@ -63,6 +63,7 @@ const workspaceSuites = [
   'dependency-files',
   'definition-project-scope',
   'editor-focus',
+  'editor-theme',
   'editor-imports',
   'help-tips',
   'lean-oversize',

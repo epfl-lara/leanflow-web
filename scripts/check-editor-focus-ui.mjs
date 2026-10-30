@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Delay the real editor's theme dependency while all API/Lean traffic is mocked.
+// Delay the real editor's font dependency while all API/Lean traffic is mocked.
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
@@ -34,14 +34,14 @@ const { page, browser, report } = fixture
 const composer = page.getByLabel('Message Lemex')
 let held = []
 let hold = true
-await page.route('**/assets/dark_vs-*.json', async (route) => {
+await page.route('**/assets/JuliaMono-Regular-*.ttf', async (route) => {
   if (hold)
     await new Promise((resolve) => {
       held.push(resolve)
     })
   await route.continue()
 })
-async function releaseTheme() {
+async function releaseEditor() {
   hold = false
   for (const release of held) release()
   held = []
@@ -53,7 +53,7 @@ async function loadUntilEditorWaits() {
     waitUntil: 'domcontentloaded',
   })
   await composer.waitFor()
-  await until(() => held.length > 0, 'editor theme held before initialization')
+  await until(() => held.length > 0, 'editor font held before initialization')
 }
 async function editorReady() {
   await page.locator('.monaco-editor').waitFor()
@@ -67,7 +67,7 @@ async function editorReady() {
 try {
   await loadUntilEditorWaits()
   await composer.fill('Keep this question in the assistant')
-  await releaseTheme()
+  await releaseEditor()
   await editorReady()
   assert.equal(
     await composer.evaluate((element) => element === document.activeElement),
@@ -97,7 +97,7 @@ try {
   const library = page.getByRole('dialog', { name: 'Your models', exact: true })
   const search = library.getByLabel('Search all available models')
   await search.focus()
-  await releaseTheme()
+  await releaseEditor()
   await editorReady()
   assert.equal(
     await search.evaluate((element) => element === document.activeElement),
@@ -145,7 +145,7 @@ try {
     .screenshot({ path: new URL('failure.png', directory).pathname })
     .catch(() => {})
 } finally {
-  await releaseTheme()
+  await releaseEditor()
   await fs.writeFile(
     new URL('report.json', directory),
     JSON.stringify(report, null, 2) + '\n',
