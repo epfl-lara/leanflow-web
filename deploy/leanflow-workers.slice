@@ -1,0 +1,14 @@
+[Unit]
+Description=LeanFlow container resource boundary
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=1600%
+MemoryAccounting=yes
+MemoryMax=48G
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=8192
+
+[Install]
+WantedBy=slices.target

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "nodeId": "worker-a",
+  "controllerLineage": "replace-with-controller-lineage",
+  "dataDir": "/data/leanflow/state",
+  "socketPath": "/data/leanflow/state/worker.sock",
+  "image": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "engineKind": "docker",
+  "engineExecutable": "/usr/bin/docker",
+  "cgroupParent": "leanflow-workers.slice",
+  "parentMemoryMax": "48g",
+  "parentTasksMax": 8192,
+  "parentMaxCpus": 16,
+  "workerMemory": "6g",
+  "workerCpus": 2,
+  "memoryBudget": "42g",
+  "maxCpus": 16,
+  "maxConcurrent": 7,
+  "scratchBytes": 137438953472,
+  "leaseMs": 30000,
+  "role": "primary"
+}

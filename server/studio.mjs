@@ -13,6 +13,7 @@ import { WorkspaceStore, validateRepository } from './workspaces.mjs'
 import { GitConnections } from './git-connections.mjs'
 import { loadConfig } from './config.mjs'
 import { EventStore, JobManager } from './events.mjs'
+import { loadClusterChecks } from './cluster/load.mjs'
 import { streamRunEvents } from './event-stream.mjs'
 import { staticAssets } from './static-assets.mjs'
 import { TexBuildManager } from './tex-builds.mjs'
@@ -209,6 +210,14 @@ export async function createStudio({
       kernelExportMaxBytes: capacity.kernelExportMaxBytes,
     })
   await runtime.init()
+  let clusterChecks = null
+  try {
+    clusterChecks = await loadClusterChecks({ dataDir, runtime })
+  } catch {
+    console.warn(
+      '[LeanFlow cluster] Distributed checks are unavailable. Local serving remains active; inspect the private cluster configuration and worker image.',
+    )
+  }
   let playgroundPreparation = Promise.resolve()
   const preparePlayground = () => {
     if (runtime.preparePresetEnvironment && runtime.templateRoot('mathlib'))
@@ -350,6 +359,7 @@ export async function createStudio({
     workspaces,
     events,
     checkTimeoutMs: capacity.checkTimeoutMs,
+    checkExecutor: clusterChecks,
   })
   const activity = new ProjectActivity({
     texBuilds,
@@ -1631,12 +1641,14 @@ export async function createStudio({
       const checksStopped = jobs.shutdown(),
         agentsStopped = agents.shutdown(),
         texStopped = texBuilds.shutdown()
+      const clusterStopped = clusterChecks?.close()
       await runtime.shutdown?.()
       await Promise.allSettled([
         modelDiscovery.close(),
         checksStopped,
         agentsStopped,
         texStopped,
+        clusterStopped,
         terminalsStopped,
         playgroundPreparation,
         presetPreparation,

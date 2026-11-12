@@ -433,8 +433,14 @@ export class EventStore extends EventEmitter {
 }
 
 export class JobManager {
-  constructor({ events, runtime, workspaces, checkTimeoutMs = 1800000 }) {
-    Object.assign(this, { events, runtime, workspaces })
+  constructor({
+    events,
+    runtime,
+    workspaces,
+    checkTimeoutMs = 1800000,
+    checkExecutor,
+  }) {
+    Object.assign(this, { events, runtime, workspaces, checkExecutor })
     this.checkTimeoutMs = checkTimeoutMs
     this.active = new Map()
     this.controllers = new Map()
@@ -499,28 +505,48 @@ export class JobManager {
               this.events.append(job.id, 'log', text, 'activity'),
           }
           this.workspaces.get(projectId, owner)
-          let result = kernelCheck
-            ? await this.runtime.checkProject(project.root, {
-                ...options,
-                kernelCheck: true,
-                freshHome: true,
-                cleanHome: true,
-              })
-            : await this.runtime.run(project.root, ['lake', 'build'], options)
-          controller.signal.throwIfAborted()
-          if (file && file.endsWith('.lean') && result.code === 0) {
-            const checked = await this.runtime.run(
-              project.root,
-              ['lake', 'env', 'lean', '--json', '-Dwarn.sorry=true', file],
-              options,
-            )
+          const local = async () => {
+            let result = kernelCheck
+              ? await this.runtime.checkProject(project.root, {
+                  ...options,
+                  kernelCheck: true,
+                  freshHome: true,
+                  cleanHome: true,
+                })
+              : await this.runtime.run(project.root, ['lake', 'build'], options)
             controller.signal.throwIfAborted()
-            result = {
-              ...checked,
-              stdout: result.stdout + checked.stdout,
-              stderr: result.stderr + checked.stderr,
+            if (file && file.endsWith('.lean') && result.code === 0) {
+              const checked = await this.runtime.run(
+                project.root,
+                ['lake', 'env', 'lean', '--json', '-Dwarn.sorry=true', file],
+                options,
+              )
+              controller.signal.throwIfAborted()
+              result = {
+                ...checked,
+                stdout: result.stdout + checked.stdout,
+                stderr: result.stderr + checked.stderr,
+              }
             }
+            return result
           }
+          let result = this.checkExecutor
+            ? await this.checkExecutor.execute(
+                {
+                  project,
+                  owner,
+                  jobId: job.id,
+                  file,
+                  kernelCheck,
+                  fingerprint,
+                  options,
+                },
+                local,
+              )
+            : await local()
+          controller.signal.throwIfAborted()
+          const remoteResult =
+            this.checkExecutor?.isRemoteResult?.(result) === true
           if (
             fingerprint !== undefined &&
             fingerprint !==
@@ -549,7 +575,7 @@ export class JobManager {
                             ? 'The independent Lean project check did not pass. Inspect the check output; a kernel or sandbox failure is not replaced by a build-only result.'
                             : 'Lean build failed. See the build output.'),
           })
-          const dependency = dependencyFailureMessage(result)
+          const dependency = !remoteResult && dependencyFailureMessage(result)
           if (dependency)
             this.workspaces.markDependencyPreparation?.(
               projectId,

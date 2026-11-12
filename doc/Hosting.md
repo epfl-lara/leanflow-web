@@ -8,6 +8,8 @@ Choose a persistent directory for accounts, projects, and caches. For a separate
 
 Expanding an existing filesystem makes its extra space available automatically. Moving existing data to another volume requires a planned migration. Additional disk space does not increase CPU, memory, or worker limits; review [capacity settings](Configuration.md#worker-capacity) for the intended workload. Keep private backups of the data directory and configuration; see [upgrade guidance](Configuration.md#back-up-before-upgrading).
 
+To add Linux machines for pure project checks, follow [Add execution workers](DistributedExecution.md). The coordinator retains saved files and interactive workloads. Certify each worker and measure representative load before enabling remote traffic.
+
 ## Run as a service
 
 The supplied systemd user service assumes the checkout is `~/leanflow-web`. Adjust its paths and Node.js 24+ location if needed. Stop the foreground server before starting the service.

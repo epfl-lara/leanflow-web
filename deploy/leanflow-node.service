@@ -1,0 +1,32 @@
+[Unit]
+Description=LeanFlow execution worker
+After=docker.service leanflow-workers.slice
+Requires=docker.service leanflow-workers.slice
+
+[Service]
+Type=simple
+User=leanflow
+Group=leanflow
+SupplementaryGroups=docker
+WorkingDirectory=/data/leanflow/app/current
+Environment=HOME=/data/leanflow/home
+Environment=PATH=/opt/leanflow/node/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/leanflow/node/bin/node /data/leanflow/app/current/server/cluster/node.mjs serve --config /etc/leanflow/node.json
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=120
+UMask=0077
+MemoryMax=2G
+MemorySwapMax=0
+TasksMax=512
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ReadWritePaths=/data/leanflow/state
+
+[Install]
+WantedBy=multi-user.target

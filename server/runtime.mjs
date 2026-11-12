@@ -28,6 +28,7 @@ import {
   toolchainName,
 } from './lean-check.mjs'
 import { createTexArtifactReceiver } from './tex-artifacts.mjs'
+import { ContainerEngine } from './container-engine.mjs'
 import {
   SharedDependencyCache,
   configurationDigest,
@@ -183,7 +184,12 @@ export class Runtime {
     memoryBudget = null,
     kernelExportMaxBytes = 8 * 1024 ** 3,
     pidsLimit = 512,
-    docker = 'docker',
+    cgroupParent,
+    docker,
+    engineKind = 'docker',
+    engineExecutable = docker,
+    engineEnv = {},
+    engineHostAppArmor,
     hostToolchainDir = path.join(process.env.HOME || '', '.elan/toolchains'),
     scope = 'helper',
     texImage = process.env.STUDIO_TEX_IMAGE || 'leanflow-tex:local',
@@ -206,7 +212,24 @@ export class Runtime {
       throw new Error('Kernel export limit must be a positive byte count.')
     this.kernelExportMaxBytes = kernelExportMaxBytes
     this.pidsLimit = pidsLimit
-    this.docker = docker
+    if (
+      cgroupParent !== undefined &&
+      (typeof cgroupParent !== 'string' ||
+        !/^[A-Za-z0-9_.@-]+\.slice$/.test(cgroupParent))
+    )
+      throw new Error('The container cgroup parent must be a systemd slice.')
+    this.cgroupParent = cgroupParent
+    if (docker !== undefined && engineExecutable !== docker)
+      throw new Error(
+        'Choose either the docker or engineExecutable runtime option.',
+      )
+    this.engine = new ContainerEngine({
+      kind: engineKind,
+      executable: engineExecutable,
+      env: engineEnv,
+      hostAppArmor: engineHostAppArmor,
+      user: `${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`,
+    })
     this.hostToolchainDir = hostToolchainDir
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(scope))
       throw new Error('Invalid runtime scope')
@@ -253,6 +276,15 @@ export class Runtime {
     this.stopping = false
   }
 
+  // Compatibility alias for callers and fixtures that inject the executable.
+  get docker() {
+    return this.engine.executable
+  }
+
+  set docker(value) {
+    this.engine.executable = value
+  }
+
   async init() {
     await fsp.mkdir(this.dataDir, { recursive: true, mode: 0o700 })
     this.dataDir = await fsp.realpath(this.dataDir)
@@ -283,16 +315,23 @@ export class Runtime {
         mode: 0o700,
       })
     try {
-      this.capacityError =
-        'Worker memory limits could not be verified. Ask the server administrator to check Docker and restart LeanFlow.'
+      this.capacityError = `Worker memory limits could not be verified. Ask the server administrator to check ${this.engine.label} and restart LeanFlow.`
       const info = await this.#host(['info', '--format', '{{json .}}'])
       if (info.code !== 0)
-        throw new Error(info.stderr || 'Docker Engine is unavailable')
-      const engine = JSON.parse(info.stdout)
+        throw new Error(
+          info.stderr || `${this.engine.label} Engine is unavailable`,
+        )
+      let engine
+      try {
+        engine = this.engine.normalizeInfo(info.stdout)
+      } catch (error) {
+        if (error.engineUnsupported) this.capacityError = error.message
+        throw error
+      }
       try {
         if (engine.MemoryLimit !== true || engine.SwapLimit !== true)
           throw new Error(
-            'Docker must support memory and swap limits before workers can start. Ask the server administrator to enable these limits.',
+            `${this.engine.label} must support memory and swap limits before workers can start. Ask the server administrator to enable these limits.`,
           )
         this.memoryCapacity = workerMemoryCapacity({
           memory: this.memory,
@@ -314,10 +353,14 @@ export class Runtime {
       ])
       if (info.code !== 0 || image.code !== 0)
         throw new Error(
-          info.stderr || image.stderr || 'Docker worker image is unavailable',
+          info.stderr ||
+            image.stderr ||
+            `${this.engine.label} worker image is unavailable`,
         )
-      this.imageId = image.stdout.trim()
+      this.imageId = this.engine.normalizeImageId(image.stdout)
       this.dockerVersion = engine.ServerVersion
+      this.cgroupDriver = engine.CgroupDriver || engine.CgroupManager || null
+      this.cgroupVersion = String(engine.CgroupVersion || '').replace(/^v/, '')
       const native = await this.#host([
         'run',
         '--rm',
@@ -348,15 +391,16 @@ export class Runtime {
       this.lemexVersion = provenance.version || null
       this.ready = true
       this.error = null
-      const security = await this.#host([
-        'info',
-        '--format',
-        '{{json .SecurityOptions}}',
-      ])
+      // Podman has no SecurityOptions template field; its normalized engine
+      // information reports the same features from its host security section.
+      const security =
+        this.engine.kind === 'docker'
+          ? await this.#host(['info', '--format', '{{json .SecurityOptions}}'])
+          : null
       try {
-        this.apparmorEnabled = JSON.parse(security.stdout).some((value) =>
-          value.startsWith('name=apparmor'),
-        )
+        this.apparmorEnabled = (
+          security ? JSON.parse(security.stdout) : engine.SecurityOptions
+        ).some((value) => value.startsWith('name=apparmor'))
       } catch {
         /* Engines without AppArmor do not need an AppArmor profile. */
       }
@@ -727,6 +771,9 @@ export class Runtime {
       error: this.error,
       image: this.image,
       imageId: this.imageId || null,
+      engineKind: this.engine.kind,
+      cgroupDriver: this.cgroupDriver || null,
+      cgroupVersion: this.cgroupVersion || null,
       dockerVersion: this.dockerVersion || null,
       lemexCommit: this.lemexCommit || null,
       lemexNativeBuildCommit: this.lemexNativeBuildCommit || null,
@@ -764,9 +811,9 @@ export class Runtime {
       this.texImage,
     ])
       .then((result) => {
-        const id = result.stdout.trim()
-        if (result.code !== 0 || !/^sha256:[a-f0-9]{64}$/.test(id))
+        if (result.code !== 0)
           throw new Error('LaTeX compiler image is unavailable.')
+        const id = this.engine.normalizeImageId(result.stdout)
         this.texImageId = id
         return { ...engine, available: true, imageId: id }
       })
@@ -1083,6 +1130,7 @@ export class Runtime {
 
   #resourceArgs(memory = this.memory, cpus = this.cpus, pids = this.pidsLimit) {
     return [
+      ...(this.cgroupParent ? ['--cgroup-parent', this.cgroupParent] : []),
       '--cpus',
       String(cpus),
       '--memory',
@@ -1137,6 +1185,8 @@ export class Runtime {
       kernelCheck = false,
       emptyRepositoryClone = false,
       repositoryRoot,
+      boundedScratchBytes,
+      postCheckFile,
     } = {},
   ) {
     this.#assertReady()
@@ -1165,6 +1215,34 @@ export class Runtime {
       throw new Error('A writable Lake cache requires a read-only workspace')
     if (retainHome && !freshHome)
       throw new Error('Only a fresh worker home can be retained for export')
+    if (
+      boundedScratchBytes !== undefined &&
+      (!Number.isSafeInteger(boundedScratchBytes) ||
+        boundedScratchBytes < 16 * 1024 ** 2 ||
+        boundedScratchBytes > 512 * 1024 ** 3 ||
+        !readOnlyWorkspace ||
+        !writeLakeCache ||
+        !freshHome ||
+        !cleanHome ||
+        retainHome ||
+        readOnlyHome ||
+        repositoryRoot !== undefined ||
+        emptyRepositoryClone ||
+        network !== 'none')
+    )
+      throw new Error(
+        'Bounded scratch requires an offline pure check with fresh, disposable caches and home.',
+      )
+    if (
+      postCheckFile !== undefined &&
+      (boundedScratchBytes === undefined ||
+        typeof postCheckFile !== 'string' ||
+        !postCheckFile.endsWith('.lean') ||
+        path.posix.isAbsolute(postCheckFile) ||
+        /[\\\x00-\x1f]/.test(postCheckFile) ||
+        postCheckFile.split('/').some((part) => ['', '.', '..'].includes(part)))
+    )
+      throw new Error('Invalid selected file in a bounded pure check.')
     const projectCheck =
       args.length === PROJECT_CHECK_COMMAND.length &&
       args.every((value, index) => value === PROJECT_CHECK_COMMAND[index])
@@ -1196,8 +1274,8 @@ export class Runtime {
       workerMemory = `${BigInt(size[1]) * BigInt(workerSlots)}${size[2]}`
       const disk = fs.statfsSync(this.runtimeDir)
       if (
-        disk.bavail * disk.bsize <
-        this.kernelExportMaxBytes + 512 * 1024 ** 2
+        boundedScratchBytes === undefined &&
+        disk.bavail * disk.bsize < this.kernelExportMaxBytes + 512 * 1024 ** 2
       )
         throw new Error(
           'Full Lean checking needs more temporary disk space. Ask the administrator to free space or review the kernel export limit.',
@@ -1223,9 +1301,16 @@ export class Runtime {
       fresh: freshHome,
       clean: cleanHome,
     })
-    const kernelTemp = kernelCheck
-      ? ensurePrivateDirectory(home, 'kernel-check-tmp')
-      : null
+    const kernelTemp =
+      kernelCheck && boundedScratchBytes === undefined
+        ? ensurePrivateDirectory(home, 'kernel-check-tmp')
+        : null
+    const scratchQuarter =
+      boundedScratchBytes === undefined
+        ? 0
+        : Math.floor(boundedScratchBytes / 4 / 4096) * 4096
+    const scratchMount = (destination, size, mode = '700') =>
+      `${destination}:rw,nosuid,nodev,size=${size},uid=${process.getuid?.() || 1000},gid=${process.getgid?.() || 1000},mode=${mode}`
     const name = `lemex-web-${this.owner.slice(0, 8)}-${randomUUID().slice(0, 12)}`
     const dockerArgs = [
       'run',
@@ -1250,20 +1335,26 @@ export class Runtime {
       ...this.#resourceArgs(workerMemory, this.cpus * workerSlots),
       '--network',
       network,
-      ...(kernelTemp
+      ...(boundedScratchBytes !== undefined
         ? [
-            '--mount',
-            `type=bind,src=${kernelTemp},dst=/tmp`,
-            '--ulimit',
-            `fsize=${this.kernelExportMaxBytes}:${this.kernelExportMaxBytes}`,
+            '--tmpfs',
+            scratchMount(
+              '/tmp',
+              boundedScratchBytes - 2 * scratchQuarter,
+              '1777',
+            ),
           ]
-        : ['--tmpfs', '/tmp:rw,nosuid,size=1g']),
+        : kernelTemp
+          ? ['--mount', `type=bind,src=${kernelTemp},dst=/tmp`]
+          : ['--tmpfs', '/tmp:rw,nosuid,size=1g']),
       '--workdir',
       repository?.selected || '/workspace',
       '--mount',
       `type=bind,src=${actual},dst=/workspace${readOnlyWorkspace ? ',readonly' : ''}`,
       '--mount',
-      `type=bind,src=${home},dst=/home/worker${readOnlyHome ? ',readonly' : ''}`,
+      boundedScratchBytes === undefined
+        ? `type=bind,src=${home},dst=/home/worker${readOnlyHome ? ',readonly' : ''}`
+        : `type=bind,src=${home},dst=/opt/leanflow-home-seed,readonly`,
       '--env',
       'HOME=/home/worker',
       '--env',
@@ -1275,6 +1366,22 @@ export class Runtime {
       '--env',
       'LAKE_CACHE_DIR=/home/worker/.cache/lake',
     ]
+    if (kernelCheck)
+      dockerArgs.push(
+        '--ulimit',
+        `fsize=${this.kernelExportMaxBytes}:${this.kernelExportMaxBytes}`,
+      )
+    if (boundedScratchBytes !== undefined)
+      dockerArgs.push(
+        '--log-driver',
+        'none',
+        '--tmpfs',
+        scratchMount('/home/worker', scratchQuarter),
+        '--tmpfs',
+        scratchMount('/workspace/.lake', scratchQuarter),
+        '--mount',
+        `type=bind,src=${path.join(projectDir, 'server/cluster/bounded-run.py')},dst=/opt/leanflow-bounded-run.py,readonly`,
+      )
     if (kernelCheck) {
       // Permit Bubblewrap's unprivileged inner namespaces in this worker only.
       // Keep the outer worker unprivileged, offline, capability-free and read-only.
@@ -1313,7 +1420,9 @@ export class Runtime {
     }
     // These are future daemon bind sources. Mountpoints cannot be renamed by
     // project code, including through another workspace/repository alias.
-    for (const relative of ['.cache', '.cache/lake'])
+    for (const relative of boundedScratchBytes === undefined
+      ? ['.cache', '.cache/lake']
+      : [])
       dockerArgs.push(
         '--mount',
         `type=bind,src=${path.join(home, relative)},dst=/home/worker/${relative}${readOnlyHome ? ',readonly' : ''}`,
@@ -1323,7 +1432,7 @@ export class Runtime {
         '--mount',
         `type=bind,src=${kernelTemp},dst=/home/worker/kernel-check-tmp`,
       )
-    if (lakeCache) {
+    if (lakeCache && boundedScratchBytes === undefined) {
       const readonly = readOnlyWorkspace && !writeLakeCache ? ',readonly' : ''
       for (const alias of [
         '/workspace',
@@ -1374,14 +1483,31 @@ export class Runtime {
         env.LEAN_NUM_THREADS ?? String(Math.max(1, Math.floor(this.cpus))),
     }
     for (const [key, value] of Object.entries(workerEnv)) {
-      if (!/^[A-Z][A-Z0-9_]*$/.test(key) || forbiddenEnv.has(key))
+      if (
+        !/^[A-Z][A-Z0-9_]*$/.test(key) ||
+        forbiddenEnv.has(key) ||
+        this.engine.reservesEnvironment(key)
+      )
         throw new Error(`Unsupported worker environment key: ${key}`)
       if (value !== undefined && value !== null) {
         childEnv[key] = String(value)
         dockerArgs.push('--env', key)
       }
     }
-    dockerArgs.push(this.imageId || this.image, ...args)
+    dockerArgs.push(
+      this.imageId || this.image,
+      ...(boundedScratchBytes === undefined
+        ? args
+        : [
+            'python3',
+            '-I',
+            '/opt/leanflow-bounded-run.py',
+            ...(postCheckFile === undefined
+              ? ['--']
+              : ['--then-lean', postCheckFile, '--']),
+            ...args,
+          ]),
+    )
     return this.#launchWorker(root, dockerArgs, {
       childEnv,
       home,
@@ -1417,7 +1543,7 @@ export class Runtime {
         new Error('All workspace workers are busy; try again shortly'),
         { status: 503 },
       )
-    const child = spawnChild(this.docker, dockerArgs, {
+    const child = this.#spawnEngine(dockerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
       env: childEnv,
@@ -1902,6 +2028,8 @@ export class Runtime {
         `lemex-web.instance=${this.instance}`,
         '--label',
         `lemex-web.scope=${this.scope}`,
+        '--user',
+        `${process.getuid?.() || 1000}:${process.getgid?.() || 1000}`,
         '--read-only',
         '--cap-drop',
         'ALL',
@@ -1917,7 +2045,11 @@ export class Runtime {
       ],
       { timeoutMs: 60_000 },
     )
-    if (check.code !== 0 || !check.stdout.includes(toolchain.split(':v')[1]))
+    if (
+      check.code !== 0 ||
+      /\bversion\s+([^,\s)]+)/.exec(check.stdout)?.[1] !==
+        toolchain.split(':v')[1]
+    )
       throw new Error(`Toolchain version verification failed for ${toolchain}`)
     this.toolchains.set(toolchain, source)
     const registry = await this.#updateRegistry('toolchains.json', {
@@ -1932,9 +2064,18 @@ export class Runtime {
     return { toolchain, ready: true }
   }
 
+  // Every engine process, including cleanup, uses the same translated
+  // arguments and engine environment so it addresses the same container store.
+  #spawnEngine(args, options) {
+    return spawnChild(this.engine.executable, this.engine.args(args), {
+      ...options,
+      env: this.engine.environment(options.env),
+    })
+  }
+
   #host(args, { onOutput, timeoutMs = 60_000 } = {}) {
     return new Promise((resolve, reject) => {
-      const child = spawnChild(this.docker, args, {
+      const child = this.#spawnEngine(args, {
         stdio: ['ignore', 'pipe', 'pipe'],
       })
       let stdout = '',
@@ -1951,9 +2092,13 @@ export class Runtime {
         child.kill('SIGTERM')
         const nameIndex = args.indexOf('--name')
         if (args[0] === 'run' && nameIndex > 0) {
-          spawnChild(this.docker, ['rm', '-f', args[nameIndex + 1]], {
-            stdio: 'ignore',
-          }).unref()
+          try {
+            this.#spawnEngine(['rm', '-f', args[nameIndex + 1]], {
+              stdio: 'ignore',
+            }).unref()
+          } catch {
+            /* The timed-out run already reports failure to its caller. */
+          }
         }
       }, timeoutMs)
       child.once('error', (error) => {
