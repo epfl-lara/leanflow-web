@@ -21,7 +21,7 @@ const auditEnv = {
 async function fixture(
   t,
   edit = async () => {},
-  { buildFails = false, onRun, onVerificationCopy } = {},
+  { buildFails = false, onRun, onVerificationCopy, documentsOnly = false } = {},
 ) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-ask-search-'))
   const calls = [],
@@ -126,12 +126,24 @@ async function fixture(
     },
   }
   const workspaces = await new WorkspaceStore({ dataDir: root, runtime }).init()
-  const project = await workspaces.create('alice', {
-    preset: 'lean',
-    name: 'Ask fixture',
-  })
+  const project = await workspaces.create(
+    'alice',
+    documentsOnly
+      ? {
+          name: 'Document fixture',
+          files: [{ path: 'Notes.md', content: 'Original notes\n' }],
+          autoRepair: false,
+        }
+      : {
+          preset: 'lean',
+          name: 'Ask fixture',
+        },
+  )
   await workspaces.jobs.get(project.id)
-  assert.equal(workspaces.get(project.id, 'alice').status, 'ready')
+  assert.equal(
+    workspaces.get(project.id, 'alice').status,
+    documentsOnly ? 'needs-setup' : 'ready',
+  )
   if (onVerificationCopy) {
     const copy = workspaces.verificationCopy.bind(workspaces)
     workspaces.verificationCopy = async (...args) => {
@@ -303,18 +315,14 @@ test('Formalize without Lean output never certifies an unchanged project as a co
         liveEdits: false,
       })
       assert.equal(result.status, 'completed', result.error)
-      assert.equal(result.verification.complete, false)
-      assert.equal(result.verification.compiled, false)
-      assert.match(
-        result.verification.reason,
-        /No Lean formalization was written/,
-      )
+      assert.equal(result.verification.kind, 'chat')
+      assert.equal(result.verification.kernelChecked, undefined)
       assert.equal(calls.length, 0)
       await assert.rejects(manager.apply('alice', result.id), { status: 409 })
     })
 })
 
-test('Formalize explains unexpected document or scratch changes and blocks applying them', async (t) => {
+test('explicit user requests override Formalize document-editing defaults', async (t) => {
   const { manager, calls, execute } = await fixture(t, async (workspace) => {
     await fs.writeFile(
       path.join(workspace, 'Main.lean'),
@@ -325,17 +333,17 @@ test('Formalize explains unexpected document or scratch changes and blocks apply
       'Extraction scratch text\n',
     )
   })
-  const result = await execute('Formalize the paper.', {
-    mode: 'formalize',
-    liveEdits: false,
-  })
-  assert.equal(result.verification.complete, false)
-  assert.match(
-    result.verification.errors[0],
-    /Keep paper.txt unchanged.*scratch output outside the project/,
+  const result = await execute(
+    'Update paper.txt with the extracted text and formalize the theorem.',
+    {
+      mode: 'formalize',
+      liveEdits: false,
+    },
   )
-  assert.equal(calls.length, 0)
-  await assert.rejects(manager.apply('alice', result.id), { status: 409 })
+  assert.equal(result.verification.complete, true)
+  assert.equal(result.verification.editsAllowed, true)
+  assert.equal(calls.length, 3)
+  assert.equal((await manager.apply('alice', result.id)).status, 'applied')
 })
 
 test(
@@ -503,7 +511,8 @@ test(
         ['lake', 'build'],
       ],
     )
-    await assert.rejects(manager.apply('alice', result.id), { status: 409 })
+    assert.equal(result.verification.editsAllowed, true)
+    await manager.apply('alice', result.id)
     await manager.undo('alice', result.id)
     assert.deepEqual(
       await workspaces.readFile(project.id, 'alice', 'Main.lean'),
@@ -667,7 +676,7 @@ test(
 )
 
 test(
-  'mixed Lean and text changes retain independent proof verification and block invalid proofs',
+  'mixed Lean and text changes report independent proof results while allowing requested edits',
   { timeout: 15000 },
   async (t) => {
     for (const buildFails of [false, true])
@@ -725,10 +734,14 @@ test(
         )
         assert.equal(result.verificationRoot, null)
         await assert.rejects(fs.stat(verificationRoot), { code: 'ENOENT' })
+        assert.equal(result.verification.editsAllowed, true)
         if (buildFails) {
-          await assert.rejects(manager.apply('alice', result.id), {
-            status: 409,
-          })
+          await manager.apply('alice', result.id)
+          assert.equal(
+            (await workspaces.readFile(project.id, 'alice', 'Notes.md'))
+              .content,
+            '# Proof notes\n',
+          )
         } else {
           assert.equal(result.verification.kernelChecked, true)
           assert.equal(calls.length, 3)
@@ -743,15 +756,582 @@ test(
   },
 )
 
+test('ordinary document requests work before a Lean environment is configured in any mode', async (t) => {
+  for (const mode of ['search', 'proofs', 'formalize', 'optimize'])
+    await t.test(mode, async (t) => {
+      const { manager, workspaces, project, calls, execute } = await fixture(
+        t,
+        (root) =>
+          fs.writeFile(path.join(root, 'Notes.md'), 'Requested edits\n'),
+        { documentsOnly: true },
+      )
+      const result = await execute('Update the project notes.', {
+        mode,
+        liveEdits: false,
+      })
+      assert.equal(result.status, 'completed', result.error)
+      assert.equal(result.verification.kind, 'workspace')
+      assert.equal(result.verification.editsAllowed, true)
+      assert.equal(calls.length, 0)
+      await manager.apply('alice', result.id)
+      assert.equal(
+        (await workspaces.readFile(project.id, 'alice', 'Notes.md')).content,
+        'Requested edits\n',
+      )
+    })
+})
+
+test('explicit user requests override file and proof scope defaults in every mode', async (t) => {
+  for (const mode of ['search', 'proofs', 'formalize', 'optimize'])
+    for (const liveEdits of [false, true])
+      await t.test(`${mode}, live=${liveEdits}`, async (t) => {
+        const original =
+          'import Lean\ndef value : Nat := 1\ntheorem target : True := by trivial\n'
+        const updated =
+          'import Lean\nimport Renamed\ndef value : Nat := 2\ntheorem target (h : False) : False := by exact h\n'
+        const helper = 'theorem helper : True := by trivial\n'
+        const { manager, workspaces, project, execute } = await fixture(
+          t,
+          async (root) => {
+            await fs.writeFile(path.join(root, 'Main.lean'), updated)
+            await fs.rename(
+              path.join(root, 'Extra.lean'),
+              path.join(root, 'Renamed.lean'),
+            )
+            await fs.unlink(path.join(root, 'Obsolete.lean'))
+            await fs.writeFile(
+              path.join(root, 'Notes.md'),
+              'Requested document changes\n',
+            )
+          },
+        )
+        await workspaces.writeFile(project.id, 'alice', 'Main.lean', original)
+        await workspaces.writeFile(
+          project.id,
+          'alice',
+          'Extra.lean',
+          helper,
+          null,
+        )
+        await workspaces.writeFile(
+          project.id,
+          'alice',
+          'Obsolete.lean',
+          'theorem obsolete : True := by trivial\n',
+          null,
+        )
+        const moves = []
+        workspaces.subscribeChanges((event) =>
+          moves.push(...(event.moves || [])),
+        )
+        const result = await execute(
+          'Change the statement, assumptions, definition and imports as described. Rename Extra.lean to Renamed.lean, delete Obsolete.lean, and update Notes.md.',
+          {
+            mode,
+            liveEdits,
+            currentFile: null,
+            files: [],
+          },
+        )
+        assert.equal(result.status, 'completed', result.error)
+        assert.equal(
+          result.verification.complete,
+          true,
+          JSON.stringify(result.verification),
+        )
+        assert.equal(result.verification.editsAllowed, true)
+        assert.equal(result.verification.kernelChecked, true)
+        await manager.apply('alice', result.id)
+        assert(
+          moves.some(
+            (move) => move.from === 'Extra.lean' && move.to === 'Renamed.lean',
+          ),
+        )
+        assert.equal(
+          (await workspaces.readFile(project.id, 'alice', 'Main.lean')).content,
+          updated,
+        )
+        assert.equal(
+          (await workspaces.readFile(project.id, 'alice', 'Renamed.lean'))
+            .content,
+          helper,
+        )
+        assert.equal(
+          (await workspaces.readFile(project.id, 'alice', 'Notes.md')).content,
+          'Requested document changes\n',
+        )
+        for (const file of ['Extra.lean', 'Obsolete.lean'])
+          await assert.rejects(workspaces.readFile(project.id, 'alice', file), {
+            status: 404,
+          })
+        if (liveEdits) {
+          await manager.undo('alice', result.id)
+          assert.equal(
+            (await workspaces.readFile(project.id, 'alice', 'Main.lean'))
+              .content,
+            original,
+          )
+          assert.equal(
+            (await workspaces.readFile(project.id, 'alice', 'Extra.lean'))
+              .content,
+            helper,
+          )
+          assert.equal(
+            (await workspaces.readFile(project.id, 'alice', 'Obsolete.lean'))
+              .content,
+            'theorem obsolete : True := by trivial\n',
+          )
+        }
+      })
+})
+
+test('a user can ask the ordinary agent to repair configuration that needs preparation', async (t) => {
+  for (const liveEdits of [false, true])
+    await t.test(`live=${liveEdits}`, async (t) => {
+      let configuration
+      const { manager, workspaces, project, execute } = await fixture(
+        t,
+        (root) =>
+          fs.writeFile(path.join(root, 'lakefile.toml'), configuration.content),
+      )
+      configuration = await workspaces.readFile(
+        project.id,
+        'alice',
+        'lakefile.toml',
+      )
+      await workspaces.writeFile(
+        project.id,
+        'alice',
+        'lakefile.toml',
+        'name = [\n',
+        configuration.hash,
+      )
+      assert.equal(workspaces.get(project.id, 'alice').needsPreparation, true)
+      const result = await execute('Fix the Lake configuration I broke.', {
+        liveEdits,
+      })
+      assert.equal(result.status, 'completed', result.error)
+      assert.equal(result.verification.complete, true)
+      await manager.apply('alice', result.id)
+      assert.equal(
+        (await workspaces.readFile(project.id, 'alice', 'lakefile.toml'))
+          .content,
+        configuration.content,
+      )
+    })
+})
+
+test('requested Lake fixes register user-created folders in every editing mode', async (t) => {
+  for (const mode of ['search', 'proofs', 'formalize'])
+    for (const liveEdits of [false, true])
+      await t.test(`${mode}, live=${liveEdits}`, async (t) => {
+        const bindings = new Map()
+        let updated, original
+        const {
+          manager,
+          workspaces,
+          project,
+          calls,
+          requests,
+          execute,
+          runtime,
+        } = await fixture(
+          t,
+          async (workspace) => {
+            await fs.writeFile(path.join(workspace, 'lakefile.toml'), updated)
+            assert.equal(
+              (await workspaces.readFile(project.id, 'alice', 'lakefile.toml'))
+                .content,
+              original.content,
+              'Configuration remains staged until its build check passes',
+            )
+          },
+          {
+            onRun: async (workspace, args) => {
+              if (!workspace.includes('/candidates/')) return
+              assert.equal(
+                await fs.readFile(
+                  path.join(workspace, 'lakefile.toml'),
+                  'utf8',
+                ),
+                updated,
+              )
+              assert.equal(bindings.get(workspace), updated)
+              if (args[0] === 'lake' && args[1] === 'build')
+                assert.match(
+                  await fs.readFile(
+                    path.join(workspace, 'Proofs/Example.lean'),
+                    'utf8',
+                  ),
+                  /theorem exampleProof/,
+                )
+            },
+          },
+        )
+        original = await workspaces.readFile(
+          project.id,
+          'alice',
+          'lakefile.toml',
+        )
+        updated =
+          original.content.replace(
+            'defaultTargets = ["Main"]',
+            'defaultTargets = ["Main", "Proofs"]',
+          ) + '\n[[lean_lib]]\nname = "Proofs"\nglobs = ["Proofs.+"]\n'
+        await workspaces.createFolder(project.id, 'alice', { path: 'Proofs' })
+        await workspaces.writeFile(
+          project.id,
+          'alice',
+          'Proofs/Example.lean',
+          'theorem exampleProof : True := by trivial\n',
+          null,
+        )
+        runtime.inheritDependencies = async (_source, target) => {
+          bindings.set(
+            target,
+            await fs.readFile(path.join(target, 'lakefile.toml'), 'utf8'),
+          )
+        }
+        const result = await execute(
+          'Fix the build for the Proofs folder I added. Update lakefile.toml as needed.',
+          { mode, liveEdits },
+        )
+        assert.equal(result.status, 'completed', result.error)
+        assert.equal(result.verification.complete, true)
+        assert.equal(result.verification.kind, 'workspace')
+        assert.equal(result.verification.kernelChecked, undefined)
+        assert.equal(
+          calls.length,
+          2,
+          'Configuration-only edits need environment and build checks',
+        )
+        const saved = await workspaces.readFile(
+          project.id,
+          'alice',
+          'lakefile.toml',
+        )
+        assert.equal(saved.content, liveEdits ? updated : original.content)
+        const instructions = requests.find(
+          (request) => request.method === 'thread/start',
+        ).params.developerInstructions
+        assert.match(instructions, /Explicit user requests take precedence/)
+        assert.match(instructions, /initial requests and follow-up messages/)
+        await manager.apply('alice', result.id)
+        assert.equal(
+          (await workspaces.readFile(project.id, 'alice', 'lakefile.toml'))
+            .content,
+          updated,
+        )
+        assert.equal(workspaces.get(project.id, 'alice').needsPreparation, true)
+        if (liveEdits) {
+          await manager.undo('alice', result.id)
+          assert.equal(
+            (await workspaces.readFile(project.id, 'alice', 'lakefile.toml'))
+              .hash,
+            original.hash,
+          )
+        }
+      })
+})
+
+test('configuration and Lean changes are built together and still receive independent proof checks', async (t) => {
+  for (const liveEdits of [false, true])
+    await t.test(`live=${liveEdits}`, async (t) => {
+      const source = 'theorem repaired : True := by trivial\n'
+      const { manager, workspaces, project, calls, execute } = await fixture(
+        t,
+        async (workspace) => {
+          await fs.appendFile(
+            path.join(workspace, 'lakefile.toml'),
+            '\n# requested setup fix\n',
+          )
+          await fs.appendFile(path.join(workspace, 'Main.lean'), source)
+        },
+      )
+      const original = await workspaces.readFile(
+        project.id,
+        'alice',
+        'lakefile.toml',
+      )
+      const originalLean = await workspaces.readFile(
+        project.id,
+        'alice',
+        'Main.lean',
+      )
+      const result = await execute('Repair the setup and finish the proof.', {
+        mode: 'proofs',
+        liveEdits,
+      })
+      assert.equal(result.status, 'completed', result.error)
+      assert.equal(
+        result.verification.complete,
+        true,
+        JSON.stringify(result.verification),
+      )
+      assert.equal(result.verification.kernelChecked, true)
+      const audit = calls.find((call) => call.args[0] === 'python3')
+      assert.deepEqual(
+        JSON.parse(audit.args.at(-1)).map((entry) => entry.path),
+        ['Main.lean'],
+      )
+      await manager.apply('alice', result.id)
+      assert.equal(
+        (await workspaces.readFile(project.id, 'alice', 'Main.lean')).content,
+        originalLean.content + source,
+      )
+      assert.equal(
+        (await workspaces.readFile(project.id, 'alice', 'lakefile.toml'))
+          .content,
+        original.content + '\n# requested setup fix\n',
+      )
+      if (liveEdits) {
+        await manager.undo('alice', result.id)
+        assert.equal(
+          (await workspaces.readFile(project.id, 'alice', 'lakefile.toml'))
+            .hash,
+          original.hash,
+        )
+      }
+    })
+})
+
+test('agents can switch between Lake configuration formats without treating lakefile.lean as proof output', async (t) => {
+  for (const liveEdits of [false, true])
+    await t.test(`live=${liveEdits}`, async (t) => {
+      const configuration =
+        'import Lake\nopen Lake DSL\npackage fixture\n@[default_target] lean_lib Main\n'
+      const { manager, workspaces, project, calls, execute } = await fixture(
+        t,
+        async (workspace) => {
+          await fs.unlink(path.join(workspace, 'lakefile.toml'))
+          await fs.writeFile(
+            path.join(workspace, 'lakefile.lean'),
+            configuration,
+          )
+        },
+      )
+      const original = await workspaces.readFile(
+        project.id,
+        'alice',
+        'lakefile.toml',
+      )
+      const result = await execute(
+        'Use a Lean Lake configuration instead of TOML.',
+        { liveEdits },
+      )
+      assert.equal(result.status, 'completed', result.error)
+      assert.equal(result.verification.complete, true)
+      assert.equal(result.verification.kind, 'workspace')
+      assert.equal(calls.length, 2)
+      await manager.apply('alice', result.id)
+      assert.equal(
+        (await workspaces.readFile(project.id, 'alice', 'lakefile.lean'))
+          .content,
+        configuration,
+      )
+      await assert.rejects(
+        workspaces.readFile(project.id, 'alice', 'lakefile.toml'),
+        { status: 404 },
+      )
+      if (liveEdits) {
+        await manager.undo('alice', result.id)
+        assert.equal(
+          (await workspaces.readFile(project.id, 'alice', 'lakefile.toml'))
+            .hash,
+          original.hash,
+        )
+        await assert.rejects(
+          workspaces.readFile(project.id, 'alice', 'lakefile.lean'),
+          { status: 404 },
+        )
+      }
+    })
+})
+
+test('an explicit toolchain request prepares and checks that release before accepting the configuration', async (t) => {
+  const requested = 'leanprover/lean4:v4.35.0'
+  const prepared = [],
+    cleared = []
+  const { manager, workspaces, project, execute, runtime } = await fixture(
+    t,
+    (workspace) =>
+      fs.writeFile(path.join(workspace, 'lean-toolchain'), requested + '\n'),
+  )
+  runtime.prepareToolchain = async (toolchain) => prepared.push(toolchain)
+  runtime.clearInheritedDependencies = async (root) => cleared.push(root)
+  const result = await execute('Change the project to Lean v4.35.0.', {
+    liveEdits: false,
+  })
+  assert.equal(result.status, 'completed', result.error)
+  assert.equal(result.verification.complete, true)
+  assert.deepEqual(prepared, [requested])
+  assert.ok(cleared.length > 0)
+  assert.ok(cleared.every((root) => root !== project.root))
+  assert.equal(
+    (await workspaces.readFile(project.id, 'alice', 'lean-toolchain')).content,
+    toolchain + '\n',
+  )
+  await manager.apply('alice', result.id)
+  assert.equal(
+    (await workspaces.readFile(project.id, 'alice', 'lean-toolchain')).content,
+    requested + '\n',
+  )
+  assert.equal(workspaces.get(project.id, 'alice').needsPreparation, true)
+})
+
+test('Stop does not wait for a shared toolchain download or publish its staged configuration', async (t) => {
+  let started, finish
+  const preparing = new Promise((resolve) => {
+    started = resolve
+  })
+  const pending = new Promise((resolve) => {
+    finish = resolve
+  })
+  const { manager, workspaces, project, runtime } = await fixture(
+    t,
+    (workspace) =>
+      fs.writeFile(
+        path.join(workspace, 'lean-toolchain'),
+        'leanprover/lean4:v4.35.0\n',
+      ),
+  )
+  runtime.prepareToolchain = () => {
+    started()
+    return pending
+  }
+  const job = await manager.start('alice', project.id, {
+    mode: 'search',
+    prompt: 'Use Lean v4.35.0.',
+    liveEdits: true,
+  })
+  await preparing
+  try {
+    const stopped = await manager.stop('alice', job.id)
+    assert.equal(stopped.status, 'cancelled')
+    assert.equal(stopped.liveChanges?.length || 0, 0)
+    assert.equal(
+      (await workspaces.readFile(project.id, 'alice', 'lean-toolchain'))
+        .content,
+      toolchain + '\n',
+    )
+  } finally {
+    finish()
+  }
+})
+
+test('failed configuration checks do not veto the requested edits', async (t) => {
+  for (const liveEdits of [false, true])
+    await t.test(`live=${liveEdits}`, async (t) => {
+      const { manager, workspaces, project, calls, execute } = await fixture(
+        t,
+        (workspace) =>
+          fs.appendFile(
+            path.join(workspace, 'lakefile.toml'),
+            '\ninvalid = [\n',
+          ),
+        { buildFails: true },
+      )
+      const original = await workspaces.readFile(
+        project.id,
+        'alice',
+        'lakefile.toml',
+      )
+      const result = await execute('Fix project configuration.', { liveEdits })
+      assert.equal(result.status, 'completed', result.error)
+      assert.equal(result.verification.complete, false)
+      assert.match(result.verification.reason, /does not build/)
+      assert.equal(result.changes.length, 1)
+      assert.equal(calls.length, 2)
+      assert.equal(result.verification.editsAllowed, true)
+      await manager.apply('alice', result.id)
+      assert.equal(
+        (await workspaces.readFile(project.id, 'alice', 'lakefile.toml'))
+          .content,
+        original.content + '\ninvalid = [\n',
+      )
+      assert.equal(workspaces.get(project.id, 'alice').needsPreparation, true)
+    })
+})
+
+test('evaluating a candidate Lake configuration cannot silently rewrite the checked sources', async (t) => {
+  const { workspaces, project, execute } = await fixture(
+    t,
+    (workspace) =>
+      fs.appendFile(
+        path.join(workspace, 'lakefile.toml'),
+        '\n# requested edit\n',
+      ),
+    {
+      onRun: async (workspace, args) => {
+        if (
+          workspace.includes('/candidates/') &&
+          args[0] === 'lake' &&
+          args[1] === 'env'
+        )
+          await fs.writeFile(
+            path.join(workspace, 'Main.lean'),
+            'axiom forged : False\n',
+          )
+      },
+    },
+  )
+  const original = await workspaces.readFile(
+    project.id,
+    'alice',
+    'lakefile.toml',
+  )
+  const result = await execute('Fix the project configuration.', {
+    liveEdits: true,
+  })
+  assert.equal(result.status, 'completed', result.error)
+  assert.equal(result.verification.complete, false)
+  assert.match(result.verification.reason, /changed project files/)
+  assert.doesNotMatch(
+    (await workspaces.readFile(project.id, 'alice', 'Main.lean')).content,
+    /forged/,
+  )
+  assert.equal(
+    (await workspaces.readFile(project.id, 'alice', 'lakefile.toml')).content,
+    original.content + '\n# requested edit\n',
+  )
+})
+
+test('configuration changed while an agent runs cannot be overwritten by its candidate', async (t) => {
+  for (const liveEdits of [false, true])
+    await t.test(`live=${liveEdits}`, async (t) => {
+      const { manager, workspaces, project, execute } = await fixture(
+        t,
+        async (workspace) => {
+          await fs.appendFile(
+            path.join(workspace, 'lakefile.toml'),
+            '\n# agent edit\n',
+          )
+          // Simulate a collaborator's external save after the agent took its snapshot.
+          await fs.appendFile(
+            path.join(project.root, 'lakefile.toml'),
+            '\n# newer saved edit\n',
+          )
+        },
+      )
+      const result = await execute('Repair the project setup.', { liveEdits })
+      assert.equal(result.status, 'failed')
+      assert.match(result.error, /changed/)
+      await assert.rejects(manager.apply('alice', result.id), { status: 409 })
+      const saved = await workspaces.readFile(
+        project.id,
+        'alice',
+        'lakefile.toml',
+      )
+      assert.match(saved.content, /newer saved edit/)
+      assert.doesNotMatch(saved.content, /agent edit/)
+    })
+})
+
 test(
-  'Ask & Search blocks pinned configuration changes and Lean trust bypasses',
+  'requested axiom edits stay distinguishable from verified proofs',
   { timeout: 15000 },
   async (t) => {
-    for (const [file, source] of [
-      ['lean-toolchain', 'leanprover/lean4:v4.35.0\n'],
-      ['lakefile.toml', 'name = "changed"\n'],
-      ['Main.lean', 'axiom forged : False\n'],
-    ])
+    for (const [file, source] of [['Main.lean', 'axiom forged : False\n']])
       await t.test(file, async (t) => {
         const { manager, workspaces, project, calls, execute } = await fixture(
           t,
@@ -762,15 +1342,23 @@ test(
           'alice',
           'Main.lean',
         )
-        const result = await execute('Change the project file.')
+        const result = await execute(
+          'Add this axiom as an explicit assumption.',
+        )
         assert.equal(result.status, 'completed', result.error)
         assert.equal(result.verification.complete, false)
         assert.equal(calls.length, 0)
-        await assert.rejects(manager.apply('alice', result.id), { status: 409 })
         assert.deepEqual(
           await workspaces.readFile(project.id, 'alice', 'Main.lean'),
           original,
         )
+        assert.equal(result.verification.editsAllowed, true)
+        await manager.apply('alice', result.id)
+        assert.equal(
+          (await workspaces.readFile(project.id, 'alice', file)).content,
+          source,
+        )
+        assert.equal(result.verification.kernelChecked, undefined)
       })
   },
 )
@@ -881,12 +1469,9 @@ test('failed independent checks dispose their verification copy and retain revie
           },
         )
         const result = await f.execute('Prove the fixture theorem.')
-        assert.equal(
-          result.status,
-          throws ? 'failed' : 'completed',
-          result.error,
-        )
-        if (!throws) assert.equal(result.verification.complete, false)
+        assert.equal(result.status, 'completed', result.error)
+        assert.equal(result.verification.complete, false)
+        assert.equal(result.verification.editsAllowed, true)
         assert.ok(checkedRoot)
         assert.equal(result.verificationRoot, null)
         await assert.rejects(fs.stat(path.dirname(checkedRoot)), {

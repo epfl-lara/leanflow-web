@@ -73,10 +73,32 @@ export function declarationNames(source) {
   return result
 }
 
-export function proofRisks(changes, mode) {
+export function proofRisks(
+  changes,
+  mode,
+  { allowRequestedEdits = false } = {},
+) {
   const problems = []
   for (const change of changes) {
-    if (mode === 'formalize' && !change.path.endsWith('.lean')) {
+    if (
+      change.path.split('/').some((part) => ['.git', '.lake'].includes(part))
+    ) {
+      problems.push(
+        `Changes to ${change.path} are outside the editable project files.`,
+      )
+      continue
+    }
+    if (
+      PROJECT_CONFIGURATION_FILES.includes(change.path) ||
+      (allowRequestedEdits &&
+        PROJECT_CONFIGURATION_FILES.includes(change.path.split('/').at(-1)))
+    )
+      continue
+    if (
+      !allowRequestedEdits &&
+      mode === 'formalize' &&
+      !change.path.endsWith('.lean')
+    ) {
       problems.push(
         `Formalize writes Lean files only. Keep ${change.path} unchanged and put extraction or scratch output outside the project.`,
       )
@@ -88,19 +110,26 @@ export function proofRisks(changes, mode) {
         .some((part) =>
           ['.git', '.lake', ...PROJECT_CONFIGURATION_FILES].includes(part),
         ) ||
-      (mode !== 'search' && !change.path.endsWith('.lean'))
+      (!allowRequestedEdits &&
+        mode !== 'search' &&
+        !change.path.endsWith('.lean'))
     ) {
       problems.push(
         `Changes to ${change.path} require a separate project configuration edit.`,
       )
       continue
     }
-    if (mode === 'search' && !change.path.endsWith('.lean')) continue
+    if (
+      (allowRequestedEdits || mode === 'search') &&
+      !change.path.endsWith('.lean')
+    )
+      continue
     if (change.after === null) {
+      if (allowRequestedEdits) continue
       problems.push(`Deleting ${change.path} requires a separate manual edit.`)
       continue
     }
-    if (mode === 'optimize' && !change.before) {
+    if (!allowRequestedEdits && mode === 'optimize' && !change.before) {
       problems.push(
         `${change.path}: Optimize changes existing proof bodies; use Formalize for new declarations.`,
       )
@@ -108,6 +137,7 @@ export function proofRisks(changes, mode) {
     }
     const code = maskLean(change.after || '')
     if (
+      !allowRequestedEdits &&
       mode === 'optimize' &&
       /\b(?:native_decide|ofReduceBool|ofReduceNat)\b/.test(code)
     )
@@ -129,6 +159,7 @@ export function proofRisks(changes, mode) {
     )
       problems.push(`${change.path} still contains an unfinished proof.`)
     if (
+      !allowRequestedEdits &&
       ['proofs', 'repair', 'prove', 'optimize'].includes(mode) &&
       change.before
     ) {
@@ -454,7 +485,7 @@ export async function verifyCandidate(
   onOutput,
   options = {},
 ) {
-  const risks = proofRisks(changes, mode)
+  const risks = proofRisks(changes, mode, options)
   if (risks.length)
     return {
       compiled: false,
@@ -465,12 +496,30 @@ export async function verifyCandidate(
         'Final verification stopped before Lean could check these changes.',
     }
   const entries = changes
-    .filter((change) => change.after !== null && change.path.endsWith('.lean'))
+    .filter(
+      (change) =>
+        change.after !== null &&
+        change.path.endsWith('.lean') &&
+        !PROJECT_CONFIGURATION_FILES.includes(change.path.split('/').at(-1)),
+    )
     .map((change) => ({
       path: change.path,
       names: declarationNames(change.after),
     }))
-  if (!entries.length && mode === 'search')
+  const configurationChanged = changes.some((change) =>
+    PROJECT_CONFIGURATION_FILES.includes(change.path.split('/').at(-1)),
+  )
+  const leanChanged = changes.some(
+    (change) =>
+      change.path.endsWith('.lean') &&
+      !PROJECT_CONFIGURATION_FILES.includes(change.path.split('/').at(-1)),
+  )
+  if (
+    !entries.length &&
+    !configurationChanged &&
+    !leanChanged &&
+    (mode === 'search' || (options.allowRequestedEdits && changes.length))
+  )
     return {
       complete: true,
       kind: 'workspace',
@@ -478,7 +527,7 @@ export async function verifyCandidate(
       reason:
         'Project file changes are ready to review. No Lean source changes to check.',
     }
-  if (!entries.length && mode === 'formalize')
+  if (!entries.length && !configurationChanged && mode === 'formalize')
     return {
       compiled: false,
       complete: false,
@@ -487,7 +536,7 @@ export async function verifyCandidate(
       reason:
         'No Lean formalization was written. There is no Lean output to verify.',
     }
-  if (!entries.length)
+  if (!entries.length && !configurationChanged && !leanChanged)
     return {
       compiled: true,
       complete: true,
@@ -495,7 +544,9 @@ export async function verifyCandidate(
       axioms: [],
       reason: 'No Lean file changes to check.',
     }
-  // Resolve the trusted baseline Lake environment before compiling model code.
+  // Configuration edits are part of the candidate. Loading Lake must not
+  // silently change the sources that the independent check will certify.
+  const fingerprint = await sourceFingerprint(root, { signal: options.signal })
   const environment = await runtime.run(
     root,
     [
@@ -538,7 +589,6 @@ export async function verifyCandidate(
       reason: 'Could not resolve the pinned Lean verification environment.',
     }
   }
-  const fingerprint = await sourceFingerprint(root, { signal: options.signal })
   const build = await runtime.run(root, ['lake', 'build'], {
     ...options,
     network: 'none',
@@ -563,6 +613,16 @@ export async function verifyCandidate(
       errors: ['The candidate build changed project source or configuration.'],
       reason:
         'The candidate build changed project files, so final verification stopped.',
+    }
+  if (!entries.length)
+    return {
+      compiled: true,
+      complete: true,
+      kind: 'workspace',
+      files: [],
+      reason: configurationChanged
+        ? 'Project configuration builds successfully. No Lean source changes to check.'
+        : 'The project builds after the requested file changes. No remaining Lean source edits to check.',
     }
   const audit = await runtime.run(
     root,

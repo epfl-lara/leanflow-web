@@ -92,6 +92,7 @@ import {
   assertMovePaths,
   moveWithoutReplacing,
   parseMoveRequest,
+  unchangedFileMoves,
 } from './workspace-moves.mjs'
 import { validatePdfBytes } from './pdf-preview.mjs'
 import { validateBinaryAsset } from './binary-assets.mjs'
@@ -153,8 +154,10 @@ export class WorkspaceError extends Error {
   }
 }
 
-function fail(message, status = 400) {
-  throw new WorkspaceError(message, status)
+function fail(message, status = 400, code) {
+  const error = new WorkspaceError(message, status)
+  if (code) error.code = code
+  throw error
 }
 
 function validateOwner(owner) {
@@ -403,7 +406,7 @@ async function workspaceFileBytes(
       (await fs.realpath(`/proc/self/fd/${handle.fd}`)) !==
       path.resolve(filename)
     )
-      fail('File path changed during access', 409)
+      fail('File path changed during access', 409, 'SOURCE_CHANGED')
     const stat = await handle.stat()
     if (!stat.isFile()) fail('Path is not a regular file')
     if (stat.size > byteLimit) fail(tooLargeMessage, 413)
@@ -469,9 +472,10 @@ async function fileHash(filename, signal) {
   try {
     if (
       (await fs.realpath(`/proc/self/fd/${handle.fd}`)) !==
-        path.resolve(filename) ||
-      !(await handle.stat()).isFile()
+      path.resolve(filename)
     )
+      fail('Source file changed during access', 409, 'SOURCE_CHANGED')
+    if (!(await handle.stat()).isFile())
       fail('Source file changed during access', 409)
     const hash = createHash('sha256')
     for await (const chunk of handle.createReadStream({ autoClose: false })) {
@@ -3040,19 +3044,7 @@ export class WorkspaceStore {
         'Setup repair changed the pinned Lean release. The original environment was preserved.',
         409,
       )
-    let abortDownload
-    try {
-      await Promise.race([
-        this.runtime.prepareToolchain(repairedToolchain),
-        new Promise((_, reject) => {
-          abortDownload = () => reject(signal.reason)
-          signal.addEventListener('abort', abortDownload, { once: true })
-          if (signal.aborted) abortDownload()
-        }),
-      ])
-    } finally {
-      signal.removeEventListener('abort', abortDownload)
-    }
+    await this.#prepareToolchain(repairedToolchain, { signal })
     const commands = []
     if (!(await exists(path.join(candidate, 'lake-manifest.json'))))
       commands.push(['lake', 'update'])
@@ -3997,31 +3989,20 @@ export class WorkspaceStore {
     const signal = this.preparationControllers.get(project.id)?.signal
     // A shared toolchain download may serve another project. Stop this wait
     // immediately without killing that shared download or changing its cache.
-    let abortWait
-    try {
-      await runSetupStep(
-        `Preparing Lean ${toolchain.replace('leanprover/lean4:', '')}`,
-        () =>
-          Promise.race([
-            this.runtime.prepareToolchain(toolchain, {
-              onOutput: (message) => {
-                if (!signal?.aborted) this.#event(project, 'output', message)
-              },
-            }),
-            new Promise((_, reject) => {
-              abortWait = () => reject(signal.reason)
-              signal?.addEventListener('abort', abortWait, { once: true })
-              if (signal?.aborted) abortWait()
-            }),
-          ]),
-        {
-          onOutput: (message) => this.#event(project, 'output', message),
+    await runSetupStep(
+      `Preparing Lean ${toolchain.replace('leanprover/lean4:', '')}`,
+      () =>
+        this.#prepareToolchain(toolchain, {
           signal,
-        },
-      )
-    } finally {
-      signal?.removeEventListener('abort', abortWait)
-    }
+          onOutput: (message) => {
+            if (!signal?.aborted) this.#event(project, 'output', message)
+          },
+        }),
+      {
+        onOutput: (message) => this.#event(project, 'output', message),
+        signal,
+      },
+    )
     this.preparationControllers.get(project.id)?.signal.throwIfAborted()
     // Existing lockfiles are authoritative. Lake fetches missing packages using
     // the pinned manifest when evaluating its environment.
@@ -4221,8 +4202,8 @@ export class WorkspaceStore {
       project.status !== 'ready' &&
       !(
         allowConfigurationChange &&
-        project.status === 'error' &&
-        project.needsPreparation
+        (project.status === 'needs-setup' ||
+          (project.status === 'error' && project.needsPreparation))
       )
     )
       fail(
@@ -4265,6 +4246,7 @@ export class WorkspaceStore {
           fail(
             'Folder changed during access. Refresh the file tree and try again.',
             409,
+            'SOURCE_CHANGED',
           )
         const anchor = `/proc/self/fd/${handle.fd}`
         const entries = await fs.readdir(anchor, { withFileTypes: true })
@@ -5023,16 +5005,16 @@ export class WorkspaceStore {
       : capture()
   }
 
-  async snapshot(id, owner, runId, { signal } = {}) {
+  async snapshot(id, owner, runId, { signal, allowUnprepared = false } = {}) {
     signal?.throwIfAborted()
     const project = this.get(id, owner)
-    this.#ready(project)
+    this.#ready(project, allowUnprepared)
     validateId(runId, 'run')
     const snapshot = await this.#capture(
       this.requireEditor(id, owner),
       runId,
       owner,
-      { signal },
+      { signal, allowUnprepared },
     )
     this.requireEditor(id, owner)
     return snapshot
@@ -5176,10 +5158,29 @@ export class WorkspaceStore {
     const actor = manifest.actor
     this.requireEditor(manifest.projectId, actor)
     const unpublished = new Set()
-    const changes = await this.changes(snapshot, {
-      skipNoneditable: true,
-      onSkipped: (filename) => unpublished.add(filename),
-    })
+    let changes
+    try {
+      changes = await this.changes(snapshot, {
+        skipNoneditable: true,
+        onSkipped: (filename) => unpublished.add(filename),
+      })
+    } catch (error) {
+      // The root and protected manifest must still be ours. Only races while
+      // reading the writable copy may retry; authorization, baseline damage,
+      // symbolic links and project-version conflicts remain blocking errors.
+      await assertCopyCurrent()
+      if (
+        error.code === 'ENOENT' ||
+        error.code === 'SOURCE_CHANGED' ||
+        (error instanceof WorkspaceError && error.status === 404)
+      )
+        fail(
+          'Terminal files changed during synchronization. Updates will retry; if this terminal is closing, recover its preserved private copy.',
+          503,
+          'TERMINAL_SOURCE_CHANGED',
+        )
+      throw error
+    }
     // A temporary partial UTF-8 write, generated binary, or oversized output
     // must not look like an intentional reversion/deletion of an earlier edit.
     // Keep the last published version until this private file is editable again.
@@ -5475,7 +5476,7 @@ export class WorkspaceStore {
   async #capture(project, runId, actor = project.owner, options = {}) {
     const capture = () => {
       const current = this.requireEditor(project.id, actor)
-      this.#ready(current)
+      this.#ready(current, options.allowUnprepared === true)
       return this.#captureAllocated(current, runId, actor, options)
     }
     return this.storage
@@ -5693,6 +5694,11 @@ export class WorkspaceStore {
           after = (await textFile(await guarded(manifest.root, filename)))
             .content
         } catch (error) {
+          if (
+            skipNoneditable &&
+            (error.code === 'SOURCE_CHANGED' || error.status === 404)
+          )
+            throw error
           if (!(error instanceof WorkspaceError)) throw error
           if (skipNoneditable && [413, 415].includes(error.status)) {
             onSkipped?.(filename)
@@ -5864,7 +5870,11 @@ export class WorkspaceStore {
     manifest,
     container,
     changes,
-    { allowProjectFiles = false, signal } = {},
+    {
+      allowProjectFiles = false,
+      allowProjectConfiguration = false,
+      signal,
+    } = {},
   ) {
     if (!Array.isArray(changes) || changes.length > 1000)
       fail('Invalid assistant change set')
@@ -5878,12 +5888,15 @@ export class WorkspaceStore {
       if (!change || typeof change !== 'object')
         fail('Invalid assistant change')
       const filename = relativeFile(change.path, { write: true })
+      const configuration =
+        allowProjectConfiguration && CONFIGURATION_FILES.has(filename)
       if (
-        allowProjectFiles &&
+        !allowProjectConfiguration &&
         filename.split('/').some((part) => CONFIGURATION_FILES.has(part))
       )
         fail('Assistant edits cannot change project configuration', 409)
       if (
+        !configuration &&
         !allowProjectFiles &&
         (!filename.endsWith('.lean') ||
           path.posix.basename(filename) === 'lakefile.lean')
@@ -5893,11 +5906,7 @@ export class WorkspaceStore {
         fail('An assistant change set contains duplicate paths')
       seen.add(filename)
       if (
-        !(
-          allowProjectFiles &&
-          !filename.endsWith('.lean') &&
-          change.after === null
-        ) &&
+        !((configuration || allowProjectFiles) && change.after === null) &&
         (typeof change.after !== 'string' ||
           Buffer.byteLength(change.after) > sourceFileByteLimit(filename) ||
           change.after.includes('\0'))
@@ -5964,7 +5973,7 @@ export class WorkspaceStore {
         initial.id,
         manifest.actor || manifest.owner,
       )
-      this.#ready(project)
+      this.#ready(project, options.allowProjectConfiguration === true)
       const previous = await this.#candidateChanges(
         manifest,
         container,
@@ -5978,11 +5987,22 @@ export class WorkspaceStore {
         options,
       )
       await this.#assertLiveCurrent(manifest, project, previous, next)
+      const transition = this.#liveTransition(previous, next)
+      if (transition.some((change) => CONFIGURATION_FILES.has(change.path)))
+        this.assertConfigurationIdle?.(
+          project.id,
+          manifest.actor || manifest.owner,
+          {
+            agentRunId: options.agentRunId,
+          },
+        )
+      options.signal?.throwIfAborted()
       await this.#applyLocked(
         project,
-        this.#liveTransition(previous, next),
+        transition,
         'live',
         () => this.requireEditor(project.id, manifest.actor || manifest.owner),
+        { detectMoves: true },
       )
       return next
     })
@@ -5999,7 +6019,7 @@ export class WorkspaceStore {
         initial.id,
         manifest.actor || manifest.owner,
       )
-      this.#ready(project)
+      this.#ready(project, options.allowProjectConfiguration === true)
       const live = await this.#candidateChanges(
         manifest,
         container,
@@ -6029,11 +6049,14 @@ export class WorkspaceStore {
         options,
       )
       await this.#assertTouched(manifest, project, live)
-      return this.#applyLocked(
-        project,
-        this.#liveTransition(live, []),
-        'undo',
-        () => this.requireEditor(project.id, manifest.actor || manifest.owner),
+      const transition = this.#liveTransition(live, [])
+      if (transition.some((change) => CONFIGURATION_FILES.has(change.path)))
+        this.assertConfigurationIdle?.(
+          project.id,
+          manifest.actor || manifest.owner,
+        )
+      return this.#applyLocked(project, transition, 'undo', () =>
+        this.requireEditor(project.id, manifest.actor || manifest.owner),
       )
     })
   }
@@ -6162,7 +6185,7 @@ export class WorkspaceStore {
       manifest.actor || manifest.owner,
     )
     const project = initial
-    this.#ready(project)
+    this.#ready(project, options.allowProjectConfiguration === true)
     if (!Array.isArray(changes) || changes.length > 1000)
       fail('Invalid verification change set')
     return (async () => {
@@ -6170,13 +6193,17 @@ export class WorkspaceStore {
         project.id,
         manifest.actor || manifest.owner,
       )
-      this.#ready(currentProject)
+      this.#ready(currentProject, options.allowProjectConfiguration === true)
       signal?.throwIfAborted()
       const previous = await this.#candidateChanges(
         manifest,
         container,
         liveChanges,
-        { allowProjectFiles: options.allowProjectFiles === true, signal },
+        {
+          allowProjectFiles: options.allowProjectFiles === true,
+          allowProjectConfiguration: options.allowProjectConfiguration === true,
+          signal,
+        },
       )
       const proposed = await this.#candidateChanges(
         manifest,
@@ -6184,6 +6211,7 @@ export class WorkspaceStore {
         changes,
         {
           allowProjectFiles: options.allowProjectFiles === true,
+          allowProjectConfiguration: options.allowProjectConfiguration === true,
           signal,
         },
       )
@@ -6246,7 +6274,12 @@ export class WorkspaceStore {
         currentProject,
         randomUUID(),
         manifest.actor || manifest.owner,
-        { signal, purpose: 'verification', sourceRunId: manifest.runId },
+        {
+          signal,
+          purpose: 'verification',
+          sourceRunId: manifest.runId,
+          allowUnprepared: options.allowProjectConfiguration === true,
+        },
       )
       try {
         options.onCaptured?.(verified)
@@ -6325,6 +6358,58 @@ export class WorkspaceStore {
     })()
   }
 
+  async prepareVerificationConfiguration(snapshot, changes, { signal } = {}) {
+    if (!changes.some((change) => CONFIGURATION_FILES.has(change.path))) return
+    const { manifest } = await this.#manifest(snapshot)
+    if (manifest.purpose !== 'verification')
+      fail('Invalid verification workspace.', 403)
+    const project = this.requireEditor(
+      manifest.projectId,
+      manifest.actor || manifest.owner,
+    )
+    const root = manifest.root
+    // A library/target edit can reuse the existing pinned dependencies. An
+    // explicitly changed toolchain or lockfile needs its own prepared inputs.
+    if (
+      !changes.some((change) =>
+        ['lean-toolchain', 'lake-manifest.json'].includes(change.path),
+      )
+    ) {
+      await this.runtime.inheritDependencies?.(project.root, root)
+      return
+    }
+    const pinned = await textFile(await guarded(root, 'lean-toolchain'), true)
+    if (!pinned)
+      fail(
+        'Add a pinned lean-toolchain file before checking the project configuration.',
+        409,
+      )
+    const toolchain = validateToolchain(pinned.content.trim())
+    await this.#prepareToolchain(toolchain, { signal })
+    signal?.throwIfAborted()
+    await this.runtime.clearInheritedDependencies?.(root, { force: true })
+    await this.#sharedDependencies({ ...project, root, toolchain }, signal)
+  }
+
+  async #prepareToolchain(toolchain, { signal, onOutput } = {}) {
+    signal?.throwIfAborted()
+    // Installation can be shared by other projects. Cancel this wait without
+    // interrupting their download or holding up the stopped agent's cleanup.
+    let abort
+    try {
+      return await Promise.race([
+        this.runtime.prepareToolchain(toolchain, { onOutput }),
+        new Promise((_, reject) => {
+          abort = () => reject(signal.reason)
+          signal?.addEventListener('abort', abort, { once: true })
+          if (signal?.aborted) abort()
+        }),
+      ])
+    } finally {
+      signal?.removeEventListener('abort', abort)
+    }
+  }
+
   async writeFiles(id, owner, files, { assertConfigurationIdle } = {}) {
     this.requireEditor(id, owner)
     if (!Array.isArray(files) || !files.length || files.length > 1000)
@@ -6364,28 +6449,40 @@ export class WorkspaceStore {
     })
   }
 
-  async applyChanges(id, owner, changes, { snapshot } = {}) {
+  async applyChanges(id, owner, changes, { snapshot, agentRunId } = {}) {
     this.requireEditor(id, owner)
     if (!Array.isArray(changes) || changes.length > 1000)
       fail('Invalid change set')
     return this.#locked(id, async () => {
       const project = this.requireEditor(id, owner)
-      this.#ready(project)
+      this.#ready(project, true)
+      if (changes.some((change) => CONFIGURATION_FILES.has(change?.path)))
+        this.assertConfigurationIdle?.(id, owner, { agentRunId })
       if (snapshot) {
         const { manifest } = await this.#manifest(snapshot)
         await this.#assertCurrent(manifest, project)
       }
-      return this.#applyLocked(project, changes, 'applied', () =>
-        this.requireEditor(id, owner),
+      return this.#applyLocked(
+        project,
+        changes,
+        'applied',
+        () => this.requireEditor(id, owner),
+        { detectMoves: true },
       )
     })
   }
 
-  async #applyLocked(project, changes, reason = 'applied', authorize) {
+  async #applyLocked(
+    project,
+    changes,
+    reason = 'applied',
+    authorize,
+    { detectMoves = false } = {},
+  ) {
     authorize?.()
     project = this.#record(project.id)
     if (project.archivedAt) fail('Project not found', 404)
-    this.#ready(project, reason === 'undo' || reason === 'saved')
+    this.#ready(project, true)
     const { id } = project
     const filenames = changes.map((change) => {
       if (!change || typeof change !== 'object') fail('Invalid file change')
@@ -6486,6 +6583,11 @@ export class WorkspaceStore {
       prepared
         .filter((change) => change.after === null)
         .map((change) => change.path),
+      detectMoves
+        ? unchangedFileMoves(
+            prepared.filter((change) => !CONFIGURATION_FILES.has(change.path)),
+          )
+        : [],
     )
     return {
       applied: prepared.length,

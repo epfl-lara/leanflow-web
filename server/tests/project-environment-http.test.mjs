@@ -99,4 +99,56 @@ test('environment API authenticates, enforces ownership and blocks active work b
     'Original specification',
   )
   assert.equal((await request(project.id, { libraries: [] })).status, 409)
+  await t.test(
+    'an agent can publish its checked configuration without ignoring other active work',
+    async () => {
+      const configuration = await studio.workspaces.readFile(
+        project.id,
+        'owner',
+        'lakefile.toml',
+      )
+      const change = {
+        path: 'lakefile.toml',
+        beforeHash: configuration.hash,
+        after: configuration.content + '\n# requested agent setup repair\n',
+      }
+      const agent = studio.events.create('owner', {
+        kind: 'agent',
+        projectId: project.id,
+      })
+      studio.events.updateMetadata(agent.id, { status: 'verifying' })
+      const check = studio.events.create('owner', {
+        kind: 'proof',
+        projectId: project.id,
+      })
+      studio.events.updateMetadata(check.id, { status: 'running' })
+      await assert.rejects(
+        studio.workspaces.applyChanges(project.id, 'owner', [change], {
+          agentRunId: agent.id,
+        }),
+        { status: 409 },
+      )
+      assert.equal(studio.events.get(check.id).status, 'running')
+      assert.equal(
+        (await studio.workspaces.readFile(project.id, 'owner', 'lakefile.toml'))
+          .hash,
+        configuration.hash,
+      )
+      studio.events.updateMetadata(check.id, { status: 'completed' })
+      const result = await studio.workspaces.applyChanges(
+        project.id,
+        'owner',
+        [change],
+        { agentRunId: agent.id },
+      )
+      assert.equal(result.requiresPreparation, true)
+      assert.equal(studio.events.get(agent.id).status, 'verifying')
+      assert.equal(
+        (await studio.workspaces.readFile(project.id, 'owner', 'lakefile.toml'))
+          .content,
+        change.after,
+      )
+      studio.events.updateMetadata(agent.id, { status: 'completed' })
+    },
+  )
 })

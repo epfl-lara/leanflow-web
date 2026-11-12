@@ -165,7 +165,14 @@ const chatTranscript = (job, eventCursor, reasoningBlocks) => ({
   ...(job.verification
     ? {
         verification: Object.fromEntries(
-          ['kind', 'compiled', 'complete', 'kernelChecked', 'reason']
+          [
+            'kind',
+            'compiled',
+            'complete',
+            'kernelChecked',
+            'reason',
+            'editsAllowed',
+          ]
             .filter((key) => job.verification[key] !== undefined)
             .map((key) => [key, job.verification[key]]),
         ),
@@ -489,6 +496,7 @@ export async function createStudio({
     {
       ignoreStopping = false,
       ignoreTerminalRunId,
+      ignoreJobId,
       action = 'deleting or restoring project data',
     } = {},
   ) => {
@@ -499,9 +507,9 @@ export async function createStudio({
     })
     const active = events.db
       .prepare(
-        "SELECT owner FROM jobs WHERE json_extract(payload,'$.projectId')=? AND (json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') OR json_extract(payload,'$.cleanupFailed')=1) ORDER BY owner<>? DESC LIMIT 1",
+        "SELECT owner FROM jobs WHERE json_extract(payload,'$.projectId')=? AND id<>? AND (json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') OR json_extract(payload,'$.cleanupFailed')=1) ORDER BY owner<>? DESC LIMIT 1",
       )
-      .get(projectId, owner)
+      .get(projectId, ignoreJobId || '', owner)
     if (active || workspaces.jobs.has(projectId))
       throw Object.assign(
         new Error(
@@ -514,8 +522,16 @@ export async function createStudio({
         { status: 409 },
       )
   }
-  workspaces.assertConfigurationIdle = (id, actor, { terminalRunId } = {}) =>
-    requireNoActiveWork(id, actor, { ignoreTerminalRunId: terminalRunId })
+  workspaces.assertConfigurationIdle = (
+    id,
+    actor,
+    { terminalRunId, agentRunId } = {},
+  ) =>
+    requireNoActiveWork(id, actor, {
+      ignoreTerminalRunId: terminalRunId,
+      ignoreJobId: agentRunId,
+      action: 'updating project configuration',
+    })
   const trash = new TrashManager({
     texBuilds,
     workspaces,

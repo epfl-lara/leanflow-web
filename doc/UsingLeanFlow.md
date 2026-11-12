@@ -144,11 +144,17 @@ Targets belong to their chat. **Ask Lemex** uses the current proof or selection;
 | **Formalize**    | Turn mathematical prose into Lean statements and proofs.   |
 | **Optimize**     | Shorten a valid proof or reduce its elaboration work.      |
 
+Modes choose a default workflow. Your explicit requests and follow-ups take precedence over those defaults and project instructions. You can ask for document edits, source renames or deletions, statement and import changes, or setup repairs in any mode. A selected Lean proof is optional.
+
 Compare optimization's token and heartbeat measurements: a shorter proof can take more elaboration work. Repair invalid proofs first.
 
 To formalize a document, open its PDF, TeX, Markdown, plain text, or other readable source, choose **Formalize**, and describe the statement or argument to translate. Use **Select files** or **@** to add other sources. You do not need to select an existing Lean file: Lemex can create one for the formalization. Source documents stay unchanged, and Lean output still receives independent verification. The standard worker can extract PDF text. If extraction is unavailable on an older worker or loses essential mathematics, provide the relevant passage or TeX source. Scanned pages may need OCR.
 
-**Ask & Search** primarily helps with Lean, but also welcomes general questions, writing, planning, and open-ended tasks. Ask it to create or edit project text files and organize, rename, or delete non-Lean notes and documents. Use the file browser for Lean source renames and deletions. Questions and explanations leave files unchanged. Live edits are off by default: inspect the diff, then choose **Apply changes**. To save requested edits as Lemex works, enable **Options → Edit files live** before sending. This choice is saved separately from the other modes. Stop the run before undoing its edits. Lemex can use the workspace shell, Python, and other installed command-line tools in either editing mode. Lean source edits still receive independent Lean verification; ordinary conversation and non-Lean file tasks do not. Project setup files and dependencies stay protected.
+**Ask & Search** primarily helps with Lean, but also welcomes general questions, writing, planning, and open-ended tasks. Ask it to create or edit project text files and organize, rename, or delete non-Lean notes and documents. Ask Lemex to rename or delete Lean sources when needed, or use the file browser. Questions and explanations leave files unchanged. Live edits are off by default: inspect the diff, then choose **Apply changes**. To save requested edits as Lemex works, enable **Options → Edit files live** before sending. This choice is saved separately from the other modes. Stop the run before undoing its edits. Lemex can use the workspace shell, Python, and other installed command-line tools in either editing mode. Lean source edits still receive independent Lean verification; ordinary conversation and non-Lean file tasks do not.
+
+Ask Lemex to fix project configuration when needed, including registering a new Lean module in `lakefile.toml`. Requested configuration edits are allowed in every mode and receive build checks. Existing Lean versions and dependency revisions are preserved unless you ask to change them. Installed dependency sources and credentials stay protected.
+
+In live editing, configuration edits save together after checks finish; in review-first mode, choose **Apply changes**. After saving configuration changes, use **Retry setup** to prepare the updated environment.
 
 ## Follow and steer a chat
 
@@ -194,7 +200,7 @@ Use **View edits** to inspect saved changes during a run. If **Final checks need
 
 **Edit files live** shows saved changes as Lemex works and preserves unsaved editor text. **View edits** shows the diff and Lean verification; intermediate edits may still contain errors.
 
-After stopping, **Undo agent edits** restores changes without overwriting conflicting saved work. For review before saving, disable live edits, inspect the candidate, then **Apply changes**. Save your editor changes before applying or undoing.
+After stopping, **Undo agent edits** restores changes without overwriting conflicting saved work. For review before saving, disable live edits, inspect the candidate, then **Apply changes**. You can apply requested edits even when their checks fail, including unfinished proof skeletons. Failed or unavailable checks stay visible; applying an edit does not make its proof verified. Save your editor changes before applying or undoing.
 
 ## Search and publish
 

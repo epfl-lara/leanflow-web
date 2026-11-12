@@ -2,9 +2,43 @@ import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import childProcess from 'node:child_process'
+import { createHash } from 'node:crypto'
 
 const MAX_TREE_ENTRIES = 20000
 const MAX_TREE_DEPTH = 64
+
+// Workspace snapshots report file contents rather than rename operations. Only follow
+// a one-to-one, byte-identical deletion/addition; duplicate contents and replaced
+// destinations cannot identify which file a local draft belongs to.
+export function unchangedFileMoves(changes) {
+  const removed = new Map()
+  const added = new Map()
+  for (const change of changes) {
+    let group, content
+    if (typeof change.before === 'string' && change.after === null) {
+      group = removed
+      content = change.before
+    } else if (change.before === null && typeof change.after === 'string') {
+      group = added
+      content = change.after
+    } else continue
+    const hash = createHash('sha256').update(content).digest('hex')
+    const entries = group.get(hash) || []
+    entries.push(change)
+    group.set(hash, entries)
+  }
+  const moves = []
+  for (const [hash, sources] of removed) {
+    const targets = added.get(hash)
+    if (
+      sources.length === 1 &&
+      targets?.length === 1 &&
+      sources[0].before === targets[0].after
+    )
+      moves.push({ from: sources[0].path, to: targets[0].path })
+  }
+  return moves
+}
 
 export class MoveError extends Error {
   constructor(message, status = 400) {

@@ -1,5 +1,9 @@
 import type { Run } from './api'
-import { finalVerificationIssue, runChangeCount } from './chatTimeline'
+import {
+  finalVerificationIssue,
+  runChangeCount,
+  canApplyRequestedEdits,
+} from './chatTimeline'
 import { Icon } from './Icons'
 
 export function TurnOutcome({
@@ -49,7 +53,9 @@ export function TurnOutcome({
           <p>
             {saved
               ? 'The edits are already saved. You can ask Lemex to fix the checks or undo its edits.'
-              : 'Lemex has finished this run. Ask it to fix the checks before applying these changes.'}
+              : canApplyRequestedEdits(run)
+                ? 'You can apply the requested edits or ask Lemex to fix these checks.'
+                : 'Lemex has finished this run. Ask it to fix the checks before applying these changes.'}
           </p>
         )}
         <button type="button" className="turn-action" onClick={onDetails}>
