@@ -11,6 +11,7 @@ import * as Y from 'yjs'
 import { DatabaseSync } from 'node:sqlite'
 import { createStudio } from '../studio.mjs'
 import { fixtureModelDiscovery } from './fixtures/model-discovery.mjs'
+import { createHash } from 'node:crypto'
 
 async function fixture(t) {
   const dataDir = await fs.mkdtemp(
@@ -559,7 +560,7 @@ test('idempotent same-text retries still require a valid original hash when a ve
   )
 })
 
-test('a real post-commit sync failure keeps original Yjs identities, waits for durable ACK and preserves collaborator text through private Undo', async (t) => {
+async function checkUncertainLiveSave(t, { externalBatch = false } = {}) {
   const f = await fixture(t)
   await f.store.setMember(f.project.id, 'alice', 'bob', 'editor')
   const service = new ProjectDocuments({ workspaces: f.store })
@@ -638,6 +639,8 @@ test('a real post-commit sync failure keeps original Yjs identities, waits for d
       }
     }
   })
+  let releaseEditor = () => {},
+    pendingEditor
   try {
     await assert.rejects(service.message(alice.client, request), {
       status: 503,
@@ -675,13 +678,65 @@ test('a real post-commit sync failure keeps original Yjs identities, waits for d
     bob.doc
       .getText('source')
       .insert(bob.doc.getText('source').length, '-- BOB_REMOTE\n')
-    await service.message(bob.client, {
+    const bobRequest = {
       type: 'update',
       path: 'Main.lean',
       documentId: bob.id,
       requestId: 2,
       update: encode(Y.encodeStateAsUpdate(bob.doc, bobVector)),
-    })
+    }
+    const prefix = externalBatch ? '-- EXTERNAL_BATCH\n' : ''
+    if (externalBatch) {
+      const { promise: entered, resolve: arrive } = Promise.withResolvers()
+      const { promise: blocked, resolve: release } = Promise.withResolvers()
+      releaseEditor = release
+      t.signal.addEventListener('abort', release, { once: true })
+      const write = f.store.writeFile.bind(f.store)
+      let attempts = 0,
+        conflicts = 0
+      t.mock.method(f.store, 'writeFile', async (...args) => {
+        if (args[1] !== 'bob') return write(...args)
+        attempts++
+        if (attempts === 1) {
+          arrive()
+          await blocked
+        }
+        try {
+          return await write(...args)
+        } catch (error) {
+          if (error.status === 409) conflicts++
+          throw error
+        }
+      })
+      pendingEditor = service.message(bob.client, bobRequest)
+      await Promise.race([
+        entered,
+        pendingEditor.then(() =>
+          assert.fail('The editor write must reach its controlled barrier.'),
+        ),
+      ])
+      const committed = await f.store.readFile(
+        f.project.id,
+        'alice',
+        'Main.lean',
+      )
+      assert.equal(committed.content, '-- ALICE_LOCAL\n' + f.before.content)
+      const external = prefix + committed.content
+      const batch = await f.store.applyChanges(f.project.id, 'alice', [
+        { path: 'Main.lean', beforeHash: committed.hash, after: external },
+      ])
+      assert.equal(batch.applied, 1)
+      assert.equal(
+        (await f.store.readFile(f.project.id, 'alice', 'Main.lean')).content,
+        external,
+      )
+      assert.equal(alice.packets.filter((packet) => packet.ack === 1).length, 0)
+      release()
+      await pendingEditor
+      assert.equal(attempts, 2)
+      assert.equal(conflicts, 1)
+    } else await service.message(bob.client, bobRequest)
+    assert.equal(bob.packets.filter((packet) => packet.ack === 2).length, 1)
     alice.deliver()
     bob.deliver()
     const inode = (await fs.stat(path.join(f.project.root, 'Main.lean'))).ino
@@ -694,13 +749,46 @@ test('a real post-commit sync failure keeps original Yjs identities, waits for d
     alice.deliver()
     assert.equal(
       (await f.store.readFile(f.project.id, 'alice', 'Main.lean')).content,
-      '-- ALICE_LOCAL\n' + f.before.content + '-- BOB_REMOTE\n',
+      prefix + '-- ALICE_LOCAL\n' + f.before.content + '-- BOB_REMOTE\n',
     )
+    async function assertConverged(expected) {
+      await record.refreshTask
+      await record.queue
+      const saved = await f.store.readFile(f.project.id, 'alice', 'Main.lean')
+      const hash = createHash('sha256').update(expected).digest('hex')
+      assert.equal(saved.content, expected)
+      assert.equal(saved.hash, hash)
+      assert.equal(record.hash, hash)
+      assert.equal(record.doc.getText('source').toString(), expected)
+      for (const peer of [alice, bob]) {
+        peer.deliver()
+        assert.equal(peer.doc.getText('source').toString(), expected)
+        assert.equal(
+          peer.packets.filter((packet) => packet.type === 'document').at(-1)
+            .hash,
+          hash,
+        )
+      }
+    }
+    const expected =
+      prefix + '-- ALICE_LOCAL\n' + f.before.content + '-- BOB_REMOTE\n'
+    await assertConverged(expected)
+    if (externalBatch) {
+      const state = Y.encodeStateVector(record.doc)
+      await service.message(alice.client, { ...request, requestId: 2 })
+      assert.equal(alice.packets.filter((packet) => packet.ack === 2).length, 1)
+      assert.deepEqual(Y.encodeStateVector(record.doc), state)
+      assert.equal(
+        (await fs.stat(path.join(f.project.root, 'Main.lean'))).ino,
+        inode,
+      )
+      await assertConverged(expected)
+    }
     const undoVector = Y.encodeStateVector(alice.doc)
     assert(undo.undo())
     assert.equal(
       alice.doc.getText('source').toString(),
-      f.before.content + '-- BOB_REMOTE\n',
+      prefix + f.before.content + '-- BOB_REMOTE\n',
     )
     await service.message(alice.client, {
       type: 'update',
@@ -711,13 +799,28 @@ test('a real post-commit sync failure keeps original Yjs identities, waits for d
     })
     assert.equal(
       (await f.store.readFile(f.project.id, 'alice', 'Main.lean')).content,
-      f.before.content + '-- BOB_REMOTE\n',
+      prefix + f.before.content + '-- BOB_REMOTE\n',
     )
+    await assertConverged(prefix + f.before.content + '-- BOB_REMOTE\n')
     await record.refreshTask
     await record.queue
     assert.equal(record.pending, 0)
     assert.equal(service.pendingBytes, 0)
   } finally {
+    releaseEditor()
+    await pendingEditor?.catch(() => {})
     restore()
   }
-})
+}
+
+test(
+  'a real post-commit sync failure keeps original Yjs identities, waits for durable ACK and preserves collaborator text through private Undo',
+  { timeout: 15_000 },
+  checkUncertainLiveSave,
+)
+
+test(
+  'an uncertain live save converges through an external batch and a concurrent editor retry without losing private Undo',
+  { timeout: 15_000 },
+  (t) => checkUncertainLiveSave(t, { externalBatch: true }),
+)
