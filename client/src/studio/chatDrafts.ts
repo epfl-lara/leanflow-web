@@ -1,6 +1,11 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ChatMode } from './chatModes'
 import type { ProofTarget } from './proofTarget'
+import {
+  FILES_MOVED_EVENT,
+  remapMovedPath,
+  type FilesMovedDetail,
+} from './projectPaths'
 
 export interface ChatDraft {
   text: string
@@ -99,12 +104,71 @@ export function restoreDraftSubmission(
   }
 }
 
+/**
+ * Re-keys attached files and the focused-proof path after `from` moved to
+ * `to`. The proof's source and baseline are unchanged: a move keeps the bytes.
+ * Returns null when the draft does not refer to the moved path. The revision
+ * advances so a submission captured before the move cannot clear this draft.
+ */
+export function moveDraftPaths(
+  draft: ChatDraft,
+  from: string,
+  to: string,
+): ChatDraft | null {
+  const files = [
+    ...new Set(
+      draft.files.map((path) => remapMovedPath(path, from, to) ?? path),
+    ),
+  ]
+  const target = draft.proofTarget
+    ? remapMovedPath(draft.proofTarget.path, from, to)
+    : null
+  if (sameFiles(files, draft.files) && target === null) return null
+  return {
+    ...draft,
+    files,
+    ...(draft.proofTarget && target !== null
+      ? { proofTarget: { ...draft.proofTarget, path: target } }
+      : {}),
+    revision: draft.revision + 1,
+  }
+}
+
 export const chatDraftKey = (
   user: string,
   project: string,
   chat: string | null,
 ) =>
   `lemex-draft:${encodeURIComponent(user)}:${encodeURIComponent(project)}:${encodeURIComponent(chat || 'new')}`
+
+export const chatDraftPrefix = (user: string, project: string) =>
+  chatDraftKey(user, project, '').slice(
+    0,
+    -1 * encodeURIComponent('new').length,
+  )
+
+/** Re-keys every saved draft of this account and project (all chats). */
+export function moveStoredDrafts(
+  user: string,
+  project: string,
+  from: string,
+  to: string,
+) {
+  try {
+    const prefix = chatDraftPrefix(user, project)
+    const keys: string[] = []
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index)
+      if (key?.startsWith(prefix)) keys.push(key)
+    }
+    for (const key of keys) {
+      const moved = moveDraftPaths(readChatDraft(key), from, to)
+      if (moved) localStorage.setItem(key, JSON.stringify(moved))
+    }
+  } catch {
+    /* Unavailable storage leaves the in-memory drafts to the hook. */
+  }
+}
 
 export function readChatDraft(key: string): ChatDraft {
   try {
@@ -169,6 +233,24 @@ export function useChatDraft(
     }
     render((value) => value + 1)
   }
+  // A rename/move re-keys attachments and the focused proof in every cached
+  // draft of this account and project, so Send never carries a stale path.
+  useEffect(() => {
+    const moved = (event: Event) => {
+      const detail = (event as CustomEvent<FilesMovedDetail>).detail
+      if (!detail || detail.projectId !== project) return
+      const prefix = chatDraftPrefix(user, project)
+      for (const [id, draft] of [...cache.current]) {
+        if (!id.startsWith(prefix)) continue
+        const next = moveDraftPaths(draft, detail.from, detail.to)
+        if (next) write(id, next)
+      }
+    }
+    window.addEventListener(FILES_MOVED_EVENT, moved)
+    return () => window.removeEventListener(FILES_MOVED_EVENT, moved)
+    // write only touches refs and a state setter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, project])
   return {
     key,
     // Async recovery can run after a write but before React commits its next

@@ -75,7 +75,20 @@ import { AccountSetup } from './AccountSetup'
 import { setRunEventTransport } from './runEventTransport'
 import { FileBrowser } from './FileBrowser'
 import { CreateEntryDialog, type EntryKind } from './CreateEntryDialog'
-import { parentFolders } from './projectPaths'
+import { MoveEntryDialog } from './MoveEntryDialog'
+import {
+  moveRequestCurrent,
+  PLAYGROUND_MOVE_REASON,
+  type MoveRequest,
+} from './moveEntryPaths'
+import {
+  FILES_MOVED_EVENT,
+  parentFolders,
+  remapMovedPath,
+  type FilesMovedDetail,
+  type PathMove,
+} from './projectPaths'
+import { moveStoredDrafts } from './chatDrafts'
 import { GitModal } from './GitModal'
 import { GitConnectionsDialog } from './GitConnectionsDialog'
 import { ResizeHandle } from './ResizeHandle'
@@ -365,6 +378,11 @@ export function Studio() {
   const [restoring, setRestoring] = useState<string | null>(null)
   const [gitOpen, setGitOpen] = useState<'changes' | 'publish' | null>(null)
   const [newEntryKind, setNewEntryKind] = useState<EntryKind | null>(null)
+  // Bound to the project and account that opened it, so a menu action can never
+  // be applied to a same-named path after switching projects or accounts.
+  const [moveTarget, setMoveTarget] = useState<MoveRequest | null>(null)
+  // Moves this tab started; its own broadcast then needs no "moved" notice.
+  const ownMoves = useRef(new Set<string>())
   const [saving, setSaving] = useState(false)
   const [opening, setOpening] = useState(false)
   const [librarySource, setLibrarySource] = useState<SourceRequest | null>(null)
@@ -415,6 +433,7 @@ export function Studio() {
     uploadProjectId ||
     projectModal ||
     newEntryKind ||
+    moveTarget ||
     pendingAction ||
     reloadTarget ||
     terminalProjectId ||
@@ -586,6 +605,7 @@ export function Studio() {
       setFoldersAvailable(null)
       setCreatedFolder(null)
       setNewEntryKind(null)
+      setMoveTarget(null)
       setUploadProjectId(null)
       setLibrarySource(null)
       setProofFocus(null)
@@ -1054,6 +1074,53 @@ export function Studio() {
       : downloadArchive(item)
   }
 
+  // Runs for this tab's own move (HTTP receipt) and for a collaborator's (live
+  // broadcast). Re-keying is idempotent, so a duplicate announcement is a no-op.
+  const handleFilesMoved = useCallback(
+    ({ from, to }: PathMove) => {
+      const id = bufferStore.getSnapshot().scope.projectId
+      const userId = session?.user.id
+      if (!id || !userId) return
+      moveStoredDrafts(userId, id, from, to)
+      window.dispatchEvent(
+        new CustomEvent<FilesMovedDetail>(FILES_MOVED_EVENT, {
+          detail: { projectId: id, from, to },
+        }),
+      )
+      const rekey = (path: string) => remapMovedPath(path, from, to) ?? path
+      setProofFocus((current) =>
+        current?.projectId === id
+          ? {
+              ...current,
+              target: { ...current.target, path: rekey(current.target.path) },
+            }
+          : current,
+      )
+      setRevealProof((current) =>
+        current
+          ? {
+              ...current,
+              target: { ...current.target, path: rekey(current.target.path) },
+            }
+          : current,
+      )
+      setFocusEditorRequest((current) =>
+        current?.path ? { ...current, path: rekey(current.path) } : current,
+      )
+      setAgentPendingFile((current) => (current ? rekey(current) : null))
+      // Read the store, not a render-time ref: the re-render has not happened.
+      const movedFile = bufferStore.getSnapshot().file
+      generation.current = Math.max(
+        generation.current,
+        movedFile?.generation ?? 0,
+      )
+      const active = movedFile?.path
+      if (active) localStorage.setItem(`lemex-file-${id}`, active)
+      if (!ownMoves.current.has(`${from}\0${to}`))
+        setNotice(`${from} was moved to ${to}.`)
+    },
+    [bufferStore, session?.user.id],
+  )
   const collaboration = useProjectCollaboration({
     store: bufferStore,
     scope,
@@ -1062,6 +1129,7 @@ export function Studio() {
     onFilesChanged: async () => {
       if (scope.projectId) await loadFiles(scope.projectId)
     },
+    onFilesMoved: handleFilesMoved,
     onAccessChanged: async () => {
       await loadProjects()
     },
@@ -1595,6 +1663,77 @@ export function Studio() {
           `Created file ${path}, but the project could not refresh. Use Refresh files to try again.`,
         )
       }
+    } finally {
+      if (bufferStore.isCurrent(expected)) setOpening(false)
+    }
+  }
+
+  useEffect(() => {
+    if (
+      moveTarget &&
+      !moveRequestCurrent(moveTarget, projectId, session?.user.id)
+    )
+      setMoveTarget(null)
+  }, [moveTarget, projectId, session?.user.id])
+
+  async function moveEntry(targetProjectId: string, from: string, to: string) {
+    // The request is bound to the project that opened the dialog; a project
+    // or account switch in between must never retarget a same-named path.
+    if (!projectId || projectId !== targetProjectId)
+      throw new Error(
+        'The project changed. Close this dialog and choose the file again.',
+      )
+    const expected = scope
+    requireScope(expected)
+    if (singleFileMode) throw new Error(PLAYGROUND_MOVE_REASON)
+    if (files.some((file) => file.path === to) || folders.includes(to))
+      throw new Error(
+        `${to} already exists. Choose another name or location; nothing is overwritten.`,
+      )
+    setOpening(true)
+    try {
+      // Moves keep file bytes, so saved edits follow the file. Never move while
+      // an edit is unsaved: saving first means the server always sees the text.
+      await saveCompletely()
+      requireScope(expected)
+      if (savePromise.current)
+        throw new Error(
+          'Wait for the current file save to finish before renaming or moving.',
+        )
+      const ownKey = `${from}\0${to}`
+      ownMoves.current.add(ownKey)
+      setTimeout(() => ownMoves.current.delete(ownKey), 15_000)
+      const moved = await post<{ kind: 'file' | 'folder' }>(
+        `/api/projects/${encodeURIComponent(projectId)}/move`,
+        { from, to },
+      )
+      if (!bufferStore.isCurrent(expected)) return
+      // Re-key open buffers (and any text typed during the request) to the new
+      // path; later saves then target the new file, never the removed one. A
+      // live broadcast of this same move may already have done so.
+      ++openRequest.current
+      bufferStore.move(from, to, ++generation.current)
+      // Drafts, proof focus and the remembered file follow the move too.
+      handleFilesMoved({ from, to })
+      setFileFilter('')
+      setCreatedFolder(
+        moved.kind === 'folder'
+          ? to
+          : to.includes('/')
+            ? to.slice(0, to.lastIndexOf('/'))
+            : null,
+      )
+      try {
+        await loadFiles(projectId)
+        if (!bufferStore.isCurrent(expected)) return
+        void loadGit(projectId)
+      } catch {
+        if (!bufferStore.isCurrent(expected)) return
+        setError(
+          `Moved ${from} to ${to}, but the file list could not refresh. Use Refresh files to try again.`,
+        )
+      }
+      setNotice(`Moved to ${to}`)
     } finally {
       if (bufferStore.isCurrent(expected)) setOpening(false)
     }
@@ -2213,6 +2352,29 @@ export function Studio() {
                   onDelete={(path, kind) =>
                     projectId &&
                     requestDelete({ projectId, path, name: path, kind })
+                  }
+                  playground={singleFileMode}
+                  onRename={(path, kind) =>
+                    projectId &&
+                    !singleFileMode &&
+                    setMoveTarget({
+                      mode: 'rename',
+                      path,
+                      kind,
+                      projectId,
+                      userId: session.user.id,
+                    })
+                  }
+                  onMove={(path, kind) =>
+                    projectId &&
+                    !singleFileMode &&
+                    setMoveTarget({
+                      mode: 'move',
+                      path,
+                      kind,
+                      projectId,
+                      userId: session.user.id,
+                    })
                   }
                 />
               </section>
@@ -3708,6 +3870,24 @@ export function Studio() {
             folders={folders}
             onCreate={(path) => createEntry(path, newEntryKind)}
             onClose={() => setNewEntryKind(null)}
+          />
+        )}
+      {project &&
+        !singleFileMode &&
+        moveRequestCurrent(moveTarget, project.id, session.user.id) && (
+          <MoveEntryDialog
+            key={`${moveTarget.userId}:${moveTarget.projectId}:${moveTarget.path}`}
+            mode={moveTarget.mode}
+            subject={moveTarget}
+            projectName={project.name}
+            folders={folders}
+            existing={
+              new Set([...files.map((entry) => entry.path), ...folders])
+            }
+            onSubmit={(to) =>
+              moveEntry(moveTarget.projectId, moveTarget.path, to)
+            }
+            onClose={() => setMoveTarget(null)}
           />
         )}
       {authRequired && <SessionRecovery user={session.user} />}

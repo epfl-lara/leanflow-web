@@ -48,6 +48,10 @@ Setup also checks that local Lean files can resolve their compiled imports. Afte
 
 Use **Refresh setup** in an open project to recheck its environment. Valid compiled caches are reused. Choose the adjacent info icon for details about cache reuse and automatic repair. Stop active checks and chats, and close the terminal before refreshing.
 
+To rename or move a project file or folder, right-click it in the file sidebar or open its **⋯** menu. Choose **Rename** or **Move to folder…**. Unsaved edits are saved first, and existing destinations are never overwritten.
+
+Finish active checks, assistant runs, PDF builds and setup, and close the project terminal before moving files. Project setup files stay in place. Open files, chat attachments and focused proofs follow the new paths while you are connected. If you were offline, refresh the file list and reopen the file at its new path. Update Lean imports that used the old name or location.
+
 ## Share a project
 
 Choose **Share project** to find an account or create an Editor or Viewer link. Project roles are **Admin**, **Editor**, and **Viewer**. Admins manage access and deletion; granting another Admin requires acknowledging those powers. Keep at least one Admin.
@@ -161,6 +165,8 @@ review the suggestion, then save it.
 Check **Current file** above your message. Its path is supplied automatically when available; you do not need to attach it to a task or update. Missing automatic context is skipped. Explicitly selected files and proof targets must be available. For PDFs, only the path is supplied. PDF contents are not attached.
 
 Type **@** or use **Select files** to attach extra files. **Options** controls model, reasoning effort, and live edits. Drafts and selections stay with their chats.
+
+Press **Enter** to send a message or a follow-up during a run. Use **Shift+Enter** to add a new line. While the **@** file picker is open, **Enter** attaches the selected file first.
 
 Reasoning defaults to **high** for **Ask & Search**, and **max** for **Proofs**,
 **Formalize**, and **Optimize**. If the model does not advertise that level, its

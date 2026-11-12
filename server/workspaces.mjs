@@ -86,6 +86,13 @@ import {
   isPdfFile,
   isBinaryAssetFile,
 } from '../shared/file-previews.mjs'
+import {
+  MoveError,
+  assertMovableTree,
+  assertMovePaths,
+  moveWithoutReplacing,
+  parseMoveRequest,
+} from './workspace-moves.mjs'
 import { validatePdfBytes } from './pdf-preview.mjs'
 import { validateBinaryAsset } from './binary-assets.mjs'
 import {
@@ -1372,7 +1379,15 @@ export class WorkspaceStore {
     return () => this.changeListeners.delete(listener)
   }
 
-  #changed(projectId, paths = [], kind = 'files', removedPaths = []) {
+  // `moves` ([{from, to}]) tells live editors that a path was renamed rather
+  // than deleted, so they can carry open drafts to the destination.
+  #changed(
+    projectId,
+    paths = [],
+    kind = 'files',
+    removedPaths = [],
+    moves = [],
+  ) {
     // Listeners enqueue their own work. Never await a socket, agent or another
     // workspace operation while the nonreentrant project write queue is held.
     if (kind === 'access') {
@@ -1389,7 +1404,13 @@ export class WorkspaceStore {
     }
     for (const listener of this.changeListeners) {
       try {
-        listener({ projectId, paths, kind, removedPaths })
+        listener({
+          projectId,
+          paths,
+          kind,
+          removedPaths,
+          ...(moves.length ? { moves } : {}),
+        })
       } catch {
         /* A transport cannot fail a durable write. */
       }
@@ -4394,6 +4415,104 @@ export class WorkspaceStore {
     })
   }
 
+  /** Renames or moves a project file or folder without overwriting anything. */
+  async moveEntry(id, owner, input, { assertIdle = () => {} } = {}) {
+    this.requireEditor(id, owner)
+    const request = parseMoveRequest(input)
+    const from = relativeFile(request.from, { write: true })
+    const to = relativeFile(request.to, { write: true })
+    assertMovePaths(from, to)
+    if (CONFIGURATION_FILES.has(from) || CONFIGURATION_FILES.has(to))
+      fail(
+        'Project setup files cannot be renamed or moved. Edit them in place instead.',
+        403,
+      )
+    return this.#locked(id, async () => {
+      const project = this.requireEditor(id, owner)
+      this.#ready(project)
+      if (project.kind === 'single-file')
+        fail(
+          'Convert the playground to a project before renaming or moving files.',
+          409,
+        )
+      if (this.jobs.has(id))
+        fail(
+          'Wait for project preparation to finish before renaming or moving files.',
+          409,
+        )
+      assertIdle()
+      const source = await guarded(project.root, from, { write: true })
+      const stat = await exists(source)
+      if (!stat) fail('File or folder not found. Refresh the file tree.', 404)
+      if (!stat.isFile() && !stat.isDirectory())
+        fail('Only regular files and folders can be moved.', 403)
+      const kind = stat.isDirectory() ? 'folder' : 'file'
+      if (kind === 'folder')
+        await assertMovableTree(source, { isSecret }).catch((error) => {
+          throw error instanceof MoveError
+            ? new WorkspaceError(error.message, error.status)
+            : error
+        })
+      const destination = await guarded(project.root, to, { write: true })
+      if (await exists(destination))
+        fail(
+          'A file or folder with this name already exists at the destination. Choose another name or location.',
+          409,
+        )
+      const destinationParent = path.dirname(destination)
+      const parentStat = await exists(destinationParent)
+      if (!parentStat?.isDirectory())
+        fail(
+          'The destination folder does not exist. Create it first or choose an existing folder.',
+          404,
+        )
+      const fromParent = await writeParent(project.root, from)
+      try {
+        const toParent = await writeParent(project.root, to)
+        try {
+          const anchored = `${fromParent.anchor}/${fromParent.name}`
+          const current = await fs.lstat(anchored)
+          if (
+            current.isSymbolicLink() ||
+            current.dev !== stat.dev ||
+            current.ino !== stat.ino
+          )
+            fail(
+              'File or folder changed during the move. Refresh the file tree and try again.',
+              409,
+            )
+          assertIdle()
+          if (this.jobs.has(id))
+            fail(
+              'Wait for project preparation to finish before renaming or moving files.',
+              409,
+            )
+          try {
+            await moveWithoutReplacing(fromParent, toParent, kind)
+          } catch (error) {
+            throw error instanceof MoveError
+              ? new WorkspaceError(error.message, error.status)
+              : error
+          }
+          await fromParent.handle.sync().catch(() => {})
+          await toParent.handle.sync().catch(() => {})
+        } finally {
+          await toParent.handle.close()
+        }
+      } finally {
+        await fromParent.handle.close()
+      }
+      // The rename is committed. An audit-log failure must not turn it into an
+      // error response or keep collaborators from learning about it.
+      try {
+        this.#optionalEvent(project, 'saved', `Moved ${from} to ${to}.\n`)
+      } finally {
+        this.#changed(id, [from, to], 'files', [from], [{ from, to }])
+      }
+      return { from, to, kind }
+    })
+  }
+
   async validateEditorContextFile(id, owner, filename) {
     const project = this.get(id, owner)
     const relative = relativeFile(filename)
@@ -4426,7 +4545,19 @@ export class WorkspaceStore {
     const root = filename.startsWith('.lake/packages/')
       ? (await this.runtime.dependencyRoot?.(project.root)) || project.root
       : project.root
-    const { content, hash } = await textFile(await guarded(root, filename))
+    let source
+    try {
+      source = await textFile(await guarded(root, filename))
+    } catch (error) {
+      // Name the path so a renamed or moved file is easy to recognise.
+      if (error instanceof WorkspaceError && error.status === 404)
+        fail(
+          `File not found: ${filename}. It may have been renamed, moved or deleted.`,
+          404,
+        )
+      throw error
+    }
+    const { content, hash } = source
     return {
       content,
       hash,

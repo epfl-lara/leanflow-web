@@ -95,8 +95,16 @@
   height: 28px;
   padding: 4px;
 }
+.folder-row > .row-menu-button,
+.folder-row > .file-delete {
+  width: 24px;
+  height: 28px;
+  padding: 4px;
+}
 .file-row:hover > .row-menu-button,
 .file-row:focus-within > .row-menu-button,
+.folder-row:hover > .row-menu-button,
+.folder-row:focus-within > .row-menu-button,
 .project-row:hover .row-menu-button,
 .project-row:focus-within .row-menu-button,
 .row-menu-button[aria-expanded='true'] {
@@ -134,7 +142,8 @@ button.project-root-label:hover:not(:disabled) {
   container: file-tree / inline-size;
 }
 @container file-tree (max-width: 200px) {
-  .file-row > .file-delete {
+  .file-row > .file-delete,
+  .folder-row > .file-delete {
     display: none;
   }
 }

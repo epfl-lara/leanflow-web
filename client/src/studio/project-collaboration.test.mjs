@@ -143,6 +143,7 @@ function fixture(t, initial = 'base source\n', options = {}) {
       react,
       yjs: Y,
       './localDocumentHistory': { LocalDocumentHistory },
+      './projectPaths': transpile('./projectPaths.ts'),
       './api': { sessionBoundUrl: (value) => value },
       '../../../shared/source-limits.mjs': { sourceFileByteLimit },
       '../../../shared/document-text.mjs': {
@@ -176,6 +177,7 @@ function fixture(t, initial = 'base source\n', options = {}) {
       enabled,
       canEdit,
       onAccessChanged: options.onAccessChanged,
+      onFilesMoved: options.onFilesMoved,
     })
   }
   const hook = rerender()
@@ -1526,4 +1528,224 @@ test('post-commit durability errors reconnect without duplicating accepted Yjs e
   backend.deliver(reopened)
   assert.equal(await hook.flush(), true)
   assert.equal(backend.source(), baseline + 'BOB_REMOTE\n')
+})
+
+test('a peer move carries unacknowledged typing to the destination without failing the visit', async (t) => {
+  const moves = []
+  const { store, socket, hook } = fixture(t, 'base source\n', {
+    onFilesMoved: (move) => moves.push(move),
+  })
+  store.change('Main.lean', '-- typed before the move\nbase source\n')
+  socket.receive({
+    type: 'files',
+    paths: ['Main.lean', 'Proofs/Moved.lean'],
+    moves: [{ from: 'Main.lean', to: 'Proofs/Moved.lean' }],
+  })
+  const state = store.getSnapshot()
+  assert.equal(state.file.path, 'Proofs/Moved.lean')
+  assert.equal(state.file.content, '-- typed before the move\nbase source\n')
+  assert.equal(state.file.savedContent, 'base source\n')
+  assert.equal(state.buffers.has('Main.lean'), false)
+  assert.deepEqual(moves, [{ from: 'Main.lean', to: 'Proofs/Moved.lean' }])
+  assert.ok(
+    socket.sent.some(
+      (message) => message.type === 'close' && message.path === 'Main.lean',
+    ),
+  )
+  const flushing = hook.flush()
+  const opened = socket.sent.filter((message) => message.type === 'open').at(-1)
+  assert.equal(opened.path, 'Proofs/Moved.lean')
+  // A late rejection from the retired old-path document is not a failure.
+  socket.receive({
+    type: 'error',
+    path: 'Main.lean',
+    status: 409,
+    message: 'old path rejected a late update',
+  })
+  const destination = new Y.Doc()
+  t.after(() => destination.destroy())
+  destination.getText('source').insert(0, 'base source\n')
+  const identity = { path: 'Proofs/Moved.lean', documentId: 'document-moved' }
+  socket.receive(
+    wire(destination, undefined, {
+      ...identity,
+      openRequestId: opened.requestId,
+    }),
+  )
+  const update = socket.sent
+    .filter((message) => message.type === 'update')
+    .at(-1)
+  assert.equal(update.path, 'Proofs/Moved.lean')
+  Y.applyUpdate(
+    destination,
+    new Uint8Array(Buffer.from(update.update, 'base64')),
+  )
+  socket.receive(
+    wire(destination, undefined, { ...identity, ack: update.requestId }),
+  )
+  assert.equal(await flushing, true)
+  assert.deepEqual(store.dirty(), [])
+  assert.equal(
+    destination.getText('source').toString(),
+    '-- typed before the move\nbase source\n',
+  )
+  assert.ok(
+    !socket.sent.some(
+      (message) => message.type === 'update' && message.path === 'Main.lean',
+    ),
+    'nothing is ever written to the old path',
+  )
+})
+
+test('the mover applies its own move once whether the broadcast or HTTP receipt arrives first', (t) => {
+  const moves = []
+  const { store, socket } = fixture(t, 'base source\n', {
+    onFilesMoved: (move) => moves.push(move),
+  })
+  store.move('Main.lean', 'Renamed.lean', 9)
+  socket.receive({
+    type: 'files',
+    paths: ['Main.lean', 'Renamed.lean'],
+    moves: [{ from: 'Main.lean', to: 'Renamed.lean' }],
+  })
+  // A repeated receipt or malformed moves change nothing.
+  socket.receive({
+    type: 'files',
+    paths: [],
+    moves: [{ from: 'Main.lean' }, { from: 'A', to: 'A/B' }],
+  })
+  const state = store.getSnapshot()
+  assert.equal(state.file.path, 'Renamed.lean')
+  assert.equal(state.file.generation, 9)
+  assert.deepEqual([...state.buffers.keys()], ['Renamed.lean'])
+  assert.equal(moves.length, 1)
+})
+
+test('a peer move into a dirty stale destination keeps both drafts and their live state', async (t) => {
+  const { store, socket, hook, rerender } = fixture(t)
+  store.register([
+    {
+      uri: 'file:///workspace/Moved.lean',
+      path: 'Moved.lean',
+      content: 'destination baseline',
+      hash: hash('destination baseline'),
+      unsaved: false,
+    },
+  ])
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  store.change('Main.lean', 'source draft')
+  store.change('Moved.lean', 'destination draft')
+  const before = store.getSnapshot()
+  const sent = socket.sent.length
+  socket.receive({
+    type: 'files',
+    paths: ['Main.lean', 'Moved.lean'],
+    moves: [{ from: 'Main.lean', to: 'Moved.lean' }],
+  })
+  assert.equal(store.getSnapshot(), before)
+  assert.equal(socket.readyState, Socket.OPEN)
+  assert.match(rerender().issue, /draft.*Moved\.lean/)
+  await assert.rejects(hook.flush(), /draft.*Moved\.lean/)
+  assert.equal(
+    socket.sent
+      .slice(sent)
+      .some(({ type }) => type === 'close' || type === 'update'),
+    false,
+  )
+  assert.deepEqual(
+    store
+      .drafts()
+      .map(({ content }) => content)
+      .sort(),
+    ['destination draft', 'source draft'],
+  )
+})
+
+test('the document service tells a peer where a moved file went, and the peer saves only to the destination', async (t) => {
+  const baseline = 'base source\n'
+  const { store, socket, hook } = fixture(t, baseline, { deferReady: true })
+  const files = new Map([['Main.lean', baseline]])
+  let notify = () => {}
+  const workspaces = {
+    get: () => ({ id: 'project', accessRole: 'editor' }),
+    requireEditor() {
+      return this.get()
+    },
+    subscribeChanges(listener) {
+      notify = listener
+      return () => {}
+    },
+    async readFile(_id, _actor, name) {
+      if (!files.has(name))
+        throw Object.assign(new Error('missing'), { status: 404 })
+      return { content: files.get(name), hash: hash(files.get(name)) }
+    },
+    async writeFile(_id, _actor, name, value, expectedHash) {
+      if (!files.has(name) || hash(files.get(name)) !== expectedHash)
+        throw Object.assign(new Error('File changed'), { status: 409 })
+      files.set(name, value)
+      return { content: value, hash: hash(value) }
+    },
+  }
+  const service = new ProjectDocuments({ workspaces })
+  t.after(() => service.close())
+  const packets = []
+  const client = {
+    projectId: 'project',
+    actor: 'peer',
+    paths: new Set(),
+    vectors: new Map(),
+    ws: {
+      readyState: 1,
+      bufferedAmount: 0,
+      send: (raw) => packets.push(JSON.parse(raw)),
+      close() {},
+      terminate() {},
+      ping() {},
+    },
+  }
+  service.clients.add(client)
+  const deliver = () => {
+    for (const packet of packets.splice(0)) socket.receive(packet)
+  }
+  socket.receive({ type: 'ready' })
+  await service.message(
+    client,
+    socket.sent.filter((message) => message.type === 'open').at(-1),
+  )
+  deliver()
+  store.change('Main.lean', 'PEER_TYPING\n' + baseline)
+  // Another collaborator renames the file on disk and the store announces it.
+  files.set('Proofs/Moved.lean', files.get('Main.lean'))
+  files.delete('Main.lean')
+  notify({
+    projectId: 'project',
+    paths: ['Main.lean', 'Proofs/Moved.lean'],
+    kind: 'files',
+    removedPaths: ['Main.lean'],
+    moves: [{ from: 'Main.lean', to: 'Proofs/Moved.lean' }],
+  })
+  assert.ok(
+    !packets.some((packet) => packet.type === 'error'),
+    'a move is not announced as a removal',
+  )
+  deliver()
+  assert.equal(store.getSnapshot().file.path, 'Proofs/Moved.lean')
+  const flushing = hook.flush()
+  await service.message(
+    client,
+    socket.sent.filter((message) => message.type === 'open').at(-1),
+  )
+  deliver()
+  await service.message(client, lastDocumentUpdate(socket))
+  deliver()
+  assert.equal(await flushing, true)
+  assert.equal(files.get('Proofs/Moved.lean'), 'PEER_TYPING\n' + baseline)
+  assert.equal(files.has('Main.lean'), false)
+  assert.equal(
+    socket.sent.some(
+      (message) => message.type === 'update' && message.path === 'Main.lean',
+    ),
+    false,
+  )
 })

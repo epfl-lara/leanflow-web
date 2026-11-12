@@ -58,6 +58,7 @@ const workspaceSuites = [
   'terminal-opening',
   'editor-startup',
   'file-lifecycle',
+  'file-moves',
   'books',
   'downloads',
   'tex',

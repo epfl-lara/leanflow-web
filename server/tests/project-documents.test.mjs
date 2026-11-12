@@ -40,9 +40,9 @@ function fixture(t, options = {}) {
     ['viewer', 'viewer'],
   ])
   const listeners = new Set()
-  const emit = (paths = ['Main.lean'], kind = 'files') => {
+  const emit = (paths = ['Main.lean'], kind = 'files', extra = {}) => {
     for (const listener of listeners)
-      listener({ projectId: 'shared', paths, kind })
+      listener({ projectId: 'shared', paths, kind, ...extra })
   }
   const store = {
     get(id, actor) {
@@ -651,4 +651,52 @@ test('an older client without an open request identifier can still cancel its pe
     ws.packets.filter((packet) => packet.type === 'document'),
     [],
   )
+})
+
+test('a moved file is announced with its destination, and the old live document rejects stale writes', async (t) => {
+  const f = fixture(t)
+  const alice = await f.client('alice'),
+    bob = await f.client('bob')
+  const stale = update(alice, 1, (text) => text.insert(0, '-- stale\n'))
+  const content = f.files.get('Main.lean')
+  f.files.set('Moved.lean', content)
+  f.files.delete('Main.lean')
+  const moves = [{ from: 'Main.lean', to: 'Moved.lean' }]
+  f.emit(['Main.lean', 'Moved.lean'], 'files', {
+    removedPaths: ['Main.lean'],
+    moves,
+  })
+  for (const entry of [alice, bob]) {
+    assert.deepEqual(
+      entry.ws.packets.filter((packet) => packet.type === 'files'),
+      [{ type: 'files', paths: ['Main.lean', 'Moved.lean'], moves }],
+    )
+    assert.equal(
+      entry.ws.packets.some((packet) => packet.type === 'error'),
+      false,
+      'peers are not told the file was removed',
+    )
+  }
+  // The retired document still refuses writes, so the old path is never recreated.
+  await assert.rejects(f.service.message(alice.client, stale), { status: 409 })
+  assert.equal(f.files.has('Main.lean'), false)
+  // The destination opens as an ordinary new document with the same source.
+  await f.service.message(alice.client, { type: 'open', path: 'Moved.lean' })
+  const opened = alice.ws.packets
+    .filter(
+      (packet) => packet.type === 'document' && packet.path === 'Moved.lean',
+    )
+    .at(-1)
+  assert.equal(opened.hash, sha(content))
+})
+
+test('deleting a live file keeps the removal error for collaborators', async (t) => {
+  const f = fixture(t)
+  const alice = await f.client('alice')
+  f.files.delete('Main.lean')
+  f.emit(['Main.lean'], 'files', { removedPaths: ['Main.lean'] })
+  const errors = alice.ws.packets.filter((packet) => packet.type === 'error')
+  assert.equal(errors.length, 1)
+  assert.equal(errors[0].status, 409)
+  assert.match(errors[0].message, /removed or moved/)
 })
