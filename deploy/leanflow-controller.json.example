@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "lineage": "replace-with-controller-lineage",
+  "mode": "off",
+  "allowReserve": false,
+  "maxQueue": 128,
+  "maxPerActor": 8,
+  "nodes": [
+    {
+      "id": "worker-a",
+      "host": "worker-a.example.org",
+      "user": "leanflow",
+      "identityFile": "/data/leanflow/cluster/keys/worker-a",
+      "knownHostsFile": "/data/leanflow/cluster/known_hosts",
+      "role": "primary",
+      "enabled": true
+    }
+  ]
+}

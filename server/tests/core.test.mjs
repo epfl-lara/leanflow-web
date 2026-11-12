@@ -1607,6 +1607,13 @@ test('a disconnected terminal holds its project guard and capacity until worker 
   )
   const previousHome = f.runtime.spawned[0].workerHome
   await assert.rejects(fs.stat(previousHome), { code: 'ENOENT' })
+  // The broker may remove its home before the session finalizer releases the
+  // project guard. Await the public stop acknowledgement as the final barrier.
+  assert.equal(
+    (await f.request(`/api/projects/${f.project.id}/terminal/stop`, options))
+      .status,
+    200,
+  )
   const next = await connectTerminal(t, f)
   assert.equal(next.readyState, WebSocket.OPEN)
   finishCleanup()

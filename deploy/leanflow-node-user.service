@@ -1,0 +1,22 @@
+[Unit]
+Description=LeanFlow execution worker in the service account
+
+[Service]
+Type=simple
+WorkingDirectory=%h/leanflow/app/current
+Environment=HOME=%h
+Environment=PATH=/opt/node/bin:/usr/bin:/bin
+ExecStart=/opt/node/bin/node %h/leanflow/app/current/server/cluster/node.mjs serve --config %h/leanflow/node.json
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=120
+UMask=0077
+CPUQuota=200%
+MemoryMax=2G
+MemorySwapMax=0
+TasksMax=512
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

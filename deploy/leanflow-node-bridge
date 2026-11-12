@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+exec /usr/bin/env -i HOME=/data/leanflow/home PATH=/opt/leanflow/node/bin:/usr/bin:/bin \
+  SSH_ORIGINAL_COMMAND="${SSH_ORIGINAL_COMMAND-}" \
+  /opt/leanflow/node/bin/node /data/leanflow/app/current/server/cluster/node.mjs \
+  bridge --config /etc/leanflow/node.json
