@@ -473,9 +473,7 @@ export class ClusterController {
     if (this.#config.mode === 'off' || !this.#accepting) return null
     const request = this.#request(input, options)
     request.signal?.throwIfAborted()
-    request.sourceBytes = await this.#environment(request)
-    request.signal?.throwIfAborted()
-    if (!this.#accepting || !this.#compatible(request)) return null
+    if (!this.canRun(request.operation, request.file)) return null
     const { actor } = request
     const load = this.#actorLoad.get(actor) ?? 0
     if (load >= this.#config.maxPerActor) throw failure('cluster_actor_limit')
@@ -483,7 +481,13 @@ export class ClusterController {
       throw failure('cluster_queue_full')
     this.#actorLoad.set(actor, load + 1)
     return new Promise((resolve, reject) => {
-      const entry = { request, job: null, assigned: false, busyRetries: 0 }
+      const entry = {
+        request,
+        job: null,
+        assigned: false,
+        busyRetries: 0,
+        ready: false,
+      }
       const settle = (action) => (value) => {
         if (entry.settled) return
         entry.settled = true
@@ -500,11 +504,28 @@ export class ClusterController {
       entry.reject = settle(reject)
       entry.onAbort = () => {
         if (entry.job) this.#halt(entry.job, request.signal.reason)
-        else if (this.#dequeue(entry)) entry.reject(request.signal.reason)
+        else if (this.#dequeue(entry)) {
+          entry.reject(request.signal.reason)
+          this.#pump()
+        }
       }
       request.signal?.addEventListener('abort', entry.onAbort, { once: true })
       this.#enqueue(entry)
-      this.#pump()
+      // Reserve a bounded queue position before asynchronous reads. Otherwise
+      // a later request from this account can finish validation and overtake it.
+      const validate = async () => {
+        try {
+          request.sourceBytes = await this.#environment(request)
+          request.signal?.throwIfAborted()
+          if (entry.settled) return
+          entry.ready = true
+          this.#pump()
+        } catch (error) {
+          if (this.#dequeue(entry)) entry.reject(error)
+          this.#pump()
+        }
+      }
+      this.#track(validate())
     })
   }
 
@@ -922,6 +943,7 @@ export class ClusterController {
         )
         for (const actor of actors) {
           const entry = this.#queues.get(actor)[0]
+          if (!entry.ready) continue
           if (!this.#compatible(entry.request)) {
             this.#dequeue(entry)
             if (entry.assigned) entry.reject(failure('cluster_busy'))

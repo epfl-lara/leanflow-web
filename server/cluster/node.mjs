@@ -341,7 +341,7 @@ export class WorkerNode {
       }
     })
     handle('images.load', async (value) => {
-      if (this.running.size || this.maintenance)
+      if (this.running.size || this.preparing.size || this.maintenance)
         throw clusterError(
           'Drain the worker before loading its image.',
           'worker_busy',
@@ -927,6 +927,18 @@ export class WorkerNode {
         stopped: !this.recoveryError && terminal.has(attempt.state),
         state: attempt.state,
       }
+    if (!record.cancelPromise) {
+      record.cancelPromise = this.#cancelRecord(id, reason, record).finally(
+        () => {
+          record.cancelPromise = null
+        },
+      )
+    }
+    return record.cancelPromise
+  }
+
+  async #cancelRecord(id, reason, record) {
+    const attempt = this.state.get(id)
     if (!terminal.has(attempt.state) && attempt.state !== 'stopping')
       this.state.transition(id, 'stopping', { reason })
     record.controller.abort(

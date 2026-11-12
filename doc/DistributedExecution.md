@@ -85,8 +85,29 @@ new root-owned directory beneath `/data/leanflow/app/releases`, then point
 Copy [the node configuration](../deploy/leanflow-node.json.example) to
 `/etc/leanflow/node.json`, owned by root and readable by `leanflow`. Set the node
 ID, enrolled controller lineage and exact `sha256:` image ID. Pin the same image
-and source bundle on the coordinator and workers. The image contains the Lean
+and source bundle across the enrolled workers. By default the coordinator also
+requires its own image and bundle to match. The image contains the Lean
 runtime; the host helpers are separately hashed because they are bind mounted.
+
+A coordinator-only website update can retain a separately reviewed and certified
+worker release. Set `executionProfile` in the protected controller configuration:
+
+```json
+{
+  "version": 1,
+  "bundleDigest": "WORKER_BUNDLE_SHA256",
+  "imageDigest": "sha256:WORKER_IMAGE_SHA256"
+}
+```
+
+The version is the supported worker protocol version. Both digests must be exact;
+this option never accepts arbitrary releases or restores old certification.
+Verify protocol compatibility and review worker helper changes before retaining
+a profile. Worker fixes require a worker upgrade and fresh conformance. A pinned
+profile retains the old release's behavior and limits; it does not apply those
+fixes remotely. The maintenance CLI's `--image` must match this profile. Local
+work continues to use the coordinator's own configured image. Without this field,
+the original matching-image-and-bundle requirement remains in force.
 
 Install Node at `/opt/leanflow/node/bin/node`, or adjust both the supplied
 [service](../deploy/leanflow-node.service) and
@@ -189,9 +210,17 @@ are hashed; resumed uploads verify their complete digest. Source contains no
 credentials or Git metadata. Projects requiring omitted private files or legacy
 mutable dependencies keep the existing local check path. Each attempt gets a
 private writable Lake cache and a fresh home; public dependencies stay read-only.
+Each transferred snapshot is limited to 150,000 entries and 32 MiB of manifest
+metadata. Large dependency caches can exceed those limits and keep checks local;
+measure the actual cache before counting its projects as remote capacity.
 Public Git dependencies carry only generated shallow metadata for their locked
 revision and reachable source objects. Original Git configuration, hooks,
 credentials and unrelated history are never copied.
+
+Remote scratch is memory backed and shares the job's RAM limit with Lean. Native
+checks need room for both their kernel export and replay memory. Compare heavy
+projects in shadow mode before serving them remotely; an ordinary build passing
+does not establish that a large native check fits.
 
 Attempt IDs are durable and cannot be reused for different inputs. Controller
 and node epochs fence old connections and results. Workers stop after leases

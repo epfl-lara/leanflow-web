@@ -86,6 +86,10 @@ Install the coordinator public key with a forced command pointing to the
 **absolute** bridge path in this account, with `restrict`. Preserve other
 administrator-authorized keys. Do this after installation checks pass so the
 production key no longer grants a shell. Private keys stay on the coordinator.
+Before restricting the bootstrap key, confirm that the administrator retains a
+working maintenance login to this account. An ordinary login to a different
+account cannot add keys or switch to this account without permission. Do not use
+Docker access or the worker protocol to bypass that separation.
 
 The bridge rejects every command except the two fixed protocol names before
 starting anything. For an allowed connection, it starts only the fixed

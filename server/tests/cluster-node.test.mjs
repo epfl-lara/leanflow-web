@@ -239,12 +239,16 @@ test('a duplicate start remains idempotent while a worker has entered recovery',
   assert.equal(f.calls.length, 1)
 })
 
-test('confirmed cleanup retry removes retained source and releases its grant', async (t) => {
+test('concurrent confirmed cleanup retries share one cleanup and release the grant', async (t) => {
   let confirmed = false
+  let cleanups = 0
+  const cleanupGate = Promise.withResolvers()
   const f = await fixture(t, async (_root, _args, options) => {
     options.onSpawn({
       async cleanupWorker() {
         if (!confirmed) throw new Error('not stopped')
+        cleanups++
+        await cleanupGate.promise
       },
     })
     throw Object.assign(new Error('not stopped'), { workerCleanup: true })
@@ -256,12 +260,48 @@ test('confirmed cleanup retry removes retained source and releases its grant', a
   assert.equal(f.worker.running.size, 1)
   await assert.rejects(f.rpc.request('attempt.cancel', { id: value.id }))
   confirmed = true
-  assert.equal(
-    (await f.rpc.request('attempt.cancel', { id: value.id })).stopped,
-    true,
-  )
+  const cancellations = [
+    f.rpc.request('attempt.cancel', { id: value.id }),
+    f.rpc.request('attempt.cancel', { id: value.id }),
+  ]
+  cleanupGate.resolve()
+  for (const result of await Promise.all(cancellations)) {
+    assert.equal(result.stopped, true)
+    assert.equal(result.state, 'cancelled')
+  }
+  assert.equal(cleanups, 1)
   assert.equal(f.worker.running.size, 0)
   await assert.rejects(fs.stat(f.calls[0].root), { code: 'ENOENT' })
+})
+
+test('an image load refuses to overlap an in-flight asset preparation', async (t) => {
+  const f = await fixture(t)
+  const entered = Promise.withResolvers()
+  const gate = Promise.withResolvers()
+  f.worker.verifyToolchain = async () => {
+    entered.resolve()
+    await gate.promise
+  }
+  const manifest = await f.worker.blobs.seal([], 'toolchain')
+  const preparing = f.rpc.request('assets.prepare', {
+    toolchain: {
+      version: 'leanprover/lean4:v4.34.1',
+      manifest: manifest.hash,
+    },
+  })
+  await entered.promise
+  try {
+    await assert.rejects(
+      f.rpc.request('images.load', {
+        imageDigest: image,
+        archive: sha256('archive'),
+      }),
+      { code: 'worker_busy' },
+    )
+  } finally {
+    gate.resolve()
+    await preparing
+  }
 })
 
 test('interrupted assets are replaced atomically and equal bytes can serve distinct toolchain pins', async (t) => {
