@@ -189,12 +189,12 @@ const selectedFiles = async () =>
       chips.map((chip) => chip.getAttribute('title')).sort(),
     )
 async function chooseFiles(paths) {
-  await page.getByLabel('Select files', { exact: true }).click()
+  await page.getByLabel('Select context', { exact: true }).click()
   for (const file of Object.keys(sources))
     await page
       .getByRole('checkbox', { name: file, exact: true })
       .setChecked(paths.includes(file))
-  await page.getByLabel('Filter context files').press('Escape')
+  await page.getByLabel('Filter context', { exact: true }).press('Escape')
 }
 async function chooseChat(id) {
   await page.getByLabel('Select chat').selectOption(id)

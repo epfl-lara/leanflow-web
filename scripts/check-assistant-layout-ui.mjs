@@ -34,8 +34,8 @@ const { page, browser, report, state, emit } = fixture
 const output = path.resolve('.runtime/assistant-layout-ui')
 await fs.mkdir(output, { recursive: true })
 const picker = page.locator('.file-context-picker')
-const trigger = page.getByLabel('Select files', { exact: true })
-const filter = page.getByLabel('Filter context files', { exact: true })
+const trigger = page.getByLabel('Select context', { exact: true })
+const filter = page.getByLabel('Filter context', { exact: true })
 const popup = page.locator('.file-context-popover')
 const composer = page.getByLabel('Message Lemex', { exact: true })
 const assistant = page.getByRole('complementary', {

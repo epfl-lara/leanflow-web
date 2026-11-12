@@ -134,11 +134,9 @@ try {
   await composer.fill('Keep this request and use @Ma')
   await composer.press('Enter')
   await attachment('Main.lean').waitFor()
-  await page
-    .getByRole('button', { name: 'Focus proof / lines', exact: true })
-    .click()
+  await page.getByLabel('Select context', { exact: true }).click()
   const focus = page.getByRole('dialog', {
-    name: 'Choose a proof or lines',
+    name: 'Choose context',
     exact: true,
   })
   await focus.getByLabel('Lines', { exact: true }).fill('1')

@@ -431,7 +431,7 @@ try {
       .count(),
     1,
   )
-  await page.getByLabel('Filter context files').press('Escape')
+  await page.getByLabel('Filter context', { exact: true }).press('Escape')
   passed('Two real context files show removable chips and the 12-file limit')
   await page.screenshot({
     path: path.join(reportDir, 'chats-and-context.png'),

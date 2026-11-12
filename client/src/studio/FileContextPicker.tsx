@@ -8,7 +8,9 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import type { FileEntry } from './api'
+import { ChatFocusOptions } from './ChatFocusOptions'
 import { Icon } from './Icons'
+import type { EditorProofState, ProofEditorRequest } from './proofTarget'
 import { useComposerPopoverPosition } from './useComposerPopoverPosition'
 import './chat-controls.css'
 
@@ -20,6 +22,8 @@ export interface FileContextPickerProps {
   selected: string[]
   onChange: (paths: string[]) => void
   disabled: boolean
+  editor?: EditorProofState
+  onFocus?: (request: Omit<ProofEditorRequest, 'id'>) => void
 }
 
 export function FileContextPicker({
@@ -27,6 +31,8 @@ export function FileContextPicker({
   selected,
   onChange,
   disabled,
+  editor,
+  onFocus,
 }: FileContextPickerProps) {
   const id = useId()
   const details = useRef<HTMLDetailsElement>(null)
@@ -194,8 +200,8 @@ export function FileContextPicker({
         onToggle={(event) => setOpen(event.currentTarget.open)}
       >
         <summary
-          aria-label="Select files"
-          title="The open file is included automatically. Select extra files, or type @ in your message."
+          aria-label="Select context"
+          title="Add files, a declaration, or selected lines to your message."
           aria-controls={`${id}-panel`}
           aria-expanded={open}
           aria-haspopup="dialog"
@@ -210,10 +216,12 @@ export function FileContextPicker({
           }}
         >
           <Icon name="plus" size={13} />
-          <span>Select files</span>
-          <span className="file-context-count" aria-hidden="true">
-            {selectedPaths.length}/{MAX_FILES}
-          </span>
+          <span>Select context</span>
+          {selectedPaths.length > 0 && (
+            <span className="file-context-count" aria-hidden="true">
+              {selectedPaths.length}/{MAX_FILES}
+            </span>
+          )}
           <Icon name="chevron" size={11} />
         </summary>
         {open &&
@@ -227,10 +235,10 @@ export function FileContextPicker({
                 visibility: positioned ? 'visible' : 'hidden',
               }}
               role="dialog"
-              aria-label="Choose extra files"
+              aria-label="Choose context"
             >
               <label className="chat-controls-sr-only" htmlFor={`${id}-filter`}>
-                Filter context files
+                Filter context
               </label>
               <div className="file-context-filter">
                 <Icon name="search" size={13} />
@@ -240,7 +248,11 @@ export function FileContextPicker({
                   type="search"
                   value={filter}
                   onChange={(event) => setFilter(event.target.value)}
-                  placeholder="Find a project or library file…"
+                  placeholder={
+                    editor && onFocus
+                      ? 'Find files or declarations…'
+                      : 'Find a project or library file…'
+                  }
                   disabled={disabled}
                   autoComplete="off"
                   onKeyDown={(event) => {
@@ -253,7 +265,19 @@ export function FileContextPicker({
                   ? `${selectedPaths.length} files selected. ${selectedPaths.length === MAX_FILES ? 'Remove one to attach another.' : 'Choose no more than 12 files.'}`
                   : 'The open file is included automatically. Choose up to 12 extra files.'}
               </p>
-              <div className="file-context-results">
+              <div className="file-context-results context-picker-results">
+                {editor && onFocus && (
+                  <ChatFocusOptions
+                    key={editor.path}
+                    editor={editor}
+                    filter={filter}
+                    onFocus={(request) => {
+                      onFocus(request)
+                      if (details.current) details.current.open = false
+                      setOpen(false)
+                    }}
+                  />
+                )}
                 {selectedFiles.length > 0 && (
                   <>
                     <div className="file-context-section">Selected</div>

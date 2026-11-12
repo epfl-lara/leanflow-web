@@ -167,9 +167,9 @@ try {
 
   await open('Main.lean')
   assert.equal(await note.count(), 0)
-  await page.getByLabel('Select files', { exact: true }).click()
+  await page.getByLabel('Select context', { exact: true }).click()
   await page.getByRole('checkbox', { name: 'Paper.PDF', exact: true }).check()
-  await page.getByLabel('Filter context files').press('Escape')
+  await page.getByLabel('Filter context', { exact: true }).press('Escape')
   await composer.fill('Formalize the attached paper into this Lean file.')
   await page.getByLabel('Lean output: Main.lean', { exact: true }).waitFor()
   assert.match(

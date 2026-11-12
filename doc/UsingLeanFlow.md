@@ -129,10 +129,10 @@ Closing the terminal, changing workspaces, or disconnecting stops its shell and 
 
 Close the terminal before preparing, changing or publishing Git history, or uploading files. Moving project data to Trash refuses another collaborator's active work. Terminal builds use the private copy's cache; checks use the saved project. Terminals share worker capacity with editors, agents, setup, and checks.
 
-## Ask about one proof
+## Ask about a proof or selected lines
 
 1. Open a Lean file. In **Outline**, click a declaration to navigate, then **+ Chat** to attach it.
-2. Or use **Focus proof / lines** in chat: choose a declaration, use selected editor lines, or enter a range such as `70–74`.
+2. Or highlight lines in the editor, open **Select context** in chat, and choose **Use selected lines**. The same menu lists declarations and accepts ranges such as `70–74`. Highlighted lines keep that exact line range, even inside a theorem.
 3. Check **Focused on**, write your request, and send. Click the target to revisit it, or clear it to remove focus.
 
 Targets belong to their chat. **Ask Lemex** uses the current proof or selection; **Optimize** also selects optimization mode. Save changed lines before sending a focused update during a run.
@@ -148,7 +148,7 @@ Modes choose a default workflow. Your explicit requests and follow-ups take prec
 
 Compare optimization's token and heartbeat measurements: a shorter proof can take more elaboration work. Repair invalid proofs first.
 
-To formalize a document, open its PDF, TeX, Markdown, plain text, or other readable source, choose **Formalize**, and describe the statement or argument to translate. Use **Select files** or **@** to add other sources. You do not need to select an existing Lean file: Lemex can create one for the formalization. Source documents stay unchanged, and Lean output still receives independent verification. The standard worker can extract PDF text. If extraction is unavailable on an older worker or loses essential mathematics, provide the relevant passage or TeX source. Scanned pages may need OCR.
+To formalize a document, open its PDF, TeX, Markdown, plain text, or other readable source, choose **Formalize**, and describe the statement or argument to translate. Use **Select context** or **@** to add other sources. You do not need to select an existing Lean file: Lemex can create one for the formalization. Source documents stay unchanged, and Lean output still receives independent verification. The standard worker can extract PDF text. If extraction is unavailable on an older worker or loses essential mathematics, provide the relevant passage or TeX source. Scanned pages may need OCR.
 
 **Ask & Search** primarily helps with Lean, but also welcomes general questions, writing, planning, and open-ended tasks. Ask it to create or edit project text files and organize, rename, or delete non-Lean notes and documents. Ask Lemex to rename or delete Lean sources when needed, or use the file browser. Questions and explanations leave files unchanged. Live edits are off by default: inspect the diff, then choose **Apply changes**. To save requested edits as Lemex works, enable **Options → Edit files live** before sending. This choice is saved separately from the other modes. Stop the run before undoing its edits. Lemex can use the workspace shell, Python, and other installed command-line tools in either editing mode. Lean source edits still receive independent Lean verification; ordinary conversation and non-Lean file tasks do not.
 
@@ -170,7 +170,7 @@ review the suggestion, then save it.
 
 Check **Current file** above your message. Its path is supplied automatically when available; you do not need to attach it to a task or update. Missing automatic context is skipped. Explicitly selected files and proof targets must be available. For PDFs, only the path is supplied. PDF contents are not attached.
 
-Type **@** or use **Select files** to attach extra files. **Options** controls model, reasoning effort, and live edits. Drafts and selections stay with their chats.
+Type **@** or use **Select context** to attach extra files. The same menu includes declarations and selected editor lines. Adding context does not save or send your message. **Options** controls model, reasoning effort, and live edits. Drafts and selections stay with their chats.
 
 Press **Enter** to send a message or a follow-up during a run. Use **Shift+Enter** to add a new line. While the **@** file picker is open, **Enter** attaches the selected file first.
 

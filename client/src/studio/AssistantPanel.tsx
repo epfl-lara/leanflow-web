@@ -17,7 +17,6 @@ import { Dialog } from './Dialog'
 import { ChatPicker, type ChatChoice } from './ChatPicker'
 import { FileContextPicker } from './FileContextPicker'
 import { FileMentionTextarea } from './FileMentionTextarea'
-import { ChatFocusPicker } from './ChatFocusPicker'
 import { ChatOptions } from './ChatOptions'
 import type { BookChatRequest } from './BooksPanel'
 import { ConversationTurn } from './ConversationTurn'
@@ -1105,7 +1104,7 @@ export function AssistantPanel({
                 <Icon name="file" size={13} />
                 <span>
                   <span className="proof-target-caption">Focused on</span>
-                  <strong>{proofTarget.name || 'Selected proof'}</strong>
+                  <strong>{proofTarget.name || 'Selected lines'}</strong>
                   <small>
                     {proofTarget.path}:{proofTarget.startLine}
                     {proofTarget.endLine !== proofTarget.startLine
@@ -1194,10 +1193,9 @@ export function AssistantPanel({
               selected={contextFiles}
               onChange={draft.setFiles}
               disabled={false}
+              editor={editorProof}
+              onFocus={onFocusEditor}
             />
-            {onFocusEditor && (
-              <ChatFocusPicker editor={editorProof} onFocus={onFocusEditor} />
-            )}
           </div>
           {error && (
             <p className="error-message" role="alert">

@@ -573,7 +573,7 @@ try {
   await page.keyboard.press(editorShortcuts.documentEnd)
   await page
     .getByLabel('Focused proof', { exact: true })
-    .getByRole('button', { name: /Selected proof/ })
+    .getByRole('button', { name: /Selected lines/ })
     .click()
   await until(
     async () => /Selected lines · line 1/.test(await outline.innerText()),

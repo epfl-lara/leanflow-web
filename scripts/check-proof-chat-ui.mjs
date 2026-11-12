@@ -96,14 +96,12 @@ async function focus(name, mode = 'proofs') {
       exact: true,
     })
     .click()
-  await page
-    .getByRole('button', { name: 'Focus proof / lines', exact: true })
-    .click()
+  await page.getByLabel('Select context', { exact: true }).click()
   const picker = page.getByRole('dialog', {
-    name: 'Choose a proof or lines',
+    name: 'Choose context',
     exact: true,
   })
-  await picker.getByLabel('Find a proof to focus').fill(name)
+  await picker.getByLabel('Filter context', { exact: true }).fill(name)
   await page
     .getByRole('list', { name: 'Proof targets in this file' })
     .getByRole('button', { name: new RegExp(name) })

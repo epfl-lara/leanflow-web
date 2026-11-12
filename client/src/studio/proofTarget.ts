@@ -42,6 +42,7 @@ export interface EditorProofState {
   declarations: ProofDeclaration[]
   status: 'loading' | 'ready' | 'unavailable'
   target: ProofTarget | null
+  hasSelection?: boolean
   error?: string
   disabled: boolean
   readOnly: boolean
@@ -328,7 +329,7 @@ export function proofTargetForSelection(
   content: string,
   selection: EditorSelection | null,
   declarations: ProofDeclaration[],
-): { target: ProofTarget | null; error?: string } {
+): { target: ProofTarget | null; error?: string; hasSelection?: boolean } {
   if (!selection) return { target: null }
   const lines = content.replace(/\r\n?/g, '\n').split('\n')
   const nonempty =
@@ -389,6 +390,7 @@ export function proofTargetForSelection(
       ? declaration.name
       : undefined
   return {
+    hasSelection: nonempty,
     target: {
       path,
       startLine,

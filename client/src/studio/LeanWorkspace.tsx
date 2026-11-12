@@ -308,6 +308,7 @@ export function LeanWorkspace({
   >('loading')
   const [focus, setFocus] = useState<{
     target: ProofTarget | null
+    hasSelection?: boolean
     error?: string
   }>({ target: null })
   const revealed = useRef<number | null>(null)
@@ -1224,6 +1225,7 @@ export function LeanWorkspace({
       selection,
       declarationsRef.current,
     )
+    if (request?.lines && latest.target) latest.target.name = undefined
     if (
       latest.target &&
       selection &&
@@ -1269,6 +1271,7 @@ export function LeanWorkspace({
       declarations: matching ? declarations : [],
       status: outlineStatus,
       target: matching ? focus.target : null,
+      hasSelection: matching && focus.hasSelection,
       error: matching ? focus.error : undefined,
       disabled: loading || !!failure || !matching,
       readOnly: !!file.readOnly,

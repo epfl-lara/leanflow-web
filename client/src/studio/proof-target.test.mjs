@@ -65,13 +65,14 @@ test('Lean hierarchical symbols become qualified declarations, never namespace r
 
 test('cursor inside proof and at its final column captures complete declaration including docs', () => {
   for (const column of [3, 10]) {
-    const { target } = proofTargetForSelection(
+    const { target, hasSelection } = proofTargetForSelection(
       'Main.lean',
       content,
       cursor(4, column),
       declarations,
     )
     assert.equal(target.name, 'Demo.one')
+    assert.equal(hasSelection, false)
     assert.equal(target.startLine, 2)
     assert.equal(target.endLine, 4)
     assert.equal(
@@ -88,7 +89,7 @@ test('explicit selected lines work without Lean and normalize CRLF snapshots', (
     endLineNumber: 5,
     endColumn: 1,
   }
-  const { target } = proofTargetForSelection(
+  const { target, hasSelection } = proofTargetForSelection(
     'Main.lean',
     content.replaceAll('\n', '\r\n'),
     selection,
@@ -100,6 +101,20 @@ test('explicit selected lines work without Lean and normalize CRLF snapshots', (
     endLine: 4,
     source: 'theorem one : True := by\n  trivial',
   })
+  assert.equal(hasSelection, true)
+})
+
+test('highlighted proof lines keep their exact range and current editor source', () => {
+  const { target, hasSelection } = proofTargetForSelection(
+    'Main.lean',
+    content.replace('  trivial', '  exact True.intro'),
+    { startLineNumber: 4, startColumn: 3, endLineNumber: 5, endColumn: 1 },
+    declarations,
+  )
+  assert.equal(hasSelection, true)
+  assert.equal(target.startLine, 4)
+  assert.equal(target.endLine, 4)
+  assert.equal(target.source, '  exact True.intro')
 })
 
 test('no implicit whole-file focus outside a declaration, including broken syntax', () => {

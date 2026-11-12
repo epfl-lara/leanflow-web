@@ -289,6 +289,10 @@
   max-height: min(240px, 35vh);
   overflow: auto;
 }
+.file-context-results.context-picker-results {
+  max-height: none;
+  overscroll-behavior: contain;
+}
 .file-context-section {
   margin: 8px 1px 5px;
   color: var(--muted);
