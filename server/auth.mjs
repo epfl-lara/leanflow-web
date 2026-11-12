@@ -8,12 +8,26 @@ import { promises as fs } from 'node:fs'
 import { closeSync, fstatSync, openSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 
+const SESSION_IDLE_TIMEOUT_MS = 48 * 3600_000
+
 const hash = (value) => createHash('sha256').update(value).digest('hex')
 const equal = (a, b) => {
   if (typeof a !== 'string' || typeof b !== 'string') return false
   const left = Buffer.from(a),
     right = Buffer.from(b)
   return left.length === right.length && timingSafeEqual(left, right)
+}
+
+function accountName(input) {
+  const name = typeof input === 'string' ? input.trim() : ''
+  if (!name || name.length > 80 || !/^[\p{L}\p{M}\p{N} ._'’\-]+$/u.test(name))
+    throw Object.assign(
+      new Error(
+        'Enter a name of up to 80 characters using letters, numbers, spaces, apostrophes, dots, underscores or hyphens.',
+      ),
+      { status: 400 },
+    )
+  return name
 }
 
 export class Auth {
@@ -59,6 +73,7 @@ export class Auth {
     return {
       id: user.id,
       name: user.name,
+      profileComplete: user.profileComplete === true,
       role:
         user.id === 'owner'
           ? 'owner'
@@ -79,18 +94,8 @@ export class Auth {
       if (!current)
         throw Object.assign(new Error('Sign in again.'), { status: 401 })
       this.requireAdmin(current)
-      const name = typeof input?.name === 'string' ? input.name.trim() : '',
+      const name = accountName(input?.name),
         role = input?.role || 'user'
-      if (
-        typeof name !== 'string' ||
-        !name ||
-        name.length > 80 ||
-        !/^[\p{L}\p{N} ._-]+$/u.test(name)
-      )
-        throw Object.assign(
-          new Error('Enter an account name of up to 80 characters.'),
-          { status: 400 },
-        )
       if (!['admin', 'user'].includes(role))
         throw Object.assign(new Error('Choose admin or user.'), { status: 400 })
       if (role === 'admin' && this.public(current).role !== 'owner')
@@ -116,6 +121,39 @@ export class Auth {
       }
       this.users.push(user)
       return { user: this.public(user), token }
+    })
+  }
+  async updateProfile(actor, input) {
+    if (
+      !input ||
+      typeof input !== 'object' ||
+      Array.isArray(input) ||
+      Object.keys(input).some((key) => key !== 'name')
+    )
+      throw Object.assign(new Error('Send only the name you want to use.'), {
+        status: 400,
+      })
+    const name = accountName(input.name)
+    return this.mutate(() => {
+      const current = this.users.find((user) => user.id === actor.id)
+      if (!current)
+        throw Object.assign(new Error('Sign in again.'), { status: 401 })
+      if (
+        this.users.some(
+          (user) =>
+            user.id !== current.id &&
+            user.name.toLowerCase() === name.toLowerCase(),
+        )
+      )
+        throw Object.assign(
+          new Error(
+            'An account with that name already exists. Choose another name.',
+          ),
+          { status: 409 },
+        )
+      current.name = name
+      current.profileComplete = true
+      return { user: this.public(current) }
     })
   }
   async mutate(change) {
@@ -181,7 +219,7 @@ export class Auth {
       const { id, expires } = JSON.parse(
         Buffer.from(payload, 'base64url').toString(),
       )
-      if (!Number.isSafeInteger(expires) || expires < Date.now()) return null
+      if (!Number.isSafeInteger(expires) || expires <= Date.now()) return null
       return this.users.find((user) => user.id === id) || null
     } catch {
       return null
@@ -194,11 +232,11 @@ export class Auth {
     const payload = Buffer.from(
       JSON.stringify({
         id: user.id,
-        expires: Date.now() + 12 * 3600_000,
+        expires: Date.now() + SESSION_IDLE_TIMEOUT_MS,
         nonce: randomBytes(16).toString('hex'),
       }),
     ).toString('base64url')
-    return `lemex_web=${payload}.${this.sign(payload)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure ? '; Secure' : ''}`
+    return `lemex_web=${payload}.${this.sign(payload)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_IDLE_TIMEOUT_MS / 1000}${secure ? '; Secure' : ''}`
   }
   async login(token, ip) {
     await this.refreshUsers()

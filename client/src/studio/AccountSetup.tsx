@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { ProviderKeyForm } from './ProviderKeyForm'
-import { type Session, errorText, post } from './api'
+import { ProfileForm } from './ProfileForm'
+import { type Account, type Session, errorText } from './api'
 import { Brand } from './Brand'
 
 export function AccountSetup({
   session,
   onSaved,
+  onProfileSaved,
   onLogout,
   refreshError,
   refreshing,
@@ -13,21 +15,22 @@ export function AccountSetup({
 }: {
   session: Session
   onSaved: () => void
-  onLogout: () => void
+  onProfileSaved: (user: Account) => void
+  onLogout: () => Promise<void>
   refreshError: string
   refreshing: boolean
   onRetry: () => void
 }) {
   const [providerBusy, setProviderBusy] = useState(false)
+  const [profileBusy, setProfileBusy] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
   const [logoutError, setLogoutError] = useState('')
   async function logout() {
-    if (providerBusy || refreshing || loggingOut) return
+    if (providerBusy || profileBusy || refreshing || loggingOut) return
     setLoggingOut(true)
     setLogoutError('')
     try {
-      await post('/api/logout', {})
-      onLogout()
+      await onLogout()
     } catch (error) {
       setLogoutError(errorText(error))
     } finally {
@@ -39,16 +42,35 @@ export function AccountSetup({
       <div className="login-card">
         <Brand />
         <h1>Welcome, {session.user.name}.</h1>
-        <p>
-          Connect your account to Lemex to open your workspace. You can update
-          your key later in Assistant settings.
-        </p>
-        <ProviderKeyForm
-          initial={{ configured: false }}
-          onSaved={onSaved}
-          onBusyChange={setProviderBusy}
-          disabled={loggingOut || refreshing}
-        />
+        {session.user.profileComplete === false ? (
+          <>
+            <p>
+              Confirm the name you want to use in LeanFlow. You can change it
+              later by clicking your account in the sidebar.
+            </p>
+            <ProfileForm
+              user={session.user}
+              firstLogin
+              onSaved={onProfileSaved}
+              onBusyChange={setProfileBusy}
+              disabled={loggingOut || refreshing}
+            />
+          </>
+        ) : (
+          <>
+            <p>
+              Connect your account to Lemex to open your workspace. Click your
+              account in the sidebar to update your profile, API key, or
+              settings.
+            </p>
+            <ProviderKeyForm
+              initial={{ configured: false }}
+              onSaved={onSaved}
+              onBusyChange={setProviderBusy}
+              disabled={loggingOut || refreshing}
+            />
+          </>
+        )}
         {refreshError && (
           <div role="alert">
             <p className="error-message">
@@ -73,7 +95,7 @@ export function AccountSetup({
         <button
           type="button"
           className="button secondary"
-          disabled={providerBusy || refreshing || loggingOut}
+          disabled={providerBusy || profileBusy || refreshing || loggingOut}
           onClick={() => void logout()}
         >
           {loggingOut ? 'Signing out…' : 'Sign out'}

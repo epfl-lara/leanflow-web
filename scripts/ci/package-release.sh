@@ -41,6 +41,16 @@ const lemex = JSON.parse(execFileSync('docker', ['run', '--rm', '--read-only', '
 console.log(JSON.stringify({ version, commit, node: process.version, platform: 'linux/amd64', workerImage, workerImageId, lemex }, null, 2))
 JS
 cp "$release_dir/manifest.json" "$stage_dir/leanflow-web/release-manifest.json"
+# Model discovery runs on the server, so ship the exact public native runtime
+# from the verified worker as well. Copy only generated package assets; never
+# include a host Lemex home, account keys, caches, or other private runtime state.
+discovery_dir="$stage_dir/leanflow-web/.runtime/lemex"
+mkdir -p "$discovery_dir"
+docker run --rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges \
+  "$worker_id" tar -cf - -C /opt/lemex \
+  bin/lemex bin/lemex-code-mode-host codex-path/rg codex-resources/bwrap \
+  codex-package.json LICENSE NOTICE config.toml models.json lemex-install.json manifest.json \
+  | tar -xf - -C "$discovery_dir"
 tar -czf "$release_dir/leanflow-web-${release_commit}.tar.gz" -C "$stage_dir" leanflow-web
 docker image save "$worker_image" | gzip -n > "$release_dir/leanflow-worker-${release_commit}.tar.gz"
 cp package-lock.json "$release_dir/package-lock.json"

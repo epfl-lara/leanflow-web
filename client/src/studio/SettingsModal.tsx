@@ -5,6 +5,7 @@ import { AdminAccounts } from './AdminAccounts'
 import { ModelAccess } from './ModelAccess'
 import { Dialog } from './Dialog'
 import { Icon } from './Icons'
+import { ProfileForm } from './ProfileForm'
 
 interface Settings {
   extraInstructions: string
@@ -23,11 +24,13 @@ export function SettingsModal({
   onSaved,
   user,
   onProviderSaved,
+  onProfileSaved,
 }: {
   onClose: () => void
   onSaved: () => void
   user: Account
   onProviderSaved: () => void
+  onProfileSaved?: (user: Account) => void
 }) {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [provider, setProvider] = useState<ProviderStatus | null>(null)
@@ -35,7 +38,8 @@ export function SettingsModal({
   const [busy, setBusy] = useState(false)
   const [providerBusy, setProviderBusy] = useState(false)
   const [accountBusy, setAccountBusy] = useState(false)
-  const pending = busy || providerBusy || accountBusy
+  const [profileBusy, setProfileBusy] = useState(false)
+  const pending = busy || providerBusy || accountBusy || profileBusy
   useEffect(() => {
     let cancelled = false
     void api<ProviderStatus>('/api/provider')
@@ -80,18 +84,26 @@ export function SettingsModal({
   return (
     <Dialog
       title="Assistant settings"
-      subtitle="Your instructions and tool choices apply to new Lemex runs."
+      subtitle="Manage your profile, API connection, and assistant preferences."
       onClose={onClose}
       busy={pending}
     >
-      <h3>
+      <h3>Profile</h3>
+      <p className="field-help">
         {user.name} · {user.role === 'owner' ? 'Owner / admin' : user.role}
-      </h3>
+      </p>
+      <ProfileForm
+        user={user}
+        onSaved={(updated) => onProfileSaved?.(updated)}
+        onBusyChange={setProfileBusy}
+        disabled={busy || providerBusy || accountBusy}
+      />
+      <h3 className="account-settings-heading">API connection</h3>
       {provider && (
         <ProviderKeyForm
           initial={provider}
           onBusyChange={setProviderBusy}
-          disabled={busy || accountBusy}
+          disabled={busy || accountBusy || profileBusy}
           onSaved={(value) => {
             setProvider(value)
             onProviderSaved()
@@ -116,6 +128,10 @@ export function SettingsModal({
       )}
       {settings && (
         <form onSubmit={submit}>
+          <h3 className="account-settings-heading">Assistant preferences</h3>
+          <p className="field-help">
+            Your instructions and tool choices apply to new Lemex runs.
+          </p>
           <label className="field-label" htmlFor="extra-instructions">
             Additional instructions
           </label>
@@ -240,7 +256,7 @@ export function SettingsModal({
         <AdminAccounts
           user={user}
           onBusyChange={setAccountBusy}
-          disabled={busy || providerBusy}
+          disabled={busy || providerBusy || profileBusy}
         />
       )}
     </Dialog>

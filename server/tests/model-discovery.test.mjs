@@ -323,6 +323,25 @@ test('a queued run cannot send its context to a newly selected provider with the
   assert.equal(workers, 0)
 })
 
+test('a missing native runtime reports a server problem before contacting the account provider', async (t) => {
+  const f = await fixture(t)
+  await assert.rejects(
+    discoverNativeModels({
+      config: { ...f.config, lemexHome: path.join(f.dataDir, 'missing') },
+      provider: {
+        LEMEX_API_KEY: 'valid-fixture-key',
+        LEMEX_BASE_URL: 'https://provider.example/v1',
+      },
+      directory: f.discovery.directory,
+      fetchImpl: () => assert.fail('No provider request for a missing runtime'),
+    }),
+    (error) =>
+      error.status === 503 &&
+      /server’s Lemex runtime is unavailable/.test(error.message) &&
+      !/API key|\/missing/.test(error.message),
+  )
+})
+
 test('native discovery uses a private empty home and requires a fresh authenticated cache', async (t) => {
   const f = await fixture(t)
   const lemexHome = path.join(f.dataDir, 'native')

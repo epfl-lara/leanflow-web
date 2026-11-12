@@ -26,7 +26,7 @@ To focus a run, append `--group=chat`, `--group=workspace`, or individual suite 
 
 1. Run **Actions → Release → Run workflow** on `main` to prepare a candidate. Download `release-candidate` from the completed run; artifacts are retained for seven days.
 2. For a release, update the root `package.json` version and its lockfile, commit to `main`, then push a matching tag such as `v0.1.0`. Tags must point to commits in `main` history.
-3. Review the resulting draft on **Releases**, then publish it. The draft includes an app archive with the built client, a Linux x64 Docker worker archive, checksums, a manifest, and the exact npm dependency lockfile.
+3. Review the resulting draft on **Releases**, then publish it. The draft includes an app archive with the built client and public Lemex runtime for account model discovery, a Linux x64 Docker worker archive, checksums, a manifest, and the exact npm dependency lockfile.
 
 Only the draft-release job receives release-writing permissions. All external actions are pinned to full commit hashes. Repository administrators can add reviewers to the `release` environment and make **CI passed** a required branch check. Fork pull requests use GitHub-hosted runners with read-only repository access.
 

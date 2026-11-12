@@ -18,6 +18,8 @@ const base = `http://127.0.0.1:${server.address().port}`
 const execute = promisify(execFile)
 const chatSuites = [
   'auth-recovery',
+  'session-inactivity',
+  'profile',
   'provider-settings',
   'model-options',
   'chat-naming',

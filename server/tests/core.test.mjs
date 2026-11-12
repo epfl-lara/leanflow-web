@@ -333,6 +333,7 @@ test('authentication persists private tokens, signs cookies, and rejects tamperi
   assert.deepEqual(auth.public(user), {
     id: 'owner',
     name: 'Owner',
+    profileComplete: false,
     role: 'owner',
   })
   assert.ok(!JSON.stringify(auth.users).includes(token))
@@ -345,7 +346,7 @@ test('authentication persists private tokens, signs cookies, and rejects tamperi
     'Path=/',
     'HttpOnly',
     'SameSite=Strict',
-    'Max-Age=43200',
+    'Max-Age=172800',
     'Secure',
   ])
     assert.ok(cookie.includes(attribute))
@@ -1018,7 +1019,7 @@ test('HTTP authentication and login keep collaborator tokens and provider creden
   assert.equal(login.status, 200)
   const body = await login.text()
   assert.deepEqual(JSON.parse(body), {
-    user: { id: 'owner', name: 'Owner', role: 'owner' },
+    user: { id: 'owner', name: 'Owner', role: 'owner', profileComplete: false },
   })
   assert.ok(!body.includes(token) && !body.includes('tokenHash'))
   const cookie = login.headers.get('set-cookie')

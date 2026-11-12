@@ -17,6 +17,7 @@ import {
   pretty,
   SESSION_EXPIRED_EVENT,
   SESSION_RESTORED_EVENT,
+  type Account,
   type FileEntry,
   type GitInfo,
   type Project,
@@ -70,6 +71,7 @@ import { GitModal } from './GitModal'
 import { GitConnectionsDialog } from './GitConnectionsDialog'
 import { ResizeHandle } from './ResizeHandle'
 import { SessionRecovery } from './SessionRecovery'
+import { useSessionActivity } from './useSessionActivity'
 import type {
   EditorProofState,
   ProofEditorRequest,
@@ -172,7 +174,12 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
         </form>
         <p className="login-help">
           Use your personal token from an administrator. On your first visit,
-          connect your account with your own Lemex API key.
+          confirm your name and connect your own Lemex API key.
+        </p>
+        <p className="login-help">
+          Need access? Email{' '}
+          <a href="mailto:lazar.milikic@epfl.ch">lazar.milikic@epfl.ch</a> to
+          request an invitation token.
         </p>
       </div>
       <div className="login-art" aria-hidden="true">
@@ -235,9 +242,14 @@ export function Studio() {
   )
   const [session, setSession] = useState<Session | null>(null)
   const [authRequired, setAuthRequired] = useState(false)
+  const { pause: pauseSessionActivity, resume: resumeSessionActivity } =
+    useSessionActivity(session?.user.id, authRequired)
+  const [loggingOut, setLoggingOut] = useState(false)
+  const logoutPending = useRef(false)
   const [startupError, setStartupError] = useState('')
   const [sessionRefreshing, setSessionRefreshing] = useState(false)
   const sessionRequest = useRef(0)
+  const profileRevision = useRef(0)
   const [projects, setProjects] = useState<Project[]>([])
   const [projectId, setSelectedProjectId] = useState<string | null>(null)
   const [files, setFiles] = useState<FileEntry[]>([])
@@ -546,15 +558,50 @@ export function Studio() {
     [bufferStore, scope],
   )
 
+  const acceptProfile = useCallback((user: Account) => {
+    profileRevision.current++
+    setSession((current) =>
+      current?.user.id === user.id ? { ...current, user } : current,
+    )
+  }, [])
+
+  const logout = useCallback(async () => {
+    if (logoutPending.current) return
+    logoutPending.current = true
+    setLoggingOut(true)
+    try {
+      await pauseSessionActivity()
+      await post('/api/logout')
+      sessionRequest.current++
+      setSessionRefreshing(false)
+      setSession(null)
+      setAuthRequired(true)
+      setProjectId(null)
+      setFile(null)
+    } catch (error) {
+      resumeSessionActivity()
+      throw error
+    } finally {
+      logoutPending.current = false
+      setLoggingOut(false)
+    }
+  }, [pauseSessionActivity, resumeSessionActivity, setProjectId, setFile])
+
   const loadSession = useCallback(async () => {
     const request = ++sessionRequest.current
+    const profileAtStart = profileRevision.current
     setSessionRefreshing(true)
     setStartupError('')
     try {
       const value = await api<Session>('/api/session')
       if (request !== sessionRequest.current) return
       setRunEventTransport(value.eventTransport)
-      setSession(value)
+      setSession((current) =>
+        profileAtStart !== profileRevision.current &&
+        current?.user.id === value.user.id
+          ? { ...value, user: current.user }
+          : value,
+      )
       setAuthRequired(false)
     } catch (error) {
       if (request !== sessionRequest.current) return
@@ -1739,21 +1786,26 @@ export function Studio() {
         }}
       />
     )
-  if (session && session.lemex?.configured === false && !authRequired)
+  if (
+    session &&
+    (session.user.profileComplete === false ||
+      session.lemex?.configured === false)
+  )
     return (
-      <AccountSetup
-        session={session}
-        refreshError={startupError}
-        refreshing={sessionRefreshing}
-        onRetry={() => void loadSession()}
-        onSaved={() => {
-          void loadSession()
-        }}
-        onLogout={() => {
-          setSession(null)
-          setAuthRequired(true)
-        }}
-      />
+      <>
+        <AccountSetup
+          session={session}
+          refreshError={startupError}
+          refreshing={sessionRefreshing}
+          onRetry={() => void loadSession()}
+          onSaved={() => {
+            void loadSession()
+          }}
+          onProfileSaved={acceptProfile}
+          onLogout={logout}
+        />
+        {authRequired && <SessionRecovery user={session.user} />}
+      </>
     )
   if (!session)
     return (
@@ -2088,47 +2140,48 @@ export function Studio() {
             </div>
           )}
         <div className="sidebar-footer">
-          <span className="user-avatar">
-            {session.user.name?.[0]?.toUpperCase() || 'U'}
-          </span>
-          <span
-            className="user-name"
-            title={`${session.user.name} · ${session.user.role === 'owner' ? 'Owner / admin' : session.user.role}`}
-          >
-            {session.user.name}
-          </span>
           <button
-            className="icon-button"
-            title={theme === 'light' ? 'Use dark theme' : 'Use light theme'}
-            aria-label={
-              theme === 'light' ? 'Use dark theme' : 'Use light theme'
-            }
-            onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+            type="button"
+            className="account-button"
+            aria-label="Account settings"
+            title="Account settings · Profile, API key, and assistant preferences"
+            onClick={() => setSettingsModal(true)}
           >
-            <Icon name={theme === 'light' ? 'moon' : 'sun'} size={17} />
+            <span className="user-avatar">
+              {session.user.name?.[0]?.toUpperCase() || 'U'}
+            </span>
+            <span className="account-summary">
+              <span className="user-name">{session.user.name}</span>
+              <span className="account-hint">Profile &amp; API key</span>
+            </span>
           </button>
-          <button
-            className="icon-button"
-            aria-label="Open Trash"
-            title="Open Trash"
-            onClick={() => void showTrash()}
-          >
-            <Icon name="trash" size={16} />
-          </button>
-          <button
-            className="logout-button"
-            onClick={() =>
-              navigate(async () => {
-                await post('/api/logout')
-                setSession(null)
-                setAuthRequired(true)
-                setProjectId(null)
-                setFile(null)
-              })
-            }
-          >
-            Sign out
-          </button>
+          <div className="sidebar-footer-actions">
+            <button
+              className="icon-button"
+              title={theme === 'light' ? 'Use dark theme' : 'Use light theme'}
+              aria-label={
+                theme === 'light' ? 'Use dark theme' : 'Use light theme'
+              }
+              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+            >
+              <Icon name={theme === 'light' ? 'moon' : 'sun'} size={17} />
+            </button>
+            <button
+              className="icon-button"
+              aria-label="Open Trash"
+              title="Open Trash"
+              onClick={() => void showTrash()}
+            >
+              <Icon name="trash" size={16} />
+            </button>
+            <button
+              className="logout-button"
+              disabled={loggingOut}
+              onClick={() => navigate(logout)}
+            >
+              {loggingOut ? 'Signing out…' : 'Sign out'}
+            </button>
+          </div>
         </div>
       </aside>
       {sidebarOpen && mobileLayout && (
@@ -2918,6 +2971,7 @@ export function Studio() {
           <div className="tool-view">
             {project?.status === 'ready' ? (
               <AssistantPanel
+                onOpenSettings={() => setSettingsModal(true)}
                 key={project.id}
                 projectId={project.id}
                 file={pdfPreview ? undefined : file?.path}
@@ -3183,6 +3237,7 @@ export function Studio() {
       {settingsModal && (
         <SettingsModal
           user={session.user}
+          onProfileSaved={acceptProfile}
           onProviderSaved={() => {
             void loadSession()
           }}

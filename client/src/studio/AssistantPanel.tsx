@@ -69,6 +69,7 @@ export function AssistantPanel({
   onDeleteChat,
   session,
   onModelsUpdated,
+  onOpenSettings,
   beforeRun,
   beforeApply,
   onDiscard,
@@ -92,6 +93,7 @@ export function AssistantPanel({
   onDeleteChat: (chat: { id: string; title: string }) => void
   session: Session
   onModelsUpdated: (access: ModelAccess) => void
+  onOpenSettings: () => void
   beforeRun: () => Promise<void>
   beforeApply: () => Promise<void>
   onDiscard: () => Promise<void>
@@ -934,7 +936,13 @@ export function AssistantPanel({
       {!session.models.length && (
         <p className="error-message" role="alert">
           {session.lemex?.modelError || 'No model is available with your key.'}{' '}
-          Open Assistant settings to refresh models or update your API key.
+          <button
+            type="button"
+            className="model-settings-link"
+            onClick={onOpenSettings}
+          >
+            Open API key settings
+          </button>
         </p>
       )}
       {!!session.models.length && (!selectedModel || !effortAvailable) && (

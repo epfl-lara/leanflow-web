@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs'
+import { constants } from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -44,6 +45,14 @@ export async function discoverNativeModels({
   fetchImpl = fetchProvider,
 }) {
   const base = endpoint(provider.LEMEX_BASE_URL)
+  const executable = path.join(config.lemexHome, 'bin/lemex')
+  try {
+    await fs.access(executable, constants.X_OK)
+  } catch {
+    throw failure(
+      'The server’s Lemex runtime is unavailable. Ask the administrator to restore it, then refresh models.',
+    )
+  }
   const home = await fs.mkdtemp(path.join(directory, 'catalog-'))
   let child, stopped, rpc, catalogServer
   try {
@@ -114,22 +123,18 @@ export async function discoverNativeModels({
     )
     // Deliberately avoid inherited provider/auth overrides and the operator's
     // home. Keys travel only in this child's environment, never argv or files.
-    child = spawn(
-      path.join(config.lemexHome, 'bin/lemex'),
-      ['app-server', '--stdio', '--strict-config'],
-      {
-        cwd: home,
-        env: {
-          PATH: process.env.PATH,
-          HOME: home,
-          LEMEX_HOME: home,
-          LEMEX_API_KEY: provider.LEMEX_API_KEY,
-          LEMEX_BASE_URL: base,
-        },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        signal,
+    child = spawn(executable, ['app-server', '--stdio', '--strict-config'], {
+      cwd: home,
+      env: {
+        PATH: process.env.PATH,
+        HOME: home,
+        LEMEX_HOME: home,
+        LEMEX_API_KEY: provider.LEMEX_API_KEY,
+        LEMEX_BASE_URL: base,
       },
-    )
+      stdio: ['pipe', 'pipe', 'pipe'],
+      signal,
+    })
     stopped = new Promise((resolve) => {
       child.once('close', resolve)
       child.once('error', resolve)

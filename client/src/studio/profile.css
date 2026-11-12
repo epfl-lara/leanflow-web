@@ -1,0 +1,32 @@
+.profile-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.profile-identity input {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.profile-identity .copy-button {
+  flex-shrink: 0;
+}
+
+.account-settings-heading {
+  margin: 28px 0 12px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 450px) {
+  .profile-identity {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .profile-identity .copy-button {
+    align-self: flex-start;
+  }
+}

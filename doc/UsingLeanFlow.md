@@ -214,6 +214,8 @@ In **Trash**, each item shows its size in MB. Files, folders, and projects show 
 
 To empty Trash, choose **Delete All**, review the item count and total size, then choose **Delete Forever**. **Do Nothing** keeps the items. If an item cannot be deleted, the dialog explains why and lets you retry the remaining items. Items added to Trash after the confirmation opened are kept.
 
-Drag separators to resize panels; double-click to reset. If sign-in expires, use the recovery dialog with the same token to keep your edits and drafts.
+Drag separators to resize panels; double-click to reset.
+
+You stay signed in while using LeanFlow. Sign in again after 48 hours without activity. Typing, clicking, and scrolling renew your session; leaving a tab open does not. If sign-in expires, use the recovery dialog with the same access token to keep your edits and drafts. Your invitation token and saved API key are unchanged.
 
 For setup, see [Install and run](LemexWeb.md#install-and-run) and [Hosting](Hosting.md). Advanced settings are in [Configuration](Configuration.md).

@@ -72,12 +72,12 @@ test('session recovery renews an expired cookie only for the expected workspace 
   const renewed = await login({ token, expectedUserId: 'owner' })
   assert.equal(renewed.status, 200)
   assert.deepEqual(await renewed.json(), {
-    user: { id: 'owner', name: 'Owner', role: 'owner' },
+    user: { id: 'owner', name: 'Owner', role: 'owner', profileComplete: false },
   })
   const cookie = renewed.headers.get('set-cookie')
   assert.match(cookie, /HttpOnly/)
   assert.match(cookie, /SameSite=Strict/)
-  assert.match(cookie, /Max-Age=43200/)
+  assert.match(cookie, /Max-Age=172800/)
   const session = await request('/api/session', {
     headers: { Cookie: cookie.split(';')[0] },
   })

@@ -545,12 +545,20 @@ textarea {
   padding: 7px 0;
 }
 .sidebar-footer {
-  padding: 14px 10px;
+  padding: 10px;
   border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.sidebar-footer-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-shrink: 0;
+}
+.sidebar-footer-actions .logout-button {
+  margin-left: auto;
 }
 .user-avatar {
   display: flex;
@@ -564,6 +572,39 @@ textarea {
   font-size: 11px;
   font-weight: 600;
   flex-shrink: 0;
+}
+.account-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+}
+.account-button:hover {
+  background: var(--accent-soft);
+}
+.account-summary {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+.account-hint {
+  color: var(--muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.model-settings-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-decoration: underline;
 }
 .user-name {
   font-size: 11px;

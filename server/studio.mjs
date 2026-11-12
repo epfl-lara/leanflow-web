@@ -522,6 +522,28 @@ export async function createStudio({
     )
     res.json({ ok: true })
   })
+  // Only explicit browser activity renews sign-in. Polls and event streams must
+  // not keep an unattended account signed in indefinitely.
+  app.post('/api/session/activity', (req, res) => {
+    if (
+      !req.body ||
+      typeof req.body !== 'object' ||
+      Array.isArray(req.body) ||
+      Object.keys(req.body).length
+    )
+      throw Object.assign(
+        new Error('Send an empty JSON object to renew your session.'),
+        { status: 400 },
+      )
+    res.setHeader(
+      'Set-Cookie',
+      auth.cookie(req.user, !!origin?.startsWith('https:')),
+    )
+    res.json({ ok: true })
+  })
+  app.put('/api/profile', async (req, res) =>
+    res.json(await auth.updateProfile(req.user, req.body)),
+  )
   app.get('/api/templates', (_req, res) => res.json(runtime.templates()))
   app.get('/api/session', async (req, res) => {
     let modelAccess

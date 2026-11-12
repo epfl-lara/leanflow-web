@@ -163,6 +163,7 @@ export async function chatBrowserFixture({
   }
   const report = {
     requests: [],
+    sessionActivityRequests: [],
     unexpectedRequests: [],
     errors: [],
     sockets: [],
@@ -253,6 +254,11 @@ export async function chatBrowserFixture({
       method = request.method()
     let body
     if (request.postData()) body = request.postDataJSON()
+    if (endpoint === '/api/session/activity' && method === 'POST') {
+      // Keep session transport separate from assertions about workspace writes.
+      report.sessionActivityRequests.push({ method, endpoint, body })
+      return route.fulfill({ json: { ok: true } })
+    }
     report.requests.push({
       method,
       endpoint,

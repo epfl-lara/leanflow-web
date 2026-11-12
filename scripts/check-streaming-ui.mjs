@@ -202,6 +202,8 @@ await page.route('**/api/**', async (route) => {
       contentType: 'application/json',
       body: JSON.stringify(value),
     })
+  if (method === 'POST' && endpoint === '/api/session/activity')
+    return json({ ok: true })
   if (method === 'GET') {
     if (endpoint === '/api/session') return json(session)
     if (endpoint === '/api/projects') return json([project])
