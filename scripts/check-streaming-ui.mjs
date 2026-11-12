@@ -685,7 +685,7 @@ try {
   await composer.fill('A separate chat draft.')
   assert(await composer.isEditable())
   assert(
-    await page.getByRole('button', { name: 'Send', exact: true }).isDisabled(),
+    await page.getByRole('button', { name: 'Send', exact: true }).isEnabled(),
   )
   await page.getByLabel('Select chat').selectOption(chatId)
   await until(

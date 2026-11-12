@@ -95,10 +95,11 @@ export async function fetchProvider(
         }),
       ]).finally(() => signal.removeEventListener('abort', abortDns))
   // EPFL's official RCP host resolves to RFC1918 inside its network. Trust
-  // only that exact TLS origin and API prefix, never arbitrary private hosts.
+  // only that exact TLS origin, API prefix and key-info route, never arbitrary
+  // private hosts or other management routes.
   const trustedRcp =
     parsed.origin === 'https://inference.rcp.epfl.ch' &&
-    parsed.pathname.startsWith('/v1/')
+    (parsed.pathname.startsWith('/v1/') || parsed.pathname === '/key/info')
   const rcpInternal = (address) => {
     if (!trustedRcp || isIP(address) !== 4) return false
     const [a, b] = address.split('.').map(Number)

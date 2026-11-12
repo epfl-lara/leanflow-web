@@ -12,6 +12,7 @@ import {
   providerLimitMessage,
 } from '../provider-requests.mjs'
 import { RCP_BASE_URL } from '../provider-endpoint.mjs'
+import { RcpKeyLimits } from '../provider-limits.mjs'
 import { createChatTitleGenerator } from '../chat-titles.mjs'
 import { AgentManager } from '../agents.mjs'
 import { EventStore } from '../events.mjs'
@@ -67,6 +68,66 @@ test('foreground reservations take priority over pending titles without interrup
   foreground.release()
   assert(title.tryAcquire())
   title.release()
+})
+
+test('a verified five-slot key starts five tasks and queues, cancels and releases the sixth safely', async () => {
+  const requests = new ProviderRequests({
+    limits: new RcpKeyLimits({
+      fetchImpl: async () =>
+        Response.json({ info: { max_parallel_requests: 5 } }),
+    }),
+  })
+  await requests.prepare(rcp())
+  const active = Array.from({ length: 5 }, () => requests.reserve(rcp()))
+  for (const task of active) assert(task.tryAcquire())
+  const waiting = requests.reserve(rcp()),
+    controller = new AbortController(),
+    notices = []
+  const pending = waiting.wait(controller.signal, (message) =>
+    notices.push(message),
+  )
+  assert(!waiting.tryAcquire())
+  controller.abort(new Error('Cancel sixth task'))
+  await assert.rejects(pending, /Cancel sixth task/)
+  const next = requests.reserve(rcp())
+  assert(!next.tryAcquire(), 'Cancelling a wait cannot free an active slot')
+  active[0].release()
+  await next.wait()
+  active[0].release()
+  const seventh = requests.reserve(rcp())
+  assert(!seventh.tryAcquire(), 'Releasing twice cannot free another slot')
+  assert.equal(notices.length, 1)
+  next.release()
+  assert(seventh.tryAcquire())
+  for (const task of [...active, seventh]) task.release()
+  assert.equal(requests.listenerCount('available'), 0)
+})
+
+test('a lower refreshed key limit drains active tasks before admitting more work', async () => {
+  let now = 0,
+    limit = 2
+  const requests = new ProviderRequests({
+    limits: new RcpKeyLimits({
+      now: () => now,
+      fetchImpl: async () =>
+        Response.json({ info: { max_parallel_requests: limit } }),
+    }),
+  })
+  await requests.prepare(rcp())
+  const first = requests.reserve(rcp()),
+    second = requests.reserve(rcp()),
+    waiting = requests.reserve(rcp())
+  assert(first.tryAcquire())
+  assert(second.tryAcquire())
+  assert(!waiting.tryAcquire())
+  now = 300_000
+  limit = 1
+  await requests.prepare(rcp())
+  first.release()
+  assert(!waiting.tryAcquire())
+  second.release()
+  assert(waiting.tryAcquire())
+  waiting.release()
 })
 
 test('background request slots count only acquired keys and remain bounded across providers', async () => {
@@ -150,7 +211,7 @@ test('RCP errors distinguish retryable busy requests from exhausted quota using 
     { message: 'Too many concurrent requests ' + secret },
     provider,
   )
-  assert.match(ended, /including requests from other apps/)
+  assert.match(ended, /includes requests from other apps/)
   assert(!ended.includes(secret))
   const quota = providerLimitMessage(
     { message: secret, codexErrorInfo: 'usageLimitExceeded' },
@@ -447,6 +508,7 @@ test('studio setup repair receives its full execution budget after the RCP key w
     config,
     capacity: { ...loadCapacity({}), setupRepairTimeoutMs: 25 },
     modelDiscoverer: fixtureModelDiscovery,
+    providerLimits: { get: async () => 1, current: () => 1 },
   })
   const foreground = providerRequestsFor(config).reserve(rcp())
   assert(foreground.tryAcquire())
@@ -600,11 +662,34 @@ test('blocked same-key agents take no global slot and do not block another key; 
   assert.equal(f.events.get(blocked.id).status, 'queued')
   assert.match(
     f.events.get(blocked.id).progress.detail,
-    /one RCP task at a time per key/,
+    /available parallel task slot/,
   )
   await f.manager.stop('bob', blocked.id)
   assert.equal(f.events.get(blocked.id).status, 'cancelled')
   assert(!f.snapshots.some((item) => item.owner === 'bob'))
+})
+
+test('a verified Pro key runs chats in separate projects together while preserving the project and global limits', async (t) => {
+  const f = await managerFixture(t)
+  f.manager.providerRequests.limits = new RcpKeyLimits({
+    fetchImpl: async () =>
+      Response.json({ info: { max_parallel_requests: 5 } }),
+  })
+  await f.manager.providerRequests.prepare(rcp())
+  const first = await f.start('alice', 'one')
+  const second = await f.start('alice', 'two')
+  await until(() => f.snapshots.length === 2)
+  assert.equal(f.events.get(first.id).status, 'running')
+  assert.equal(f.events.get(second.id).status, 'running')
+  const third = await f.start('alice', 'three')
+  assert.equal(f.events.get(third.id).status, 'queued')
+  assert.equal(f.manager.running, 2, 'The server agent limit still applies')
+  await assert.rejects(f.start('alice', 'one'), {
+    status: 409,
+    message: /This chat already has an active Lemex run/,
+  })
+  await f.manager.stop('alice', third.id)
+  assert.equal(f.events.get(third.id).status, 'cancelled')
 })
 
 test('foreground admission reserves the RCP key before automatic chat naming can call the provider', async (t) => {

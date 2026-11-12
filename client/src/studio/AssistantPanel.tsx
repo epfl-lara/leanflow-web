@@ -180,10 +180,21 @@ export function AssistantPanel({
     null,
   )
   const conversationScroll = useConversationScroll(chatId)
-  const activeRun = projectRuns.find(runIsActive)
+  const activeRuns = projectRuns.filter(runIsActive)
+  const activeRun =
+    activeRuns.find((run) => (run.chatId || null) === chatId) ||
+    projectRuns.find(
+      (run) => stoppingIds.includes(run.id) && (run.chatId || null) === chatId,
+    ) ||
+    activeRuns[0]
   const statusRun =
-    activeRun || projectRuns.find((item) => stoppingIds.includes(item.id))
-  const activeHere = !!activeRun && activeRun.chatId === chatId
+    activeRun || projectRuns.find((run) => stoppingIds.includes(run.id))
+  const activeHere = !!activeRun && (activeRun.chatId || null) === chatId
+  const hasChatActive =
+    activeHere ||
+    projectRuns.some(
+      (run) => stoppingIds.includes(run.id) && (run.chatId || null) === chatId,
+    )
   const acceptingUpdate =
     activeHere &&
     ['queued', 'starting', 'preparing', 'running'].includes(
@@ -623,7 +634,12 @@ export function AssistantPanel({
   })
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (!canRun || !prompt.trim() || busy || (hasActive && !acceptingUpdate))
+    if (
+      !canRun ||
+      !prompt.trim() ||
+      busy ||
+      (hasChatActive && !acceptingUpdate)
+    )
       return
     // Sending is an explicit choice of this visible conversation. Startup
     // restoration must not redirect it while its first chat is being created.
@@ -883,7 +899,7 @@ export function AssistantPanel({
           )
         }}
         disabled={applying || discarding}
-        deleteDisabled={activeHere}
+        deleteDisabled={hasChatActive}
         loading={chatBusy}
       />
       <div className="assistant-mode-picker">
@@ -930,7 +946,7 @@ export function AssistantPanel({
         }
         liveEdits={currentLiveEdits}
         onLiveEdits={mode === 'search' ? setSearchLiveEdits : setLiveEdits}
-        active={hasActive}
+        active={hasChatActive}
       />
       {!session.models.length && (
         <p className="error-message" role="alert">
@@ -1004,6 +1020,25 @@ export function AssistantPanel({
             {stopping ? 'Stopping…' : 'Stop'}
           </button>
         </div>
+      )}
+      {activeRuns.length > 1 && (
+        <nav className="chat-parallel-work" aria-label="Other active chats">
+          <span>{activeRuns.length} active chats</span>
+          {activeRuns
+            .filter((run) => run.chatId && run.id !== statusRun?.id)
+            .map((run) => (
+              <button
+                type="button"
+                key={run.id}
+                onClick={() => {
+                  if (run.chatId) void openChat(run.chatId)
+                }}
+              >
+                {chats.find((chat) => chat.id === run.chatId)?.title ||
+                  'Open working chat'}
+              </button>
+            ))}
+        </nav>
       )}
       <div className="assistant-output">
         <div
@@ -1142,7 +1177,7 @@ export function AssistantPanel({
                 ? `Current file: ${currentFile} (included automatically)`
                 : target || 'Project context'}
             </span>
-            {dirty && !hasActive && (
+            {dirty && !hasChatActive && (
               <span className="tag">Saves before sending</span>
             )}
           </div>
@@ -1204,12 +1239,10 @@ export function AssistantPanel({
           )}
           <div className="composer-footer">
             <span>
-              {hasActive
+              {hasChatActive
                 ? acceptingUpdate
                   ? 'Your update will be picked up after the current step.'
-                  : activeHere
-                    ? 'Checking or stopping; your next draft is kept.'
-                    : 'Open the active chat to send an update.'
+                  : 'Checking or stopping; your next draft is kept.'
                 : 'Enter to send · Shift+Enter for a new line'}
             </span>
             <button
@@ -1221,7 +1254,7 @@ export function AssistantPanel({
                 chatBusy ||
                 !prompt.trim() ||
                 busy ||
-                (hasActive
+                (hasChatActive
                   ? !acceptingUpdate
                   : !selectedModel || !effortAvailable)
               }

@@ -47,6 +47,23 @@ const historical = {
     },
   ],
   verification: { complete: true, compiled: true, kernelChecked: true },
+  log: Array.from(
+    { length: 80 },
+    (_, index) =>
+      `Check ${index}: reading /workspace/Proofs/Helper.lean and checking the saved candidate.`,
+  ).join('\n'),
+  usage: {
+    last: { inputTokens: 213466 },
+    modelContextWindow: 228000,
+    total: {
+      inputTokens: 12189411,
+      cachedInputTokens: 12104320,
+      outputTokens: 134016,
+      cacheWriteInputTokens: 82624,
+      reasoningOutputTokens: 89959,
+      totalTokens: 12323427,
+    },
+  },
   eventCursor: 1,
 }
 const active = {
@@ -253,6 +270,43 @@ try {
     'Stopping an unfinished tool reports a missing result; only independent final verification receives the final check badge',
   )
 
+  await old.locator('.turn-details > summary').click()
+  await old.locator('.activity-log > summary').click()
+  const log = old.locator('.activity-log pre')
+  assert.equal(await log.textContent(), historical.log)
+  assert(
+    await log.evaluate((element) => {
+      const text = document.createRange()
+      text.selectNodeContents(element)
+      return (
+        text.getBoundingClientRect().left -
+          element.getBoundingClientRect().left >=
+          12 && element.scrollHeight > element.clientHeight
+      )
+    }),
+    'Technical text needs a left inset and its own bounded scroll area',
+  )
+  await old.locator('.usage-request > summary').click()
+  const cards = old.locator('.usage-totals > div')
+  assert.equal(await cards.count(), 6)
+  assert.equal(await cards.locator('dd').first().innerText(), '12,189,411')
+  assert.equal(await old.locator('.usage-raw pre').isVisible(), false)
+  assert(
+    await cards.evaluateAll((elements) =>
+      elements.every((element) => {
+        const style = getComputedStyle(element)
+        return (
+          parseFloat(style.borderLeftWidth) >= 1 &&
+          parseFloat(style.paddingLeft) >= 10
+        )
+      }),
+    ),
+    'Token totals need clearly bordered, padded cards',
+  )
+  report.checks.push(
+    'Technical logs preserve their text with inset spacing and bounded scrolling; all six usage totals appear in bordered cards',
+  )
+
   for (const [width, height] of [
     [1600, 1000],
     [1366, 768],
@@ -275,16 +329,51 @@ try {
         () => document.documentElement.scrollWidth <= window.innerWidth + 1,
       ),
     )
+    await old.locator('.usage-details').scrollIntoViewIfNeeded()
+    assert(
+      await cards.evaluateAll((elements) =>
+        elements.every((element) => {
+          const parent = element.parentElement.getBoundingClientRect()
+          const card = element.getBoundingClientRect()
+          return (
+            card.left >= parent.left &&
+            card.right <= parent.right + 1 &&
+            element.scrollWidth <= element.clientWidth + 1
+          )
+        }),
+      ),
+      'Usage cards must fit the available chat width',
+    )
+    assert(
+      await log.evaluate(
+        (element) => element.scrollWidth <= element.clientWidth + 1,
+      ),
+      'Long technical lines must wrap inside the log',
+    )
+    await page.locator('.chat-workbench').screenshot({
+      path: new URL(`run-details-${width}.png`, output).pathname,
+    })
     await page.screenshot({
       path: new URL(`dark-${width}.png`, output).pathname,
       fullPage: true,
     })
   }
-  await page.setViewportSize({ width: 1600, height: 1000 })
+  await page.setViewportSize({ width: 1600, height: 1500 })
+  await old
+    .locator('.turn-details > summary')
+    .evaluate((element) => element.scrollIntoView({ block: 'start' }))
+  await log.evaluate((element) => {
+    element.scrollTop = 0
+  })
+  await page.locator('.chat-workbench').screenshot({
+    path: new URL('run-details-desktop.png', output).pathname,
+  })
   await page
     .getByRole('button', { name: 'Use light theme', exact: true })
     .click()
-  await old.locator('.tool-step > summary').scrollIntoViewIfNeeded()
+  await page.locator('.chat-workbench').screenshot({
+    path: new URL('run-details-light.png', output).pathname,
+  })
   await page.screenshot({
     path: new URL('light-desktop.png', output).pathname,
     fullPage: true,

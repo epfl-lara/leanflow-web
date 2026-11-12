@@ -119,9 +119,11 @@ export function ProviderKeyForm({
             (opens in a new tab).
           </p>
           <p className="field-help">
-            Free RCP keys allow one model request at a time. Chats using the
-            same RCP key wait their turn and start automatically. You can stop a
-            waiting chat.
+            LeanFlow checks the parallel request limit reported for your RCP
+            key. If no limit is reported, tasks run one at a time. Waiting chats
+            start automatically and can be stopped. Separate chats can work in
+            the same project. Live edits pause if a file has changed underneath
+            a chat.
           </p>
         </>
       )}

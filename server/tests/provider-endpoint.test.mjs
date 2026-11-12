@@ -111,6 +111,16 @@ test('the official RCP TLS origin supports EPFL internal DNS without opening oth
     (await fetchProvider(RCP_BASE_URL + '/models', {}, transport)).status,
     401,
   )
+  assert.equal(
+    (
+      await fetchProvider(
+        'https://inference.rcp.epfl.ch/key/info',
+        {},
+        transport,
+      )
+    ).status,
+    401,
+  )
   await assert.rejects(
     () => fetchProvider('https://custom.example/v1/models', {}, transport),
     { status: 400 },
@@ -119,7 +129,12 @@ test('the official RCP TLS origin supports EPFL internal DNS without opening oth
     () => fetchProvider('https://inference.rcp.epfl.ch/private', {}, transport),
     { status: 400 },
   )
-  assert.equal(requests, 1)
+  await assert.rejects(
+    () =>
+      fetchProvider('https://inference.rcp.epfl.ch/key/list', {}, transport),
+    { status: 400 },
+  )
+  assert.equal(requests, 2)
 })
 
 test('mixed/private DNS, oversized responses and cancellation fail before returning provider data', async () => {

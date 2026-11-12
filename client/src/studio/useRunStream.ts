@@ -11,7 +11,7 @@ import { hydrateReasoningHistory } from './reasoningHistory'
 import { runChangePaths } from './chatTimeline'
 import { openRunEvents } from './runEventTransport'
 
-/** Follow the active project run independently of which chat or turn is open. */
+/** Follow the selected chat's run, or background work when that chat is idle. */
 export function useRunStream(
   id: string | null,
   callbacks: {

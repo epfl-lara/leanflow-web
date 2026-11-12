@@ -14,6 +14,7 @@ import { PassThrough } from 'node:stream'
 import WebSocket from 'ws'
 import { loadCapacity } from '../capacity.mjs'
 import { createStudio } from '../studio.mjs'
+import { RcpKeyLimits } from '../provider-limits.mjs'
 
 test('invalid capacity settings fail before startup rather than disabling admission limits', () => {
   for (const name of [
@@ -50,7 +51,12 @@ test('invalid capacity settings fail before startup rather than disabling admiss
   )
 })
 
-async function fixture(t, extraCapacity = {}, runtimeInfo = {}) {
+async function fixture(
+  t,
+  extraCapacity = {},
+  runtimeInfo = {},
+  providerLimits = { get: async () => 1, current: () => 1 },
+) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-capacity-'))
   const children = new Set()
   const capacity = loadCapacity({
@@ -87,6 +93,7 @@ async function fixture(t, extraCapacity = {}, runtimeInfo = {}) {
   }
   const studio = await createStudio({
     modelDiscoverer: fixtureModelDiscovery,
+    providerLimits,
     dataDir,
     runtime,
     capacity,
@@ -214,6 +221,97 @@ test('three assistant tasks execute concurrently while a fourth waits for capaci
     manager.stopping = true
     for (const reject of pending) reject(new Error('End of capacity fixture'))
     await manager.shutdown()
+  }
+})
+
+test('HTTP chat admission starts separate chats in one project, rejects duplicate runs in a chat, and stops only the chosen run', async (t) => {
+  let metadataCalls = 0
+  const limits = new RcpKeyLimits({
+    fetchImpl: async (url) => {
+      metadataCalls++
+      assert.equal(String(url), 'https://inference.rcp.epfl.ch/key/info')
+      return Response.json({ info: { max_parallel_requests: 5 } })
+    },
+  })
+  const f = await fixture(t, {}, {}, limits),
+    pending = [],
+    jobs = [],
+    chats = []
+  f.studio.workspaces.snapshot = (_project, _owner, _runId, { signal }) =>
+    new Promise((_resolve, reject) => {
+      pending.push(reject)
+      signal.addEventListener('abort', () => reject(signal.reason), {
+        once: true,
+      })
+    })
+  const start = (chat) =>
+    fetch(`${f.base}/api/chats/${chat.id}/runs`, {
+      method: 'POST',
+      headers: { ...f.headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'proofs',
+        prompt: 'Check the proof.',
+        model: 'test',
+      }),
+    })
+  try {
+    const project = f.projects[0]
+    for (let i = 0; i < 2; i++)
+      chats.push(f.studio.chats.create('owner', project.id))
+    const responses = await Promise.all(chats.map(start))
+    for (const response of responses) {
+      assert.equal(response.status, 202)
+      jobs.push(await response.json())
+    }
+    const deadline = Date.now() + 2000
+    while (pending.length < 2 && Date.now() < deadline)
+      await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(pending.length, 2)
+    assert.equal(f.studio.agents.running, 2)
+    assert.equal(metadataCalls, 1)
+    for (const job of jobs)
+      assert.equal(f.studio.events.getMetadata(job.id).status, 'running')
+    assert.throws(
+      () =>
+        f.studio.workspaces.assertConfigurationIdle(project.id, 'owner', {
+          agentRunId: jobs[0].id,
+        }),
+      { status: 409 },
+      'One chat cannot change the environment while another chat is running',
+    )
+    const response = await start(chats[0])
+    assert.equal(response.status, 409)
+    assert.match(
+      (await response.json()).error,
+      /This chat already has an active Lemex run/,
+    )
+    const stopped = await fetch(`${f.base}/api/runs/${jobs[0].id}/stop`, {
+      method: 'POST',
+      headers: { ...f.headers, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(stopped.status, 200)
+    assert.equal((await stopped.json()).status, 'cancelled')
+    assert.equal(f.studio.events.getMetadata(jobs[1].id).status, 'running')
+    assert.equal(f.studio.agents.running, 1)
+    const resumed = await start(chats[0])
+    assert.equal(resumed.status, 202)
+    assert.notEqual((await resumed.json()).id, jobs[0].id)
+    const next = Date.now() + 2000
+    while (pending.length < 3 && Date.now() < next)
+      await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(pending.length, 3)
+    await f.studio.agents.stopProject('owner', project.id)
+    assert.equal(f.studio.agents.running, 0)
+    assert.equal(
+      f.studio.events.activeMetadata('owner', project.id, 'agent').length,
+      0,
+    )
+  } finally {
+    f.studio.agents.stopping = true
+    for (const reject of pending)
+      reject(new Error('End of chat admission fixture'))
+    await f.studio.agents.shutdown()
   }
 })
 

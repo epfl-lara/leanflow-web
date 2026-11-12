@@ -542,7 +542,7 @@ test('Undo of an older chat cannot modify saved sources while another project ta
   )
 })
 
-test('the controller and real workspace store preserve the original baseline across live updates and Undo', async (t) => {
+async function workspaceFixture(t) {
   const root = await fs.mkdtemp(
     path.join(os.tmpdir(), 'lemex-live-integration-'),
   )
@@ -571,6 +571,11 @@ test('the controller and real workspace store preserve the original baseline acr
   })
   const project = await store.create('alice', { preset: 'lean' })
   await store.jobs.get(project.id)
+  return { store, events, project, runtime }
+}
+
+test('the controller and real workspace store preserve the original baseline across live updates and Undo', async (t) => {
+  const { store, events, project, runtime } = await workspaceFixture(t)
   const original = await store.readFile(project.id, 'alice', 'Main.lean')
   const snapshot = await store.snapshot(project.id, 'alice', 'integration')
   const job = events.create('alice', {
@@ -639,5 +644,130 @@ test('the controller and real workspace store preserve the original baseline acr
       .filter((event) => event.type === 'files-updated')
       .map((event) => event.data.paths),
     [['Main.lean'], ['Main.lean'], ['Main.lean']],
+  )
+})
+
+test('parallel chat mirrors save different files and verification captures both saved edits without mixing candidates', async (t) => {
+  const { store, project } = await workspaceFixture(t)
+  const helperOriginal = 'theorem helper : True := by trivial\n'
+  await store.writeFile(
+    project.id,
+    'alice',
+    'Helper.lean',
+    helperOriginal,
+    null,
+  )
+  const [first, second] = await Promise.all([
+    store.snapshot(project.id, 'alice', 'parallel-first'),
+    store.snapshot(project.id, 'alice', 'parallel-second'),
+  ])
+  const main = 'theorem first_chat : True := by trivial\n'
+  const helper = 'theorem second_chat : True := by exact True.intro\n'
+  const mirrors = [first, second].map(
+    (snapshot) => new LiveMirror({ snapshot, workspaces: store }),
+  )
+  t.after(() => Promise.all(mirrors.map((mirror) => mirror.stop())))
+  await fs.writeFile(path.join(first.root, 'Main.lean'), main)
+  await fs.writeFile(path.join(second.root, 'Helper.lean'), helper)
+  await Promise.all(mirrors.map((mirror) => mirror.poll()))
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Main.lean')).content,
+    main,
+  )
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Helper.lean')).content,
+    helper,
+  )
+  assert(mirrors.every((mirror) => !mirror.paused))
+  assert.deepEqual(
+    mirrors.map((mirror) => mirror.liveChanges.map((change) => change.path)),
+    [['Main.lean'], ['Helper.lean']],
+  )
+  const clean = await store.verificationCopy(
+    first,
+    await store.changes(first),
+    {
+      liveChanges: mirrors[0].liveChanges,
+    },
+  )
+  assert.equal(
+    await fs.readFile(path.join(clean.root, 'Main.lean'), 'utf8'),
+    main,
+  )
+  assert.equal(
+    await fs.readFile(path.join(clean.root, 'Helper.lean'), 'utf8'),
+    helper,
+  )
+  assert.equal(
+    await fs.readFile(path.join(first.root, 'Helper.lean'), 'utf8'),
+    helperOriginal,
+  )
+  await mirrors[0].stop()
+  const later = helper + '-- Second chat continues independently.\n'
+  await fs.writeFile(path.join(second.root, 'Helper.lean'), later)
+  await mirrors[1].poll()
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Helper.lean')).content,
+    later,
+  )
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Main.lean')).content,
+    main,
+  )
+})
+
+test('parallel chat mirrors editing the same file pause the conflicting chat and preserve its candidate without overwriting the winner', async (t) => {
+  const { store, project } = await workspaceFixture(t)
+  const candidates = await Promise.all([
+    store.snapshot(project.id, 'alice', 'overlap-first'),
+    store.snapshot(project.id, 'alice', 'overlap-second'),
+  ])
+  const sources = [
+    'theorem first_chat : True := by trivial\n',
+    'theorem second_chat : True := by exact True.intro\n',
+  ]
+  const conflicts = []
+  const mirrors = candidates.map(
+    (snapshot, index) =>
+      new LiveMirror({
+        snapshot,
+        workspaces: store,
+        onConflict: (error) => conflicts.push({ index, error }),
+      }),
+  )
+  t.after(() => Promise.all(mirrors.map((mirror) => mirror.stop())))
+  await Promise.all(
+    candidates.map((snapshot, index) =>
+      fs.writeFile(path.join(snapshot.root, 'Main.lean'), sources[index]),
+    ),
+  )
+  await Promise.all(mirrors.map((mirror) => mirror.poll()))
+  assert.equal(conflicts.length, 1)
+  const loser = conflicts[0].index,
+    winner = 1 - loser
+  assert.equal(conflicts[0].error.status, 409)
+  assert.match(conflicts[0].error.message, /Main\.lean/)
+  assert(mirrors[loser].paused)
+  assert(!mirrors[winner].paused)
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Main.lean')).content,
+    sources[winner],
+  )
+  assert.equal(
+    await fs.readFile(path.join(candidates[loser].root, 'Main.lean'), 'utf8'),
+    sources[loser],
+  )
+  await assert.rejects(
+    store.verificationCopy(
+      candidates[loser],
+      await store.changes(candidates[loser]),
+      { liveChanges: mirrors[loser].liveChanges },
+    ),
+    { status: 409 },
+  )
+  await mirrors[loser].stop({ flush: true })
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Main.lean')).content,
+    sources[winner],
   )
 })

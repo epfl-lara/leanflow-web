@@ -140,6 +140,7 @@ async function fixture(t, capacity) {
     config,
     capacity,
     modelDiscoverer: fixtureModelDiscovery,
+    providerLimits: { get: async () => 1, current: () => 1 },
   })
   await studio.providers.save('owner', providerSecret)
   await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve))

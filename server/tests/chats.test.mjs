@@ -294,6 +294,7 @@ async function httpFixture(t, titleGenerator) {
   }
   const studio = await createStudio({
     modelDiscoverer: fixtureModelDiscovery,
+    providerLimits: { get: async () => 1, current: () => 1 },
     dataDir,
     runtime,
     config,

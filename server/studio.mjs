@@ -25,6 +25,7 @@ import { TexBuildManager } from './tex-builds.mjs'
 import { AgentManager } from './agents.mjs'
 import { Settings } from './settings.mjs'
 import { Providers, providerFor } from './providers.mjs'
+import { providerRequestsFor } from './provider-requests.mjs'
 import { ModelDiscovery } from './model-discovery.mjs'
 import { ModelPreferences } from './model-preferences.mjs'
 import { ChatStore } from './chats.mjs'
@@ -191,6 +192,7 @@ export async function createStudio({
   capacity = loadCapacity(),
   books = new LeanBooks(),
   modelDiscoverer,
+  providerLimits,
 } = {}) {
   dataDir = path.resolve(dataDir)
   const workspaceDataDir = dataDir
@@ -202,6 +204,7 @@ export async function createStudio({
   const auth = new Auth(dataDir)
   await auth.init()
   const config = suppliedConfig || (await loadConfig(dataDir))
+  if (providerLimits) config.providerLimits = providerLimits
   const providers = await new Providers(
     dataDir,
     auth.key,
@@ -209,7 +212,11 @@ export async function createStudio({
     config.redact,
   ).init()
   config.redact = providers.redact
-  config.providerForUser = (owner) => providers.provider(owner)
+  config.providerForUser = async (owner) => {
+    const provider = providers.provider(owner)
+    await providerRequestsFor(config).prepare(provider)
+    return provider
+  }
   const modelDiscovery = new ModelDiscovery({
     dataDir,
     config,

@@ -1,13 +1,9 @@
-import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import {
-  isRcpEndpoint,
-  providerEndpoint,
-  RCP_BASE_URL,
-} from './provider-endpoint.mjs'
+import { providerFingerprint, RcpKeyLimits } from './provider-limits.mjs'
+import { isRcpEndpoint, RCP_BASE_URL } from './provider-endpoint.mjs'
 
 export const RCP_WAIT_MESSAGE =
-  'Waiting for another request using this RCP key. LeanFlow runs one RCP task at a time per key so free keys work reliably. This task will start automatically; you can stop it while it waits.'
+  'Waiting for an available parallel task slot for this RCP key. This task will start automatically; you can stop it while it waits.'
 
 export function usesRcp(provider) {
   return (
@@ -16,35 +12,38 @@ export function usesRcp(provider) {
   )
 }
 
-const fingerprint = (provider) =>
-  createHash('sha256')
-    .update(providerEndpoint(provider?.LEMEX_BASE_URL || RCP_BASE_URL))
-    .update('\0')
-    .update(provider?.LEMEX_API_KEY || '')
-    .digest('hex')
-
 // Reservations contain only a one-way fingerprint, never a credential. They
 // stay in memory and are shared by chats, naming and automatic setup repair.
 // The main agent queue tries reservations before consuming a worker slot.
 export class ProviderRequests extends EventEmitter {
   #keys = new Map()
   #backgroundActive = 0
-  constructor({ maxPendingPerKey = 48, maxBackground = 2 } = {}) {
+  constructor({
+    maxPendingPerKey = 48,
+    maxBackground = 2,
+    limits = new RcpKeyLimits(),
+  } = {}) {
     super()
     this.maxPendingPerKey = maxPendingPerKey
     this.maxBackground = maxBackground
+    this.limits = limits
     this.setMaxListeners(64)
+  }
+  async prepare(provider) {
+    if (!usesRcp(provider)) return
+    await this.limits.get(provider)
+    this.emit('available')
   }
   reserve(provider, { background = false } = {}) {
     const limited = usesRcp(provider)
-    const key = fingerprint(provider)
+    const key = providerFingerprint(provider)
     let state,
       acquired = false,
       released = false
     if (limited) {
       state = this.#keys.get(key)
       if (!state) {
-        state = { active: null, pending: [] }
+        state = { active: new Set(), pending: [] }
         this.#keys.set(key, state)
       }
       if (state.pending.length >= this.maxPendingPerKey)
@@ -58,7 +57,7 @@ export class ProviderRequests extends EventEmitter {
     const reservation = {
       limited,
       background,
-      matches: (current) => fingerprint(current) === key,
+      matches: (current) => providerFingerprint(current) === key,
       tryAcquire: () => {
         if (released) return false
         if (acquired) return true
@@ -67,9 +66,13 @@ export class ProviderRequests extends EventEmitter {
         if (limited) {
           const next =
             state.pending.find((item) => !item.background) || state.pending[0]
-          if (state.active || next !== reservation) return false
+          if (
+            state.active.size >= this.limits.current(key) ||
+            next !== reservation
+          )
+            return false
           state.pending.splice(state.pending.indexOf(reservation), 1)
-          state.active = reservation
+          state.active.add(reservation)
         }
         acquired = true
         if (background) this.#backgroundActive++
@@ -80,10 +83,11 @@ export class ProviderRequests extends EventEmitter {
         released = true
         if (background && acquired) this.#backgroundActive--
         if (limited) {
-          if (state.active === reservation) state.active = null
+          state.active.delete(reservation)
           const index = state.pending.indexOf(reservation)
           if (index >= 0) state.pending.splice(index, 1)
-          if (!state.active && !state.pending.length) this.#keys.delete(key)
+          if (!state.active.size && !state.pending.length)
+            this.#keys.delete(key)
         }
         if (limited || background) this.emit('available')
       },
@@ -136,14 +140,14 @@ const coordinators = new WeakMap()
 export function providerRequestsFor(config) {
   let requests = coordinators.get(config)
   if (!requests) {
-    requests = new ProviderRequests()
+    requests = new ProviderRequests({ limits: config.providerLimits })
     coordinators.set(config, requests)
   }
   return requests
 }
 
 // An isolated native agent can otherwise spawn subagents using the same key.
-// Tools may still run in parallel; model requests must remain serial on RCP.
+// Tools may still run in parallel; nested model calls bypass task admission.
 export function providerRequestConfig(provider) {
   return usesRcp(provider)
     ? [
@@ -179,6 +183,6 @@ export function providerLimitMessage(
   )
     return retrying
       ? 'RCP is busy or this key is already handling another request. Lemex is retrying automatically. If you use this key in another app, let that request finish; you can stop this task at any time.'
-      : 'RCP could not accept another request for this key. Free RCP keys allow one model request at a time, including requests from other apps. Wait for that request to finish, or check the key’s limits in the RCP portal, then send your request again.'
+      : 'RCP could not accept another request for this key. Its parallel request limit includes requests from other apps. Wait for a request to finish, or check the key’s limits in the RCP portal, then send your request again.'
   return null
 }

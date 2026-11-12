@@ -93,6 +93,7 @@ async function fixture(t) {
   const runtime = new FixtureRuntime()
   const studio = await createStudio({
     modelDiscoverer: fixtureModelDiscovery,
+    providerLimits: { get: async () => 1, current: () => 1 },
     dataDir: directory,
     runtime,
     config: {

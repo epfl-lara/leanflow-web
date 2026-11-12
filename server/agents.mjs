@@ -271,15 +271,21 @@ export class AgentManager {
     if (
       this.events
         .listMetadata(owner, projectId)
-        .some((job) => !TERMINAL.has(job.status)) ||
+        .some(
+          (job) => (job.chatId || null) === chatId && !TERMINAL.has(job.status),
+        ) ||
       [...this.active.keys()].some((activeId) => {
         const activeJob = this.events.getMetadata(activeId)
-        return activeJob.owner === owner && activeJob.projectId === projectId
+        return (
+          activeJob.owner === owner &&
+          activeJob.projectId === projectId &&
+          (activeJob.chatId || null) === chatId
+        )
       })
     )
       throw Object.assign(
         new Error(
-          'This project already has an active Lemex run. Wait for it to finish stopping before starting another.',
+          'This chat already has an active Lemex run. Send an update in this chat, wait for it to finish, or start another chat.',
         ),
         { status: 409 },
       )
