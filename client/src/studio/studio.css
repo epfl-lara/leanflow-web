@@ -560,20 +560,25 @@ textarea {
   padding: 7px 0;
 }
 .sidebar-footer {
-  padding: 10px;
+  padding: 10px 8px;
   border-top: 1px solid var(--border);
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 6px;
   flex-shrink: 0;
 }
 .sidebar-footer-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.sidebar-footer-actions .icon-button {
+  padding: 4px;
 }
 .sidebar-footer-actions .logout-button {
-  margin-left: auto;
+  margin-left: 0;
+  white-space: nowrap;
 }
 .user-avatar {
   display: flex;
@@ -591,7 +596,7 @@ textarea {
 .account-button {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex: 1;
   min-width: 0;
   padding: 4px;
@@ -607,12 +612,11 @@ textarea {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  flex: 1;
   gap: 2px;
 }
 .account-hint {
-  color: var(--muted);
-  font-size: 9px;
-  white-space: nowrap;
+  display: none;
 }
 .model-settings-link {
   padding: 0;
@@ -622,6 +626,7 @@ textarea {
   text-decoration: underline;
 }
 .user-name {
+  display: block;
   font-size: 11px;
   color: var(--muted);
   flex: 1;
