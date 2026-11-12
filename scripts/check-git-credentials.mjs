@@ -66,7 +66,13 @@ print(json.dumps({'gitCredentialPrompt': True, 'noexecTemporaryFiles': True, 'cr
   assert.equal(result.code, 0, result.stderr)
   const report = JSON.parse(result.stdout)
   await cleanupGitWorkerHome(child, dataDir)
-  assert.deepEqual(await fs.readdir(root), [])
+  // Git-only workers may create empty cache directories. No credential or
+  // helper files should be left in the workspace.
+  const entries = await fs.readdir(root, {
+    recursive: true,
+    withFileTypes: true,
+  })
+  assert(entries.every((entry) => entry.isDirectory()))
   assert.deepEqual(await fs.readdir(path.join(dataDir, 'runtime/homes')), [])
   await fs.writeFile(
     path.join(output, 'report.json'),
