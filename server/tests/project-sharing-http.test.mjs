@@ -277,6 +277,128 @@ test('older update recovery HTTP requires an idle Admin and preserves later edit
   )
 })
 
+test('legacy preview admission bounds active reads across projects and retains cancelled work until it settles', async (t) => {
+  const f = await fixture(t)
+  assert.equal((await f.member(f.editor, 'admin')).status, 200)
+  const other = await f.workspaces.create(f.owner.id, {
+    name: 'Other preview project',
+    preset: 'lean',
+    autoRepair: false,
+  })
+  await f.workspaces.jobs.get(other.id)
+  assert.equal(
+    (
+      await f.request(
+        `/api/projects/${other.id}/sharing/members/${f.outsider.id}`,
+        { method: 'PUT', body: { role: 'admin' } },
+      )
+    ).status,
+    200,
+  )
+  const endpoint = `${f.base}/file-recovery/legacy`
+  const otherEndpoint = `/api/projects/${other.id}/file-recovery/legacy`
+  const held = []
+  let closing = false
+  let holdNew = true
+  const original = f.workspaces.legacyRecovery.list.bind(
+    f.workspaces.legacyRecovery,
+  )
+  t.mock.method(f.workspaces.legacyRecovery, 'list', async (...args) => {
+    if (closing || !holdNew) return original(...args)
+    const waiting = { signal: args[1].signal, release: null, settled: false }
+    held.push(waiting)
+    try {
+      await new Promise((resolve) => {
+        waiting.release = resolve
+      })
+      return await original(...args)
+    } finally {
+      waiting.settled = true
+    }
+  })
+  const until = async (condition, label) => {
+    const deadline = Date.now() + 3000
+    while (!condition()) {
+      assert.ok(Date.now() < deadline, label)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
+  const controller = new AbortController()
+  const requests = []
+  try {
+    const first = fetch(f.origin + endpoint, {
+      headers: { Authorization: `Bearer ${f.owner.token}` },
+      signal: controller.signal,
+    })
+    requests.push(first)
+    const cancelled = assert.rejects(first, { name: 'AbortError' })
+    await until(() => held.length === 1, 'first preview starts')
+    const duplicate = await f.request(otherEndpoint)
+    assert.equal(duplicate.status, 429)
+    assert.equal(duplicate.headers.get('retry-after'), '1')
+    assert.match((await duplicate.json()).error, /Wait briefly.*retry/)
+    const second = f.request(endpoint, { actor: f.editor })
+    requests.push(second)
+    await until(() => held.length === 2, 'second Admin preview starts')
+    assert.equal(
+      (await f.request(otherEndpoint, { actor: f.outsider })).status,
+      429,
+    )
+    assert.equal((await f.request(endpoint, { actor: f.viewer })).status, 403)
+    assert.equal((await f.request(endpoint, { actor: null })).status, 401)
+    const source = await f.workspaces.readFile(
+      f.project.id,
+      f.owner.id,
+      'Main.lean',
+    )
+    const saved = await f.request(`${f.base}/file?path=Main.lean`, {
+      actor: f.editor,
+      method: 'PUT',
+      body: {
+        content: '-- ordinary save during previews\n',
+        expectedHash: source.hash,
+      },
+    })
+    assert.equal(saved.status, 200)
+    assert.equal(
+      (await saved.json()).content,
+      '-- ordinary save during previews\n',
+    )
+    controller.abort()
+    await cancelled
+    await until(
+      () => held[0].signal.aborted,
+      'server observes disconnected preview',
+    )
+    assert.equal(held[0].settled, false)
+    assert.equal((await f.request(endpoint)).status, 429)
+    assert.equal(
+      (await f.request(otherEndpoint, { actor: f.outsider })).status,
+      429,
+    )
+    holdNew = false
+    held[0].release()
+    await until(() => held[0].settled, 'cancelled filesystem work settles')
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(
+      (await f.request(otherEndpoint, { actor: f.outsider })).status,
+      200,
+    )
+    assert.equal((await f.request(endpoint)).status, 200)
+    held[1].release()
+    assert.equal((await second).status, 200)
+    assert.equal((await f.request(endpoint, { actor: f.editor })).status, 200)
+    assert.equal(held.length, 2)
+    assert.equal(f.workspaces.get(f.project.id, f.owner.id).status, 'ready')
+    assert.equal(f.workspaces.get(other.id, f.owner.id).status, 'ready')
+  } finally {
+    closing = true
+    controller.abort()
+    for (const waiting of held) waiting.release?.()
+    await Promise.allSettled(requests)
+  }
+})
+
 test('sharing grants project roles, bounds account discovery, and keeps private data private', async (t) => {
   const f = await fixture(t)
   assert.equal((await f.request(f.base, { actor: null })).status, 401)

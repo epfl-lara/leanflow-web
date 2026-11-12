@@ -289,3 +289,92 @@ test('a queued terminal rechecks collaborator permissions before starting its wo
     ),
   )
 })
+
+test('a full interactive class refuses terminal startup before copying project files', async (t) => {
+  const f = await fixture(t)
+  f.runtime.info = () => ({
+    ready: true,
+    workloads: { interactiveLimit: 1, active: { interactive: 1 } },
+  })
+  f.store.terminalSnapshot = () =>
+    assert.fail(
+      'A full editor/terminal class must be reported before making a private copy.',
+    )
+  const terminals = new Terminals({
+    runtime: f.runtime,
+    workspaces: f.store,
+    capacity: {},
+  })
+  f.cleanup.push(() => terminals.close())
+  const ws = socket(),
+    messages = []
+  ws.send = (raw) => messages.push(JSON.parse(raw))
+  terminals.connect(ws, f.project, 'alice')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(terminals.sessions.size, 0)
+  assert(
+    messages.some(
+      (message) =>
+        message.type === 'error' &&
+        /Close an unused editor or terminal/.test(message.message),
+    ),
+  )
+  assert.deepEqual(await fs.readdir(f.store.snapshotsDir), [])
+})
+
+test('a queued terminal shows worker-capacity guidance and reports the correct startup timeout', async (t) => {
+  const f = await fixture(t)
+  let queued
+  const waiting = new Promise((resolve) => {
+    queued = resolve
+  })
+  f.runtime.spawnWhenAvailable = (_root, _args, options) =>
+    new Promise((_resolve, reject) => {
+      options.signal.addEventListener(
+        'abort',
+        () => reject(options.signal.reason),
+        { once: true },
+      )
+      options.onQueued()
+      queued()
+    })
+  const terminals = new Terminals({
+    runtime: f.runtime,
+    workspaces: f.store,
+    capacity: {},
+  })
+  f.cleanup.push(() => terminals.close())
+  const ws = socket(),
+    notices = [],
+    errors = []
+  ws.send = (raw, options) => {
+    if (options?.binary) notices.push(raw.toString())
+    else errors.push(JSON.parse(raw))
+  }
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  terminals.connect(ws, f.project, 'alice')
+  const session = [...terminals.sessions][0]
+  await waiting
+  assert(
+    notices.some((message) => /Waiting for an available worker/.test(message)),
+  )
+  ws.emit(
+    'message',
+    Buffer.from(
+      JSON.stringify({ type: 'ack', bytes: Buffer.byteLength(notices[0]) }),
+    ),
+    false,
+  )
+  assert.equal(
+    ws.readyState,
+    1,
+    'The browser can acknowledge a waiting notice before a shell exists',
+  )
+  t.mock.timers.tick(60_000)
+  await session.startup
+  assert(
+    errors.some((message) => /Terminal capacity is busy/.test(message.message)),
+  )
+  assert(!errors.some((message) => /copy took too long/.test(message.message)))
+  assert.equal(terminals.sessions.size, 0)
+})

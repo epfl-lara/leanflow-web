@@ -133,6 +133,28 @@ export class StorageCapacity {
     this.reservedBytes = 0
     this.observed = null
     this.probing = null
+    this.allocationObservers = new Set()
+  }
+
+  observeAllocations(prepare) {
+    if (typeof prepare !== 'function' || this.allocationObservers.size >= 16)
+      throw new Error('Storage allocation observers must be bounded functions.')
+    this.allocationObservers.add(prepare)
+    return () => this.allocationObservers.delete(prepare)
+  }
+
+  #setReservation(key, bytes) {
+    if (bytes === undefined) this.leases.delete(key)
+    else this.leases.set(key, bytes)
+    let total = 0n
+    for (const amount of this.leases.values()) total += BigInt(amount)
+    // Restoring funded claims can exceed current free space after unrelated
+    // writes. Saturate for refusal rather than overflowing into false capacity.
+    this.reservedBytes = Number(
+      total > BigInt(Number.MAX_SAFE_INTEGER)
+        ? BigInt(Number.MAX_SAFE_INTEGER)
+        : total,
+    )
   }
 
   async #probe({ refresh = false } = {}) {
@@ -144,12 +166,28 @@ export class StorageCapacity {
       return this.observed
     if (this.probing) return this.probing
     const operation = (async () => {
-      try {
-        const canonical = await this.resolve(this.dataDir)
-        const result = await this.sample(canonical, { bigint: true })
-        return { freeBytes: availableBytes(result), time: this.now() }
-      } catch (cause) {
-        return { freeBytes: null, time: this.now(), cause }
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const confirmations = []
+        try {
+          const canonical = await this.resolve(this.dataDir)
+          for (const prepare of this.allocationObservers)
+            confirmations.push(await prepare())
+          const result = await this.sample(canonical, { bigint: true })
+          let coherent = true
+          for (const confirm of confirmations)
+            if ((await confirm(true)) === false) coherent = false
+          if (!coherent && attempt === 0) continue
+          return { freeBytes: availableBytes(result), time: this.now() }
+        } catch (cause) {
+          for (const confirm of confirmations) {
+            try {
+              await confirm(false)
+            } catch {
+              /* Failed checks grant no new admission. */
+            }
+          }
+          return { freeBytes: null, time: this.now(), cause }
+        }
       }
     })()
     let timer
@@ -187,13 +225,15 @@ export class StorageCapacity {
         'STORAGE_UNAVAILABLE',
         observed.cause,
       )
-    const total = this.reservedBytes - previous
-    // Subtract instead of adding large configured counts, so this check cannot
-    // wrap around the safe integer range and accidentally admit more work.
+    let total = -BigInt(previous)
+    for (const amount of this.leases.values()) total += BigInt(amount)
+    const available = BigInt(observed.freeBytes) - BigInt(this.minimumFreeBytes)
+    // Funded claims can return from already allocated blocks. Compare their
+    // exact total even when public byte counts have saturated the safe range.
     if (
-      observed.freeBytes < this.minimumFreeBytes ||
-      total > observed.freeBytes - this.minimumFreeBytes ||
-      bytes > observed.freeBytes - this.minimumFreeBytes - total
+      available < 0n ||
+      total > available ||
+      BigInt(bytes) > available - total
     )
       throw storageError(pressureMessage, 'STORAGE_PRESSURE')
   }
@@ -212,8 +252,9 @@ export class StorageCapacity {
       )
     this.#check(observed, bytes)
     const key = Symbol('storage reservation')
-    this.leases.set(key, bytes)
-    this.reservedBytes += bytes
+    this.#setReservation(key, bytes)
+    let fundedBytes = bytes
+    let allocatedBytes = 0
     const storage = this
     return Object.freeze({
       get bytes() {
@@ -222,20 +263,34 @@ export class StorageCapacity {
       release() {
         const previous = storage.leases.get(key)
         if (previous === undefined) return
-        storage.leases.delete(key)
-        storage.reservedBytes -= previous
+        storage.#setReservation(key, undefined)
+      },
+      accountAllocatedBytes(nextAllocated) {
+        byteCount(nextAllocated, 'allocated bytes', { zero: true })
+        if (nextAllocated > fundedBytes || !storage.leases.has(key))
+          throw new Error(
+            'Allocated storage must belong to a funded reservation.',
+          )
+        allocatedBytes = nextAllocated
+        // The caller verifies these blocks around the filesystem sample. They
+        // are already charged to statfs, so only future allocation stays held.
+        storage.#setReservation(key, fundedBytes - allocatedBytes)
       },
       async resize(nextBytes, { signal: resizeSignal } = {}) {
         byteCount(nextBytes, 'reservation bytes', { zero: true })
         resizeSignal?.throwIfAborted()
         if (!storage.leases.has(key))
           throw new Error('This storage reservation has already been released.')
+        if (allocatedBytes)
+          throw new Error(
+            'Reset allocated storage accounting before resizing its budget.',
+          )
         const current = storage.leases.get(key)
         // Shrinking is always possible, including after the filesystem fails.
         // Do not await here: release/resize must remain atomic with admission.
         if (nextBytes <= current) {
-          storage.reservedBytes += nextBytes - current
-          storage.leases.set(key, nextBytes)
+          fundedBytes = nextBytes
+          storage.#setReservation(key, nextBytes)
           return
         }
         const updated = await cancellable(
@@ -246,9 +301,13 @@ export class StorageCapacity {
         const previous = storage.leases.get(key)
         if (previous === undefined)
           throw new Error('This storage reservation has already been released.')
+        if (allocatedBytes)
+          throw new Error(
+            'Reset allocated storage accounting before resizing its budget.',
+          )
         storage.#check(updated, nextBytes, previous)
-        storage.reservedBytes += nextBytes - previous
-        storage.leases.set(key, nextBytes)
+        fundedBytes = nextBytes
+        storage.#setReservation(key, nextBytes)
       },
     })
   }

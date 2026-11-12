@@ -226,6 +226,14 @@ export async function createStudio({
       storage,
     })
   await runtime.init()
+  const effectiveInteractive = runtime.info().workloads?.interactiveLimit
+  if (
+    Number.isSafeInteger(effectiveInteractive) &&
+    effectiveInteractive < capacity.editors
+  )
+    console.warn(
+      `[LeanFlow capacity] Interactive workers allow ${effectiveInteractive} concurrent editors and terminals; STUDIO_MAX_EDITORS is ${capacity.editors}. Worker reservations and the memory budget still apply. Close unused sessions or review the worker capacity settings.`,
+    )
   let playgroundPreparation = Promise.resolve()
   const preparePlayground = () => {
     if (runtime.preparePresetEnvironment && runtime.templateRoot('mathlib'))
@@ -1008,15 +1016,24 @@ export async function createStudio({
         ].includes(req.query.path)
       )
         requireNoRun(req.params.id, req.user.id)
-      const saved = await workspaces.writeFile(
-        req.params.id,
-        req.user.id,
-        req.query.path,
-        req.body.content,
-        req.body.expectedHash,
-      )
-      if (saved.requiresPreparation) closeProjectEditors(req.params.id)
-      res.json(saved)
+      try {
+        const saved = await workspaces.writeFile(
+          req.params.id,
+          req.user.id,
+          req.query.path,
+          req.body.content,
+          req.body.expectedHash,
+        )
+        if (saved.requiresPreparation) closeProjectEditors(req.params.id)
+        res.json(saved)
+      } catch (error) {
+        if (
+          error.sourceCommitted === true &&
+          configurationPaths.has(req.query.path)
+        )
+          closeProjectEditors(req.params.id)
+        throw error
+      }
     }),
   )
   app.post('/api/projects/:id/trash', async (req, res) => {

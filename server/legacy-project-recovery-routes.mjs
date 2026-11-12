@@ -26,6 +26,9 @@ export function recoveryIdleCheck(
 export function installLegacyRecoveryRoutes(app, dependencies) {
   const { workspaces, publicProject } = dependencies
   const base = '/api/projects/:id/file-recovery/legacy'
+  // Previews hash retained and current files outside the project write queue.
+  // Bound active work across every project without queuing more disk reads.
+  const previewActors = new Set()
   app.get(base, async (req, res) => {
     workspaces.requireAdmin(req.params.id, req.user.id)
     res.setHeader('Cache-Control', 'no-store')
@@ -44,10 +47,21 @@ export function installLegacyRecoveryRoutes(app, dependencies) {
       throw Object.assign(new Error('Choose a valid recovery page.'), {
         status: 400,
       })
+    if (previewActors.size >= 2 || previewActors.has(req.user.id)) {
+      res.setHeader('Retry-After', '1')
+      throw Object.assign(
+        new Error(
+          'File recovery reviews are busy. Wait briefly, then retry the review.',
+        ),
+        { status: 429 },
+      )
+    }
+    previewActors.add(req.user.id)
     const controller = new AbortController()
     const cancel = () => controller.abort()
     req.once('aborted', cancel)
     res.once('close', cancel)
+    if (req.aborted || res.destroyed) cancel()
     try {
       res.json(
         await workspaces.legacyFileRecovery(req.params.id, req.user.id, {
@@ -62,6 +76,9 @@ export function installLegacyRecoveryRoutes(app, dependencies) {
         }),
       )
     } finally {
+      // A disconnected caller can leave filesystem reads settling. Keep its
+      // claim until the awaited preview actually ends, including cancellation.
+      previewActors.delete(req.user.id)
       req.off('aborted', cancel)
       res.off('close', cancel)
     }

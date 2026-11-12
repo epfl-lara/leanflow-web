@@ -372,3 +372,77 @@ test('disk exhaustion during accepted allocation is actionable and releases the 
     assert.equal((await storage.status()).reservedBytes, 0)
   }
 })
+
+test('funded allocated blocks replace the future claim and restore it before another operation is admitted', async () => {
+  const { storage, state } = fixture()
+  const exportLease = await storage.reserve({ bytes: 700 })
+  state.bytes = 600
+  exportLease.accountAllocatedBytes(400)
+  assert.equal(exportLease.bytes, 300)
+  const other = await storage.reserve({ bytes: 200 })
+  await assert.rejects(storage.reserve({ bytes: 1 }), {
+    code: 'STORAGE_PRESSURE',
+  })
+  state.bytes = 1000
+  exportLease.accountAllocatedBytes(0)
+  assert.equal(exportLease.bytes, 700)
+  await assert.rejects(storage.reserve({ bytes: 1 }), {
+    code: 'STORAGE_PRESSURE',
+  })
+  other.release()
+  exportLease.release()
+  assert.equal(storage.reservedBytes, 0)
+})
+
+test('a concurrent allocation observer cannot be overwritten by an in-flight resize', async () => {
+  const { storage } = fixture()
+  const lease = await storage.reserve({ bytes: 200 })
+  let complete
+  storage.sample = async () => {
+    await new Promise((resolve) => {
+      complete = resolve
+    })
+    return { bavail: 1000n, bsize: 1n }
+  }
+  const resizing = lease.resize(800)
+  await new Promise((resolve) => setImmediate(resolve))
+  lease.accountAllocatedBytes(100)
+  complete()
+  await assert.rejects(resizing, /Reset allocated storage accounting/)
+  assert.equal(lease.bytes, 100)
+  lease.accountAllocatedBytes(0)
+  lease.release()
+  assert.equal(storage.reservedBytes, 0)
+})
+
+test('restored funded claims cannot overflow into false free capacity', async () => {
+  const storage = new StorageCapacity({
+    dataDir: '/fixture',
+    minimumFreeBytes: 0,
+    warningFreeBytes: 0,
+    allocationBytes: 1,
+    resolve: async (value) => value,
+    sample: async () => ({
+      bavail: BigInt(Number.MAX_SAFE_INTEGER) * 3n,
+      bsize: 1n,
+    }),
+  })
+  const first = await storage.reserve({ bytes: Number.MAX_SAFE_INTEGER })
+  first.accountAllocatedBytes(Number.MAX_SAFE_INTEGER)
+  const second = await storage.reserve({ bytes: Number.MAX_SAFE_INTEGER })
+  second.accountAllocatedBytes(Number.MAX_SAFE_INTEGER)
+  first.accountAllocatedBytes(0)
+  second.accountAllocatedBytes(0)
+  assert.equal(storage.reservedBytes, Number.MAX_SAFE_INTEGER)
+  await assert.rejects(storage.reserve({ bytes: 1 }), {
+    code: 'STORAGE_PRESSURE',
+  })
+  first.release()
+  await assert.rejects(storage.reserve({ bytes: 1 }), {
+    code: 'STORAGE_PRESSURE',
+  })
+  second.release()
+  const resumed = await storage.reserve({ bytes: 1 })
+  resumed.release()
+  assert.equal(storage.reservedBytes, 0)
+})

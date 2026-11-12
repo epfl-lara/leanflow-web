@@ -120,6 +120,7 @@ async function targetState(
     size = null,
     mode = null,
     ownedAlias = null,
+    verifyLinks = null,
   } = {},
 ) {
   if (
@@ -143,20 +144,32 @@ async function targetState(
     if (
       !before.isFile() ||
       before.size > MAX_BYTES ||
-      (size !== null && before.size !== size) ||
-      (mode !== null && (before.mode & 0o777) !== mode)
+      (size !== null && before.size !== size)
     )
       throw new Error('Transaction target is not a bounded regular file.')
+    if (mode !== null && (before.mode & 0o777) !== mode)
+      throw Object.assign(
+        new Error(
+          'The file permissions changed during saving. Refresh the project and try again.',
+        ),
+        {
+          code: 'TRANSACTION_MODE_CHANGED',
+          status: 409,
+        },
+      )
     if (singleLink && before.nlink !== 1) {
       const alias = ownedAlias ? await fs.lstat(ownedAlias) : null
-      if (
-        before.nlink !== 2 ||
-        !alias?.isFile() ||
-        alias.isSymbolicLink() ||
-        alias.nlink !== 2 ||
-        alias.dev !== before.dev ||
-        alias.ino !== before.ino
-      )
+      const ownedPair =
+        ownedAlias &&
+        before.nlink === 2 &&
+        alias?.isFile() &&
+        !alias.isSymbolicLink() &&
+        alias.nlink === 2 &&
+        alias.dev === before.dev &&
+        alias.ino === before.ino
+      const permitted =
+        ownedPair || (verifyLinks && (await verifyLinks(before)))
+      if (!permitted)
         throw new Error('Transaction backup contains an unexpected hardlink.')
     }
     const hash = createHash('sha256')
@@ -187,8 +200,14 @@ async function targetState(
 }
 
 export class ProjectTransactions {
-  constructor({ db, historyDir, validatePath, openParent }) {
-    Object.assign(this, { db, historyDir, validatePath, openParent })
+  constructor({ db, historyDir, validatePath, openParent, verifySourceLinks }) {
+    Object.assign(this, {
+      db,
+      historyDir,
+      validatePath,
+      openParent,
+      verifySourceLinks,
+    })
     this.errors = new Map()
     db.exec(
       'CREATE TABLE IF NOT EXISTS pending_project_transactions (id TEXT PRIMARY KEY, project TEXT NOT NULL UNIQUE, owner TEXT NOT NULL, payload TEXT NOT NULL);',
@@ -435,6 +454,48 @@ export class ProjectTransactions {
       await syncDirectory(directory)
   }
 
+  async #sourceState(project, change, parent, { sync = false } = {}) {
+    let retainedAliases = false
+    const hash = await targetState(project, change, parent, {
+      sync,
+      singleLink: true,
+      mode: change.beforeMode,
+      verifyLinks: async (source) => {
+        if (
+          !this.verifySourceLinks ||
+          !(await this.verifySourceLinks(project, change.path, source))
+        )
+          throw Object.assign(
+            new Error(
+              `The file ${change.path} has an unrecognized filesystem link. Ask the server administrator to inspect it before retrying.`,
+            ),
+            { status: 409 },
+          )
+        retainedAliases = true
+        return true
+      },
+    })
+    return { hash, retainedAliases }
+  }
+
+  async #copyRetainedBackup(intent, index, change, backups) {
+    const anchor = `/proc/self/fd/${backups.fd}`
+    const temporary = `${anchor}/.copy-${index}-${randomUUID()}`
+    try {
+      await durableFile(
+        temporary,
+        await this.#originalBytes(intent, index, change),
+        change.beforeMode,
+      )
+      // Only complete, durable bytes enter an indexed recovery slot. A failed
+      // or interrupted copy leaves the immutable originals as the fallback.
+      await fs.rename(temporary, `${anchor}/${index}`)
+      await backups.sync()
+    } finally {
+      await fs.rm(temporary, { force: true }).catch(() => {})
+    }
+  }
+
   async #backupState(intent, index, change, parent, backups, current) {
     if (!backups) return null
     return targetState(
@@ -444,6 +505,14 @@ export class ProjectTransactions {
       {
         singleLink: true,
         mode: intent.version === 1 ? change.mode : change.beforeMode,
+        verifyLinks: this.verifySourceLinks
+          ? (source) =>
+              this.verifySourceLinks(
+                { id: intent.projectId, owner: intent.owner },
+                change.path,
+                source,
+              )
+          : null,
         // A crash immediately after link() can retain exactly this one owned
         // alias of the unchanged source. No unrelated hardlinks are accepted.
         ownedAlias:
@@ -751,11 +820,8 @@ export class ProjectTransactions {
         const parent = await this.openParent(project.root, change.path)
         try {
           if (
-            (await targetState(project, change, parent, {
-              sync: true,
-              singleLink: true,
-              mode: change.beforeMode,
-            })) !== change.beforeHash
+            (await this.#sourceState(project, change, parent, { sync: true }))
+              .hash !== change.beforeHash
           )
             throw Object.assign(
               new Error(`Cannot apply: ${change.path} changed before saving.`),
@@ -770,24 +836,19 @@ export class ProjectTransactions {
         const parent = await this.openParent(project.root, change.path)
         try {
           authorize?.()
-          if (
-            (await targetState(project, change, parent, {
-              mode: change.beforeMode,
-              singleLink: true,
-            })) !== change.beforeHash
-          )
+          const current = await this.#sourceState(project, change, parent)
+          if (current.hash !== change.beforeHash)
             throw Object.assign(
               new Error(`Cannot apply: ${change.path} changed before saving.`),
               { status: 409 },
             )
           const destination = `${parent.anchor}/${parent.name}`
           if (change.beforeHash !== null) {
-            mutationStarted = true
             const backup = `/proc/self/fd/${backups.fd}/${index}`
-            if (change.afterHash === null) await fs.rename(destination, backup)
-            else {
-              // Keep the old name readable until rename atomically replaces it.
-              await fs.link(destination, backup)
+            if (current.retainedAliases) {
+              // Trash keeps its own immutable inode. Preserve an independent,
+              // durable backup rather than adding another alias of that inode.
+              await this.#copyRetainedBackup(intent, index, change, backups)
               if (
                 (await this.#backupState(
                   intent,
@@ -801,6 +862,43 @@ export class ProjectTransactions {
                 throw new Error(
                   'Original transaction backup failed verification.',
                 )
+              authorize?.()
+              if (
+                (await this.#sourceState(project, change, parent)).hash !==
+                change.beforeHash
+              )
+                throw Object.assign(
+                  new Error(
+                    `Cannot apply: ${change.path} changed before saving.`,
+                  ),
+                  { status: 409 },
+                )
+              if (change.afterHash === null) {
+                authorize?.()
+                mutationStarted = true
+                await fs.unlink(destination)
+              }
+            } else {
+              mutationStarted = true
+              if (change.afterHash === null)
+                await fs.rename(destination, backup)
+              else {
+                // Keep the old name readable until rename atomically replaces it.
+                await fs.link(destination, backup)
+                if (
+                  (await this.#backupState(
+                    intent,
+                    index,
+                    change,
+                    parent,
+                    backups,
+                    change.beforeHash,
+                  )) !== change.beforeHash
+                )
+                  throw new Error(
+                    'Original transaction backup failed verification.',
+                  )
+              }
             }
           }
           authorize?.()

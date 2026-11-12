@@ -15,6 +15,7 @@ import {
   storedDiskBytes,
   storedManifest,
   removeStoredTree,
+  verifyRestoredFileLinks,
 } from './trash-storage.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { constants } from 'node:fs'
@@ -826,6 +827,14 @@ export class WorkspaceStore {
       historyDir: this.historyDir,
       validatePath: (filename) => relativeFile(filename, { write: true }),
       openParent: writeParent,
+      verifySourceLinks: (project, filename, source) =>
+        verifyRestoredFileLinks({
+          db: this.db,
+          trashDir: this.trashDir,
+          project,
+          filename,
+          source,
+        }),
     })
     for (const row of this.db.prepare('SELECT data FROM projects').all()) {
       const project = JSON.parse(row.data)
@@ -1321,7 +1330,7 @@ export class WorkspaceStore {
           assertIdle()
         },
       )
-      this.#event(
+      this.#optionalEvent(
         project,
         'file-recovery',
         `Reviewed an older interrupted file update (${input.decision}).\n`,

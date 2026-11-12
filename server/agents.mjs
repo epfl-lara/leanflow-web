@@ -888,7 +888,10 @@ export class AgentManager {
         })
         active.workerStopped = child.workerStopped
       }
-      const spawn = this.runtime.spawnWhenAvailable || this.runtime.spawn
+      const spawn =
+        this.runtime.spawnAgentWhenAvailable ||
+        this.runtime.spawnWhenAvailable ||
+        this.runtime.spawn
       if (this.runtime.spawnWhenAvailable)
         this.#progress(
           id,
@@ -903,6 +906,12 @@ export class AgentManager {
           env: provider,
           network: 'bridge',
           workload: 'batch',
+          ...(this.runtime.spawnAgentWhenAvailable
+            ? {
+                dependentTools:
+                  job.mode === 'search' && Boolean(this.texBuilds),
+              }
+            : {}),
           signal: active.controller.signal,
           onSpawn: attachChild,
           beforeSpawn: () => {
@@ -958,6 +967,7 @@ export class AgentManager {
       if (withTex) {
         active.texTools = createTexAgentTools({
           manager: this.texBuilds,
+          parentWorker: child,
           job,
           snapshot,
           active,

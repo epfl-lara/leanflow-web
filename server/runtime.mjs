@@ -13,6 +13,7 @@ import {
 } from './prepared-presets.mjs'
 import { PresetInstaller } from './preset-installer.mjs'
 import { LeanReleases } from './lean-releases.mjs'
+import { KernelStorageBudget } from './kernel-storage-budget.mjs'
 import { dependencyBuildPlan } from './dependency-targets.mjs'
 import { workerMemoryCapacity } from './worker-memory.mjs'
 import { projectImportRequirements } from './editor-imports.mjs'
@@ -37,6 +38,8 @@ import {
 
 const scheduledWorker = Symbol('scheduledWorker')
 const kernelStorageReservation = Symbol('kernelStorageReservation')
+const dependentWorkerParent = Symbol('dependentWorkerParent')
+const agentWorkerRole = Symbol('agentWorkerRole')
 
 const projectDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -210,6 +213,7 @@ export class Runtime {
     this.batchReserved = batchReserved
     this.storage = storage
     this.temporaryStorageReservations = new Map()
+    this.pendingDependentWorkers = new WeakSet()
     this.cpus = cpus
     this.memory = memory
     this.memoryBudget = memoryBudget
@@ -221,6 +225,13 @@ export class Runtime {
     )
       throw new Error('Kernel export limit must be a positive byte count.')
     this.kernelExportMaxBytes = kernelExportMaxBytes
+    this.kernelStorageBudget = storage
+      ? new KernelStorageBudget({
+          storage,
+          runtimeDir: this.runtimeDir,
+          maximumBytes: kernelExportMaxBytes,
+        })
+      : null
     this.pidsLimit = pidsLimit
     this.docker = docker
     this.hostToolchainDir = hostToolchainDir
@@ -273,6 +284,8 @@ export class Runtime {
     await fsp.mkdir(this.dataDir, { recursive: true, mode: 0o700 })
     this.dataDir = await fsp.realpath(this.dataDir)
     this.runtimeDir = path.join(this.dataDir, 'runtime')
+    if (this.kernelStorageBudget)
+      this.kernelStorageBudget.runtimeDir = this.runtimeDir
     this.leanReleases.filename = path.join(
       this.runtimeDir,
       'lean-releases.json',
@@ -811,6 +824,7 @@ export class Runtime {
       queued: this.queue.length,
       maxConcurrent: this.#slotLimit(),
       configuredMaxConcurrent: this.maxConcurrent,
+      compilerReservedSlots: this.#compilerReserve(),
       workloads: {
         ...this.#workloadLimits(),
         active: {
@@ -955,8 +969,7 @@ export class Runtime {
   }
 
   async checkProject(root, options = {}) {
-    const reservation = await this.storage?.reserve({
-      bytes: this.kernelExportMaxBytes,
+    const reservation = await this.kernelStorageBudget?.acquire({
       signal: options.signal,
     })
     let spawned = false
@@ -978,7 +991,7 @@ export class Runtime {
     } finally {
       // Once a worker exists, its verified cleanup owns the disk claim. Failed
       // container cleanup retains both the resource slot and this reservation.
-      if (!spawned) reservation?.release()
+      if (!spawned) await reservation?.release()
     }
   }
 
@@ -1211,6 +1224,86 @@ export class Runtime {
     return workload
   }
 
+  #liveDependencyParent(parent) {
+    return Boolean(
+      parent &&
+      this.children.has(parent) &&
+      parent.workload === 'batch' &&
+      parent.agentWorker &&
+      parent.texCapable &&
+      parent.workerSlots === 1 &&
+      !parent.kernelCheck &&
+      !parent.dependentWorker &&
+      !parent.cancelled &&
+      parent.exitCode === null &&
+      parent.signalCode === null,
+    )
+  }
+
+  #supportsDependentCompiler() {
+    return this.#slotLimit() >= 2 && this.#workloadLimits().batchLimit >= 2
+  }
+
+  #compilerReserve(options = {}) {
+    if (
+      !this.#supportsDependentCompiler() ||
+      [...this.children].some((child) => child.dependentWorker)
+    )
+      return 0
+    return options[agentWorkerRole]?.texCapable ||
+      [...this.children].some((child) => this.#liveDependencyParent(child))
+      ? 1
+      : 0
+  }
+
+  #boundedIndependent(options) {
+    return (
+      !options[agentWorkerRole] &&
+      Number.isSafeInteger(options.timeoutMs) &&
+      options.timeoutMs > 0
+    )
+  }
+
+  #batchHead() {
+    return this.queue.find((job) => job.options.workload === 'batch')
+  }
+
+  #canBypassBatchHead(options) {
+    if (
+      options.workload !== 'batch' ||
+      !this.#liveDependencyParent(options[dependentWorkerParent])
+    )
+      return false
+    const head = this.#batchHead()
+    return Boolean(head && !this.#hasCapacity(head.options))
+  }
+
+  #canBackfillBatchHead(options) {
+    const head = this.#batchHead()
+    if (
+      !head?.options.kernelCheck ||
+      options.workload !== 'batch' ||
+      !this.#boundedIndependent(options) ||
+      this.#workerSlots(options) !== 1 ||
+      this.#hasCapacity(head.options)
+    )
+      return false
+    if ([...this.children].some((child) => child.kernelCheck)) return true
+    const holds = [...this.children].filter((child) => child.longLived)
+    const slots = this.#workerSlots(head.options)
+    const longTotal = holds.reduce((sum, child) => sum + child.workerSlots, 0)
+    const longBatch = holds
+      .filter((child) => child.workload === 'batch')
+      .reduce((sum, child) => sum + child.workerSlots, 0)
+    // Backfill only while draining ALL bounded jobs still cannot admit the
+    // check. As soon as long-lived holders leave, stop filling its free slots.
+    return (
+      longTotal + this.#compilerReserve() + slots > this.#slotLimit() ||
+      longBatch + this.#compilerReserve() + slots >
+        this.#workloadLimits().batchLimit
+    )
+  }
+
   #workerSlots(options = {}) {
     return options.kernelCheck
       ? Math.min(3, this.#workloadLimits().batchLimit)
@@ -1248,13 +1341,21 @@ export class Runtime {
     const workload = this.#workload(options)
     const limit = this.#workloadLimits()[`${workload}Limit`]
     const slots = this.#workerSlots(options)
+    const compilerReserve = this.#liveDependencyParent(
+      options[dependentWorkerParent],
+    )
+      ? 0
+      : this.#compilerReserve(options)
     // Keep only one large export on disk, and charge its larger RAM/CPU budget
     // to the same pool as editors and ordinary workers.
     return (
       (!options.kernelCheck ||
         ![...this.children].some((child) => child.kernelCheck)) &&
-      this.#usedSlots() + slots <= this.#slotLimit() &&
-      this.#usedSlots(workload) + slots <= limit
+      this.#usedSlots() + slots + compilerReserve <= this.#slotLimit() &&
+      this.#usedSlots(workload) +
+        slots +
+        (workload === 'batch' ? compilerReserve : 0) <=
+        limit
     )
   }
 
@@ -1279,6 +1380,7 @@ export class Runtime {
       workload = 'batch',
       [scheduledWorker]: scheduled = false,
       [kernelStorageReservation]: storageReservation,
+      [agentWorkerRole]: agentRole,
     } = {},
   ) {
     this.#assertReady()
@@ -1326,10 +1428,16 @@ export class Runtime {
     if (!['none', 'bridge'].includes(network))
       throw new Error('Only isolated or outbound worker networks are supported')
     this.#workload({ kernelCheck, workload })
+    const admission = {
+      kernelCheck,
+      workload,
+      timeoutMs,
+      [agentWorkerRole]: agentRole,
+    }
     if (
       (!scheduled &&
         this.queue.some((job) => job.options.workload === workload)) ||
-      !this.#hasCapacity({ kernelCheck, workload })
+      !this.#hasCapacity(admission)
     )
       throw Object.assign(
         new Error(
@@ -1537,6 +1645,7 @@ export class Runtime {
       }
     }
     dockerArgs.push(this.imageId || this.image, ...args)
+    if (kernelTemp) storageReservation?.track(kernelTemp)
     return this.#launchWorker(root, dockerArgs, {
       childEnv,
       home,
@@ -1550,6 +1659,7 @@ export class Runtime {
       kernelCheck,
       workload,
       storageReservation,
+      [agentWorkerRole]: agentRole,
     })
   }
 
@@ -1569,9 +1679,19 @@ export class Runtime {
       kernelCheck = false,
       workload = 'batch',
       storageReservation,
+      [dependentWorkerParent]: dependencyParent,
+      [agentWorkerRole]: agentRole,
     },
   ) {
-    if (!this.#hasCapacity({ kernelCheck, workload }))
+    if (
+      !this.#hasCapacity({
+        kernelCheck,
+        workload,
+        timeoutMs,
+        [agentWorkerRole]: agentRole,
+        [dependentWorkerParent]: dependencyParent,
+      })
+    )
       throw Object.assign(
         new Error('All workspace workers are busy; try again shortly'),
         { status: 503 },
@@ -1585,6 +1705,14 @@ export class Runtime {
     child.workerSlots = workerSlots
     child.kernelCheck = kernelCheck
     child.workload = workload
+    child.dependentWorker = Boolean(dependencyParent)
+    child.agentWorker = Boolean(agentRole)
+    child.texCapable = agentRole?.texCapable === true
+    child.longLived =
+      workload === 'interactive' ||
+      Boolean(agentRole) ||
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs <= 0
     child.containerName = name
     child.workspaceRoot = path.resolve(root)
     this.children.add(child)
@@ -1650,8 +1778,8 @@ export class Runtime {
         // Export callers own a retained fresh home until they have transferred
         // its output. Every other fresh home is removed when the worker stops.
         if (freshHome && !retainHome) await removeDisposableTree(home)
+        await storageReservation?.release()
         this.children.delete(child)
-        storageReservation?.release()
         this.#drain()
       })().catch((error) => {
         cleanup = undefined
@@ -1664,6 +1792,25 @@ export class Runtime {
     // the child in the live set so a later project stop can retry safely.
     child.workerStopped.catch(() => {})
     return child
+  }
+
+  spawnAgentWhenAvailable(
+    root,
+    args,
+    { dependentTools = false, ...options } = {},
+  ) {
+    if (typeof dependentTools !== 'boolean')
+      throw new Error('Dependent assistant tools must be a boolean.')
+    return this.#schedule(
+      root,
+      args,
+      {
+        ...options,
+        workload: 'batch',
+        [agentWorkerRole]: { texCapable: dependentTools },
+      },
+      true,
+    )
   }
 
   spawnWhenAvailable(root, args, options = {}) {
@@ -1695,48 +1842,89 @@ export class Runtime {
         new Error('Choose a relative .tex main file inside this project.'),
         { status: 400 },
       )
-    options.signal?.throwIfAborted()
-    const info = await this.texInfo()
-    options.signal?.throwIfAborted()
-    if (!info.available)
-      throw Object.assign(new Error(info.error), { status: 503 })
-    const timeoutMs = options.timeoutMs ?? 120_000
+    const parent = options.parentWorker
     if (
-      !Number.isSafeInteger(timeoutMs) ||
-      timeoutMs <= 0 ||
-      timeoutMs > 10 * 60_000
+      parent !== undefined &&
+      (!this.#liveDependencyParent(parent) ||
+        this.pendingDependentWorkers.has(parent))
     )
-      throw new Error('LaTeX compilation timeout must be at most 10 minutes.')
+      throw Object.assign(
+        new Error(
+          'This assistant worker is unavailable or already waiting for a compiler. Retry from the active assistant run.',
+        ),
+        { status: 409 },
+      )
+    if (parent !== undefined && !this.#supportsDependentCompiler())
+      throw Object.assign(
+        new Error(
+          'This server cannot run an assistant and its LaTeX compiler together. Compile from the project PDF panel after the assistant finishes, or ask the administrator to increase worker capacity.',
+        ),
+        { status: 503 },
+      )
     const controller = new AbortController()
     const signal = options.signal
       ? AbortSignal.any([options.signal, controller.signal])
       : controller.signal
-    const token = randomUUID()
-    const receiver = createTexArtifactReceiver(
-      token,
-      options.onOutput,
-      (error) => controller.abort(error),
-    )
-    const worker = { kind: 'tex', outputRoot }
-    const result = await this.#schedule(
-      sourceRoot,
-      ['python3', '-I', '/opt/tex-compile-worker.py', options.rootFile, token],
-      {
-        signal,
-        timeoutMs,
-        onSpawn: options.onSpawn,
-        onOutput: (text, stream) => receiver.append(text, stream),
-        maxOutputBytes: 512 * 1024,
-      },
-      false,
-      worker,
-    )
-    if (result.cancelled || result.timedOut) {
-      if (controller.signal.aborted) throw controller.signal.reason
-      return { ...result, stdout: '', stderr: '' }
+    const parentEnded = () =>
+      controller.abort(
+        new Error('The assistant worker ended before its compiler finished.'),
+      )
+    if (parent !== undefined) {
+      this.pendingDependentWorkers.add(parent)
+      parent.once('close', parentEnded)
     }
-    const stdout = await receiver.publish(outputRoot)
-    return { ...result, stdout, stderr: '', truncated: false }
+    try {
+      signal.throwIfAborted()
+      const info = await this.texInfo()
+      signal.throwIfAborted()
+      if (!info.available)
+        throw Object.assign(new Error(info.error), { status: 503 })
+      const timeoutMs = options.timeoutMs ?? 120_000
+      if (
+        !Number.isSafeInteger(timeoutMs) ||
+        timeoutMs <= 0 ||
+        timeoutMs > 10 * 60_000
+      )
+        throw new Error('LaTeX compilation timeout must be at most 10 minutes.')
+      const token = randomUUID()
+      const receiver = createTexArtifactReceiver(
+        token,
+        options.onOutput,
+        (error) => controller.abort(error),
+      )
+      const worker = { kind: 'tex', outputRoot }
+      const result = await this.#schedule(
+        sourceRoot,
+        [
+          'python3',
+          '-I',
+          '/opt/tex-compile-worker.py',
+          options.rootFile,
+          token,
+        ],
+        {
+          signal,
+          timeoutMs,
+          onSpawn: options.onSpawn,
+          onOutput: (text, stream) => receiver.append(text, stream),
+          maxOutputBytes: 512 * 1024,
+          ...(parent === undefined ? {} : { [dependentWorkerParent]: parent }),
+        },
+        false,
+        worker,
+      )
+      if (result.cancelled || result.timedOut) {
+        if (controller.signal.aborted) throw controller.signal.reason
+        return { ...result, stdout: '', stderr: '' }
+      }
+      const stdout = await receiver.publish(outputRoot)
+      return { ...result, stdout, stderr: '', truncated: false }
+    } finally {
+      if (parent !== undefined) {
+        parent.removeListener('close', parentEnded)
+        this.pendingDependentWorkers.delete(parent)
+      }
+    }
   }
 
   #spawnTex(root, args, options, worker) {
@@ -1817,6 +2005,16 @@ export class Runtime {
 
   #spawnScheduled(root, args, options, worker) {
     options.signal?.throwIfAborted()
+    if (
+      options[dependentWorkerParent] &&
+      !this.#liveDependencyParent(options[dependentWorkerParent])
+    )
+      throw Object.assign(
+        new Error(
+          'The assistant worker ended before its dependent work could start.',
+        ),
+        { status: 409 },
+      )
     const admitted = options.beforeSpawn?.()
     if (admitted && typeof admitted.then === 'function') {
       Promise.resolve(admitted).catch(() => {})
@@ -1852,6 +2050,11 @@ export class Runtime {
       typeof options.beforeSpawn !== 'function'
     )
       throw new Error('Worker admission callback must be a function.')
+    if (
+      options.onQueued !== undefined &&
+      typeof options.onQueued !== 'function'
+    )
+      throw new Error('Worker queue callback must be a function.')
     if (worker?.kind === 'tex') {
       if (this.stopping) throw new Error('Runtime is shutting down')
     } else this.#assertReady()
@@ -1868,7 +2071,12 @@ export class Runtime {
         options.signal.reason || new Error('Worker job was cancelled'),
       )
     if (
-      !this.queue.some((job) => job.options.workload === workload) &&
+      (!this.queue.some((job) => job.options.workload === workload) ||
+        ((this.#canBypassBatchHead(options) ||
+          this.#canBackfillBatchHead(options)) &&
+          !this.queue.some((job) =>
+            this.#liveDependencyParent(job.options[dependentWorkerParent]),
+          ))) &&
       this.#hasCapacity(options)
     )
       return spawnOnly
@@ -1919,6 +2127,16 @@ export class Runtime {
       job.abort = abort
       options.signal?.addEventListener('abort', abort, { once: true })
       this.queue.push(job)
+      try {
+        options.onQueued?.()
+      } catch (error) {
+        this.queue.splice(this.queue.indexOf(job), 1)
+        options.signal?.removeEventListener('abort', abort)
+        reject(error)
+        this.#drain()
+        return
+      }
+      if (options[dependentWorkerParent]) this.#drain()
     })
   }
 
@@ -1979,14 +2197,30 @@ export class Runtime {
       this.#usedSlots() < this.#slotLimit() &&
       this.queue.length
     ) {
-      const seen = new Set()
-      const index = this.queue.findIndex((job) => {
-        // Only each class's head can advance. A weighted check accumulates
-        // free slots instead of being perpetually overtaken by small jobs.
-        if (seen.has(job.options.workload)) return false
-        seen.add(job.options.workload)
-        return this.#hasCapacity(job.options)
-      })
+      const batchHead = this.#batchHead()
+      let index = -1
+      // A live parent's child has priority over ordinary bounded backfill.
+      // A ready weighted head keeps its place and cannot be overtaken.
+      if (!batchHead || !this.#hasCapacity(batchHead.options))
+        index = this.queue.findIndex(
+          (job) =>
+            this.#canBypassBatchHead(job.options) &&
+            this.#hasCapacity(job.options),
+        )
+      if (index < 0) {
+        const seen = new Set()
+        index = this.queue.findIndex((job) => {
+          if (seen.has(job.options.workload)) return false
+          seen.add(job.options.workload)
+          return this.#hasCapacity(job.options)
+        })
+      }
+      if (index < 0)
+        index = this.queue.findIndex(
+          (job) =>
+            this.#canBackfillBatchHead(job.options) &&
+            this.#hasCapacity(job.options),
+        )
       if (index < 0) break
       const [job] = this.queue.splice(index, 1)
       job.options.signal?.removeEventListener('abort', job.abort)

@@ -846,3 +846,67 @@ test('slow all-before classification defers only the unmarked update and leaves 
     original.length,
   )
 })
+
+for (const decision of ['restore', 'keep-current'])
+  test(`legacy ${decision} success and notifications survive an activity-log insert failure`, async (t) => {
+    const f = await fixture(t)
+    const {
+      reviews: [review],
+    } = await f.store.legacyFileRecovery(f.project.id, 'alice')
+    const notifications = []
+    f.store.subscribeChanges((event) => notifications.push(event))
+    const prepare = f.store.db.prepare.bind(f.store.db)
+    let failures = 0
+    t.mock.method(f.store.db, 'prepare', (sql) => {
+      if (sql.startsWith('INSERT INTO events(')) {
+        failures++
+        throw Object.assign(new Error('Fixture activity storage full'), {
+          code: 'SQLITE_FULL',
+        })
+      }
+      return prepare(sql)
+    })
+    let result
+    try {
+      result = await f.store.resolveLegacyFileRecovery(
+        f.project.id,
+        'alice',
+        f.id,
+        { revision: review.revision, decision },
+      )
+    } finally {
+      t.mock.restoreAll()
+    }
+    assert.equal(failures, 1)
+    assert.equal(result.fileRecoveryRequired, undefined)
+    assert.equal(result.status, 'ready')
+    assert.equal(
+      await fs.readFile(path.join(f.project.root, 'A.lean'), 'utf8'),
+      decision === 'restore' ? '-- original A\n' : '-- new A\n',
+    )
+    assert.equal(
+      f.store.db
+        .prepare('SELECT COUNT(*) AS count FROM legacy_transaction_resolutions')
+        .get().count,
+      1,
+    )
+    assert.equal(
+      notifications.some((event) => event.projectId === f.healthy.id),
+      false,
+    )
+    assert(
+      notifications.some(
+        (event) => event.projectId === f.project.id && event.kind === 'files',
+      ),
+    )
+    assert(
+      notifications.some(
+        (event) => event.projectId === f.project.id && event.kind === 'project',
+      ),
+    )
+    await f.reopen()
+    assert.equal(
+      f.store.get(f.project.id, 'alice').fileRecoveryRequired,
+      undefined,
+    )
+  })
