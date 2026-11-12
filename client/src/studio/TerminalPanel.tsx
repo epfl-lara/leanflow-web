@@ -5,7 +5,7 @@ import { Icon } from './Icons'
 import { ResizeHandle } from './ResizeHandle'
 import { useStoredSize } from './layout'
 import { messageId } from './messageId'
-import { sessionBoundUrl } from './api'
+import { errorText, sessionBoundUrl } from './api'
 import '@xterm/xterm/css/xterm.css'
 import './terminal.css'
 
@@ -21,6 +21,8 @@ export function TerminalPanel({
   onClose,
   onStateChange,
   onOpeningChange,
+  beforeConnect,
+  needsPreparation = false,
 }: {
   projectId: string
   projectName: string
@@ -28,6 +30,8 @@ export function TerminalPanel({
   onClose: () => void
   onStateChange?: (active: boolean) => void
   onOpeningChange?: (openingId: string) => void
+  beforeConnect?: () => Promise<void>
+  needsPreparation?: boolean
 }) {
   const host = useRef<HTMLDivElement>(null)
   const terminal = useRef<Terminal | null>(null)
@@ -35,11 +39,17 @@ export function TerminalPanel({
   stateChange.current = onStateChange
   const openingChange = useRef(onOpeningChange)
   openingChange.current = onOpeningChange
+  const beforeConnectRef = useRef(beforeConnect)
+  beforeConnectRef.current = beforeConnect
   const themeRef = useRef(theme)
   themeRef.current = theme
   const [attempt, setAttempt] = useState(0)
   const [status, setStatus] = useState('Connecting…')
   const [connected, setConnected] = useState(false)
+  const [syncIssue, setSyncIssue] = useState<{
+    state: 'paused' | 'limited'
+    message: string
+  } | null>(null)
   const [height, setHeight] = useStoredSize(
     'lemex-terminal-height',
     260,
@@ -65,21 +75,12 @@ export function TerminalPanel({
     term.loadAddon(fit)
     term.open(host.current)
     term.textarea?.setAttribute('aria-label', 'Project terminal input')
-    const url = new URL(
-      `/websocket/terminal/${encodeURIComponent(projectId)}`,
-      location.href,
-    )
-    const openingId = messageId()
-    url.searchParams.set('openingId', openingId)
-    openingChange.current?.(openingId)
-    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const socket = new WebSocket(sessionBoundUrl(url))
-    socket.binaryType = 'arraybuffer'
+    let connection: WebSocket | null = null
     let disposed = false
     let failure = ''
     const send = (message: object) => {
-      if (socket.readyState === WebSocket.OPEN)
-        socket.send(JSON.stringify(message))
+      if (connection?.readyState === WebSocket.OPEN)
+        connection.send(JSON.stringify(message))
     }
     const resize = () => {
       if (!host.current?.clientWidth || !host.current.clientHeight) return
@@ -110,69 +111,120 @@ export function TerminalPanel({
         return false
       return true
     })
-    setStatus('Connecting…')
+    setStatus(beforeConnectRef.current ? 'Saving edits…' : 'Connecting…')
     setConnected(false)
-    socket.onopen = () => {
-      if (disposed) return socket.close()
-      setStatus('Connected')
-      setConnected(true)
-      term.options.disableStdin = false
-      resize()
-      term.focus()
-    }
-    socket.onmessage = (event) => {
-      if (disposed) return
-      if (event.data instanceof ArrayBuffer) {
-        const data = new Uint8Array(event.data)
-        term.write(data, () => send({ type: 'ack', bytes: data.byteLength }))
-        return
-      }
+    setSyncIssue(null)
+    async function connect() {
       try {
-        const message: unknown = JSON.parse(String(event.data))
-        if (!message || typeof message !== 'object') return
-        if (
-          'type' in message &&
-          message.type === 'error' &&
-          'message' in message &&
-          typeof message.message === 'string'
-        ) {
-          failure = message.message
-          setStatus(failure)
-        } else if (
-          'type' in message &&
-          message.type === 'exit' &&
-          'code' in message
-        ) {
-          failure =
-            typeof message.code === 'number'
-              ? `Shell exited (${message.code}).`
-              : 'Shell exited.'
-          setStatus(failure)
+        await beforeConnectRef.current?.()
+        if (disposed) return
+        const url = new URL(
+          `/websocket/terminal/${encodeURIComponent(projectId)}`,
+          location.href,
+        )
+        const openingId = messageId()
+        url.searchParams.set('openingId', openingId)
+        openingChange.current?.(openingId)
+        url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+        const socket = new WebSocket(sessionBoundUrl(url))
+        connection = socket
+        socket.binaryType = 'arraybuffer'
+        setStatus('Connecting…')
+        socket.onopen = () => {
+          if (disposed) return socket.close()
+          setStatus('Connected')
+          setConnected(true)
+          term.options.disableStdin = false
+          resize()
+          const active = document.activeElement
+          if (
+            active === document.body ||
+            (active instanceof Element &&
+              (host.current?.contains(active) ||
+                active.closest(
+                  '.terminal-actions, .toolbar-action[aria-label="Terminal"]',
+                )))
+          )
+            term.focus()
         }
-      } catch {
-        /* A disconnected worker can no longer send terminal messages. */
+        socket.onmessage = (event) => {
+          if (disposed) return
+          if (event.data instanceof ArrayBuffer) {
+            const data = new Uint8Array(event.data)
+            term.write(data, () =>
+              send({ type: 'ack', bytes: data.byteLength }),
+            )
+            return
+          }
+          try {
+            const message: unknown = JSON.parse(String(event.data))
+            if (!message || typeof message !== 'object') return
+            if (
+              'type' in message &&
+              message.type === 'sync' &&
+              'state' in message &&
+              'message' in message &&
+              typeof message.message === 'string'
+            ) {
+              if (message.state === 'synced') setSyncIssue(null)
+              else if (
+                message.state === 'paused' ||
+                message.state === 'limited'
+              )
+                setSyncIssue({ state: message.state, message: message.message })
+              return
+            }
+            if (
+              'type' in message &&
+              message.type === 'error' &&
+              'message' in message &&
+              typeof message.message === 'string'
+            ) {
+              failure = message.message
+              setStatus(failure)
+            } else if (
+              'type' in message &&
+              message.type === 'exit' &&
+              'code' in message
+            ) {
+              failure =
+                typeof message.code === 'number'
+                  ? `Shell exited (${message.code}).`
+                  : 'Shell exited.'
+              setStatus(failure)
+            }
+          } catch {
+            /* A disconnected worker can no longer send terminal messages. */
+          }
+        }
+        socket.onerror = () => {
+          failure ||=
+            'Could not open the terminal. Check your sign-in, close other terminals, and try again.'
+          if (!disposed) setStatus(failure)
+        }
+        socket.onclose = () => {
+          if (disposed) return
+          term.options.disableStdin = true
+          setConnected(false)
+          stateChange.current?.(false)
+          setStatus(
+            failure || 'Terminal disconnected. Reopen it to start a new shell.',
+          )
+        }
+      } catch (error) {
+        if (disposed) return
+        failure = errorText(error)
+        setStatus(failure)
+        stateChange.current?.(false)
       }
     }
-    socket.onerror = () => {
-      failure ||=
-        'Could not open the terminal. Check your sign-in, close other terminals, and try again.'
-      if (!disposed) setStatus(failure)
-    }
-    socket.onclose = () => {
-      if (disposed) return
-      term.options.disableStdin = true
-      setConnected(false)
-      stateChange.current?.(false)
-      setStatus(
-        failure || 'Terminal disconnected. Reopen it to start a new shell.',
-      )
-    }
+    void connect()
     return () => {
       disposed = true
       stateChange.current?.(false)
       observer.disconnect()
       input.dispose()
-      socket.close()
+      connection?.close()
       term.dispose()
       terminal.current = null
     }
@@ -249,6 +301,27 @@ export function TerminalPanel({
             <kbd>Ctrl+C</kbd> stops a command.
           </span>
         </p>
+        {needsPreparation && (
+          <div className="workspace-alert terminal-setup-alert" role="status">
+            Project setup changed. Finish or stop your commands, then close this
+            terminal before retrying setup.
+          </div>
+        )}
+        {syncIssue && (
+          <div className="workspace-alert terminal-sync-alert" role="status">
+            <span>
+              <strong>
+                {syncIssue.state === 'paused'
+                  ? 'File syncing paused. '
+                  : 'Some terminal files remain private. '}
+              </strong>
+              {syncIssue.message} Close this terminal to recover its private
+              files below.
+              {syncIssue.state === 'paused' &&
+                ' Open a new terminal to start from the latest saved files.'}
+            </span>
+          </div>
+        )}
         <div className="terminal-screen" ref={host} />
       </section>
     </>

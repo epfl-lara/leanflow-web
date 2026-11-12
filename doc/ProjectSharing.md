@@ -34,6 +34,10 @@ Editable text uses an authenticated project connection and a Yjs document for ea
 
 Agent and terminal changes enter through checked file transactions and then update open documents. If a touched file changed since the agent or terminal's baseline, publication pauses rather than overwriting the newer file. Agent changes remain available in that account's run. Restart the task from the current project or review the conflicting edits. Verification also checks the saved context, so a change to an imported file can require a fresh check.
 
+Open editors follow terminal moves when an unchanged file can be identified uniquely. For moves involving several identical files, use the file browser's **Rename** or **Move to folder** action. If an old file still has a draft, download it before discarding it and open the file at its new location.
+
+If a saved file disappears, its unsaved draft stays in a read-only view. Other files can still save and receive collaborators' changes. Choose **Download draft** or **Save a copy** to recover the draft under a new name. Saving a copy never replaces a different existing file. This also applies when the deletion happened while your connection was interrupted. Leaving the project still asks you to keep or discard remaining drafts.
+
 Large batches hold the write queue for that project until they finish. Another save in the same project can wait for the batch; your local draft remains editable and other projects keep responding. Keep the tab open until saving is confirmed. Replacing an existing file preserves its name throughout the replacement, so readers see complete old or new contents rather than a temporarily missing file.
 
 Configuration files use the normal save path and its active-work checks. They do not use the live text connection. Changing Lean or Lake configuration requires preparing the shared environment again. The selected Lean release and dependency pins are preserved.
@@ -51,6 +55,10 @@ Choose **Choose individual files** if the ZIP is too large. Downloads allow up t
 Terminal Git metadata is local to the private copy. Use **Source control** for the saved project's history and publication. Terminal Git requests use the current account's saved Git connection. Build output, secret paths, dependency caches, and Git metadata are not copied into shared source files. Generated binary or oversized files stay in the private copy for recovery and explicit upload. Other text files continue publishing. A temporarily invalid text file keeps its last published version until it becomes editable again.
 
 ## Concurrency and hosting
+
+Opening a terminal saves pending browser edits before creating its private copy. Later browser edits do not update an already open terminal. If those edits conflict with a terminal command, a persistent notice explains how to recover the private files and start a new terminal from the latest saved project. Brief file changes during a terminal scan retry automatically; actual version conflicts still preserve the private copy.
+
+Terminal synchronization publishes files. Use the file browser to create, move, or remove empty folders.
 
 Document updates and private-copy publication share a version-checked file-write queue. Git commands inside that queue report busy worker capacity immediately instead of waiting for a slot. Cancellation stops workers before final terminal publication; queued writes recheck current membership.
 
@@ -78,6 +86,7 @@ node scripts/check-project-sharing-ux.mjs
 node scripts/check-project-sharing-editor.mjs
 node scripts/check-session-project-drafts-ui.mjs
 node scripts/check-terminal-opening-ui.mjs
+node scripts/check-collaboration-sync-ui.mjs
 node scripts/check-editor-startup-ui.mjs
 node scripts/check-session-account-switch-ui.mjs
 node scripts/check-account-setup-invitation-ui.mjs

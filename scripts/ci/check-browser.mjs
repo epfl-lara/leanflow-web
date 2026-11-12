@@ -63,6 +63,7 @@ const workspaceSuites = [
   'downloads',
   'tex',
   'terminal',
+  'collaboration-sync',
   'search-results',
   'import',
   'import-environment',

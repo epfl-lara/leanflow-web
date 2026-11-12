@@ -8,6 +8,7 @@ import { Runtime } from '../runtime.mjs'
 import { createProjectDownload } from '../project-downloads.mjs'
 import { syncBuiltinESMExports } from 'node:module'
 import JSZip from 'jszip'
+import { TerminalSourceMirror } from '../terminal-live.mjs'
 
 const TOOLCHAIN = 'leanprover/lean4:v4.34.1'
 async function fixture(t) {
@@ -67,6 +68,290 @@ const bounded = (promise) =>
       timer.unref()
     }),
   ])
+
+test('terminal moves announce committed destinations and keep subsequent shared edits protected', async (t) => {
+  const { store, project } = await fixture(t)
+  await store.setMember(project.id, 'alice', 'bob', 'editor')
+  const original = await store.readFile(project.id, 'alice', 'Main.lean')
+  const snapshot = await store.terminalSnapshot(
+    project.id,
+    'alice',
+    'terminal-moves',
+  )
+  const events = []
+  store.subscribeChanges((event) => events.push(event))
+  await fs.mkdir(path.join(snapshot.root, 'Proofs'))
+  await fs.rename(
+    path.join(snapshot.root, 'Main.lean'),
+    path.join(snapshot.root, 'Proofs/Main.lean'),
+  )
+  let changes = await store.syncTerminal(snapshot)
+  assert.deepEqual(events.at(-1).moves, [
+    { from: 'Main.lean', to: 'Proofs/Main.lean' },
+  ])
+  assert.equal(
+    (await store.readFile(project.id, 'bob', 'Proofs/Main.lean')).content,
+    original.content,
+  )
+  await fs.rename(
+    path.join(snapshot.root, 'Proofs/Main.lean'),
+    path.join(snapshot.root, 'Proofs/Renamed.lean'),
+  )
+  changes = await store.syncTerminal(snapshot, changes)
+  assert.deepEqual(events.at(-1).moves, [
+    { from: 'Proofs/Main.lean', to: 'Proofs/Renamed.lean' },
+  ])
+  const current = await store.readFile(project.id, 'bob', 'Proofs/Renamed.lean')
+  await store.writeFile(
+    project.id,
+    'bob',
+    'Proofs/Renamed.lean',
+    '-- newer browser edit\n',
+    current.hash,
+  )
+  const committed = events.length
+  await fs.writeFile(
+    path.join(snapshot.root, 'Proofs/Renamed.lean'),
+    '-- stale terminal edit\n',
+  )
+  await assert.rejects(store.syncTerminal(snapshot, changes), { status: 409 })
+  assert.equal(
+    events.length,
+    committed,
+    'a rejected transaction cannot announce a move or a write',
+  )
+  assert.equal(
+    (await store.readFile(project.id, 'bob', 'Proofs/Renamed.lean')).content,
+    '-- newer browser edit\n',
+  )
+  await store.cleanupTerminalSnapshot(snapshot, { finalize: true })
+})
+
+test('terminal folder moves report each uniquely identified file and never guess among duplicate contents', async (t) => {
+  const { store, project } = await fixture(t)
+  for (const [name, content] of [
+    ['Old/A.lean', '-- A\n'],
+    ['Old/B.lean', '-- B\n'],
+    ['Old/Empty1.lean', ''],
+    ['Old/Empty2.lean', ''],
+  ])
+    await store.writeFile(project.id, 'alice', name, content, null)
+  const snapshot = await store.terminalSnapshot(
+    project.id,
+    'alice',
+    'terminal-folder-move',
+  )
+  const events = []
+  store.subscribeChanges((event) => events.push(event))
+  await fs.rename(
+    path.join(snapshot.root, 'Old'),
+    path.join(snapshot.root, 'New'),
+  )
+  await store.syncTerminal(snapshot)
+  const published = events.find((event) => event.moves?.length)
+  assert.deepEqual(published.moves, [
+    { from: 'Old/A.lean', to: 'New/A.lean' },
+    { from: 'Old/B.lean', to: 'New/B.lean' },
+  ])
+  assert.deepEqual(published.removedPaths.sort(), [
+    'Old/A.lean',
+    'Old/B.lean',
+    'Old/Empty1.lean',
+    'Old/Empty2.lean',
+  ])
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'New/Empty1.lean')).content,
+    '',
+  )
+  assert.equal(
+    (await store.folders(project.id, 'alice')).includes('Old'),
+    false,
+  )
+  await store.cleanupTerminalSnapshot(snapshot, { finalize: true })
+  await store.moveEntry(project.id, 'alice', { from: 'New', to: 'Old' })
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Old/A.lean')).content,
+    '-- A\n',
+  )
+})
+
+test('a uniquely identified empty file follows a terminal move without attaching a replaced destination', async (t) => {
+  const { store, project } = await fixture(t)
+  await store.writeFile(project.id, 'alice', 'Empty.lean', '', null)
+  await store.writeFile(
+    project.id,
+    'alice',
+    'Existing.lean',
+    '-- must not inherit the empty file’s editor\n',
+    null,
+  )
+  const snapshot = await store.terminalSnapshot(
+    project.id,
+    'alice',
+    'terminal-empty-move',
+  )
+  const events = []
+  store.subscribeChanges((event) => events.push(event))
+  await fs.mkdir(path.join(snapshot.root, 'Proofs'))
+  await fs.rename(
+    path.join(snapshot.root, 'Empty.lean'),
+    path.join(snapshot.root, 'Proofs/Empty.lean'),
+  )
+  const changes = await store.syncTerminal(snapshot)
+  assert.deepEqual(events.at(-1).moves, [
+    { from: 'Empty.lean', to: 'Proofs/Empty.lean' },
+  ])
+  await fs.rename(
+    path.join(snapshot.root, 'Proofs/Empty.lean'),
+    path.join(snapshot.root, 'Existing.lean'),
+  )
+  await store.syncTerminal(snapshot, changes)
+  assert.deepEqual(
+    events.at(-1).moves || [],
+    [],
+    'overwriting an existing destination cannot redirect another editor’s draft',
+  )
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Existing.lean')).content,
+    '',
+  )
+  await store.cleanupTerminalSnapshot(snapshot, { finalize: true })
+})
+
+for (const keep of ['private empty folder', 'new shared file'])
+  test(`terminal folder cleanup preserves ${keep}`, async (t) => {
+    const { store, project } = await fixture(t)
+    await store.writeFile(project.id, 'alice', 'Old/A.lean', '-- A\n', null)
+    const snapshot = await store.terminalSnapshot(
+      project.id,
+      'alice',
+      'terminal-keep-folder',
+    )
+    if (keep === 'private empty folder') {
+      await fs.mkdir(path.join(snapshot.root, 'New'))
+      await fs.rename(
+        path.join(snapshot.root, 'Old/A.lean'),
+        path.join(snapshot.root, 'New/A.lean'),
+      )
+    } else {
+      await store.setMember(project.id, 'alice', 'bob', 'editor')
+      await store.writeFile(
+        project.id,
+        'bob',
+        'Old/Keep.lean',
+        '-- collaborator keeps this\n',
+        null,
+      )
+      await fs.rename(
+        path.join(snapshot.root, 'Old'),
+        path.join(snapshot.root, 'New'),
+      )
+    }
+    await store.syncTerminal(snapshot)
+    assert.equal(
+      (await store.folders(project.id, 'alice')).includes('Old'),
+      true,
+    )
+    if (keep === 'new shared file')
+      assert.equal(
+        (await store.readFile(project.id, 'alice', 'Old/Keep.lean')).content,
+        '-- collaborator keeps this\n',
+      )
+    await store.cleanupTerminalSnapshot(snapshot, { finalize: true })
+  })
+
+for (const race of ['before-open', 'after-open'])
+  test(`moving a file between the terminal scan and read retries without permanently pausing publication (${race})`, async (t) => {
+    const { store, project } = await fixture(t)
+    const snapshot = await store.terminalSnapshot(
+      project.id,
+      'alice',
+      'terminal-scan-move',
+    )
+    const from = path.join(snapshot.root, 'Main.lean')
+    const to = path.join(snapshot.root, 'Moved.lean')
+    const originalOpen = fs.open
+    let moved = false
+    const errors = []
+    const mirror = new TerminalSourceMirror({
+      workspaces: store,
+      snapshot,
+      onError: (error) => errors.push(error),
+      onConflict: (error) => errors.push(error),
+    })
+    t.mock.method(fs, 'open', async (...args) => {
+      if (!moved && args[0] === from) {
+        moved = true
+        const handle =
+          race === 'after-open' ? await originalOpen(...args) : null
+        await fs.rename(from, to)
+        if (handle) return handle
+      }
+      return originalOpen(...args)
+    })
+    syncBuiltinESMExports()
+    try {
+      await mirror.poll()
+    } finally {
+      t.mock.restoreAll()
+      syncBuiltinESMExports()
+    }
+    assert.equal(moved, true)
+    assert.equal(
+      mirror.paused,
+      false,
+      'a disappearing scanned filename is temporary, not a publication conflict',
+    )
+    assert.deepEqual(errors, [])
+    await mirror.poll()
+    assert.equal(
+      (await store.readFile(project.id, 'alice', 'Moved.lean')).content.length >
+        0,
+      true,
+    )
+    await assert.rejects(store.readFile(project.id, 'alice', 'Main.lean'), {
+      status: 404,
+    })
+    await mirror.stop({ flush: true })
+    await store.cleanupTerminalSnapshot(snapshot, { finalize: true })
+  })
+
+for (const damage of ['baseline', 'symlink'])
+  test(`terminal scan retries never bypass ${damage} protection`, async (t) => {
+    const { store, project } = await fixture(t)
+    const snapshot = await store.terminalSnapshot(
+      project.id,
+      'alice',
+      `terminal-damage-${damage}`,
+    )
+    const filename = path.join(snapshot.root, 'Main.lean')
+    if (damage === 'baseline') {
+      await fs.writeFile(filename, '-- private edit\n')
+      await fs.rm(
+        path.join(path.dirname(snapshot.root), 'baseline', 'Main.lean'),
+      )
+    } else {
+      await fs.unlink(filename)
+      await fs.symlink('../../outside-private-fixture', filename)
+    }
+    const conflicts = []
+    const mirror = new TerminalSourceMirror({
+      workspaces: store,
+      snapshot,
+      onConflict: (error) => conflicts.push(error),
+    })
+    await mirror.poll()
+    assert.equal(mirror.paused, true)
+    assert.equal(conflicts.length, 1)
+    assert.notEqual(conflicts[0].code, 'TERMINAL_SOURCE_CHANGED')
+    assert.equal(
+      (await store.readFile(project.id, 'alice', 'Main.lean')).content.includes(
+        '-- private edit',
+      ),
+      false,
+    )
+    await store.cleanupTerminalSnapshot(snapshot, { finalize: true })
+  })
 
 test('durable project roles enforce file, metadata and sharing permissions', async (t) => {
   const f = await fixture(t),

@@ -123,6 +123,18 @@ export class Terminals {
       outstanding += output.length
       ws.send(output, { binary: true })
     }
+    let lastSyncStatus = ''
+    const syncStatus = (state, message = '') => {
+      const packet = JSON.stringify({ type: 'sync', state, message })
+      if (ws.readyState !== 1 || packet === lastSyncStatus) return
+      try {
+        assertAuthenticated()
+      } catch {
+        return
+      }
+      lastSyncStatus = packet
+      ws.send(packet)
+    }
     const fail = (message, code = 1011) => {
       if (ws.readyState === 1)
         ws.send(JSON.stringify({ type: 'error', message }))
@@ -321,6 +333,7 @@ export class Terminals {
           session.recovery = true
           session.publicationPaused = true
           session.recoveryMessage = message
+          syncStatus('paused', message)
           notice(
             `File updates paused: ${message} Close this terminal to recover its preserved private working copy (${session.snapshot.runId}) from /api/projects/${project.id}/terminal-recoveries/${session.snapshot.runId}/download.`,
           )
@@ -335,12 +348,14 @@ export class Terminals {
               session.recovery = paths.length > 0
               if (!paths.length) {
                 session.unpublished = ''
+                syncStatus('synced')
                 return
               }
               const fingerprint = paths.join('\0')
               if (fingerprint === session.unpublished) return
               session.unpublished = fingerprint
               session.recoveryMessage = `Some generated, binary or oversized files remain in this private terminal copy: ${paths.slice(0, 5).join(', ')}${paths.length > 5 ? ', …' : ''}. Download the copy to recover them. Text changes continue to publish.`
+              syncStatus('limited', session.recoveryMessage)
               notice(session.recoveryMessage)
             },
             onConflict: preserve,

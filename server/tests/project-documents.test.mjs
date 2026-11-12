@@ -541,6 +541,42 @@ test('an authoritative complex replacement rotates document identity without los
   )
 })
 
+test('an update whose refresh replaces the document cannot publish operations from its old identity', async (t) => {
+  const value = fixture(t)
+  value.files.set('Main.lean', '')
+  const alice = await value.client('alice')
+  const stale = update(alice, 1, (text) => text.insert(0, 'STALE ROOT INSERT'))
+  const record = [...value.service.documents.values()][0]
+  // The insertion was authored against the empty file, so it has no causal
+  // dependency on the source that will be replaced during request admission.
+  value.files.set('Main.lean', 'a'.repeat(640001))
+  await value.service.queue(record, () =>
+    value.service.refresh(record, 'alice'),
+  )
+  assert.equal(record.id, alice.id)
+  const replacement = 'b'.repeat(640001)
+  value.files.set('Main.lean', replacement)
+  let writes = 0
+  const write = value.store.writeFile.bind(value.store)
+  value.store.writeFile = (...args) => {
+    writes++
+    return write(...args)
+  }
+
+  await assert.rejects(value.service.message(alice.client, stale), {
+    status: 409,
+  })
+
+  assert.notEqual(record.id, alice.id)
+  assert.equal(value.files.get('Main.lean'), replacement)
+  assert.equal(record.doc.getText('source').toString(), replacement)
+  assert.equal(writes, 0)
+  assert.equal(
+    alice.ws.packets.some((packet) => packet.ack === 1),
+    false,
+  )
+})
+
 test('a close cancels an awaiting open before it can reattach or send a stale baseline', async (t) => {
   const value = fixture(t)
   const read = value.store.readFile.bind(value.store)
@@ -669,7 +705,14 @@ test('a moved file is announced with its destination, and the old live document 
   for (const entry of [alice, bob]) {
     assert.deepEqual(
       entry.ws.packets.filter((packet) => packet.type === 'files'),
-      [{ type: 'files', paths: ['Main.lean', 'Moved.lean'], moves }],
+      [
+        {
+          type: 'files',
+          paths: ['Main.lean', 'Moved.lean'],
+          removedPaths: ['Main.lean'],
+          moves,
+        },
+      ],
     )
     assert.equal(
       entry.ws.packets.some((packet) => packet.type === 'error'),

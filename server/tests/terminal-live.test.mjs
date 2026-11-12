@@ -60,3 +60,69 @@ test('a terminal publication conflict pauses once and preserves the candidate fo
   assert.deepEqual(conflicts, ['Main.lean changed in another tab.'])
   assert.equal(mirror.paused, true)
 })
+
+test('a changing private file retries from the last publication, but a failed final scan retains recovery', async () => {
+  const published = [{ path: 'Main.lean', after: 'published' }]
+  const errors = []
+  let calls = 0
+  const mirror = new TerminalSourceMirror({
+    workspaces: {
+      async syncTerminal(_snapshot, previous) {
+        if (++calls === 1) return published
+        assert.deepEqual(previous, published)
+        throw Object.assign(new Error('Private files are changing.'), {
+          code: 'TERMINAL_SOURCE_CHANGED',
+          status: 503,
+        })
+      },
+    },
+    onError: (error) => errors.push(error.message),
+  })
+  await mirror.poll()
+  await mirror.poll()
+  assert.equal(mirror.paused, false)
+  assert.deepEqual(mirror.changes, published)
+  assert.deepEqual(errors, [])
+  await mirror.stop({ flush: true })
+  assert.equal(mirror.paused, true)
+  assert.deepEqual(errors, ['Private files are changing.'])
+})
+
+test('closing during a transient ordinary scan still performs its final checked publication', async () => {
+  let finishScan, entered
+  const scanning = new Promise((resolve) => {
+    entered = resolve
+  })
+  const first = new Promise((_, reject) => {
+    finishScan = reject
+  })
+  const errors = []
+  let calls = 0
+  const final = [{ path: 'Final.lean', after: '-- final\n' }]
+  const mirror = new TerminalSourceMirror({
+    workspaces: {
+      async syncTerminal() {
+        if (++calls === 1) {
+          entered()
+          return first
+        }
+        return final
+      },
+    },
+    onError: (error) => errors.push(error),
+  })
+  const polling = mirror.poll()
+  await scanning
+  const stopping = mirror.stop({ flush: true })
+  finishScan(
+    Object.assign(new Error('Temporary private scan race.'), {
+      code: 'TERMINAL_SOURCE_CHANGED',
+      status: 503,
+    }),
+  )
+  await Promise.all([polling, stopping])
+  assert.equal(calls, 2)
+  assert.equal(mirror.paused, false)
+  assert.deepEqual(mirror.changes, final)
+  assert.deepEqual(errors, [])
+})

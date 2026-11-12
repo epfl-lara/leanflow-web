@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 import ts from 'typescript'
+import { MAX_PROJECT_FILES } from '../../../shared/source-limits.mjs'
 
 const projectPaths = (() => {
   const { outputText } = ts.transpileModule(
@@ -14,7 +15,14 @@ const projectPaths = (() => {
     },
   )
   const module = { exports: {} }
-  new Function('exports', 'module', outputText)(module.exports, module)
+  new Function('exports', 'module', 'require', outputText)(
+    module.exports,
+    module,
+    (name) => {
+      assert.equal(name, '../../../shared/source-limits.mjs')
+      return { MAX_PROJECT_FILES }
+    },
+  )
   return module.exports
 })()
 

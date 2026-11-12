@@ -75,6 +75,8 @@ import { AccountSetup } from './AccountSetup'
 import { setRunEventTransport } from './runEventTransport'
 import { FileBrowser } from './FileBrowser'
 import { CreateEntryDialog, type EntryKind } from './CreateEntryDialog'
+import { DetachedDraftNotice } from './DetachedDraftNotice'
+import { reconcileMissingBuffers } from './workspaceFiles'
 import { MoveEntryDialog } from './MoveEntryDialog'
 import {
   moveRequestCurrent,
@@ -350,6 +352,11 @@ export function Studio() {
   const [reloadBusy, setReloadBusy] = useState(false)
   const [reloadTarget, setReloadTarget] = useState<string | null>(null)
   const [agentPendingFile, setAgentPendingFile] = useState<string | null>(null)
+  const [recoveryTarget, setRecoveryTarget] = useState<{
+    path: string
+    scope: WorkspaceScope
+    userId: string
+  } | null>(null)
   const [projectModal, setProjectModal] = useState<{ preset?: string } | null>(
     null,
   )
@@ -402,6 +409,8 @@ export function Studio() {
   const closeBooks = useCallback(() => setBooksOpen(false), [])
   const [showInfoview, setShowInfoview] = useState(true)
   const [terminalActive, setTerminalActive] = useState(false)
+  const [startingTerminal, setStartingTerminal] = useState(false)
+  const terminalStartRequest = useRef<WorkspaceScope | null>(null)
   const [terminalRecoveryVersion, setTerminalRecoveryVersion] = useState(0)
   const [terminalProjectId, setTerminalProjectId] = useState<string | null>(
     null,
@@ -433,10 +442,12 @@ export function Studio() {
     uploadProjectId ||
     projectModal ||
     newEntryKind ||
+    recoveryTarget ||
     moveTarget ||
     pendingAction ||
     reloadTarget ||
     terminalProjectId ||
+    startingTerminal ||
     gitOpen ||
     deleteTarget ||
     renameTarget ||
@@ -463,6 +474,19 @@ export function Studio() {
     >
   } | null>(null)
   const openRequest = useRef(0)
+  const pendingFileOpen = useRef<{
+    request: number
+    scope: WorkspaceScope
+    path: string
+    line?: number
+    column?: number
+    reload: boolean
+  } | null>(null)
+  const pendingReload = useRef<{
+    scope: WorkspaceScope
+    path: string
+  } | null>(null)
+  const filesRequest = useRef(0)
   const navigationRequest = useRef(0)
   const generation = useRef(0)
   const savePromise = useRef<{
@@ -527,7 +551,7 @@ export function Studio() {
     if (project?.status === 'needs-setup') setToolsOpen(false)
   }, [project?.id, project?.status])
   const currentEditorProof =
-    editorProof?.path === file?.path ? editorProof : null
+    !file?.unavailable && editorProof?.path === file?.path ? editorProof : null
   const sidebarMaximum = Math.min(
     480,
     studioSize.width - 360 - (toolsOpen && !overlayTools ? 280 : 0),
@@ -556,6 +580,8 @@ export function Studio() {
   )
   const fileTreePercent = clamp(fileTreeSize, fileTreeMinimum, fileTreeMaximum)
   const dirtyFiles = bufferStore.drafts()
+  const saveableFiles = bufferStore.dirty()
+  const detachedFiles = [...buffers.values()].filter((file) => file.unavailable)
   const readOnlyDrafts = dirtyFiles.some((file) => file.readOnly)
   const dirtyKey = dirtyFiles
     .map((file) => file.path)
@@ -599,6 +625,8 @@ export function Studio() {
       fileRef.current = null
       filesRef.current = []
       ++openRequest.current
+      pendingFileOpen.current = null
+      pendingReload.current = null
       savePromise.current = null
       setFiles([])
       setFolders([])
@@ -616,6 +644,8 @@ export function Studio() {
       setGit(null)
       setGitOpen(null)
       setTerminalProjectId(null)
+      terminalStartRequest.current = null
+      setStartingTerminal(false)
       terminalOpening.current = null
       setTerminalActive(false)
       setJob(null)
@@ -626,6 +656,7 @@ export function Studio() {
       setReloadTarget(null)
       setReloadBusy(false)
       setAgentPendingFile(null)
+      setRecoveryTarget(null)
       setPendingAction(null)
       setNavigationError('')
       setNavigationTarget('')
@@ -838,12 +869,17 @@ export function Studio() {
   const loadFiles = useCallback(
     async (id: string) => {
       const expected = bufferStore.getSnapshot().scope
+      const request = ++filesRequest.current
       const base = `/api/projects/${encodeURIComponent(id)}`
       const [value, directories] = await Promise.all([
         api<FileEntry[]>(`${base}/files`),
         api<string[]>(`${base}/folders`).catch(() => null),
       ])
-      if (bufferStore.isCurrent(expected) && expected.projectId === id) {
+      if (
+        request === filesRequest.current &&
+        bufferStore.isCurrent(expected) &&
+        expected.projectId === id
+      ) {
         setFiles(value)
         setFoldersAvailable(directories !== null)
         // A server being updated or an unavailable folder listing must not hide files.
@@ -903,6 +939,7 @@ export function Studio() {
       const expected = bufferStore.getSnapshot().scope
       if (expected.projectId !== id) return
       const request = ++openRequest.current
+      pendingFileOpen.current = null
       const revealCurrent = () => {
         if (line)
           setRevealPosition({
@@ -916,13 +953,25 @@ export function Studio() {
       // Diagnostic links navigate within the current editor. Reopening it
       // would discard undo/cursor state and could
       // overwrite keystrokes made while a redundant source request was pending.
-      if (!reload && bufferStore.getSnapshot().file?.path === path) {
+      if (
+        !reload &&
+        bufferStore.getSnapshot().file?.path === path &&
+        !bufferStore.getSnapshot().file?.unavailable
+      ) {
         setOpening(false)
         setError('')
         revealCurrent()
         return
       }
       setOpening(true)
+      pendingFileOpen.current = {
+        request,
+        scope: expected,
+        path,
+        line,
+        column,
+        reload,
+      }
       setError('')
       try {
         const pdf = isPdfFile(path)
@@ -953,6 +1002,7 @@ export function Studio() {
         }
         if (
           latest &&
+          !latest.unavailable &&
           bufferStore.getSnapshot().file?.path === path &&
           value.content === latest.content &&
           value.hash === latest.hash &&
@@ -967,6 +1017,8 @@ export function Studio() {
           savedContent:
             latest && value === latest ? latest.savedContent : value.content,
           hash: value.hash,
+          unavailable:
+            latest && value === latest ? latest.unavailable : undefined,
           generation: ++generation.current,
           readOnly:
             projectAccessRef.current === 'viewer' ||
@@ -982,6 +1034,8 @@ export function Studio() {
       } catch (error) {
         if (request === openRequest.current) setError(errorText(error))
       } finally {
+        if (pendingFileOpen.current?.request === request)
+          pendingFileOpen.current = null
         if (request === openRequest.current) setOpening(false)
       }
     },
@@ -1088,6 +1142,10 @@ export function Studio() {
         }),
       )
       const rekey = (path: string) => remapMovedPath(path, from, to) ?? path
+      const reloading = pendingReload.current
+      if (reloading && bufferStore.isCurrent(reloading.scope))
+        reloading.path = rekey(reloading.path)
+      setReloadTarget((current) => (current ? rekey(current) : null))
       setProofFocus((current) =>
         current?.projectId === id
           ? {
@@ -1114,12 +1172,20 @@ export function Studio() {
         generation.current,
         movedFile?.generation ?? 0,
       )
+      const opening = pendingFileOpen.current
+      if (opening && bufferStore.isCurrent(opening.scope)) {
+        const destination = remapMovedPath(opening.path, from, to)
+        if (destination)
+          void openFile(id, destination, opening.line, opening.column, {
+            reload: opening.reload,
+          })
+      }
       const active = movedFile?.path
       if (active) localStorage.setItem(`lemex-file-${id}`, active)
       if (!ownMoves.current.has(`${from}\0${to}`))
         setNotice(`${from} was moved to ${to}.`)
     },
-    [bufferStore, session?.user.id],
+    [bufferStore, session?.user.id, openFile],
   )
   const collaboration = useProjectCollaboration({
     store: bufferStore,
@@ -1127,7 +1193,18 @@ export function Studio() {
     enabled: !!session && !authRequired && workspaceEditable,
     canEdit: projectCanEdit,
     onFilesChanged: async () => {
-      if (scope.projectId) await loadFiles(scope.projectId)
+      const id = scope.projectId
+      if (!id) return
+      const listing = await loadFiles(id)
+      await reconcileMissingBuffers(
+        bufferStore,
+        scope,
+        listing.map((entry) => entry.path),
+        (path) =>
+          api(
+            `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
+          ),
+      )
     },
     onFilesMoved: handleFilesMoved,
     onAccessChanged: async () => {
@@ -1248,7 +1325,7 @@ export function Studio() {
   }, [saveVersion, scope, bufferStore, loadGit])
 
   const saveCompletely = useCallback(async () => {
-    if (bufferStore.drafts().some((file) => file.readOnly))
+    if (bufferStore.drafts().some((file) => file.readOnly && !file.unavailable))
       throw new Error(
         'Your drafts can no longer be saved to this project. Download them before continuing, or discard them.',
       )
@@ -1262,7 +1339,7 @@ export function Studio() {
     if (bufferStore.dirty().length) await saveFile()
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
     requireScope(expected)
-    if (bufferStore.drafts().length)
+    if (bufferStore.drafts().some((file) => !file.unavailable))
       throw new Error(
         'Files are still being edited. Save them before continuing.',
       )
@@ -1271,14 +1348,18 @@ export function Studio() {
   const saveWorkspace = useCallback(async () => {
     requireScope(scope)
     await saveCompletely()
-  }, [requireScope, scope, saveCompletely])
+    if (bufferStore.getSnapshot().file?.unavailable)
+      throw new Error(
+        'This file was deleted or moved. Choose a saved file, or save a copy of its draft before starting work on it.',
+      )
+  }, [requireScope, scope, saveCompletely, bufferStore])
 
   const beforeApply = useCallback(async () => {
     if (savePromise.current)
       throw new Error(
         'A file save is still in progress. Wait for it to finish before applying the candidate.',
       )
-    if (bufferStore.drafts().length)
+    if (bufferStore.drafts().some((file) => !file.unavailable))
       throw new Error(
         'The editor has unsaved changes. Keep them and start a new run, or discard them before applying this candidate.',
       )
@@ -1322,7 +1403,11 @@ export function Studio() {
   }, [notice])
 
   const navigate = useCallback(
-    (action: () => Promise<void>, destination = '') => {
+    (
+      action: () => Promise<void>,
+      destination = '',
+      keepDetachedDrafts = false,
+    ) => {
       const expected = bufferStore.getSnapshot().scope
       const request = ++navigationRequest.current
       const openingRequest = openRequest.current
@@ -1338,7 +1423,11 @@ export function Studio() {
             !bufferStore.isCurrent(expected)
           )
             return
-          if (bufferStore.drafts().length)
+          if (
+            bufferStore
+              .drafts()
+              .some((file) => !keepDetachedDrafts || !file.unavailable)
+          )
             throw new Error(
               'Your drafts are still in this tab. Download or save them before continuing, or discard them.',
             )
@@ -1402,7 +1491,7 @@ export function Studio() {
         const action = () => openFile(id, path)
         if (bufferStore.getSnapshot().buffers.has(path))
           void action().catch((error) => setError(errorText(error)))
-        else navigate(action)
+        else navigate(action, '', true)
       }
     },
     [navigate, openFile, bufferStore],
@@ -1505,6 +1594,10 @@ export function Studio() {
     setError('')
     try {
       await saveCompletely()
+      if (bufferStore.getSnapshot().file?.unavailable)
+        throw new Error(
+          'This file was deleted or moved. Choose a saved Lean file to check.',
+        )
       const value = await post<Job>(
         `/api/projects/${encodeURIComponent(id)}/check`,
         { path: file.path },
@@ -1668,6 +1761,146 @@ export function Studio() {
     }
   }
 
+  async function recoverDraft(path: string) {
+    if (!recoveryTarget) return
+    if (!session || session.user.id !== recoveryTarget.userId)
+      throw new Error(
+        'The workspace account changed. Choose the draft again in this account.',
+      )
+    const expected = recoveryTarget.scope
+    requireScope(expected)
+    const id = expected.projectId
+    if (!id) throw new Error('Choose a project before saving this draft.')
+    const draft = bufferStore.getSnapshot().buffers.get(recoveryTarget.path)
+    if (!draft?.unavailable)
+      throw new Error(
+        'This draft changed. Close the dialog and choose it again.',
+      )
+    if (path === draft.path)
+      throw new Error('Choose a different filename for this copy.')
+    const destination = bufferStore.getSnapshot().buffers.get(path)
+    if (destination && destination.content !== destination.savedContent)
+      throw new Error(
+        `A draft already uses ${path}. Choose another filename for this copy.`,
+      )
+    const receipt = await api<{ content: string; hash: string }>(
+      `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
+      {
+        method: 'PUT',
+        signal: AbortSignal.timeout(60_000),
+        body: JSON.stringify({ content: draft.content, expectedHash: null }),
+      },
+    )
+    requireScope(expected)
+    if (
+      receipt?.content !== draft.content ||
+      !/^[a-f0-9]{64}$/.test(receipt.hash)
+    )
+      throw new Error(
+        'The server did not confirm this copy. Your draft is kept here; retry saving it.',
+      )
+    await loadFiles(id)
+    requireScope(expected)
+    await openFile(id, path)
+    requireScope(expected)
+    const latest = bufferStore.getSnapshot().buffers.get(draft.path)
+    const copied = bufferStore.getSnapshot().buffers.get(path)
+    if (
+      latest?.unavailable &&
+      latest.content === draft.content &&
+      copied?.savedContent === draft.content &&
+      copied.hash === receipt.hash
+    )
+      bufferStore.remove(draft.path)
+    setNotice(`Draft saved as ${path}`)
+  }
+
+  async function reloadSavedFile(path: string) {
+    const expected = bufferStore.getSnapshot().scope
+    const id = expected.projectId
+    if (!id || savePromise.current) return
+    const operation = { scope: expected, path }
+    pendingReload.current = operation
+    setReloadBusy(true)
+    setError('')
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const requestedPath = operation.path
+        const previous = bufferStore.getSnapshot().buffers.get(requestedPath)
+        const selectedRequest = openRequest.current
+        let latest: { content: string; hash: string; readOnly?: boolean }
+        try {
+          latest = await api(
+            `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(requestedPath)}`,
+          )
+        } catch (error) {
+          if (operation.path !== requestedPath) continue
+          throw error
+        }
+        if (
+          !bufferStore.isCurrent(expected) ||
+          pendingReload.current !== operation
+        )
+          return
+        // A committed move can overtake this HTTP response. Read the new path
+        // instead of selecting a stale source that no longer exists.
+        if (operation.path !== requestedPath) continue
+        if (openRequest.current !== selectedRequest)
+          throw new Error(
+            'The selected file changed. Choose Reload file again for the file you want to reload.',
+          )
+        const current = bufferStore.getSnapshot().buffers.get(requestedPath)
+        if (current?.unavailable && !previous?.unavailable)
+          throw new Error(
+            'This file was deleted or moved while reloading. Your draft is kept here; choose a saved file or save a copy.',
+          )
+        if (
+          current &&
+          previous &&
+          current.content !== previous.content &&
+          current.content !== current.savedContent
+        )
+          throw new Error(
+            'New edits arrived while reloading. Your draft is kept here; review it before choosing Reload file again.',
+          )
+        if (
+          current?.generation !== previous?.generation ||
+          current?.hash !== previous?.hash
+        )
+          continue
+        setFile({
+          path: requestedPath,
+          ...latest,
+          savedContent: latest.content,
+          generation: ++generation.current,
+          readOnly:
+            projectAccessRef.current === 'viewer' ||
+            latest.readOnly ||
+            (!!current?.readOnly && !current.unavailable) ||
+            requestedPath.startsWith('.lake/') ||
+            filesRef.current.find((item) => item.path === requestedPath)
+              ?.readOnly,
+        })
+        setReloadTarget(null)
+        setAgentPendingFile(null)
+        return
+      }
+      throw new Error(
+        'The saved file kept changing while reloading. Your draft is kept here; try Reload file again.',
+      )
+    } catch (error) {
+      if (bufferStore.isCurrent(expected)) {
+        setError(errorText(error))
+        setReloadTarget(null)
+      }
+    } finally {
+      if (pendingReload.current === operation) {
+        pendingReload.current = null
+        if (bufferStore.isCurrent(expected)) setReloadBusy(false)
+      }
+    }
+  }
+
   useEffect(() => {
     if (
       moveTarget &&
@@ -1748,7 +1981,8 @@ export function Studio() {
       if (!bufferStore.isCurrent(expected)) return
       const id = expected.projectId
       if (!id) return
-      const [listing, updated] = await Promise.all([
+      const current = bufferStore.getSnapshot().file
+      const [, updated] = await Promise.all([
         loadFiles(id),
         source === 'agent'
           ? api<Project>(`/api/projects/${encodeURIComponent(id)}`)
@@ -1760,12 +1994,13 @@ export function Studio() {
           previous.map((item) => (item.id === id ? updated : item)),
         )
       if (source === 'agent') void loadGit(id)
-      const current = fileRef.current
       if (!current || (paths.length && !paths.includes(current.path))) return
-      if (!listing.some((entry) => entry.path === current.path)) {
-        setAgentPendingFile(current.path)
+      const selected = bufferStore.getSnapshot().file
+      if (
+        selected?.path !== current.path ||
+        selected.generation !== current.generation
+      )
         return
-      }
       if (current.preview === 'pdf') {
         // Terminal polling supplies no changed paths. Keep the reader's page
         // and scroll position until a reported edit or an explicit reload.
@@ -1775,17 +2010,57 @@ export function Studio() {
           })
         return
       }
-      const latest = await api<{ content: string; hash: string }>(
-        `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(current.path)}`,
-      )
-      const now = fileRef.current
+      if (collaboration.manages(current.path)) {
+        setAgentPendingFile((pending) =>
+          pending === current.path ? null : pending,
+        )
+        return
+      }
+      let latest: { content: string; hash: string }
+      try {
+        latest = await api(
+          `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(current.path)}`,
+        )
+      } catch (error) {
+        if (collaboration.manages(current.path)) return
+        const now = bufferStore.getSnapshot().file
+        if (error instanceof ApiError && error.status === 404) {
+          if (
+            bufferStore.isCurrent(expected) &&
+            now?.path === current.path &&
+            now.generation === current.generation &&
+            now.hash === current.hash
+          ) {
+            bufferStore.detach(current.path)
+            setAgentPendingFile(null)
+          }
+          return
+        }
+        throw error
+      }
+      const now = bufferStore.getSnapshot().file
+      if (collaboration.manages(current.path)) return
       if (
         !bufferStore.isCurrent(expected) ||
         now?.path !== current.path ||
         now.generation !== current.generation
       )
         return
-      if (latest.hash === now.hash) return
+      if (latest.hash === now.hash) {
+        if (now.content === now.savedContent)
+          setAgentPendingFile((pending) =>
+            pending === now.path ? null : pending,
+          )
+        return
+      }
+      if (latest.content === now.content) {
+        // The file can become readable before this tab receives its save ACK.
+        // Keep waiting for that receipt without claiming an outside conflict.
+        setAgentPendingFile((pending) =>
+          pending === now.path ? null : pending,
+        )
+        return
+      }
       if (savePromise.current || now.content !== now.savedContent) {
         setAgentPendingFile(now.path)
         return
@@ -1793,6 +2068,7 @@ export function Studio() {
       if (now.hash !== current.hash) return
       setFile((previous) =>
         previous?.path === current.path &&
+        previous.generation === current.generation &&
         previous.hash === current.hash &&
         previous.content === previous.savedContent
           ? {
@@ -1810,11 +2086,11 @@ export function Studio() {
           : 'Agent edits updated live',
       )
     },
-    [bufferStore, loadFiles, loadGit, openFile, setFile],
+    [bufferStore, loadFiles, loadGit, openFile, setFile, collaboration.manages],
   )
 
   useEffect(() => {
-    if (!terminalOpen || project?.status !== 'ready') return
+    if (!terminalOpen) return
     let disposed = false
     let timer: ReturnType<typeof setTimeout>
     const refresh = async () => {
@@ -1839,6 +2115,26 @@ export function Studio() {
     refreshLiveFiles,
     loadProjects,
   ])
+
+  async function openTerminal() {
+    const expected = bufferStore.getSnapshot().scope
+    const id = expected.projectId
+    if (!id || terminalStartRequest.current) return
+    terminalStartRequest.current = expected
+    setStartingTerminal(true)
+    try {
+      await saveCompletely()
+      requireScope(expected)
+      setTerminalProjectId(id)
+    } catch (error) {
+      if (bufferStore.isCurrent(expected)) setError(errorText(error))
+    } finally {
+      if (terminalStartRequest.current === expected) {
+        terminalStartRequest.current = null
+        setStartingTerminal(false)
+      }
+    }
+  }
 
   async function closeTerminal() {
     const opening = terminalOpening.current
@@ -2150,7 +2446,7 @@ export function Studio() {
             void loadSession()
           }}
           onProfileSaved={acceptProfile}
-          onLogout={logout}
+          onLogout={async () => navigate(logout)}
           invitationNotice={invitationNotice}
           viewerProjects={
             session.user.profileComplete === false
@@ -2664,9 +2960,10 @@ export function Studio() {
                 label="Terminal"
                 icon={<Icon name="terminal" size={15} />}
                 pressed={terminalOpen}
+                disabled={startingTerminal}
                 onClick={() => {
                   if (terminalOpen) closeTerminal()
-                  else setTerminalProjectId(project.id)
+                  else void openTerminal()
                 }}
                 help="Run commands in your private working copy. File changes sync with conflict checks. Terminal Git history stays private; use Source control to publish project history."
               />
@@ -2773,41 +3070,43 @@ export function Studio() {
             </button>
           </div>
         )}
-        {agentPendingFile && file?.path === agentPendingFile && (
-          <div className="workspace-alert live-edit-alert" role="status">
-            <span>
-              The saved file changed outside this editor. Your unsaved edits are
-              preserved in this editor.
-            </span>
-            <button
-              className="button small secondary"
-              onClick={() =>
-                projectId &&
-                navigate(async () => {
-                  await openFile(
-                    projectId,
-                    agentPendingFile,
-                    undefined,
-                    undefined,
-                    {
-                      reload: true,
-                    },
-                  )
-                  setAgentPendingFile(null)
-                })
-              }
-            >
-              Reload saved file
-            </button>
-            <button
-              className="icon-button"
-              aria-label="Dismiss live edit notice"
-              onClick={() => setAgentPendingFile(null)}
-            >
-              <Icon name="close" size={14} />
-            </button>
-          </div>
-        )}
+        {agentPendingFile &&
+          file?.path === agentPendingFile &&
+          !file.unavailable && (
+            <div className="workspace-alert live-edit-alert" role="status">
+              <span>
+                The saved file changed outside this editor. Your unsaved edits
+                are preserved in this editor.
+              </span>
+              <button
+                className="button small secondary"
+                onClick={() =>
+                  projectId &&
+                  navigate(async () => {
+                    await openFile(
+                      projectId,
+                      agentPendingFile,
+                      undefined,
+                      undefined,
+                      {
+                        reload: true,
+                      },
+                    )
+                    setAgentPendingFile(null)
+                  })
+                }
+              >
+                Reload saved file
+              </button>
+              <button
+                className="icon-button"
+                aria-label="Dismiss live edit notice"
+                onClick={() => setAgentPendingFile(null)}
+              >
+                <Icon name="close" size={14} />
+              </button>
+            </div>
+          )}
         {lastTrash && (
           <div className="trash-notice" role="status">
             <span>
@@ -2888,9 +3187,18 @@ export function Studio() {
         {collaboration.issue && project && (
           <div className="workspace-alert draft-protection-alert" role="status">
             <span>{collaboration.issue}</span>
-            <DraftDownloads files={dirtyFiles} />
+            <DraftDownloads
+              files={dirtyFiles.filter((file) => !file.unavailable)}
+            />
           </div>
         )}
+        <DetachedDraftNotice
+          files={detachedFiles}
+          canRecover={projectCanEdit && !saving && !singleFileMode}
+          onRecover={(path) =>
+            setRecoveryTarget({ path, scope, userId: session.user.id })
+          }
+        />
         {error && (
           <div className="workspace-alert" role="alert">
             <span>{error}</span>
@@ -3078,6 +3386,9 @@ export function Studio() {
                 <Icon name="file" size={15} />
                 <span title={file?.path}>{file?.path || 'Choose a file'}</span>
                 {file?.readOnly && <span className="tag">Read only</span>}
+                {file && collaboration.joining(file.path) && (
+                  <span className="tag">Joining live editing…</span>
+                )}
                 {dirty && (
                   <span
                     className="dirty-dot"
@@ -3138,7 +3449,7 @@ export function Studio() {
                   }
                   disabled={
                     !projectCanEdit ||
-                    !dirty ||
+                    !saveableFiles.length ||
                     saving ||
                     opening ||
                     file?.readOnly
@@ -3148,8 +3459,8 @@ export function Studio() {
                   <Icon name="save" size={14} />
                   {saving
                     ? 'Saving…'
-                    : dirtyFiles.length > 1
-                      ? `Save all (${dirtyFiles.length})`
+                    : saveableFiles.length > 1
+                      ? `Save all (${saveableFiles.length})`
                       : 'Save'}
                 </button>
                 {file && !file.readOnly && (
@@ -3169,6 +3480,7 @@ export function Studio() {
                     project.status !== 'ready' ||
                     project.needsPreparation ||
                     !file?.path.endsWith('.lean') ||
+                    file.unavailable ||
                     saving
                   }
                   singleFile={singleFileMode}
@@ -3191,6 +3503,7 @@ export function Studio() {
                   projectId={project.id}
                   files={files}
                   file={pdfPreview ? null : file}
+                  joining={!!file && collaboration.joining(file.path)}
                   buffers={buffers}
                   bufferDiscardVersion={discardVersion}
                   bufferSaveVersion={saveVersion}
@@ -3241,7 +3554,7 @@ export function Studio() {
                       openFile(project.id, path, line, column)
                     if (bufferStore.getSnapshot().buffers.has(path))
                       void action().catch((error) => setError(errorText(error)))
-                    else navigate(action)
+                    else navigate(action, '', true)
                   }}
                   onOpenLibrary={(source) => {
                     if (bufferStore.isCurrent(scope)) setLibrarySource(source)
@@ -3298,7 +3611,7 @@ export function Studio() {
                     const action = () => openFile(project.id, path, line)
                     if (bufferStore.getSnapshot().buffers.has(path))
                       void action().catch((error) => setError(errorText(error)))
-                    else navigate(action)
+                    else navigate(action, '', true)
                   }}
                 />
               )}
@@ -3372,12 +3685,14 @@ export function Studio() {
             )}
           </>
         )}
-        {terminalOpen && project?.status === 'ready' && (
+        {terminalOpen && project && (
           <TerminalPanel
             key={`${session.user.id}:${project.id}`}
             projectId={project.id}
             projectName={project.name}
+            needsPreparation={project.status !== 'ready'}
             theme={theme}
+            beforeConnect={saveCompletely}
             onClose={closeTerminal}
             onOpeningChange={(openingId) => {
               if (bufferStore.isCurrent(scope))
@@ -3485,8 +3800,8 @@ export function Studio() {
                 onOpenSettings={() => setSettingsModal(true)}
                 key={`${session.user.id}:${project.id}`}
                 projectId={project.id}
-                file={pdfPreview ? undefined : file?.path}
-                currentFile={file?.path}
+                file={pdfPreview || file?.unavailable ? undefined : file?.path}
+                currentFile={file?.unavailable ? undefined : file?.path}
                 files={assistantFiles}
                 focusRequest={proofFocus || undefined}
                 bookRequest={bookChatRequest}
@@ -3813,47 +4128,32 @@ export function Studio() {
             <button
               className="button primary"
               disabled={reloadBusy}
-              onClick={() =>
-                void (async () => {
-                  const expected = scope
-                  const id = expected.projectId
-                  if (
-                    !id ||
-                    savePromise.current ||
-                    !bufferStore.isCurrent(expected)
-                  )
-                    return
-                  setReloadBusy(true)
-                  setError('')
-                  try {
-                    const latest = await api<{ content: string; hash: string }>(
-                      `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(reloadTarget)}`,
-                    )
-                    if (!bufferStore.isCurrent(expected)) return
-                    setFile({
-                      path: reloadTarget,
-                      ...latest,
-                      savedContent: latest.content,
-                      generation: ++generation.current,
-                    })
-                    setReloadTarget(null)
-                    setAgentPendingFile(null)
-                  } catch (error) {
-                    if (bufferStore.isCurrent(expected)) {
-                      setError(errorText(error))
-                      setReloadTarget(null)
-                    }
-                  } finally {
-                    if (bufferStore.isCurrent(expected)) setReloadBusy(false)
-                  }
-                })()
-              }
+              onClick={() => void reloadSavedFile(reloadTarget)}
             >
               Reload this file
             </button>
           </footer>
         </Dialog>
       )}
+      {recoveryTarget &&
+        project &&
+        recoveryTarget.userId === session.user.id &&
+        bufferStore.isCurrent(recoveryTarget.scope) && (
+          <CreateEntryDialog
+            key={`${project.id}:${recoveryTarget.path}`}
+            kind="file"
+            projectName={project.name}
+            presetProject={!!project.preset}
+            folders={folders}
+            title="Save draft as a new file"
+            actionLabel="Save a copy"
+            initialName={(
+              recoveryTarget.path.split('/').at(-1) || 'Draft.lean'
+            ).replace(/(\.[^.]*)?$/, '-recovered$1')}
+            onCreate={recoverDraft}
+            onClose={() => setRecoveryTarget(null)}
+          />
+        )}
       {draftNavigationDialog}
       {newEntryKind &&
         project &&

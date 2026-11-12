@@ -346,6 +346,10 @@ try {
     )
   }
   const append = async (text) => {
+    await page
+      .locator('.file-tab')
+      .getByText('Joining live editing…', { exact: true })
+      .waitFor({ state: 'hidden' })
     await page.locator('.monaco-editor textarea').first().focus()
     await page.keyboard.press(
       process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',

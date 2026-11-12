@@ -6,6 +6,8 @@ import ts from 'typescript'
 function delayedEditor() {
   let release
   let focused = 0
+  const modelLoads = []
+  const editorOptions = []
   const body = { matches: () => false }
   const document = { body, activeElement: body, querySelector: () => null }
   const host = {
@@ -30,21 +32,26 @@ function delayedEditor() {
           Uri: { parse: (uri) => uri },
           editor: {
             getModel: () => null,
-            create: () => ({
-              focus: () => {
-                ++focused
-              },
-              dispose() {},
-            }),
+            create: (_host, options) => {
+              editorOptions.push(options)
+              return {
+                focus: () => {
+                  ++focused
+                },
+                dispose() {},
+              }
+            },
           },
         }
       assert.equal(name, 'vscode/monaco')
       return {
-        createModelReference: () =>
-          new Promise((resolve) => {
+        createModelReference: (resource, content) => {
+          modelLoads.push({ resource, content })
+          return new Promise((resolve) => {
             release = () =>
               resolve({ object: { textEditorModel: {} }, dispose() {} })
-          }),
+          })
+        },
       }
     },
     module,
@@ -57,8 +64,41 @@ function delayedEditor() {
     host,
     release: () => release(),
     focused: () => focused,
+    modelLoads,
+    editorOptions,
   }
 }
+
+test('joining blocks input while editable source still seeds its virtual model', async () => {
+  const fixture = delayedEditor()
+  const content =
+    '\\documentclass{article}\n\\begin{document}Draft\\end{document}'
+  const loading = fixture.instance.start(
+    fixture.host,
+    'file:///workspace/main.tex',
+    content,
+    false,
+    true,
+  )
+  assert.equal(fixture.modelLoads[0].content, content)
+  fixture.release()
+  await loading
+  assert.equal(fixture.editorOptions[0].readOnly, true)
+})
+
+test('actual read-only sources use authenticated source reads without virtual writes', async () => {
+  const fixture = delayedEditor()
+  const loading = fixture.instance.start(
+    fixture.host,
+    'file:///workspace/.lake/packages/mathlib/Mathlib.lean',
+    'import Mathlib.Init',
+    true,
+  )
+  assert.equal(fixture.modelLoads[0].content, undefined)
+  fixture.release()
+  await loading
+  assert.equal(fixture.editorOptions[0].readOnly, true)
+})
 
 test('finishing editor setup preserves the composer or other input chosen while loading', async () => {
   for (const kind of [

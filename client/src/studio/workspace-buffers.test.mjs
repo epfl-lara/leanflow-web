@@ -46,6 +46,107 @@ test('read-only permission changes preserve draft discovery while excluding thos
   assert.deepEqual(store.drafts(), [])
 })
 
+test('removed paths retain drafts without recreating files or accepting late save results', () => {
+  const store = new WorkspaceBuffers()
+  store.setFile(file('Main.lean', 'saved'))
+  store.change('Main.lean', 'draft to recover')
+  const pending = store.dirty()
+  store.detach('Main.lean')
+  store.permissions(false)
+  store.saved(pending, [{ path: 'Main.lean', hash: hashB }])
+  store.collaborated('Main.lean', 'late source', 'late source', hashC)
+  store.change('Main.lean', 'late editor callback')
+  assert.deepEqual(store.dirty(), [])
+  assert.equal(store.drafts()[0].content, 'draft to recover')
+  assert.equal(store.drafts()[0].savedContent, 'saved')
+  assert.equal(store.drafts()[0].unavailable, true)
+  assert.equal(store.drafts()[0].readOnly, true)
+  const detached = store.getSnapshot()
+  assert.throws(
+    () =>
+      store.register([
+        source('Other.lean', 'safe source'),
+        source('Main.lean', 'draft to recover'),
+      ]),
+    /deleted or moved/,
+  )
+  assert.equal(
+    store.getSnapshot(),
+    detached,
+    'a delayed Lean rename cannot attach or edit unavailable sources',
+  )
+  store.setFile(file('Other.lean', 'other saved'))
+  store.change('Other.lean', 'other draft')
+  assert.deepEqual(
+    store.dirty().map(({ path }) => path),
+    ['Other.lean'],
+  )
+  assert.deepEqual(
+    store.drafts().map(({ path }) => path),
+    ['Main.lean', 'Other.lean'],
+  )
+})
+
+test('moving a restored file cannot revive the draft of its removed predecessor', () => {
+  const store = new WorkspaceBuffers()
+  store.setFile(file('Main.lean', 'saved source'))
+  store.change('Main.lean', 'old draft to recover')
+  store.detach('Main.lean')
+  const before = store.getSnapshot()
+  // Another member restores the same saved bytes and then renames that file.
+  store.move('Main.lean', 'Restored.lean')
+  store.permissions(false)
+  assert.equal(store.getSnapshot(), before)
+  assert.equal(store.getSnapshot().file.path, 'Main.lean')
+  assert.equal(store.drafts()[0].content, 'old draft to recover')
+  assert.equal(store.drafts()[0].unavailable, true)
+  assert.equal(store.drafts()[0].readOnly, true)
+  assert.equal(store.getSnapshot().buffers.has('Restored.lean'), false)
+  assert.deepEqual(store.dirty(), [])
+})
+
+test('folder moves retain removed drafts at their original paths while attached files follow', () => {
+  const store = new WorkspaceBuffers()
+  store.setFile(file('Old/Attached.lean', 'attached saved source'))
+  store.change('Old/Attached.lean', 'attached unsaved work')
+  store.setFile(file('Old/Removed.lean', 'removed saved source'))
+  store.change('Old/Removed.lean', 'removed draft to recover')
+  store.detach('Old/Removed.lean')
+  const detached = store.getSnapshot().file
+  store.move('Old', 'New')
+  store.permissions(false)
+  assert.equal(store.getSnapshot().file, detached)
+  assert.equal(store.getSnapshot().buffers.get('Old/Removed.lean'), detached)
+  assert.equal(store.getSnapshot().buffers.has('Old/Attached.lean'), false)
+  assert.equal(store.getSnapshot().buffers.has('New/Removed.lean'), false)
+  assert.equal(
+    store.getSnapshot().buffers.get('New/Attached.lean').content,
+    'attached unsaved work',
+  )
+  assert.deepEqual(
+    store.dirty().map(({ path }) => path),
+    ['New/Attached.lean'],
+  )
+  assert.equal(detached.unavailable, true)
+  assert.equal(detached.readOnly, true)
+})
+
+test('a move cannot replace an unavailable destination draft', () => {
+  const store = new WorkspaceBuffers()
+  store.setFile(file('Destination.lean', 'destination saved source'))
+  store.change('Destination.lean', 'destination draft to recover')
+  store.detach('Destination.lean')
+  store.setFile(file('Source.lean', 'source saved content'))
+  const before = store.getSnapshot()
+  assert.throws(
+    () => store.move('Source.lean', 'Destination.lean'),
+    /draft already uses/,
+  )
+  assert.equal(store.getSnapshot(), before)
+  assert.equal(store.drafts()[0].content, 'destination draft to recover')
+  assert.equal(store.drafts()[0].unavailable, true)
+})
+
 test('project selection clears visible and retained files before notifying subscribers', () => {
   const store = new WorkspaceBuffers()
   store.selectProject('alpha')

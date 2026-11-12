@@ -1,3 +1,5 @@
+import { MAX_PROJECT_FILES } from '../../../shared/source-limits.mjs'
+
 export function parentFolders(path: string): string[] {
   const parts = path.split('/')
   parts.pop()
@@ -30,7 +32,7 @@ export function remapMovedPath(
 
 /** Validates the `moves` field of an untrusted live-collaboration message. */
 export function pathMoves(value: unknown): PathMove[] {
-  if (!Array.isArray(value) || value.length > 32) return []
+  if (!Array.isArray(value) || value.length > MAX_PROJECT_FILES) return []
   return value.filter(
     (move): move is PathMove =>
       !!move &&

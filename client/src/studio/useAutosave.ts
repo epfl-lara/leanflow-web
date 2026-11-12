@@ -62,15 +62,16 @@ export function useAutosave({
         clearIssue()
         return
       }
-      // A manual save, reload, or discard resolves a paused failure. Typing
-      // against the same stale hash must never retry a conflicting overwrite.
+      // A removed, reloaded or discarded member changes a failed batch. Retry
+      // its remaining files; typing against unchanged stale hashes stays paused.
       if (
         failed.current &&
-        !failed.current.snapshots.some((previous) =>
-          dirty.some(
-            (file) =>
-              file.path === previous.path && file.hash === previous.hash,
-          ),
+        failed.current.snapshots.some(
+          (previous) =>
+            !dirty.some(
+              (file) =>
+                file.path === previous.path && file.hash === previous.hash,
+            ),
         )
       )
         clearIssue()

@@ -784,6 +784,146 @@ test('staged editor buffers can be saved before retrying a changed project confi
   store.jobs.delete(project.id)
 })
 
+test('a lost batch-save response can be replayed without replacing files or creating another transaction', async (t) => {
+  const { store, project } = await fixture(t)
+  await store.writeFile(project.id, 'alice', 'Use.lean', '#check Nat\n', null)
+  const main = await store.readFile(project.id, 'alice', 'Main.lean')
+  const use = await store.readFile(project.id, 'alice', 'Use.lean')
+  const request = [
+    {
+      path: 'Main.lean',
+      content: main.content + '-- first save\n',
+      expectedHash: main.hash,
+    },
+    { path: 'Use.lean', content: '#check Int\n', expectedHash: use.hash },
+  ]
+  const saved = await store.writeFiles(project.id, 'alice', request)
+  const history = path.join(store.historyDir, project.id)
+  const transactions = await fs.readdir(history)
+  const identities = await Promise.all(
+    request.map((file) => fs.stat(path.join(project.root, file.path))),
+  )
+
+  const replayed = await store.writeFiles(project.id, 'alice', request)
+
+  assert.equal(replayed.applied, 0)
+  assert.equal(replayed.requiresPreparation, false)
+  assert.deepEqual(replayed.files, saved.files)
+  assert.deepEqual(await fs.readdir(history), transactions)
+  for (const [index, file] of request.entries()) {
+    assert.equal(
+      (await fs.stat(path.join(project.root, file.path))).ino,
+      identities[index].ino,
+    )
+    assert.equal(
+      (await store.readFile(project.id, 'alice', file.path)).content,
+      file.content,
+    )
+  }
+
+  await assert.rejects(
+    store.writeFiles(project.id, 'alice', [
+      request[0],
+      { ...request[1], content: '#check Bool\n' },
+    ]),
+    { status: 409 },
+  )
+  assert.deepEqual(await fs.readdir(history), transactions)
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Use.lean')).content,
+    '#check Int\n',
+  )
+
+  const mixed = await store.writeFiles(project.id, 'alice', [
+    request[0],
+    {
+      ...request[1],
+      content: '#check Bool\n',
+      expectedHash: saved.files[1].hash,
+    },
+  ])
+  assert.equal(mixed.applied, 1)
+  assert.equal(mixed.files.length, 2)
+  assert.equal((await fs.readdir(history)).length, transactions.length + 1)
+  for (const file of mixed.files)
+    assert.equal(
+      (await store.readFile(project.id, 'alice', file.path)).hash,
+      file.hash,
+    )
+})
+
+test('exact batch-save retries still enforce preparation and current membership, while agent and terminal changes keep strict conflicts', async (t) => {
+  const { store, project } = await fixture(t)
+  await store.setMember(project.id, 'alice', 'bob', 'editor')
+  const main = await store.readFile(project.id, 'alice', 'Main.lean')
+  const snapshot = await store.terminalSnapshot(
+    project.id,
+    'alice',
+    'batch-retry-terminal',
+  )
+  const request = [
+    {
+      path: 'Main.lean',
+      content: main.content + '-- saved browser edit\n',
+      expectedHash: main.hash,
+    },
+  ]
+  await store.writeFiles(project.id, 'bob', request)
+  await fs.writeFile(path.join(snapshot.root, 'Main.lean'), request[0].content)
+  await assert.rejects(store.syncTerminal(snapshot), { status: 409 })
+  await assert.rejects(
+    store.applyChanges(project.id, 'bob', [
+      { path: 'Main.lean', after: request[0].content, beforeHash: main.hash },
+    ]),
+    { status: 409 },
+  )
+  await store.cleanupTerminalSnapshot(snapshot, { finalize: true })
+
+  store.jobs.set(project.id, Promise.resolve())
+  await assert.rejects(store.writeFiles(project.id, 'bob', request), {
+    status: 409,
+  })
+  store.jobs.delete(project.id)
+  const demoted = store.setMember(project.id, 'alice', 'bob', 'viewer')
+  await assert.rejects(store.writeFiles(project.id, 'bob', request), {
+    status: 403,
+  })
+  await demoted
+  await store.removeMember(project.id, 'alice', 'bob')
+  await assert.rejects(store.writeFiles(project.id, 'bob', request), {
+    status: 404,
+  })
+})
+
+test('replaying a configuration batch reports pending setup without another transaction and retains configuration guards', async (t) => {
+  const { store, project } = await fixture(t)
+  const pin = await store.readFile(project.id, 'alice', 'lean-toolchain')
+  const request = [
+    {
+      path: 'lean-toolchain',
+      content: pin.content + '\n',
+      expectedHash: pin.hash,
+    },
+  ]
+  const first = await store.writeFiles(project.id, 'alice', request)
+  assert.equal(first.requiresPreparation, true)
+  const history = path.join(store.historyDir, project.id)
+  const transactions = await fs.readdir(history)
+  const replay = await store.writeFiles(project.id, 'alice', request)
+  assert.equal(replay.requiresPreparation, true)
+  assert.equal(replay.applied, 0)
+  assert.deepEqual(replay.files, first.files)
+  assert.deepEqual(await fs.readdir(history), transactions)
+  await assert.rejects(
+    store.writeFiles(project.id, 'alice', request, {
+      assertConfigurationIdle: () => {
+        throw Object.assign(new Error('Active proof run'), { status: 409 })
+      },
+    }),
+    { status: 409 },
+  )
+})
+
 test('batch saves reject invalid, secret, dependency, duplicate and oversized changes without partial writes', async (t) => {
   const { store, project } = await fixture(t)
   const main = await store.readFile(project.id, 'alice', 'Main.lean')

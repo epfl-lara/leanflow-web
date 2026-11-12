@@ -11,7 +11,10 @@ import {
   documentOffsetAfterEdit,
 } from '../../../shared/document-text.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configuration.mjs'
-import { sourceFileByteLimit } from '../../../shared/source-limits.mjs'
+import {
+  MAX_PROJECT_FILES,
+  sourceFileByteLimit,
+} from '../../../shared/source-limits.mjs'
 
 function transpile(name, imports = {}) {
   const { outputText } = ts.transpileModule(
@@ -35,6 +38,7 @@ function transpile(name, imports = {}) {
   return module.exports
 }
 const { WorkspaceBuffers } = transpile('./workspaceBuffers.ts')
+const { ApiError } = transpile('./api.ts')
 const { LocalDocumentHistory } = transpile('./localDocumentHistory.ts', {
   yjs: Y,
   '../../../shared/document-text.mjs': { documentTextEdit },
@@ -143,8 +147,10 @@ function fixture(t, initial = 'base source\n', options = {}) {
       react,
       yjs: Y,
       './localDocumentHistory': { LocalDocumentHistory },
-      './projectPaths': transpile('./projectPaths.ts'),
-      './api': { sessionBoundUrl: (value) => value },
+      './projectPaths': transpile('./projectPaths.ts', {
+        '../../../shared/source-limits.mjs': { MAX_PROJECT_FILES },
+      }),
+      './api': { ApiError, sessionBoundUrl: (value) => value },
       '../../../shared/source-limits.mjs': { sourceFileByteLimit },
       '../../../shared/document-text.mjs': {
         replaceDocumentText: options.replaceDocumentText || replaceDocumentText,
@@ -238,6 +244,186 @@ test('lost acknowledgements retain the draft and prevent an unsafe fallback save
   assert.equal(store.getSnapshot().file.savedContent, 'base source\n')
 })
 
+test('initial live admission waits for the canonical baseline while initialized offline editors remain editable', (t) => {
+  const { store, socket, server, hook, rerender } = fixture(
+    t,
+    'base source\n',
+    {
+      deferReady: true,
+    },
+  )
+  assert.equal(hook.joining('Main.lean'), true)
+  assert.equal(hook.manages('Main.lean'), false)
+  socket.receive({ type: 'ready' })
+  assert.equal(hook.manages('Main.lean'), true)
+  assert.equal(hook.joining('Main.lean'), true)
+  server.getText('source').insert(0, 'SAVED_BEFORE_ADMISSION\n')
+  socket.receive(openedWire(server, socket))
+  assert.equal(hook.joining('Main.lean'), false)
+  assert.equal(
+    store.getSnapshot().file.content,
+    server.getText('source').toString(),
+  )
+  assert.equal(rerender().issue, null)
+  socket.close(1006)
+  assert.equal(hook.manages('Main.lean'), true)
+  assert.equal(hook.joining('Main.lean'), false)
+})
+
+test('ordinary-save fallback releases initial admission and does not claim HTTP-only files', (t) => {
+  const { store, socket, hook } = fixture(t, 'base source\n', {
+    deferReady: true,
+  })
+  socket.receive({ type: 'ready' })
+  socket.receive({
+    type: 'error',
+    path: 'Main.lean',
+    status: 429,
+    message: 'Live capacity full.',
+  })
+  assert.equal(hook.manages('Main.lean'), false)
+  assert.equal(hook.joining('Main.lean'), false)
+  store.setFile({
+    path: 'lakefile.toml',
+    content: 'name = "fixture"',
+    savedContent: 'name = "fixture"',
+    hash: hash('name = "fixture"'),
+    generation: 2,
+  })
+  assert.equal(hook.joining('lakefile.toml'), false)
+  assert.equal(hook.manages('lakefile.toml'), false)
+})
+
+test('a never-ready WebSocket releases first admission to version-checked saving after its deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { store, socket, hook } = fixture(t, 'base source\n', {
+    deferReady: true,
+  })
+  assert.equal(hook.joining('Main.lean'), true)
+  t.mock.timers.tick(15_000)
+  assert.equal(hook.joining('Main.lean'), false)
+  store.change('Main.lean', 'HTTP_ONLY_DRAFT\nbase source\n')
+  assert.equal(await hook.flush(), false)
+  socket.receive({ type: 'ready' })
+  assert.equal(
+    socket.sent.filter((message) => message.type === 'open').length,
+    0,
+  )
+  assert.equal(hook.manages('Main.lean'), false)
+  assert.equal(
+    store.getSnapshot().file.content,
+    'HTTP_ONLY_DRAFT\nbase source\n',
+  )
+})
+
+test('a delayed initial live reply cannot reattach a path handed to HTTP saving after timeout', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { store, socket, server, hook, rerender } = fixture(
+    t,
+    'base source\n',
+    { deferReady: true },
+  )
+  socket.receive({ type: 'ready' })
+  const delayedReply = openedWire(server, socket)
+  assert.equal(hook.manages('Main.lean'), true)
+  t.mock.timers.tick(15_000)
+  assert.equal(hook.joining('Main.lean'), false)
+  assert.equal(hook.manages('Main.lean'), false)
+  store.change('Main.lean', 'ORDINARY_SAVE_AFTER_DEADLINE\nbase source\n')
+  const pending = store.dirty()
+  assert.equal(await hook.flush(), false)
+  store.saved(pending, [{ path: 'Main.lean', hash: hash(pending[0].content) }])
+  socket.receive(delayedReply)
+  assert.deepEqual(store.dirty(), [])
+  assert.equal(store.getSnapshot().file.content, pending[0].content)
+  assert.match(rerender().issue, /normal version-checked saving/)
+  assert.equal(
+    socket.sent.filter((message) => message.type === 'update').length,
+    0,
+  )
+})
+
+test('a restarted document recognizes an accepted update with a lost acknowledgement and saves later offline typing once', async (t) => {
+  const { store, socket, server, hook, rerender } = fixture(t)
+  const acceptedSource = 'FIRST_SAVED\nbase source\n'
+  store.change('Main.lean', acceptedSource)
+  const flushing = hook.flush()
+  const first = socket.sent
+    .filter((message) => message.type === 'update')
+    .at(-1)
+  Y.applyUpdate(server, new Uint8Array(Buffer.from(first.update, 'base64')))
+  socket.close(1006)
+  await assert.rejects(flushing, /interrupted/)
+  store.change('Main.lean', acceptedSource + 'LATER_OFFLINE\n')
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reconnect = Socket.instances.at(-1)
+  const restarted = new Y.Doc()
+  t.after(() => restarted.destroy())
+  restarted.getText('source').insert(0, server.getText('source').toString())
+  reconnect.receive({ type: 'ready' })
+  reconnect.receive({
+    ...openedWire(restarted, reconnect),
+    documentId: 'after-restart',
+  })
+  assert.equal(rerender().issue, null)
+  const replay = reconnect.sent.filter((message) => message.type === 'update')
+  assert.equal(replay.length, 1)
+  Y.applyUpdate(
+    restarted,
+    new Uint8Array(Buffer.from(replay[0].update, 'base64')),
+  )
+  reconnect.receive(
+    wire(restarted, undefined, {
+      documentId: 'after-restart',
+      ack: replay[0].requestId,
+    }),
+  )
+  assert.equal(await hook.flush(), true)
+  assert.equal(
+    restarted.getText('source').toString(),
+    acceptedSource + 'LATER_OFFLINE\n',
+  )
+  assert.deepEqual(store.dirty(), [])
+  const vector = Y.encodeStateVector(restarted)
+  restarted.getText('source').insert(0, 'COLLABORATOR\n')
+  reconnect.receive(
+    deltaWire(restarted, vector, { documentId: 'after-restart' }),
+  )
+  assert.equal(hook.undo('Main.lean'), true)
+  assert.equal(
+    store.getSnapshot().file.content,
+    'COLLABORATOR\n' + acceptedSource,
+  )
+})
+
+test('a restarted document with divergent remote contents still protects the offline draft', async (t) => {
+  const { store, socket, hook, rerender } = fixture(t)
+  store.change('Main.lean', 'FIRST_LOCAL\nbase source\n')
+  const flushing = hook.flush()
+  socket.close(1006)
+  await assert.rejects(flushing, /interrupted/)
+  const draft = 'FIRST_LOCAL\nbase source\nLATER_OFFLINE\n'
+  store.change('Main.lean', draft)
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reconnect = Socket.instances.at(-1)
+  const restarted = new Y.Doc()
+  t.after(() => restarted.destroy())
+  restarted
+    .getText('source')
+    .insert(0, 'FIRST_LOCAL\nbase source\nOTHER_EDIT\n')
+  reconnect.receive({ type: 'ready' })
+  reconnect.receive({
+    ...openedWire(restarted, reconnect),
+    documentId: 'divergent-restart',
+  })
+  assert.match(rerender().issue, /changed while disconnected/)
+  assert.equal(store.getSnapshot().file.content, draft)
+  assert.equal(
+    reconnect.sent.filter((message) => message.type === 'update').length,
+    0,
+  )
+})
+
 test('canonical shared acknowledgements preserve newer local typing', async (t) => {
   const { store, socket, server, hook } = fixture(t)
   store.change('Main.lean', 'first local\nbase source\n')
@@ -300,7 +486,10 @@ test('rejected persistence preserves its draft and allows an explicit reload to 
         status,
         message: `Persist rejected ${status}; reload before retrying.`,
       })
-      await assert.rejects(flushing, new RegExp(`Persist rejected ${status}`))
+      await assert.rejects(flushing, {
+        status,
+        message: new RegExp(`Persist rejected ${status}`),
+      })
       assert.match(
         store.getSnapshot().file.content,
         new RegExp(`retain failed ${status}`),
@@ -1199,7 +1388,7 @@ test('same-generation authoritative HTTP refreshes do not become duplicate local
     })
 })
 
-test('a removed clean file stays blocked until an explicit reload and file 404 does not refresh project access', async (t) => {
+test('a missing file retires its subscription until explicitly restored and does not refresh project access', async (t) => {
   let accessRefreshes = 0
   const { store, socket, server, hook } = fixture(t, 'base source\n', {
     onAccessChanged() {
@@ -1235,7 +1424,18 @@ test('a removed clean file stays blocked until an explicit reload and file 404 d
     1,
     'only initial admission refreshes access for a file-level 404',
   )
-  store.setFile({ ...store.getSnapshot().file, generation: 2 })
+  assert.equal(store.getSnapshot().file.unavailable, true)
+  assert.equal(
+    await hook.flush(),
+    true,
+    'a clean missing file does not block other work',
+  )
+  store.setFile({
+    ...store.getSnapshot().file,
+    generation: 2,
+    unavailable: false,
+    readOnly: false,
+  })
   assert.equal(await hook.flush(), true)
   assert.equal(opens().length, 2)
   socket.receive(openedWire(server, socket))
@@ -1249,6 +1449,91 @@ test('a removed clean file stays blocked until an explicit reload and file 404 d
   socket.receive(wire(server, undefined, { ack: update.requestId }))
   assert.equal(await flushing, true)
   assert.match(server.getText('source').toString(), /RESTORED_FILE_EDIT/)
+})
+
+test('a removed dirty file keeps its draft while live and ordinary saves continue', async (t) => {
+  const { store, socket, hook } = fixture(t)
+  const draft = '-- KEEP_ORPHANED_DRAFT\nbase source\n'
+  store.change('Main.lean', draft)
+  const pending = hook.flush()
+  socket.receive({
+    type: 'files',
+    paths: ['Main.lean'],
+    removedPaths: ['Main.lean'],
+  })
+  assert.equal(await pending, true)
+  assert.equal(store.getSnapshot().file.content, draft)
+  assert.equal(store.getSnapshot().file.unavailable, true)
+  assert.deepEqual(store.dirty(), [])
+  store.setFile({
+    path: 'Other.lean',
+    content: '-- other\n',
+    savedContent: '-- other\n',
+    hash: hash('-- other\n'),
+    generation: 2,
+  })
+  await hook.flush()
+  const other = new Y.Doc()
+  t.after(() => other.destroy())
+  other.getText('source').insert(0, '-- other\n')
+  socket.receive(
+    wire(other, undefined, {
+      path: 'Other.lean',
+      documentId: 'other',
+      openRequestId: socket.sent
+        .filter((message) => message.type === 'open')
+        .at(-1).requestId,
+    }),
+  )
+  store.change('Other.lean', '-- other saved after deletion\n')
+  const saving = hook.flush()
+  const update = lastDocumentUpdate(socket)
+  assert.equal(update.path, 'Other.lean')
+  Y.applyUpdate(other, new Uint8Array(Buffer.from(update.update, 'base64')))
+  socket.receive(
+    wire(other, undefined, {
+      path: 'Other.lean',
+      documentId: 'other',
+      ack: update.requestId,
+    }),
+  )
+  assert.equal(await saving, true)
+  store.setFile({
+    path: 'lakefile.toml',
+    content: 'name = "fixture"\n',
+    savedContent: 'name = "fixture"\n',
+    hash: hash('name = "fixture"\n'),
+    generation: 3,
+  })
+  store.change('lakefile.toml', 'name = "updated"\n')
+  assert.equal(await hook.flush(), false)
+  assert.equal(store.getSnapshot().buffers.get('Main.lean').content, draft)
+})
+
+test('reconnecting after a missed deletion retains a dirty draft and releases other saves', async (t) => {
+  const { store, socket, hook } = fixture(t)
+  store.change('Main.lean', 'OFFLINE_DRAFT\n')
+  socket.close(1006)
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reconnect = Socket.instances.at(-1)
+  reconnect.receive({ type: 'ready' })
+  const opened = reconnect.sent
+    .filter((message) => message.type === 'open')
+    .at(-1)
+  reconnect.receive({
+    type: 'error',
+    path: 'Main.lean',
+    status: 404,
+    requestId: opened.requestId,
+    message: 'File not found.',
+  })
+  assert.equal(await hook.flush(), true)
+  assert.equal(store.drafts()[0].content, 'OFFLINE_DRAFT\n')
+  assert.equal(store.drafts()[0].unavailable, true)
+  assert.equal(
+    reconnect.sent.some((message) => message.type === 'update'),
+    false,
+  )
 })
 
 test('ordinary-saving mode remains visible through successful live packets and reconnect until a new workspace visit', async (t) => {
@@ -1595,6 +1880,107 @@ test('a peer move carries unacknowledged typing to the destination without faili
     ),
     'nothing is ever written to the old path',
   )
+})
+
+test('leaving a removed clean document releases its failure before saving configuration', async (t) => {
+  const { store, socket, hook, rerender } = fixture(t)
+  socket.receive({
+    type: 'error',
+    path: 'Main.lean',
+    status: 409,
+    message: 'The old file was removed.',
+  })
+  store.setFile({
+    path: 'lakefile.toml',
+    content: 'name = "fixture"\n',
+    savedContent: 'name = "fixture"\n',
+    hash: hash('name = "fixture"\n'),
+    generation: 2,
+  })
+  store.change('lakefile.toml', 'name = "updated"\n')
+  assert.equal(
+    await hook.flush(),
+    false,
+    'configuration can use checked HTTP saving',
+  )
+  assert.doesNotMatch(rerender().issue || '', /old file was removed/)
+  socket.receive({
+    type: 'error',
+    path: 'Main.lean',
+    status: 409,
+    message: 'A late old-path write was rejected.',
+  })
+  assert.equal(await hook.flush(), false)
+  assert.equal(store.getSnapshot().file.content, 'name = "updated"\n')
+})
+
+test('an old rejected request cannot block a newly opened generation at the same path', async (t) => {
+  const { store, socket, server, hook } = fixture(t)
+  store.change('Main.lean', 'old draft\n')
+  const oldFlush = hook.flush()
+  const request = lastDocumentUpdate(socket)
+  store.setFile({
+    ...store.getSnapshot().file,
+    content: 'base source\n',
+    savedContent: 'base source\n',
+    generation: 2,
+  })
+  const reopened = hook.flush()
+  socket.receive(openedWire(server, socket))
+  await Promise.all([oldFlush, reopened])
+  socket.receive({
+    type: 'error',
+    path: 'Main.lean',
+    requestId: request.requestId,
+    status: 409,
+    message: 'A retired document rejected the old request.',
+  })
+  store.change('Main.lean', 'new generation\n')
+  const saving = hook.flush()
+  const update = lastDocumentUpdate(socket)
+  assert.notEqual(update.requestId, request.requestId)
+  Y.applyUpdate(server, new Uint8Array(Buffer.from(update.update, 'base64')))
+  socket.receive(wire(server, undefined, { ack: update.requestId }))
+  assert.equal(await saving, true)
+  assert.equal(store.getSnapshot().file.savedContent, 'new generation\n')
+})
+
+test('retiring one failed file keeps another file’s unresolved conflict visible', async (t) => {
+  const { store, socket, hook } = fixture(t)
+  store.register([
+    {
+      path: 'Other.lean',
+      content: '-- other\n',
+      hash: hash('-- other\n'),
+      unsaved: false,
+    },
+  ])
+  await hook.flush()
+  socket.receive({
+    type: 'error',
+    path: 'Main.lean',
+    status: 409,
+    message: 'Main conflict.',
+  })
+  socket.receive({
+    type: 'error',
+    path: 'Other.lean',
+    status: 409,
+    message: 'Other conflict.',
+  })
+  store.remove('Main.lean')
+  await assert.rejects(hook.flush(), /Other conflict/)
+  store.setFile({
+    path: 'lakefile.toml',
+    content: 'name = "fixture"\n',
+    savedContent: 'name = "fixture"\n',
+    hash: hash('name = "fixture"\n'),
+    generation: 2,
+  })
+  store.change('lakefile.toml', 'name = "updated"\n')
+  await assert.rejects(hook.flush(), /Other conflict/)
+  store.remove('Other.lean')
+  assert.equal(await hook.flush(), false)
 })
 
 test('the mover applies its own move once whether the broadcast or HTTP receipt arrives first', (t) => {

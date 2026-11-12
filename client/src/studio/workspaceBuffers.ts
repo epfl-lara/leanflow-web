@@ -133,6 +133,10 @@ export class WorkspaceBuffers {
     // from another browser must never acquire a newer hash for older source.
     for (const source of sources) {
       const current = this.state.buffers.get(source.path)
+      if (current?.unavailable)
+        throw new Error(
+          `${source.path} was deleted or moved while Lean prepared the rename. Choose a saved file before renaming again.`,
+        )
       if (
         current
           ? current.content !== source.content || current.hash !== source.hash
@@ -158,7 +162,7 @@ export class WorkspaceBuffers {
   }
   change = (path: string, content: string) => {
     const current = this.state.buffers.get(path)
-    if (!current || current.content === content) return
+    if (!current || current.unavailable || current.content === content) return
     const file = { ...current, content }
     const buffers = new Map(this.state.buffers)
     buffers.set(path, file)
@@ -183,7 +187,12 @@ export class WorkspaceBuffers {
     for (const snapshot of snapshots) {
       const current = buffers.get(snapshot.path),
         hash = hashes.get(snapshot.path)
-      if (current && hash && current.hash === snapshot.hash)
+      if (
+        current &&
+        !current.unavailable &&
+        hash &&
+        current.hash === snapshot.hash
+      )
         buffers.set(snapshot.path, {
           ...current,
           hash,
@@ -211,7 +220,7 @@ export class WorkspaceBuffers {
     hash: string,
   ) => {
     const current = this.state.buffers.get(path)
-    if (!current) return
+    if (!current || current.unavailable) return
     if (
       current.content === content &&
       current.savedContent === savedContent &&
@@ -236,7 +245,10 @@ export class WorkspaceBuffers {
     let changed = false
     for (const [path, file] of buffers) {
       const restricted =
-        readOnly || path.startsWith('.lake/') || file.preview === 'pdf'
+        readOnly ||
+        file.unavailable ||
+        path.startsWith('.lake/') ||
+        file.preview === 'pdf'
       if (!!file.readOnly !== restricted) {
         buffers.set(path, { ...file, readOnly: restricted })
         changed = true
@@ -249,6 +261,17 @@ export class WorkspaceBuffers {
           : null,
         buffers,
       )
+  }
+  detach = (path: string) => {
+    const current = this.state.buffers.get(path)
+    if (!current || current.unavailable) return
+    const file = { ...current, unavailable: true, readOnly: true }
+    const buffers = new Map(this.state.buffers)
+    buffers.set(path, file)
+    this.publish(
+      this.state.file?.path === path ? file : this.state.file,
+      buffers,
+    )
   }
   remove = (path: string) => {
     const matches = (name: string) =>
@@ -278,14 +301,19 @@ export class WorkspaceBuffers {
     const matches = (name: string) =>
       name === from || name.startsWith(from + '/')
     const target = (name: string) => to + name.slice(from.length)
-    const moving = [...this.state.buffers].filter(([name]) => matches(name))
+    // A removed draft belongs to the former file at this path. A later move
+    // can refer to a replacement file and must never revive that old draft.
+    const moving = [...this.state.buffers].filter(
+      ([name, file]) => matches(name) && !file.unavailable,
+    )
     if (!moving.length) return
+    const movingPaths = new Set(moving.map(([name]) => name))
     const destinations = new Set(moving.map(([name]) => target(name)))
     for (const destination of destinations) {
       const existing = this.state.buffers.get(destination)
       if (
         existing &&
-        !matches(destination) &&
+        !movingPaths.has(destination) &&
         existing.content !== existing.savedContent
       )
         throw new Error(
@@ -294,14 +322,14 @@ export class WorkspaceBuffers {
     }
     const previous = this.state.file
     const activePath = previous
-      ? matches(previous.path)
+      ? movingPaths.has(previous.path)
         ? target(previous.path)
         : previous.path
       : null
     const removedPaths = new Set(moving.map(([name]) => name))
     const buffers = new Map<string, OpenFile>()
     for (const [name, file] of this.state.buffers) {
-      if (matches(name)) continue
+      if (movingPaths.has(name)) continue
       if (destinations.has(name)) removedPaths.add(name)
       else buffers.set(name, file)
     }
@@ -310,6 +338,7 @@ export class WorkspaceBuffers {
       buffers.set(renamed, {
         ...file,
         path: renamed,
+        unavailable: false,
         // A new generation makes live editors and models bind to the new path.
         generation:
           renamed === activePath

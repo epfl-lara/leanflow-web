@@ -241,6 +241,7 @@ export function LeanWorkspace({
   onProofStateChange,
   focusEditorRequest,
   onFocusEditorHandled,
+  joining = false,
 }: {
   projectId: string
   files: readonly FileEntry[]
@@ -267,6 +268,7 @@ export function LeanWorkspace({
   onProofStateChange?: (state: EditorProofState | null) => void
   focusEditorRequest?: ProofEditorRequest | null
   onFocusEditorHandled?: (id: number) => void
+  joining?: boolean
   revealTarget?: {
     id: number
     target: Pick<ProofTarget, 'path' | 'startLine' | 'endLine' | 'name'>
@@ -283,6 +285,8 @@ export function LeanWorkspace({
   const infoEl = useRef<HTMLDivElement>(null)
   const runtime = useRef<Runtime | null>(null)
   const fileRef = useRef(file)
+  const joiningRef = useRef(joining)
+  joiningRef.current = joining
   const buffersRef = useRef(buffers)
   buffersRef.current = buffers
   const syncingContent = useRef(false)
@@ -719,7 +723,13 @@ export function LeanWorkspace({
       try {
         ownEditor = new WorkspaceEditor()
         if (!snapshot.readOnly) active.virtualFiles.add(uri)
-        await ownEditor.start(host, uri, snapshot.content, !!snapshot.readOnly)
+        await ownEditor.start(
+          host,
+          uri,
+          snapshot.content,
+          !!snapshot.readOnly,
+          joiningRef.current,
+        )
         if (cancelled || runtime.current !== active || !host.isConnected) {
           ownEditor.dispose()
           return
@@ -773,7 +783,7 @@ export function LeanWorkspace({
           scrollBeyondLastLine: false,
           padding: { top: 16, bottom: 16 },
           fontSize: 14,
-          readOnly: !!fileRef.current?.readOnly,
+          readOnly: !!fileRef.current?.readOnly || joiningRef.current,
           // Monaco assigns definition links to the other mouse modifier.
           multiCursorModifier: 'ctrlCmd',
         })
@@ -849,6 +859,7 @@ export function LeanWorkspace({
           }
         }
         active.subscription = editor.onDidChangeModelContent(() => {
+          if (joiningRef.current) return
           if (syncingContent.current) return
           const content = editor.getValue()
           onChangeRef.current(snapshot.path, content)
@@ -995,11 +1006,11 @@ export function LeanWorkspace({
     }
   }, [projectId, file?.path, file?.generation])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     runtime.current?.editor?.editor.updateOptions({
-      readOnly: !!file?.readOnly,
+      readOnly: !!file?.readOnly || joining,
     })
-  }, [file?.readOnly])
+  }, [file?.readOnly, joining])
 
   useLayoutEffect(() => {
     const snapshot = fileRef.current
@@ -1159,6 +1170,7 @@ export function LeanWorkspace({
       !editor ||
       !current ||
       current.readOnly ||
+      joiningRef.current ||
       !current.path.endsWith('.lean')
     )
       return

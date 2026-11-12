@@ -202,9 +202,7 @@ export const FileBrowser = memo(function FileBrowser({
         aria-haspopup={disabled ? undefined : 'menu'}
         title={file.path}
         disabled={disabled}
-        onClick={() => {
-          if (selectedPath !== file.path) onSelect(file.path)
-        }}
+        onClick={() => onSelect(file.path)}
       >
         <Icon name="file" size={15} />
         <span>

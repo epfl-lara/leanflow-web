@@ -13,6 +13,7 @@ export class WorkspaceEditor {
     uri: string,
     content: string,
     readOnly = false,
+    inputBlocked = false,
   ) {
     if (this.disposed) return
     try {
@@ -29,7 +30,7 @@ export class WorkspaceEditor {
         contextmenu: true,
         lineNumbersMinChars: 1,
         lineDecorationsWidth: 5,
-        readOnly,
+        readOnly: readOnly || inputBlocked,
       })
       const document = element.ownerDocument
       const focused = document.activeElement

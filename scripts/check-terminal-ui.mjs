@@ -42,6 +42,7 @@ const sockets = []
 const terminalProjects = []
 let closed = 0
 let expectedHash
+let delayedSave = null
 let onTerminalStop = () => {}
 await f.page.route('**/api/projects/*/terminal/stop', (route) => {
   assert.equal(route.request().headers()['x-leanflow-user'], 'fixture')
@@ -70,16 +71,33 @@ await f.page.routeWebSocket('**/websocket/terminal/**', (socket) => {
     ),
   )
 })
-await f.page.route(`**/api/projects/${id}/file?path=Main.lean`, (route) => {
-  if (route.request().method() !== 'PUT') return route.fallback()
-  expectedHash = route.request().postDataJSON().expectedHash
-  return route.fulfill({
-    status: 409,
-    json: {
-      error: 'The saved file changed. Reload it before saving your edits.',
-    },
-  })
-})
+await f.page.route(
+  `**/api/projects/${id}/file?path=Main.lean`,
+  async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    const body = route.request().postDataJSON()
+    expectedHash = body.expectedHash
+    if (delayedSave) {
+      const pending = delayedSave
+      f.state.files[id]['Main.lean'] = body.content
+      pending.entered = true
+      await pending.promise
+      return route.fulfill({
+        json: {
+          content: body.content,
+          hash: createHash('sha256').update(body.content).digest('hex'),
+          requiresPreparation: false,
+        },
+      })
+    }
+    return route.fulfill({
+      status: 409,
+      json: {
+        error: 'The saved file changed. Reload it before saving your edits.',
+      },
+    })
+  },
+)
 try {
   await f.ready()
   await f.page.getByRole('button', { name: 'Terminal', exact: true }).click()
@@ -201,6 +219,41 @@ try {
     'The terminal has a visible, draggable boundary in both themes and labelled controls that fit narrow layouts.',
   )
 
+  let acknowledgeOwnSave
+  delayedSave = {
+    entered: false,
+    promise: new Promise((resolve) => {
+      acknowledgeOwnSave = resolve
+    }),
+  }
+  await f.page.locator('.monaco-editor textarea').focus()
+  await f.page.keyboard.press('Control+End')
+  await f.page.keyboard.insertText('-- own save before its acknowledgement\n')
+  await f.page.getByRole('button', { name: 'Save', exact: true }).click()
+  await until(
+    () => delayedSave.entered,
+    'the saved source is readable before its acknowledgement',
+  )
+  await new Promise((resolve) => setTimeout(resolve, 2500))
+  assert.equal(
+    await f.page.locator('.live-edit-alert').count(),
+    0,
+    'ordinary saves must not warn about their own unacknowledged source',
+  )
+  acknowledgeOwnSave()
+  await until(
+    async () =>
+      await f.page
+        .getByRole('button', { name: 'Save', exact: true })
+        .isDisabled(),
+    'the ordinary save is acknowledged',
+  )
+  delayedSave = null
+  expectedHash = undefined
+  f.report.checks.push(
+    'A readable ordinary save awaiting its acknowledgement does not raise a false outside-change warning.',
+  )
+
   f.state.files[id]['Main.lean'] = source + '-- saved from the terminal\n'
   await until(
     async () =>
@@ -267,6 +320,33 @@ try {
   await panel
     .getByRole('button', { name: 'Reconnect terminal', exact: true })
     .click()
+  await panel
+    .getByText('The saved file changed. Reload it before saving your edits.', {
+      exact: true,
+    })
+    .waitFor()
+  assert.equal(
+    sockets.length,
+    connectionsBeforeReconnect,
+    'an unresolved save conflict must not open another terminal copy',
+  )
+  assert(
+    (await f.page.locator('.monaco-editor').innerText())
+      .replaceAll('\u00a0', ' ')
+      .includes('unsaved editor work'),
+  )
+  await f.page.getByRole('button', { name: 'Reload file', exact: true }).click()
+  const reload = f.page.getByRole('dialog', {
+    name: 'Reload saved file',
+    exact: true,
+  })
+  await reload
+    .getByRole('button', { name: 'Reload this file', exact: true })
+    .click()
+  await reload.waitFor({ state: 'hidden' })
+  await panel
+    .getByRole('button', { name: 'Reconnect terminal', exact: true })
+    .click()
   await until(
     () => sockets.length > connectionsBeforeReconnect,
     'new shell connection',
@@ -280,11 +360,14 @@ try {
   await until(() => closed > closedBeforeButton, 'closed terminal connections')
   assert.equal(await panel.count(), 0)
   f.report.checks.push(
-    'Assistant controls stay responsive; connection errors, reconnect, and close work.',
+    'Assistant controls stay responsive; reconnect preserves a conflicting draft and waits for explicit resolution before opening a new shell; close works.',
   )
 
   await f.page.getByRole('button', { name: 'Terminal', exact: true }).click()
   await panel.getByText('Connected', { exact: true }).waitFor()
+  await f.page.locator('.monaco-editor textarea').focus()
+  await f.page.keyboard.press('Control+End')
+  await f.page.keyboard.insertText('-- unsaved before workspace switch\n')
   const closedBeforeSwitch = closed
   const connectionsBeforeSwitch = sockets.length
   // Discard unsaved text through the existing navigation dialog.
@@ -308,6 +391,19 @@ try {
   )
   await f.page.getByRole('button', { name: 'Terminal', exact: true }).click()
   await panel.getByText('Connected', { exact: true }).waitFor()
+  const connectionsBeforeConfiguration = sockets.length
+  const closedBeforeConfiguration = closed
+  const configurationProject = f.state.projects.find(
+    (project) => project.id === 'other-terminal-project',
+  )
+  configurationProject.status = 'error'
+  configurationProject.needsPreparation = true
+  configurationProject.error =
+    'Project configuration changed. Retry setup to prepare and test the updated environment.'
+  await panel.locator('.terminal-setup-alert').waitFor()
+  await panel.getByText('Connected', { exact: true }).waitFor()
+  assert.equal(sockets.length, connectionsBeforeConfiguration)
+  assert.equal(closed, closedBeforeConfiguration)
   onTerminalStop = () => {
     const project = f.state.projects.find(
       (project) => project.id === 'other-terminal-project',
@@ -324,8 +420,27 @@ try {
     .getByRole('button', { name: 'Retry setup', exact: true })
     .waitFor()
   assert.equal(await panel.count(), 0)
+  await f.page.route(
+    '**/api/projects/other-terminal-project/prepare',
+    (route) => {
+      configurationProject.status = 'ready'
+      configurationProject.needsPreparation = false
+      delete configurationProject.error
+      return route.fulfill({ json: configurationProject })
+    },
+  )
+  await f.page.getByRole('button', { name: 'Retry setup', exact: true }).click()
+  await until(
+    async () =>
+      await f.page
+        .getByRole('button', { name: 'Terminal', exact: true })
+        .isEnabled(),
+    'setup completes without reopening the terminal',
+  )
+  assert.equal(sockets.length, connectionsBeforeConfiguration)
+  assert.equal(await panel.count(), 0)
   f.report.checks.push(
-    'Closing a terminal reloads preparation status and exposes Retry setup after configuration edits.',
+    'Configuration changes keep running terminals visible with setup guidance; explicit close permits setup and never reopens a shell unasked.',
   )
   await f.page
     .getByRole('button', { name: /Terminal fixture/ })

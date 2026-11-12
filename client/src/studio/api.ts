@@ -284,6 +284,9 @@ export interface OpenFile {
   hash: string
   generation: number
   readOnly?: boolean
+  // The saved path disappeared. Keep local bytes for download or Save a copy,
+  // but never recreate it through autosave or a delayed acknowledgement.
+  unavailable?: boolean
   line?: number
   column?: number
   preview?: 'pdf'

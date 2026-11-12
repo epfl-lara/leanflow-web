@@ -695,7 +695,11 @@ async function captureTexInputs(source, target, signal, rootFile = 'main.tex') {
 
 // Node lacks openat(); Linux descriptor paths provide the same stable parent
 // anchoring. Repository processes cannot redirect writes through swapped links.
-async function writeParent(root, filename, { durable = false } = {}) {
+async function writeParent(
+  root,
+  filename,
+  { durable = false, create = true } = {},
+) {
   const parts = relativeFile(filename, { write: true }).split('/')
   const name = parts.pop()
   let directory = await fs.open(
@@ -708,11 +712,13 @@ async function writeParent(root, filename, { durable = false } = {}) {
       fail('Workspace directory is not safe', 409)
     for (const part of parts) {
       const child = `/proc/self/fd/${directory.fd}/${part}`
-      try {
-        await fs.mkdir(child, { mode: 0o700 })
-        if (durable) await directory.sync()
-      } catch (error) {
-        if (error.code !== 'EEXIST') throw error
+      if (create) {
+        try {
+          await fs.mkdir(child, { mode: 0o700 })
+          if (durable) await directory.sync()
+        } catch (error) {
+          if (error.code !== 'EEXIST') throw error
+        }
       }
       let next
       try {
@@ -5225,10 +5231,17 @@ export class WorkspaceStore {
         })
       assertAuthorized?.()
       await assertCopyCurrent()
-      await this.#applyLocked(project, transition, 'saved', () => {
-        assertAuthorized?.()
-        this.requireEditor(project.id, actor)
-      })
+      await this.#applyLocked(
+        project,
+        transition,
+        'saved',
+        () => {
+          assertAuthorized?.()
+          this.requireEditor(project.id, actor)
+        },
+        { detectMoves: true },
+      )
+      await this.#pruneTerminalFolders(project, manifest, transition)
       return changes
     })
     onUnpublished?.([...unpublished])
@@ -5238,6 +5251,42 @@ export class WorkspaceStore {
   markTerminalFinalizing(snapshot) {
     const active = this.terminalCopies.get(snapshot?.runId)
     if (active) active.phase = 'finalizing'
+  }
+
+  async #pruneTerminalFolders(project, manifest, changes) {
+    const folders = new Set()
+    for (const change of changes) {
+      if (change.after !== null) continue
+      let folder = path.posix.dirname(change.path)
+      while (folder !== '.') {
+        folders.add(folder)
+        folder = path.posix.dirname(folder)
+      }
+    }
+    const removed = []
+    for (const folder of [...folders].sort(
+      (a, b) => b.split('/').length - a.split('/').length,
+    )) {
+      try {
+        // Keep intentionally empty folders and all nonempty shared folders.
+        // Only remove a parent that also disappeared from the private copy.
+        if (await exists(await guarded(manifest.root, folder, { write: true })))
+          continue
+        const parent = await writeParent(project.root, folder, {
+          create: false,
+        })
+        try {
+          await fs.rmdir(`${parent.anchor}/${parent.name}`)
+          removed.push(folder)
+        } finally {
+          await parent.handle.close()
+        }
+      } catch (error) {
+        if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code))
+          this.#saveDiagnostic(project.id, error, 'terminal folder cleanup')
+      }
+    }
+    if (removed.length) this.#changed(project.id, removed, 'files', removed)
   }
 
   async retainTerminalSnapshot(snapshot, message, { active = false } = {}) {
@@ -6445,6 +6494,7 @@ export class WorkspaceStore {
         changes,
         'saved',
         () => this.requireEditor(id, owner),
+        { allowExactSaveRetries: true },
       )
     })
   }
@@ -6477,7 +6527,7 @@ export class WorkspaceStore {
     changes,
     reason = 'applied',
     authorize,
-    { detectMoves = false } = {},
+    { detectMoves = false, allowExactSaveRetries = false } = {},
   ) {
     authorize?.()
     project = this.#record(project.id)
@@ -6491,6 +6541,7 @@ export class WorkspaceStore {
     assertTransactionPaths(filenames)
     const seen = new Set()
     const prepared = []
+    const unchanged = []
     for (const [index, change] of changes.entries()) {
       const filename = filenames[index]
       this.#assertPlaygroundFile(project, filename)
@@ -6527,13 +6578,24 @@ export class WorkspaceStore {
           409,
         )
       const before = assetUpload ? null : await textFile(destination, true)
-      if ((before?.hash ?? null) !== change.beforeHash)
+      const exactSave =
+        allowExactSaveRetries && before?.content === change.after
+      if ((before?.hash ?? null) !== change.beforeHash && !exactSave)
         fail(
           reason === 'saved'
             ? `Cannot save: ${filename} changed since it was opened. Reload it before saving.`
             : `Cannot apply: ${filename} changed since the assistant run started.`,
           409,
         )
+      if (exactSave) {
+        unchanged.push({
+          path: filename,
+          destination,
+          content: before.content,
+          hash: before.hash,
+        })
+        continue
+      }
       prepared.push({
         ...change,
         path: filename,
@@ -6543,9 +6605,52 @@ export class WorkspaceStore {
         before: before?.content ?? null,
       })
     }
-    if (!prepared.length) return { applied: 0, files: [] }
-    let requiresPreparation = false
-    const committedHashes = new Map()
+    // A response can be lost after a complete batch commits. Confirm exact
+    // saved bytes without journaling or replacing them again. Fsync also covers
+    // a same-text retry following an uncertain single-file acknowledgement.
+    for (const file of unchanged) {
+      const parent = await writeParent(project.root, file.path, {
+        create: false,
+      })
+      try {
+        await durableSourceWrite({
+          parent,
+          destination: file.destination,
+          content: file.content,
+          unchanged: true,
+          authorize: async () => {
+            authorize?.()
+            const current = await textFile(file.destination, true)
+            if (current?.hash !== file.hash)
+              fail(
+                `Cannot save: ${file.path} changed during saving. Reload it before saving.`,
+                409,
+              )
+            authorize?.()
+          },
+        })
+      } finally {
+        await parent.handle
+          .close()
+          .catch((error) => this.#saveDiagnostic(id, error, 'close'))
+      }
+    }
+    authorize?.()
+    const committedHashes = new Map(
+      unchanged.map((file) => [file.path, file.hash]),
+    )
+    const savedFiles = () =>
+      filenames.map((filename) => ({
+        path: filename,
+        hash: committedHashes.get(filename),
+      }))
+    let requiresPreparation =
+      unchanged.some((file) => CONFIGURATION_FILES.has(file.path)) &&
+      project.needsPreparation === true
+    if (!prepared.length)
+      return allowExactSaveRetries
+        ? { applied: 0, requiresPreparation, files: savedFiles() }
+        : { applied: 0, files: [] }
     let transaction
     try {
       transaction = await this.transactions.apply(project, prepared, {
@@ -6553,10 +6658,9 @@ export class WorkspaceStore {
         onCommitted: (current, committed) => {
           for (const change of committed)
             committedHashes.set(change.path, change.afterHash)
-          requiresPreparation = this.#transactionConfiguration(
-            current,
-            committed,
-          )
+          requiresPreparation =
+            this.#transactionConfiguration(current, committed) ||
+            requiresPreparation
         },
       })
     } catch (error) {
@@ -6592,10 +6696,7 @@ export class WorkspaceStore {
     return {
       applied: prepared.length,
       requiresPreparation,
-      files: prepared.map((change) => ({
-        path: change.path,
-        hash: committedHashes.get(change.path),
-      })),
+      files: savedFiles(),
     }
   }
 

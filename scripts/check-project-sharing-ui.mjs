@@ -629,6 +629,9 @@ try {
   state.onSave = ({ respond }) =>
     respond({ error: 'Fixture conflict preserves draft.' }, 409)
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })
+  await page
+    .getByText('Joining live editing…', { exact: true })
+    .waitFor({ state: 'hidden' })
   await page.locator('.monaco-editor textarea').first().focus()
   await page.keyboard.insertText('LOCAL_DRAFT_BEFORE_REVOCATION')
   await until(

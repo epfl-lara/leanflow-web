@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import test from 'node:test'
 import ts from 'typescript'
 import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configuration.mjs'
+import { MAX_PROJECT_FILES } from '../../../shared/source-limits.mjs'
 
 function load(name, imports = {}) {
   const { outputText } = ts.transpileModule(
@@ -33,7 +34,9 @@ const { moveBlockedReason, moveProblem, moveRequestCurrent } = load(
     },
   },
 )
-const { remapMovedPath, pathMoves } = load('./projectPaths.ts')
+const { remapMovedPath, pathMoves } = load('./projectPaths.ts', {
+  '../../../shared/source-limits.mjs': { MAX_PROJECT_FILES },
+})
 
 const request = {
   mode: 'rename',
@@ -103,8 +106,16 @@ test('live move messages are validated as untrusted input', () => {
     [good],
   )
   assert.deepEqual(
-    pathMoves(Array.from({ length: 40 }, () => good)),
+    pathMoves(Array.from({ length: MAX_PROJECT_FILES + 1 }, () => good)),
     [],
     'an oversized list is ignored',
   )
+})
+
+test('terminal folder moves can announce more than 32 uniquely identified files', () => {
+  const moves = Array.from({ length: 40 }, (_, index) => ({
+    from: `Old/File${index}.lean`,
+    to: `New/File${index}.lean`,
+  }))
+  assert.deepEqual(pathMoves(moves), moves)
 })

@@ -208,7 +208,7 @@ function rejectedSocket(url, headers) {
   })
 }
 
-test('HTTP batch saves enforce ownership and all-or-none conflicts, and protect active-run configuration', async (t) => {
+test('HTTP batch saves allow exact retries, enforce ownership and all-or-none conflicts, and protect active-run configuration', async (t) => {
   const f = await fixture(t)
   const endpoint = `/api/projects/${f.project.id}/files`
   const put = (body, access = f.token) =>
@@ -264,8 +264,40 @@ test('HTTP batch saves enforce ownership and all-or-none conflicts, and protect 
   f.events.updateMetadata(active.id, { status: 'completed' })
   const saved = await put({ files: [changed] })
   assert.equal(saved.status, 200)
-  assert.equal((await saved.json()).applied, 1)
-  assert.equal((await put({ files: [changed] })).status, 409)
+  const receipt = await saved.json()
+  assert.equal(receipt.applied, 1)
+  const replayed = await put({ files: [changed] })
+  assert.equal(replayed.status, 200)
+  const replay = await replayed.json()
+  assert.equal(replay.applied, 0)
+  assert.deepEqual(replay.files, receipt.files)
+
+  const other = await f.workspaces.writeFile(
+    f.project.id,
+    'owner',
+    'Use.lean',
+    '#check Nat\n',
+    null,
+  )
+  const conflict = await put({
+    files: [
+      {
+        path: 'Use.lean',
+        content: '#check Int\n',
+        expectedHash: other.hash,
+      },
+      { ...changed, content: changed.content + '\n-- different stale edit' },
+    ],
+  })
+  assert.equal(conflict.status, 409)
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, 'owner', 'Use.lean')).content,
+    '#check Nat\n',
+  )
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, 'owner', 'Main.lean')).content,
+    changed.content,
+  )
 })
 
 test('HTTP folder creation validates input, enforces authentication and ownership, and reports collisions', async (t) => {

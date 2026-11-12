@@ -43,6 +43,10 @@ export class TerminalSourceMirror {
         this.changes = changes
       })
       .catch((error) => {
+        // Shell commands can rename a file after the directory scan. Retry the
+        // next snapshot instead of turning that brief gap into a lasting pause.
+        // A failed final scan must still preserve the private copy for recovery.
+        if (error.code === 'TERMINAL_SOURCE_CHANGED' && !force) return
         this.paused = true
         clearInterval(this.timer)
         if ((error.status || error.statusCode) === 409) this.onConflict?.(error)

@@ -9,6 +9,7 @@ import { editorShortcuts } from './lib/editor-shortcuts.mjs'
 
 const output = path.resolve('.runtime/session-project-drafts-ui')
 await fs.mkdir(output, { recursive: true })
+await fs.rm(path.join(output, 'result.json'), { force: true })
 const app = express()
 app.use(express.static(process.env.STUDIO_TEST_DIST || 'client/dist'))
 const server = await new Promise((resolve) => {
@@ -241,6 +242,82 @@ try {
   assert.equal(await page.locator('.revoked-access-notice').count(), 0)
   checks.push(
     'A fresh reload with an inaccessible remembered project selects an accessible fallback.',
+  )
+
+  const setupMarker = '-- KEEP_DRAFT_THROUGH_ACCOUNT_SETUP\n'
+  const ownSavedSource = state.files[own.id]['Main.lean']
+  await page.locator('.monaco-editor textarea').first().focus()
+  await page.keyboard.press(editorShortcuts.documentEnd)
+  await page.keyboard.insertText(setupMarker)
+  await until(
+    () => editorText().then((text) => text.includes(setupMarker.trim())),
+    'draft before account setup reappears',
+  )
+  let logoutRequests = 0
+  await page.route('**/api/logout', (route) => {
+    logoutRequests++
+    return route.fulfill({ json: { ok: true } })
+  })
+  // The settings refresh discovers that the account's provider is no longer
+  // configured. All provider traffic stays inside the existing closed fixture.
+  state.session = {
+    ...state.session,
+    lemex: { ...state.session.lemex, configured: false },
+  }
+  await page
+    .getByRole('button', { name: 'Account settings', exact: true })
+    .click()
+  const settings = page.getByRole('dialog', {
+    name: 'Assistant settings',
+    exact: true,
+  })
+  await settings
+    .getByLabel('Your Lemex API key', { exact: true })
+    .fill('fixture-key-with-no-provider-call')
+  await settings
+    .getByRole('button', { name: 'Save connection', exact: true })
+    .click()
+  const setup = page.locator('.account-setup')
+  await setup.waitFor()
+  const signOut = setup.getByRole('button', { name: 'Sign out', exact: true })
+  const signOutConfirmation = page.getByRole('dialog', {
+    name: 'Save your changes?',
+    exact: true,
+  })
+  await signOut.click()
+  await until(
+    async () => logoutRequests > 0 || (await signOutConfirmation.isVisible()),
+    'account setup sign-out decision',
+  )
+  assert.equal(
+    logoutRequests,
+    0,
+    'account setup must preserve unsaved work before issuing logout',
+  )
+  const setupDownload = page.waitForEvent('download')
+  await signOutConfirmation
+    .getByRole('button', { name: 'Download draft: Main.lean', exact: true })
+    .click()
+  assert.equal(
+    await fs.readFile(await (await setupDownload).path(), 'utf8'),
+    ownSavedSource + setupMarker,
+  )
+  await signOutConfirmation
+    .getByRole('button', { name: 'Cancel', exact: true })
+    .click()
+  await signOutConfirmation.waitFor({ state: 'hidden' })
+  assert.equal(logoutRequests, 0)
+  await setup.waitFor()
+  await signOut.click()
+  await signOutConfirmation.waitFor()
+  await signOutConfirmation
+    .getByRole('button', { name: 'Discard edits', exact: true })
+    .click()
+  await until(() => logoutRequests === 1, 'explicit discard permits sign-out')
+  await setup.waitFor({ state: 'hidden' })
+  assert.equal(state.files[own.id]['Main.lean'], ownSavedSource)
+  checks.push(
+    'Account setup sign-out keeps unsaved work downloadable, Cancel preserves the draft without logout, and only explicit discard permits sign-out.',
   )
   fixture.assertClean()
   await fs.writeFile(

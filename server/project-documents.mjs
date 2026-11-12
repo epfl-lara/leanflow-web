@@ -12,8 +12,8 @@ const CONFIGURATION_FILES = new Set(PROJECT_CONFIGURATION_FILES)
 const MAX_MESSAGE_BYTES = 12 * 1024 * 1024
 const MAX_BUFFERED_BYTES = 16 * 1024 * 1024
 const MAX_SUBSCRIPTIONS = 16
-const fail = (message, status = 400) => {
-  throw Object.assign(new Error(message), { status })
+const fail = (message, status = 400, code) => {
+  throw Object.assign(new Error(message), { status, ...(code ? { code } : {}) })
 }
 
 export { replaceDocumentText } from '../shared/document-text.mjs'
@@ -179,6 +179,7 @@ export class ProjectDocuments {
                 ? request.requestId
                 : undefined,
             status: error.status || 400,
+            ...(error.code === 'DOCUMENT_REMOVED' ? { code: error.code } : {}),
             message: error.status
               ? error.message
               : 'The shared edit could not be saved. Your edits remain in this tab. Reload the saved file before retrying.',
@@ -335,6 +336,7 @@ export class ProjectDocuments {
         type: 'error',
         path: record.path,
         status: 409,
+        code: 'DOCUMENT_REMOVED',
         message:
           'This shared file was removed or moved. Your draft remains in this tab. Reopen the saved file before continuing.',
       })
@@ -344,6 +346,7 @@ export class ProjectDocuments {
       fail(
         'This live file was removed or replaced. Reopen the saved file before editing.',
         409,
+        record.invalidated ? 'DOCUMENT_REMOVED' : undefined,
       )
   }
   resetDocument(record) {
@@ -686,6 +689,7 @@ export class ProjectDocuments {
             503,
           )
         await this.refresh(record, client.actor)
+        this.assertDocumentCurrent(record, request.documentId)
         const claims = this.updateOwners(record, incoming.structs, client.actor)
         const candidate = new Y.Doc()
         try {
@@ -811,6 +815,9 @@ export class ProjectDocuments {
                   ? 'project'
                   : 'files',
             paths: event.paths,
+            ...(event.removedPaths?.length
+              ? { removedPaths: event.removedPaths }
+              : {}),
             ...(event.moves?.length && event.kind === 'files'
               ? { moves: event.moves }
               : {}),
@@ -882,6 +889,7 @@ export class ProjectDocuments {
       }
     })()
       .catch((error) => {
+        if (record.invalidated) return
         if (error.documentReaderDenied) {
           record.refreshNeeded = [...record.clients].some((client) => {
             try {

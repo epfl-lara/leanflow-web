@@ -13,6 +13,9 @@ export function CreateEntryDialog({
   folders,
   onCreate,
   onClose,
+  title,
+  actionLabel,
+  initialName = '',
 }: {
   kind: EntryKind
   projectName: string
@@ -20,8 +23,11 @@ export function CreateEntryDialog({
   folders: string[]
   onCreate: (path: string) => Promise<void>
   onClose: () => void
+  title?: string
+  actionLabel?: string
+  initialName?: string
 }) {
-  const [name, setName] = useState('')
+  const [name, setName] = useState(initialName)
   const [parent, setParent] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -67,7 +73,7 @@ export function CreateEntryDialog({
 
   return (
     <Dialog
-      title={`Create a ${kind}`}
+      title={title || `Create a ${kind}`}
       subtitle={`Choose a location inside ${projectName}.`}
       onClose={onClose}
       busy={busy}
@@ -145,7 +151,7 @@ export function CreateEntryDialog({
             ) : (
               <Icon name="plus" size={15} />
             )}
-            Create {kind}
+            {actionLabel || `Create ${kind}`}
           </button>
         </footer>
       </form>
