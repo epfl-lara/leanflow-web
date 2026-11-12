@@ -25,6 +25,7 @@ import { nodeConfig, readNodeConfig, workerBundleDigest } from './config.mjs'
 import { certifyWorker } from './conformance.mjs'
 import { inspectBoundary } from './boundary.mjs'
 import { acquireServerLease } from '../lease.mjs'
+import { StorageCapacity } from '../storage-capacity.mjs'
 
 const execute = promisify(execFile)
 const terminal = new Set([
@@ -105,6 +106,12 @@ export class WorkerNode {
     this.closed = false
     this.operations = new Set()
     this.shutdownController = new AbortController()
+    this.storage = new StorageCapacity({
+      dataDir: this.config.dataDir,
+      minimumFreeBytes: this.config.reserveBytes,
+      warningFreeBytes: this.config.reserveBytes,
+      allocationBytes: 16 * 1024 ** 2,
+    })
   }
 
   async init() {
@@ -129,6 +136,11 @@ export class WorkerNode {
       })
       this.blobs = await new BlobStore(
         path.join(this.config.dataDir, 'blobs'),
+        {
+          maxBytes: this.config.maxStoreBytes,
+          maxFiles: this.config.maxStoreFiles,
+          reserveBytes: this.config.reserveBytes,
+        },
       ).init()
       this.bundleDigest = this.expectedBundle || (await workerBundleDigest())
       try {
@@ -159,6 +171,24 @@ export class WorkerNode {
             void this.cancel(id, 'lease-expired').catch(() => {})
       }, 500)
       this.timer.unref()
+      if (
+        this.config.certifyToolchain &&
+        this.runtime.toolchains.has(this.config.certifyToolchain) &&
+        this.runtime.info().ready &&
+        !this.recoveryError
+      ) {
+        const task = Promise.resolve()
+          .then(() => {
+            if (!this.closed)
+              return this.certify({ toolchain: this.config.certifyToolchain })
+          })
+          .catch((error) => {
+            this.certificationError = safeWorkerError(error).message
+          })
+          .finally(() => this.operations.delete(task))
+        this.operations.add(task)
+        this.certificationTask = task
+      }
       return this
     } catch (error) {
       await this.close().catch(() => {})
@@ -385,23 +415,33 @@ export class WorkerNode {
       }
       return { renewed }
     })
-    handle('worker.certify', async (value) => {
-      if (this.running.size || this.maintenance)
-        throw clusterError(
-          'Drain the worker before certification.',
-          'worker_busy',
-          409,
-        )
-      this.maintenance = true
-      try {
-        const report = await this.certifier(this, value)
-        this.state.setMeta('certification', report)
-        return report
-      } finally {
-        this.maintenance = false
-      }
-    })
+    handle('worker.certify', (value) => this.certify(value))
     return rpc
+  }
+
+  async certify(value) {
+    if (
+      this.closed ||
+      this.running.size ||
+      this.preparing.size ||
+      this.maintenance
+    )
+      throw clusterError(
+        'Drain the worker before certification.',
+        'worker_busy',
+        409,
+      )
+    this.maintenance = true
+    try {
+      const report = await this.certifier(this, value)
+      if (this.closed)
+        throw clusterError('Worker is stopping.', 'worker_stopping', 503)
+      this.state.setMeta('certification', report)
+      this.certificationError = null
+      return report
+    } finally {
+      this.maintenance = false
+    }
   }
 
   #authorize(context) {
@@ -515,6 +555,14 @@ export class WorkerNode {
   }
 
   async #installManifest(hash, destination) {
+    const manifest = await this.blobs.manifest(hash)
+    return this.storage.withReservation(
+      { bytes: manifest.totalBytes, signal: this.shutdownController.signal },
+      () => this.#publishManifest(hash, destination),
+    )
+  }
+
+  async #publishManifest(hash, destination) {
     const stage = destination + '.stage-' + randomUUID()
     const abandoned = destination + '.abandoned-' + randomUUID()
     await this.blobs.materialize(hash, stage, {
@@ -676,6 +724,10 @@ export class WorkerNode {
           'scratch_exceeded',
           413,
         )
+      record.diskReservation = await this.storage.reserve({
+        bytes: source.totalBytes,
+        signal: record.controller.signal,
+      })
       await this.blobs.materialize(value.sourceManifest, workspace, {
         signal: record.controller.signal,
       })
@@ -847,6 +899,7 @@ export class WorkerNode {
         await removeDisposableTree(workspace)
       }
       record.workspaceCleaned = true
+      record.diskReservation?.release()
     } catch {
       throw Object.assign(
         clusterError(
@@ -1066,15 +1119,39 @@ export async function bridgeNode(
   config,
   input = process.stdin,
   output = process.stdout,
+  {
+    startUserService = () =>
+      execute(
+        '/usr/bin/systemctl',
+        ['--user', 'start', 'leanflow-node.service'],
+        { timeout: 12000, maxBuffer: 65536 },
+      ),
+  } = {},
 ) {
   const command = process.env.SSH_ORIGINAL_COMMAND || ''
   if (!['leanflow-node-control', 'leanflow-node-bulk'].includes(command))
     throw clusterError('Only the LeanFlow worker protocol is available.')
-  const socket = net.createConnection(config.socketPath)
-  await new Promise((resolve, reject) => {
-    socket.once('connect', resolve)
-    socket.once('error', reject)
-  })
+  if (config.startUserService) await startUserService()
+  const deadline = performance.now() + (config.startUserService ? 12000 : 0)
+  let socket
+  for (;;) {
+    socket = net.createConnection(config.socketPath)
+    try {
+      await new Promise((resolve, reject) => {
+        socket.once('connect', resolve)
+        socket.once('error', reject)
+      })
+      break
+    } catch (error) {
+      socket.destroy()
+      if (
+        !['ENOENT', 'ECONNREFUSED'].includes(error.code) ||
+        performance.now() >= deadline
+      )
+        throw error
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+  }
   input.pipe(socket)
   socket.pipe(output)
   input.once('end', () => socket.end())

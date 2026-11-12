@@ -169,6 +169,65 @@ test('a cancel tombstone prevents a delayed start from executing after shutdown 
   assert.equal(f.calls.length, 0)
 })
 
+test('an opted-in restart earns fresh certification before advertising its saved toolchain', async (t) => {
+  const f = await fixture(t)
+  await f.rpc.request('worker.certify', { toolchain: version })
+  const oldEpoch = f.worker.nodeEpoch
+  await f.worker.close()
+  const gate = Promise.withResolvers()
+  const restarted = await new WorkerNode({
+    config: { ...f.worker.config, certifyToolchain: version },
+    runtime: f.runtime,
+    bundleDigest: bundle,
+    reap: async () => {},
+    boundaryInspector: async () => ({}),
+    leaseAcquire: async () => ({ release: async () => {} }),
+    certifier: async (node) => {
+      await gate.promise
+      return {
+        nodeEpoch: node.nodeEpoch,
+        bundleDigest: bundle,
+        imageDigest: image,
+        engineKind: 'docker',
+        capabilities: ['check.build', 'lean.file'],
+      }
+    },
+  }).init()
+  t.after(() => restarted.close())
+  assert.notEqual(restarted.nodeEpoch, oldEpoch)
+  assert.equal(restarted.status().certified, false)
+  assert.deepEqual(restarted.status().capabilities, [])
+  gate.resolve()
+  await restarted.certificationTask
+  assert.equal(restarted.status().certified, true)
+  assert.deepEqual(restarted.status().capabilities, [
+    'check.build',
+    'lean.file',
+  ])
+})
+
+test('a failed automatic certification never restores an older capability report', async (t) => {
+  const f = await fixture(t)
+  await f.rpc.request('worker.certify', { toolchain: version })
+  await f.worker.close()
+  const restarted = await new WorkerNode({
+    config: { ...f.worker.config, certifyToolchain: version },
+    runtime: f.runtime,
+    bundleDigest: bundle,
+    reap: async () => {},
+    boundaryInspector: async () => ({}),
+    leaseAcquire: async () => ({ release: async () => {} }),
+    certifier: async () => {
+      throw new Error('probe failed')
+    },
+  }).init()
+  t.after(() => restarted.close())
+  await restarted.certificationTask
+  assert.equal(restarted.status().certified, false)
+  assert.deepEqual(restarted.status().capabilities, [])
+  assert.ok(restarted.certificationError)
+})
+
 test('a duplicate start remains idempotent while a worker has entered recovery', async (t) => {
   const f = await fixture(t)
   await f.rpc.request('worker.certify', { toolchain: version })

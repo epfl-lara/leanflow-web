@@ -137,6 +137,20 @@ export function nodeConfig(value) {
   )
   if (maxOutputBytes > 16 * 1024 ** 2)
     throw clusterError('Worker output limit exceeds its bound.')
+  if (
+    value.startUserService !== undefined &&
+    typeof value.startUserService !== 'boolean'
+  )
+    throw clusterError('Invalid user-service startup policy.')
+  if (
+    value.certifyToolchain !== undefined &&
+    !/^leanprover\/lean4:v\d+\.\d+\.\d+(?:-(?:rc\d+|nightly-[0-9-]+))?$/.test(
+      value.certifyToolchain,
+    )
+  )
+    throw clusterError(
+      'Automatic certification requires an official pinned toolchain.',
+    )
   return {
     version: 1,
     nodeId: value.nodeId,
@@ -172,6 +186,19 @@ export function nodeConfig(value) {
     ),
     role: value.role === 'reserve' ? 'reserve' : 'primary',
     maxOutputBytes,
+    startUserService: value.startUserService === true,
+    certifyToolchain: value.certifyToolchain || undefined,
+    maxStoreBytes: positive(
+      value.maxStoreBytes,
+      128 * 1024 ** 3,
+      'worker object-store budget',
+    ),
+    maxStoreFiles: positive(value.maxStoreFiles, 500000, 'worker object count'),
+    reserveBytes: positive(
+      value.reserveBytes,
+      1024 ** 3,
+      'worker disk reserve',
+    ),
   }
 }
 

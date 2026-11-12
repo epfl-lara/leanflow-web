@@ -22,6 +22,10 @@ flowchart LR
 
 ## Prepare each worker
 
+For a shared machine whose administrator has already provided Docker, the
+container slice and AppArmor profile, use the [user account installation](UserExecutionWorkers.md).
+It keeps the remaining files and service in the dedicated account's local home.
+
 Ask its administrator to provide:
 
 - Node.js 24 or newer, Python 3, OpenSSH, and local persistent storage.
@@ -133,6 +137,9 @@ the controller's state. Transfer the pinned image, toolchain and immutable publi
 dependency assets, then certify each node. Each certification is bound to the
 current worker-process epoch, image and helper digest. Repeat certification after
 every worker-service restart; previous reports cannot authorize a new process.
+An optional `certifyToolchain` configuration pin runs fresh probes automatically
+on restart once that toolchain is installed. It never restores old capabilities
+without running those probes.
 An uncertified operation is never selected; unavailable native checking is never
 replaced by a build-only result.
 
@@ -200,7 +207,12 @@ copies and databases. Native checks run at most one per host while ordinary chec
 can use the remaining admitted capacity.
 
 The coordinator object store defaults to 32 GiB and 250,000 objects; each worker
-store defaults to 128 GiB and 500,000 objects. Reservations charge complete objects
+store defaults to 128 GiB and 500,000 objects. Worker `maxStoreBytes`,
+`maxStoreFiles` and `reserveBytes` can lower cache limits and increase the free
+space left on a shared volume. Asset and source copies reserve their full size
+against the measured free-space floor until publication or confirmed cleanup.
+These application checks do not create a filesystem quota or reserve disk from
+other applications. Reservations charge complete objects
 before writes, including interrupted partial uploads. Repeated snapshots reuse
 existing content. A full store refuses new objects. Cache eviction is an explicit
 idle operation in this release, not a background collector:

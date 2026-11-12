@@ -103,9 +103,14 @@ try {
   const handle = await fs.open(archive, 'wx', 0o600)
   await handle.close()
   try {
-    await execute('tar', ['-czf', archive, '-C', temporary, '.'], {
-      maxBuffer: 1024 * 1024,
-    })
+    await execute(
+      'tar',
+      ['--no-xattrs', '-czf', archive, '-C', temporary, '.'],
+      {
+        maxBuffer: 1024 * 1024,
+        env: { ...process.env, COPYFILE_DISABLE: '1' },
+      },
+    )
   } catch (error) {
     await fs.rm(archive, { force: true })
     throw error
