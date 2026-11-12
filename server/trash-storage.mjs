@@ -162,3 +162,93 @@ export async function removeStoredTree(directory, name) {
     await parent.close()
   }
 }
+
+/** Accept only links accounted for by this project's retained restore receipts. */
+export async function verifyRestoredFileLinks({
+  db,
+  trashDir,
+  project,
+  filename,
+  source,
+}) {
+  const refused = () =>
+    unsafe(
+      `The restored file ${filename} has an unrecognized filesystem link. Ask the server administrator to check the file and its retained Trash entries before retrying.`,
+      409,
+    )
+  if (
+    !source.isFile() ||
+    !Number.isSafeInteger(source.nlink) ||
+    source.nlink < 2 ||
+    (process.getuid && source.uid !== process.getuid())
+  )
+    refused()
+  const records = db
+    .prepare(
+      "SELECT id,owner,project,data FROM trash WHERE project=? AND owner=? AND json_extract(data,'$.path')=? AND json_extract(data,'$.kind')='file'",
+    )
+    .all(project.id, project.owner, filename)
+  const root = await directoryHandle(trashDir)
+  let matched = 0
+  try {
+    for (const row of records) {
+      let receipt
+      try {
+        receipt = JSON.parse(row.data)
+      } catch {
+        continue
+      }
+      if (
+        !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(row.id) ||
+        receipt.trashId !== row.id ||
+        receipt.projectId !== project.id ||
+        receipt.owner !== project.owner ||
+        receipt.path !== filename ||
+        receipt.kind !== 'file' ||
+        (!['restored', 'restoring'].includes(receipt.state) &&
+          !(
+            receipt.state === 'trashed' &&
+            typeof receipt.restoredAt === 'string' &&
+            Number.isFinite(Date.parse(receipt.restoredAt))
+          ))
+      )
+        continue
+      let container, content
+      try {
+        container = await fs.open(
+          `/proc/self/fd/${root.fd}/${row.id}`,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        )
+        if (
+          (await fs.realpath(`/proc/self/fd/${container.fd}`)) !==
+          `${trashDir}/${row.id}`
+        )
+          continue
+        content = await fs.open(
+          `/proc/self/fd/${container.fd}/content`,
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        )
+        const stored = await content.stat()
+        if (
+          stored.isFile() &&
+          stored.dev === source.dev &&
+          stored.ino === source.ino &&
+          stored.nlink === source.nlink &&
+          stored.uid === source.uid &&
+          stored.size === source.size &&
+          (stored.mode & 0o777) === (source.mode & 0o777)
+        )
+          matched++
+      } catch (error) {
+        if (!['ENOENT', 'ELOOP', 'ENOTDIR'].includes(error.code)) throw error
+      } finally {
+        await content?.close()
+        await container?.close()
+      }
+    }
+  } finally {
+    await root.close()
+  }
+  if (matched + 1 !== source.nlink) refused()
+  return true
+}

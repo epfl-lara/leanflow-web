@@ -287,7 +287,7 @@ export class TexBuildManager {
     owner,
     projectId,
     input,
-    { sourceRoot, signal, runId, origin } = {},
+    { sourceRoot, signal, runId, origin, parentWorker } = {},
   ) {
     if (this.stopping)
       fail('The server is shutting down. Compile after it restarts.', 503)
@@ -307,6 +307,17 @@ export class TexBuildManager {
     if (!TEX_ENGINES.includes(engine))
       fail(
         'Only pdfLaTeX is available. Choose pdflatex; other engines are not substituted.',
+      )
+    if (
+      parentWorker !== undefined &&
+      (origin !== 'agent' ||
+        !runId ||
+        !sourceRoot ||
+        parentWorker.workspaceRoot !== path.resolve(sourceRoot))
+    )
+      fail(
+        'This compiler request does not belong to its active assistant workspace.',
+        409,
       )
     signal?.throwIfAborted()
     const info = await this.availability()
@@ -402,6 +413,7 @@ export class TexBuildManager {
           {
             rootFile,
             engine,
+            ...(parentWorker === undefined ? {} : { parentWorker }),
             timeoutMs: this.timeoutMs,
             signal: controller.signal,
             onSpawn: () => {

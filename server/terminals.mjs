@@ -112,6 +112,17 @@ export class Terminals {
     let lastActivity = Date.now()
     let alive = true
     const startupController = new AbortController()
+    const notice = (message) => {
+      if (ws.readyState !== 1) return
+      try {
+        assertAuthenticated()
+      } catch {
+        return
+      }
+      const output = Buffer.from(`\r\n[LeanFlow] ${message}\r\n`)
+      outstanding += output.length
+      ws.send(output, { binary: true })
+    }
     const fail = (message, code = 1011) => {
       if (ws.readyState === 1)
         ws.send(JSON.stringify({ type: 'error', message }))
@@ -121,7 +132,9 @@ export class Terminals {
     const startupTimeout = setTimeout(() => {
       startupController.abort(new Error('Terminal startup timed out.'))
       fail(
-        'The private terminal copy took too long to prepare. Close it and retry.',
+        session.waitingForWorker
+          ? 'Terminal capacity is busy. Close an unused editor or terminal, then retry.'
+          : 'The private terminal copy took too long to prepare. Close it and retry.',
       )
     }, 60_000)
     startupTimeout.unref?.()
@@ -169,7 +182,7 @@ export class Terminals {
             throw new Error()
           outstanding -= message.bytes
           lastActivity = Date.now()
-          if (outstanding < outputWindow / 2) child.stdout.resume()
+          if (outstanding < outputWindow / 2) child?.stdout.resume()
           return
         }
         if (message.type === 'input') {
@@ -226,6 +239,18 @@ export class Terminals {
       try {
         assertAuthenticated()
         this.workspaces?.requireEditor?.(project.id, actor)
+        const runtimeStatus = this.runtime.info?.()
+        const limits = runtimeStatus?.workloads
+        if (
+          limits?.interactiveLimit > 0 &&
+          limits.active.interactive >= limits.interactiveLimit
+        )
+          throw Object.assign(
+            new Error(
+              'Interactive capacity is full. Close an unused editor or terminal, then reopen this terminal.',
+            ),
+            { status: 429 },
+          )
         if (this.workspaces?.terminalSnapshot) {
           session.snapshot = await this.workspaces.terminalSnapshot(
             project.id,
@@ -247,10 +272,30 @@ export class Terminals {
           !session.snapshot && actor === project.owner
             ? this.workspaces?.repositoryRoot?.(project)
             : null
-        child = this.runtime.spawn(
+        const spawn = this.runtime.spawnWhenAvailable || this.runtime.spawn
+        child = await spawn.call(
+          this.runtime,
           session.snapshot?.root || project.root,
           ['python3', '-u', '-c', workerScript],
           {
+            workload: 'interactive',
+            signal: startupController.signal,
+            onQueued: () => {
+              session.waitingForWorker = true
+              notice(
+                'Waiting for an available worker. Close unused editors or terminals, or wait for running project work to finish.',
+              )
+            },
+            onSpawn: (spawned) => {
+              session.waitingForWorker = false
+              child = spawned
+              session.child = spawned
+            },
+            beforeSpawn: () => {
+              startupController.signal.throwIfAborted()
+              assertAuthenticated()
+              this.workspaces?.requireEditor?.(project.id, actor)
+            },
             network: 'bridge',
             freshHome: true,
             cleanHome: true,
@@ -266,17 +311,6 @@ export class Terminals {
           },
         )
         session.child = child
-        const notice = (message) => {
-          if (ws.readyState !== 1) return
-          try {
-            assertAuthenticated()
-          } catch {
-            return
-          }
-          const output = Buffer.from(`\r\n[LeanFlow] ${message}\r\n`)
-          outstanding += output.length
-          ws.send(output, { binary: true })
-        }
         const preserve = (error) => {
           const status = error.status || error.statusCode
           const message = [403, 404].includes(status)

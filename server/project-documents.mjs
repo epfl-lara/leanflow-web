@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { watch } from 'node:fs'
 import { lstat } from 'node:fs/promises'
 import path from 'node:path'
@@ -596,6 +596,14 @@ export class ProjectDocuments {
     return claims
   }
 
+  integrateUpdate(record, client, update, claims, state, hash, ack) {
+    for (const id of claims) record.clientOwners.set(id, client.actor)
+    Y.applyUpdate(record.doc, update)
+    record.hash = hash
+    record.bytes = state.byteLength
+    this.broadcast(record, client, ack)
+  }
+
   async message(client, request) {
     if (this.closed)
       fail('Live editing is stopping. Your edits remain in this tab.', 503)
@@ -737,6 +745,20 @@ export class ProjectDocuments {
               },
             )
           } catch (error) {
+            if (error.sourceCommitted === true) {
+              // The atomic replacement is already visible, but its directory
+              // fsync failed. Keep the exact causal IDs so refresh/reconnect
+              // cannot re-import the same local text as unrelated remote ops.
+              // No ACK is sent until a retry confirms the storage sync.
+              this.integrateUpdate(
+                record,
+                client,
+                update,
+                claims,
+                state,
+                createHash('sha256').update(content).digest('hex'),
+              )
+            }
             if (
               (error.status || error.statusCode) === 409 &&
               (this.workspaces.get(client.projectId, client.actor).status ===
@@ -752,11 +774,15 @@ export class ProjectDocuments {
             throw error
           }
           // Membership may change during the CAS; store checks again inside its lock.
-          for (const id of claims) record.clientOwners.set(id, client.actor)
-          Y.applyUpdate(record.doc, update)
-          record.hash = saved.hash
-          record.bytes = state.byteLength
-          this.broadcast(record, client, request.requestId)
+          this.integrateUpdate(
+            record,
+            client,
+            update,
+            claims,
+            state,
+            saved.hash,
+            request.requestId,
+          )
           return
         } finally {
           candidate.destroy()

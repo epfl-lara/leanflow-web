@@ -162,7 +162,7 @@ if (args[0] === 'run') {
   }
 }
 
-test('memory admission queues weighted checks, allows smaller jobs, and recovers after cancellation', async (t) => {
+test('memory admission queues weighted checks without smaller jobs overtaking and recovers after cancellation', async (t) => {
   const { runtime, root, runs } = await fixture(t)
   assert.equal(runtime.ready, true, runtime.error)
   assert.equal(runtime.info().configuredMaxConcurrent, 6)
@@ -176,8 +176,8 @@ test('memory admission queues weighted checks, allows smaller jobs, and recovers
     freshHome: true,
   })
   assert.equal(runtime.info().queued, 1)
-  assert.equal((await runtime.run(root, ['quick'])).code, 0)
-  assert.equal(runtime.info().queued, 1)
+  const small = runtime.run(root, ['quick'])
+  assert.equal(runtime.info().queued, 2)
   editor.kill()
   await editor.workerStopped
   const kernel = await pending
@@ -189,12 +189,13 @@ test('memory admission queues weighted checks, allows smaller jobs, and recovers
   assert.throws(() => runtime.spawn(root, ['quick']), { status: 503 })
   const controller = new AbortController()
   const cancelled = runtime.run(root, ['quick'], { signal: controller.signal })
-  assert.equal(runtime.info().queued, 1)
+  assert.equal(runtime.info().queued, 2)
   controller.abort()
   await assert.rejects(cancelled, { name: 'AbortError' })
-  assert.equal(runtime.info().queued, 0)
+  assert.equal(runtime.info().queued, 1)
   kernel.kill()
   await kernel.workerStopped
+  assert.equal((await small).code, 0)
   assert.equal(runtime.info().usedSlots, 0)
   assert.equal((await runtime.run(root, ['quick'])).code, 0)
 })

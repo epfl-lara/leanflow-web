@@ -881,20 +881,56 @@ export class AgentManager {
       })
       await writeModelCatalog(home, modelConfig.modelCatalog)
       if (active.controller.signal.aborted) return
-      const child = this.runtime.spawn(
+      const attachChild = (child) => {
+        active.childClosed = new Promise((resolve) => {
+          child.once('close', resolve)
+          child.once('error', resolve)
+        })
+        active.workerStopped = child.workerStopped
+      }
+      const spawn =
+        this.runtime.spawnAgentWhenAvailable ||
+        this.runtime.spawnWhenAvailable ||
+        this.runtime.spawn
+      if (this.runtime.spawnWhenAvailable)
+        this.#progress(
+          id,
+          'Waiting for a project worker',
+          'Opening the isolated assistant when capacity is available. You can stop this run while it waits.',
+        )
+      const child = await spawn.call(
+        this.runtime,
         snapshot.root,
         ['lemex', 'app-server', '--stdio', '--strict-config'],
         {
           env: provider,
           network: 'bridge',
+          workload: 'batch',
+          ...(this.runtime.spawnAgentWhenAvailable
+            ? {
+                dependentTools:
+                  job.mode === 'search' && Boolean(this.texBuilds),
+              }
+            : {}),
           signal: active.controller.signal,
+          onSpawn: attachChild,
+          beforeSpawn: () => {
+            active.controller.signal.throwIfAborted()
+            this.#editableProject(job.projectId, job.owner)
+            this.assertCanStart(job.owner, job.projectId)
+          },
         },
       )
-      active.childClosed = new Promise((resolve) => {
-        child.once('close', resolve)
-        child.once('error', resolve)
-      })
-      active.workerStopped = child.workerStopped
+      if (!active.childClosed) attachChild(child)
+      if (active.controller.signal.aborted) {
+        child.kill()
+        return
+      }
+      this.#progress(
+        id,
+        'Starting Lemex',
+        'Opening the isolated assistant session.',
+      )
       const rpc = (active.rpc = new AgentRpc(child))
       child.stderr.on(
         'data',
@@ -931,6 +967,7 @@ export class AgentManager {
       if (withTex) {
         active.texTools = createTexAgentTools({
           manager: this.texBuilds,
+          parentWorker: child,
           job,
           snapshot,
           active,

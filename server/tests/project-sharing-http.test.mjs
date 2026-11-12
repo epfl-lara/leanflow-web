@@ -7,6 +7,7 @@ import net from 'node:net'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { WebSocket } from 'ws'
@@ -131,6 +132,272 @@ async function fixture(t, { capacity } = {}) {
     origin,
   }
 }
+
+test('older update recovery HTTP requires an idle Admin and preserves later edits', async (t) => {
+  const f = await fixture(t)
+  const original = await f.workspaces.readFile(
+    f.project.id,
+    f.owner.id,
+    'Main.lean',
+  )
+  await f.workspaces.writeFile(
+    f.project.id,
+    f.owner.id,
+    'Main.lean',
+    '-- interrupted update\n',
+    original.hash,
+  )
+  const id = `${Date.now()}-${randomUUID()}`
+  const directory = path.join(f.workspaces.historyDir, f.project.id, id)
+  await fs.mkdir(path.join(directory, 'before'), { recursive: true })
+  await fs.writeFile(path.join(directory, 'before/0'), original.content)
+  await fs.writeFile(
+    path.join(directory, 'manifest.json'),
+    JSON.stringify({
+      projectId: f.project.id,
+      owner: f.owner.id,
+      createdAt: new Date().toISOString(),
+      changes: [
+        {
+          path: 'Main.lean',
+          beforeHash: original.hash,
+          afterHash: createHash('sha256')
+            .update('-- interrupted update\n')
+            .digest('hex'),
+        },
+      ],
+    }),
+  )
+  await f.workspaces.legacyRecovery.init([f.project])
+  const base = `${f.base}/file-recovery/legacy`
+  const endpoint = `${base}/${id}`
+  const download = `${endpoint}/original?path=Main.lean`
+  assert.equal(
+    (await (await f.request(f.base)).json()).legacyFileRecoveryRequired,
+    true,
+  )
+  for (const actor of [f.editor, f.viewer, f.outsider, null]) {
+    const expected = actor === null ? 401 : actor === f.outsider ? 404 : 403
+    assert.equal((await f.request(base, { actor })).status, expected)
+    assert.equal((await f.request(download, { actor })).status, expected)
+    assert.equal(
+      (
+        await f.request(endpoint, {
+          actor,
+          method: 'POST',
+          body: { revision: 'a'.repeat(64), decision: 'keep-current' },
+        })
+      ).status,
+      expected,
+    )
+  }
+  const initial = await f.request(base)
+  assert.equal(initial.status, 200)
+  assert.equal(initial.headers.get('cache-control'), 'no-store')
+  const {
+    reviews: [review],
+  } = await initial.json()
+  for (const query of [
+    'cursor=../secret',
+    'recordId=../secret',
+    'fileOffset=1.5',
+    'fileOffset=12001',
+    'fileOffset=1',
+    'cursor=x&cursor=y',
+    'unknown=1',
+  ])
+    assert.equal((await f.request(`${base}?${query}`)).status, 400)
+  const originalDownload = await f.request(download)
+  assert.equal(originalDownload.status, 200)
+  assert.equal(await originalDownload.text(), original.content)
+  assert.match(originalDownload.headers.get('content-disposition'), /Main.lean/)
+  assert.equal(
+    (await f.request(`${endpoint}/original?path=../secret`)).status,
+    400,
+  )
+  for (const body of [
+    null,
+    [],
+    { revision: review.revision, decision: 'restore', force: true },
+    { revision: 'wrong', decision: 'restore' },
+  ])
+    assert.equal(
+      (await f.request(endpoint, { method: 'POST', body })).status,
+      400,
+    )
+  const active = f.events.create(f.editor.id, {
+    kind: 'agent',
+    projectId: f.project.id,
+  })
+  f.events.updateMetadata(active.id, { status: 'running' })
+  assert.equal(
+    (
+      await f.request(endpoint, {
+        method: 'POST',
+        body: { revision: review.revision, decision: 'restore' },
+      })
+    ).status,
+    409,
+  )
+  assert.equal(f.events.getMetadata(active.id).status, 'running')
+  f.events.updateMetadata(active.id, { status: 'completed' })
+  await fs.writeFile(
+    path.join(f.project.root, 'Main.lean'),
+    '-- later user edit\n',
+  )
+  assert.equal(
+    (
+      await f.request(endpoint, {
+        method: 'POST',
+        body: { revision: review.revision, decision: 'restore' },
+      })
+    ).status,
+    409,
+  )
+  const {
+    reviews: [fresh],
+  } = await (await f.request(base)).json()
+  assert.equal(fresh.canRestore, false)
+  const kept = await f.request(endpoint, {
+    method: 'POST',
+    body: { revision: fresh.revision, decision: 'keep-current' },
+  })
+  assert.equal(kept.status, 200)
+  const result = await kept.json()
+  assert.equal(result.root, undefined)
+  assert.equal(result.fileRecoveryRequired, undefined)
+  assert.equal(result.status, 'ready')
+  assert.equal(
+    await fs.readFile(path.join(f.project.root, 'Main.lean'), 'utf8'),
+    '-- later user edit\n',
+  )
+  assert.equal(
+    await fs.readFile(path.join(directory, 'before/0'), 'utf8'),
+    original.content,
+  )
+})
+
+test('legacy preview admission bounds active reads across projects and retains cancelled work until it settles', async (t) => {
+  const f = await fixture(t)
+  assert.equal((await f.member(f.editor, 'admin')).status, 200)
+  const other = await f.workspaces.create(f.owner.id, {
+    name: 'Other preview project',
+    preset: 'lean',
+    autoRepair: false,
+  })
+  await f.workspaces.jobs.get(other.id)
+  assert.equal(
+    (
+      await f.request(
+        `/api/projects/${other.id}/sharing/members/${f.outsider.id}`,
+        { method: 'PUT', body: { role: 'admin' } },
+      )
+    ).status,
+    200,
+  )
+  const endpoint = `${f.base}/file-recovery/legacy`
+  const otherEndpoint = `/api/projects/${other.id}/file-recovery/legacy`
+  const held = []
+  let closing = false
+  let holdNew = true
+  const original = f.workspaces.legacyRecovery.list.bind(
+    f.workspaces.legacyRecovery,
+  )
+  t.mock.method(f.workspaces.legacyRecovery, 'list', async (...args) => {
+    if (closing || !holdNew) return original(...args)
+    const waiting = { signal: args[1].signal, release: null, settled: false }
+    held.push(waiting)
+    try {
+      await new Promise((resolve) => {
+        waiting.release = resolve
+      })
+      return await original(...args)
+    } finally {
+      waiting.settled = true
+    }
+  })
+  const until = async (condition, label) => {
+    const deadline = Date.now() + 3000
+    while (!condition()) {
+      assert.ok(Date.now() < deadline, label)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
+  const controller = new AbortController()
+  const requests = []
+  try {
+    const first = fetch(f.origin + endpoint, {
+      headers: { Authorization: `Bearer ${f.owner.token}` },
+      signal: controller.signal,
+    })
+    requests.push(first)
+    const cancelled = assert.rejects(first, { name: 'AbortError' })
+    await until(() => held.length === 1, 'first preview starts')
+    const duplicate = await f.request(otherEndpoint)
+    assert.equal(duplicate.status, 429)
+    assert.equal(duplicate.headers.get('retry-after'), '1')
+    assert.match((await duplicate.json()).error, /Wait briefly.*retry/)
+    const second = f.request(endpoint, { actor: f.editor })
+    requests.push(second)
+    await until(() => held.length === 2, 'second Admin preview starts')
+    assert.equal(
+      (await f.request(otherEndpoint, { actor: f.outsider })).status,
+      429,
+    )
+    assert.equal((await f.request(endpoint, { actor: f.viewer })).status, 403)
+    assert.equal((await f.request(endpoint, { actor: null })).status, 401)
+    const source = await f.workspaces.readFile(
+      f.project.id,
+      f.owner.id,
+      'Main.lean',
+    )
+    const saved = await f.request(`${f.base}/file?path=Main.lean`, {
+      actor: f.editor,
+      method: 'PUT',
+      body: {
+        content: '-- ordinary save during previews\n',
+        expectedHash: source.hash,
+      },
+    })
+    assert.equal(saved.status, 200)
+    assert.equal(
+      (await saved.json()).content,
+      '-- ordinary save during previews\n',
+    )
+    controller.abort()
+    await cancelled
+    await until(
+      () => held[0].signal.aborted,
+      'server observes disconnected preview',
+    )
+    assert.equal(held[0].settled, false)
+    assert.equal((await f.request(endpoint)).status, 429)
+    assert.equal(
+      (await f.request(otherEndpoint, { actor: f.outsider })).status,
+      429,
+    )
+    holdNew = false
+    held[0].release()
+    await until(() => held[0].settled, 'cancelled filesystem work settles')
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(
+      (await f.request(otherEndpoint, { actor: f.outsider })).status,
+      200,
+    )
+    assert.equal((await f.request(endpoint)).status, 200)
+    held[1].release()
+    assert.equal((await second).status, 200)
+    assert.equal((await f.request(endpoint, { actor: f.editor })).status, 200)
+    assert.equal(held.length, 2)
+    assert.equal(f.workspaces.get(f.project.id, f.owner.id).status, 'ready')
+    assert.equal(f.workspaces.get(other.id, f.owner.id).status, 'ready')
+  } finally {
+    closing = true
+    controller.abort()
+    for (const waiting of held) waiting.release?.()
+    await Promise.allSettled(requests)
+  }
+})
 
 test('sharing grants project roles, bounds account discovery, and keeps private data private', async (t) => {
   const f = await fixture(t)

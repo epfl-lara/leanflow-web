@@ -4,6 +4,8 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { GitConnections } from '../git-connections.mjs'
+import { validateRepository } from '../workspaces.mjs'
 import {
   createTerminalGitBroker,
   terminalGitEnvironment,
@@ -103,6 +105,38 @@ test('terminal Git connections remain owner and host scoped', async (t) => {
     await alice.request({ ...query, host: 'gitlab.example.org' }),
     {},
   )
+})
+
+test('terminal Git reuses a saved repository token for pull and push credential requests only at its repository path', async (t) => {
+  const dataDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'terminal-repository-token-'),
+  )
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }))
+  const connections = await new GitConnections({
+    dataDir,
+    validateRepository,
+    resolveHost: async () => [{ address: '140.82.112.3' }],
+  }).init()
+  await connections.connect('alice', {
+    repository: 'https://github.com/team/repo.git',
+    token: 'fixture-repository-token',
+  })
+  const f = await fixture(t, 'alice', {
+    lookup: (owner, url) => connections.credentials(owner, url),
+  })
+  const query = { protocol: 'https', host: 'github.com', path: 'team/repo.git' }
+  for (let operation = 0; operation < 2; operation++)
+    assert.deepEqual(await f.request(query), {
+      username: 'x-access-token',
+      token: 'fixture-repository-token',
+    })
+  assert.deepEqual(await f.request({ ...query, path: 'team/other.git' }), {})
+  await connections.disconnect(
+    'alice',
+    'github.com',
+    'https://github.com/team/repo',
+  )
+  assert.deepEqual(await f.request(query), {})
 })
 
 test('terminal Git rejects malformed credential requests before any lookup', async (t) => {

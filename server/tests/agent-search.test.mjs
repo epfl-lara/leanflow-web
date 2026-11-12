@@ -1306,3 +1306,99 @@ test(
     }
   },
 )
+
+test('an assistant waiting for worker capacity can be stopped before any provider process starts', async (t) => {
+  const f = await fixture(t)
+  let waiting
+  f.runtime.spawn = () =>
+    assert.fail(
+      'A cancelled queued assistant must not start a provider process.',
+    )
+  f.runtime.spawnWhenAvailable = (_root, _args, options) =>
+    new Promise((_resolve, reject) => {
+      waiting = options
+      options.signal.addEventListener(
+        'abort',
+        () => reject(options.signal.reason),
+        { once: true },
+      )
+    })
+  const job = await f.manager.start('alice', f.project.id, {
+    mode: 'search',
+    prompt: 'Explain this project.',
+  })
+  const deadline = Date.now() + 2000
+  while (!waiting && Date.now() < deadline)
+    await new Promise((resolve) => setImmediate(resolve))
+  assert(waiting)
+  assert.equal(waiting.workload, 'batch')
+  assert.equal(typeof waiting.beforeSpawn, 'function')
+  assert.equal(
+    f.events.getMetadata(job.id).progress.label,
+    'Waiting for a project worker',
+  )
+  await f.manager.stop('alice', job.id)
+  assert.equal(waiting.signal.aborted, true)
+  assert.equal(f.events.getMetadata(job.id).status, 'cancelled')
+  assert.equal(f.manager.running, 0)
+  assert.equal(f.manager.active.size, 0)
+  assert.equal(f.requests.length, 0)
+})
+
+test('an assistant queued for a worker rechecks project permission immediately before admission', async (t) => {
+  const f = await fixture(t)
+  await f.workspaces.setMember(f.project.id, 'alice', 'bob', 'editor')
+  let waiting, release
+  f.runtime.spawn = () =>
+    assert.fail('Revoked editing access must prevent provider process startup.')
+  f.runtime.spawnWhenAvailable = async (_root, _args, options) => {
+    waiting = options
+    await new Promise((resolve) => {
+      release = resolve
+    })
+    options.beforeSpawn()
+    assert.fail('A viewer cannot start the assistant.')
+  }
+  const job = await f.manager.start('bob', f.project.id, {
+    mode: 'search',
+    prompt: 'Explain this project.',
+  })
+  const deadline = Date.now() + 2000
+  while (!waiting && Date.now() < deadline)
+    await new Promise((resolve) => setImmediate(resolve))
+  assert(waiting)
+  await f.workspaces.setMember(f.project.id, 'alice', 'bob', 'viewer')
+  release()
+  await Promise.all([...f.manager.tasks])
+  const failed = f.events.getMetadata(job.id)
+  assert.equal(failed.status, 'failed')
+  assert.match(failed.error, /editor access/i)
+  assert.equal(f.requests.length, 0)
+})
+
+test('stopping an assistant at worker admission observes closure before awaiting the spawn result', async (t) => {
+  const f = await fixture(t)
+  const spawn = f.runtime.spawn.bind(f.runtime)
+  let stopping
+  f.runtime.spawnWhenAvailable = async (root, args, options) => {
+    options.beforeSpawn()
+    const child = spawn(root, args, options)
+    options.onSpawn(child)
+    const job = [...f.manager.active.keys()][0]
+    stopping = f.manager.stop('alice', job)
+    child.kill()
+    return child
+  }
+  const job = await f.manager.start('alice', f.project.id, {
+    mode: 'search',
+    prompt: 'Explain this project.',
+  })
+  const deadline = Date.now() + 2000
+  while (!stopping && Date.now() < deadline)
+    await new Promise((resolve) => setImmediate(resolve))
+  assert(stopping)
+  await stopping
+  assert.equal(f.events.getMetadata(job.id).status, 'cancelled')
+  assert.equal(f.manager.active.size, 0)
+  assert.equal(f.requests.length, 0)
+})

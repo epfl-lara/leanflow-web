@@ -50,6 +50,8 @@ import { isPdfFile, isBinaryAssetFile } from '../../../shared/file-previews.mjs'
 import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
 import { ProjectFileRecovery } from './ProjectFileRecovery'
+import { LegacyRecoveryNotice } from './LegacyRecoveryNotice'
+import { StorageStatus } from './StorageStatus'
 import { ImportedProjectSetup } from './ImportedProjectSetup'
 import { RepositoryCredentialsDialog } from './RepositoryCredentialsDialog'
 import type { RepositoryCredentials } from './RepositoryCredentialsFields'
@@ -1990,7 +1992,13 @@ export function Studio() {
   if (
     session &&
     (session.user.profileComplete === false ||
-      (session.lemex?.configured === false && project?.accessRole !== 'viewer'))
+      (session.lemex?.configured === false &&
+        project?.accessRole !== 'viewer' &&
+        !project?.fileRecoveryRequired &&
+        !(
+          project?.legacyRecoveryReviewAvailable &&
+          (!project.accessRole || project.accessRole === 'admin')
+        )))
   )
     return (
       <>
@@ -2695,6 +2703,26 @@ export function Studio() {
           </div>
         )}
         {invitationNotice}
+        <StorageStatus
+          key={session.user.id}
+          initial={session.storage}
+          enabled={!authRequired}
+        />
+        {project?.legacyRecoveryReviewAvailable &&
+          !project.fileRecoveryRequired &&
+          (!project.accessRole || project.accessRole === 'admin') && (
+            <LegacyRecoveryNotice
+              key={`${session.user.id}:${project.id}`}
+              project={project}
+              onRecovered={(value) => {
+                if (!bufferStore.isCurrent(scope) || value.id !== project.id)
+                  return
+                setProjects((previous) =>
+                  previous.map((item) => (item.id === value.id ? value : item)),
+                )
+              }}
+            />
+          )}
         {collaboration.issue && project && (
           <div className="workspace-alert draft-protection-alert" role="status">
             <span>{collaboration.issue}</span>

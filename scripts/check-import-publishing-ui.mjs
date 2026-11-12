@@ -40,6 +40,10 @@ const fixture = await chatBrowserFixture({
   runs: [],
 })
 const { page, state, report, browser } = fixture
+// Keep these one-use credential checks independent of saved connections.
+await page.route('**/api/git-connections', (route) =>
+  route.fulfill({ status: 404, json: { error: 'API endpoint not found.' } }),
+)
 const imports = [],
   actions = [],
   externalRequests = [],

@@ -1,5 +1,12 @@
 import { removeDisposableTree } from './temporary-workspaces.mjs'
+import { durableSourceWrite } from './durable-source-write.mjs'
+import { SaveEvents } from './save-events.mjs'
+import { storageFailure } from './storage-capacity.mjs'
 import { ProjectMemberships } from './project-memberships.mjs'
+import {
+  LegacyProjectRecovery,
+  legacyRecoveryMessage,
+} from './legacy-project-recovery.mjs'
 import {
   ProjectTransactions,
   assertTransactionPaths,
@@ -8,6 +15,7 @@ import {
   storedDiskBytes,
   storedManifest,
   removeStoredTree,
+  verifyRestoredFileLinks,
 } from './trash-storage.mjs'
 import { DatabaseSync } from 'node:sqlite'
 import { constants } from 'node:fs'
@@ -676,7 +684,7 @@ async function captureTexInputs(source, target, signal, rootFile = 'main.tex') {
 
 // Node lacks openat(); Linux descriptor paths provide the same stable parent
 // anchoring. Repository processes cannot redirect writes through swapped links.
-async function writeParent(root, filename) {
+async function writeParent(root, filename, { durable = false } = {}) {
   const parts = relativeFile(filename, { write: true }).split('/')
   const name = parts.pop()
   let directory = await fs.open(
@@ -691,6 +699,7 @@ async function writeParent(root, filename) {
       const child = `/proc/self/fd/${directory.fd}/${part}`
       try {
         await fs.mkdir(child, { mode: 0o700 })
+        if (durable) await directory.sync()
       } catch (error) {
         if (error.code !== 'EEXIST') throw error
       }
@@ -762,11 +771,13 @@ export class WorkspaceStore {
     gitCredentials = async () => null,
     setupRepair,
     setupBuildTimeoutMs = 1800000,
+    storage,
   }) {
     if (!dataDir || !runtime)
       throw new Error('WorkspaceStore requires dataDir and runtime')
     this.dataDir = path.resolve(dataDir)
     this.runtime = runtime
+    this.storage = storage
     this.setupBuildTimeoutMs = validateSetupBuildTimeout(setupBuildTimeoutMs)
     this.resolveHost = resolveHost
     this.gitCredentials = gitCredentials
@@ -779,7 +790,12 @@ export class WorkspaceStore {
     this.locks = new Map()
     this.preparationControllers = new Map()
     this.preparationActors = new Map()
+    this.preparationAllocations = new Map()
     this.changeListeners = new Set()
+    this.saveEvents = new SaveEvents({
+      append: (entries) => this.#saveEventBatch(entries),
+      onError: (error) => this.#saveDiagnostic(null, error, 'activity'),
+    })
     this.terminalStarts = new Map()
     this.terminalCopies = new Map()
   }
@@ -811,6 +827,14 @@ export class WorkspaceStore {
       historyDir: this.historyDir,
       validatePath: (filename) => relativeFile(filename, { write: true }),
       openParent: writeParent,
+      verifySourceLinks: (project, filename, source) =>
+        verifyRestoredFileLinks({
+          db: this.db,
+          trashDir: this.trashDir,
+          project,
+          filename,
+          source,
+        }),
     })
     for (const row of this.db.prepare('SELECT data FROM projects').all()) {
       const project = JSON.parse(row.data)
@@ -907,9 +931,24 @@ export class WorkspaceStore {
       onCommitted: (project, changes) =>
         this.#transactionConfiguration(project, changes),
     })
+    this.legacyRecovery = new LegacyProjectRecovery({
+      db: this.db,
+      historyDir: this.historyDir,
+      validatePath: (filename) => relativeFile(filename, { write: true }),
+    })
+    await this.legacyRecovery.init(
+      this.db
+        .prepare('SELECT data FROM projects')
+        .all()
+        .map((row) => JSON.parse(row.data)),
+    )
     for (const row of this.db.prepare('SELECT data FROM trash').all()) {
       const entry = JSON.parse(row.data)
-      if (this.transactions.errors.has(entry.projectId)) continue
+      if (
+        this.transactions.errors.has(entry.projectId) ||
+        this.legacyRecovery.pending.has(entry.projectId)
+      )
+        continue
       if (!['moving', 'restoring'].includes(entry.state)) continue
       const content = await exists(
         path.join(this.trashDir, validateId(entry.trashId, 'trash'), 'content'),
@@ -973,6 +1012,7 @@ export class WorkspaceStore {
   }
 
   close() {
+    this.saveEvents.close()
     this.db?.close()
   }
 
@@ -982,6 +1022,8 @@ export class WorkspaceStore {
     delete stored.log
     delete stored.accessRole
     delete stored.fileRecoveryRequired
+    delete stored.legacyFileRecoveryRequired
+    delete stored.legacyRecoveryReviewAvailable
     if (project.fileRecoveryRequired === true) {
       // Recovery is a temporary read view. An allowed metadata edit must not
       // persist it over the project's readiness before the interrupted write.
@@ -1015,6 +1057,61 @@ export class WorkspaceStore {
           : {}),
       }),
     )
+  }
+
+  #saveDiagnostic(projectId, error, phase) {
+    const now = Date.now()
+    if (this.saveWarningAt && now - this.saveWarningAt < 30000) return
+    this.saveWarningAt = now
+    console.warn('[LeanFlow files] Save follow-up could not finish.', {
+      project: projectId,
+      phase,
+      code: error.code || error.name,
+    })
+  }
+
+  #saveEventBatch(entries) {
+    // Audit is optional. Never nest within a metadata transaction or wait on
+    // the durable file journal's writer; source ACKs already stand on fsync.
+    if (this.db.isTransaction) return
+    const previousTimeout = this.db.prepare('PRAGMA busy_timeout').get().timeout
+    let ownedTransaction = false
+    try {
+      this.db.exec('PRAGMA busy_timeout=0; BEGIN IMMEDIATE;')
+      ownedTransaction = true
+      for (const { projectId, filename, count } of entries) {
+        if (
+          !this.db.prepare('SELECT 1 FROM projects WHERE id=?').get(projectId)
+        )
+          continue
+        this.#event(
+          { id: projectId },
+          'saved',
+          `Saved ${filename}${count > 1 ? ` (${count} updates)` : ''}.\n`,
+        )
+      }
+      this.db.exec('COMMIT')
+      ownedTransaction = false
+    } catch (error) {
+      if (ownedTransaction) {
+        try {
+          this.db.exec('ROLLBACK')
+        } catch {
+          /* The original audit failure is diagnostic only. */
+        }
+      }
+      this.#saveDiagnostic(null, error, 'activity')
+    } finally {
+      this.db.exec(`PRAGMA busy_timeout=${previousTimeout}`)
+    }
+  }
+
+  #optionalEvent(project, type, message) {
+    try {
+      this.#event(project, type, message)
+    } catch (error) {
+      this.#saveDiagnostic(project.id, error, 'activity')
+    }
   }
 
   #setupPhase(project, phase) {
@@ -1057,12 +1154,19 @@ export class WorkspaceStore {
   }
 
   #dependencyStatus(project) {
-    const recoveryError = this.transactions.errors.get(project.id)
+    if (this.legacyRecovery?.deferred.has(project.id))
+      project.legacyRecoveryReviewAvailable = true
+    const legacy = this.legacyRecovery?.pending.has(project.id)
+    const recoveryError =
+      this.transactions.errors.get(project.id) ||
+      (legacy ? legacyRecoveryMessage : null)
     if (recoveryError) {
       project.status = 'error'
       project.needsPreparation = false
       project.error = recoveryError
       project.fileRecoveryRequired = true
+      if (legacy && !this.transactions.errors.has(project.id))
+        project.legacyFileRecoveryRequired = true
       return project
     }
     if (project.status !== 'ready') return project
@@ -1089,7 +1193,7 @@ export class WorkspaceStore {
     const project = this.#record(id)
     if (this.memberships.role(id, owner) !== 'admin')
       fail('Project admin access is required.', 403)
-    this.transactions.assertWritable(id)
+    this.#assertWritable(id)
     return project
   }
 
@@ -1121,12 +1225,120 @@ export class WorkspaceStore {
         'This project is shared with view access. Ask a project admin for editor access.',
         403,
       )
-    this.transactions.assertWritable(id)
+    this.#assertWritable(id)
     return project
   }
 
   assertRecoveryReady(id) {
+    this.#assertWritable(id)
+  }
+
+  #assertWritable(id) {
     this.transactions.assertWritable(id)
+    this.legacyRecovery?.assertWritable(id)
+  }
+
+  async legacyFileRecovery(id, actor, options = {}) {
+    this.requireAdmin(id, actor)
+    const signal = options.signal || AbortSignal.timeout(30000)
+    const project = await this.#locked(id, async () => {
+      const project = this.requireAdmin(id, actor)
+      const wasPending = this.legacyRecovery.pending.has(id)
+      const wasDeferred = this.legacyRecovery.deferred.has(id)
+      try {
+        await this.legacyRecovery.refreshUnavailable(project, { signal })
+      } finally {
+        if (
+          wasPending !== this.legacyRecovery.pending.has(id) ||
+          wasDeferred !== this.legacyRecovery.deferred.has(id)
+        )
+          this.#changed(id, [], 'project')
+      }
+      return project
+    })
+    // Previews are read only and revision-bound. Hashing large histories must
+    // not hold the project write queue while another Admin resolves an update.
+    const page = await this.legacyRecovery.list(project, { ...options, signal })
+    this.requireAdmin(id, actor)
+    return page
+  }
+
+  async legacyRecoveryOriginal(id, actor, transactionId, filename) {
+    this.requireAdmin(id, actor)
+    return this.#locked(id, async () => {
+      const original = await this.legacyRecovery.original(
+        this.requireAdmin(id, actor),
+        transactionId,
+        relativeFile(filename, { write: true }),
+      )
+      this.requireAdmin(id, actor)
+      return original
+    })
+  }
+
+  async resolveLegacyFileRecovery(
+    id,
+    actor,
+    transactionId,
+    input,
+    { assertIdle = () => {} } = {},
+  ) {
+    this.requireAdmin(id, actor)
+    return this.#locked(id, async () => {
+      this.requireAdmin(id, actor)
+      const project = this.#record(id)
+      this.transactions.assertWritable(id)
+      assertIdle()
+      const removedPaths = []
+      const paths = await this.legacyRecovery.resolve(
+        project,
+        actor,
+        transactionId,
+        input,
+        async (prepared, review) => {
+          if (input.decision === 'keep-current') {
+            const changes = review.error
+              ? [...CONFIGURATION_FILES].map((filename) => ({
+                  path: filename,
+                  beforeHash: 'unknown',
+                  afterHash: null,
+                }))
+              : review.files.map((file) => ({
+                  path: file.path,
+                  beforeHash: file.originalHash,
+                  afterHash: file.currentHash,
+                }))
+            this.#transactionConfiguration(project, changes)
+          }
+          if (!prepared.length) return
+          removedPaths.push(
+            ...prepared
+              .filter((change) => change.after === null)
+              .map((change) => change.path),
+          )
+          await this.transactions.apply(project, prepared, {
+            authorize: () => {
+              this.requireAdmin(id, actor)
+              assertIdle()
+            },
+            onCommitted: (current, changes) =>
+              this.#transactionConfiguration(current, changes),
+          })
+        },
+        () => {
+          this.requireAdmin(id, actor)
+          assertIdle()
+        },
+      )
+      this.#optionalEvent(
+        project,
+        'file-recovery',
+        `Reviewed an older interrupted file update (${input.decision}).\n`,
+      )
+      this.#changed(id, paths, 'files', removedPaths)
+      this.#changed(id, [], 'project')
+      return this.get(id, actor)
+    })
   }
 
   async retryFileRecovery(id, actor, { assertIdle = () => {} } = {}) {
@@ -1134,6 +1346,8 @@ export class WorkspaceStore {
     return this.#locked(id, async () => {
       this.requireAdmin(id, actor)
       assertIdle()
+      if (!this.transactions.errors.has(id))
+        this.legacyRecovery?.assertWritable(id)
       await this.transactions.retry(this.#record(id), {
         onCommitted: (project, changes) =>
           this.#transactionConfiguration(project, changes),
@@ -1503,7 +1717,7 @@ export class WorkspaceStore {
         filename === undefined
           ? this.requireAdmin(id, owner)
           : this.requireEditor(id, owner)
-      this.transactions.assertWritable(id)
+      this.#assertWritable(id)
       this.#assertPlaygroundFile(project, filename)
       if (project.protected && filename === undefined)
         fail(
@@ -1917,6 +2131,11 @@ export class WorkspaceStore {
         if (entry.kind === 'project') {
           this.db.prepare('DELETE FROM events WHERE project=?').run(project.id)
           this.db
+            .prepare(
+              'DELETE FROM legacy_transaction_resolutions WHERE project=?',
+            )
+            .run(project.id)
+          this.db
             .prepare('DELETE FROM trash WHERE project=? AND owner=?')
             .run(project.id, project.owner)
           this.db
@@ -2064,55 +2283,89 @@ export class WorkspaceStore {
           )
         : undefined
     const root = path.join(this.projectsDir, id)
-    await fs.mkdir(root, { recursive: false, mode: 0o700 })
-    const project = {
-      id,
-      name: name.trim(),
-      owner,
-      status: 'preparing',
-      toolchain,
-      preset,
-      ...(singleFile ? { kind: 'single-file', presetInitialized: false } : {}),
-      ...(selection ? { libraries: selection.libraries } : {}),
-      repository,
-      revision,
-      ...(input.publishingEnabled !== undefined
-        ? { publishingEnabled: input.publishingEnabled }
-        : {}),
-      ...(workingBranch ? { workingBranch } : {}),
-      root,
-      subdirectory: location.subdirectory || '',
-      uploaded: !!files,
-      autoRepair: singleFile ? false : input.autoRepair !== false,
-      createdAt: new Date().toISOString(),
-    }
-    if (singleFile)
-      await fs.writeFile(path.join(root, 'Main.lean'), singleFile.content, {
-        mode: 0o600,
-        flag: 'wx',
-      })
-    if (files)
-      for (const file of files) {
-        const destination = await guarded(root, file.path, { write: true })
-        await fs.mkdir(path.dirname(destination), {
-          recursive: true,
-          mode: 0o700,
-        })
-        await fs.writeFile(destination, file.content, {
+    const allocation = await this.storage?.reserve()
+    let handedOff = false
+    let createdRoot
+    try {
+      await fs.mkdir(root, { recursive: false, mode: 0o700 })
+      createdRoot = await fs.lstat(root)
+      const project = {
+        id,
+        name: name.trim(),
+        owner,
+        status: 'preparing',
+        toolchain,
+        preset,
+        ...(singleFile
+          ? { kind: 'single-file', presetInitialized: false }
+          : {}),
+        ...(selection ? { libraries: selection.libraries } : {}),
+        repository,
+        revision,
+        ...(input.publishingEnabled !== undefined
+          ? { publishingEnabled: input.publishingEnabled }
+          : {}),
+        ...(workingBranch ? { workingBranch } : {}),
+        root,
+        subdirectory: location.subdirectory || '',
+        uploaded: !!files,
+        autoRepair: singleFile ? false : input.autoRepair !== false,
+        createdAt: new Date().toISOString(),
+      }
+      if (singleFile)
+        await fs.writeFile(path.join(root, 'Main.lean'), singleFile.content, {
           mode: 0o600,
           flag: 'wx',
         })
+      if (files)
+        for (const file of files) {
+          const destination = await guarded(root, file.path, { write: true })
+          await fs.mkdir(path.dirname(destination), {
+            recursive: true,
+            mode: 0o700,
+          })
+          await fs.writeFile(destination, file.content, {
+            mode: 0o600,
+            flag: 'wx',
+          })
+        }
+      if (singleFile && input.name === undefined)
+        project.name = availablePlaygroundName(
+          singleFile.path,
+          this.#namedWorkspaces(owner),
+        )
+      this.#save(project)
+      this.#event(project, 'created', `Creating ${project.name}.\n`)
+      this.#beginPrepare(project, credentials, owner, allocation)
+      handedOff = true
+      if (singleFile) await this.jobs.get(project.id)
+      return clone(this.#owned(project.id, owner))
+    } catch (error) {
+      if (
+        createdRoot &&
+        !this.db.prepare('SELECT 1 FROM projects WHERE id=?').get(id)
+      ) {
+        const current = await exists(root)
+        if (
+          current?.isDirectory() &&
+          !current.isSymbolicLink() &&
+          current.dev === createdRoot.dev &&
+          current.ino === createdRoot.ino
+        )
+          await removeDisposableTree(root).catch((cleanupError) => {
+            console.warn(
+              '[LeanFlow storage] Incomplete project cleanup needs a retry.',
+              { project: id, code: cleanupError.code || cleanupError.name },
+            )
+          })
       }
-    if (singleFile && input.name === undefined)
-      project.name = availablePlaygroundName(
-        singleFile.path,
-        this.#namedWorkspaces(owner),
-      )
-    this.#save(project)
-    this.#event(project, 'created', `Creating ${project.name}.\n`)
-    this.#beginPrepare(project, credentials)
-    if (singleFile) await this.jobs.get(project.id)
-    return clone(this.#owned(project.id, owner))
+      throw storageFailure(error)
+    } finally {
+      if (!handedOff) {
+        allocation?.release()
+        clearGitCredentials(credentials)
+      }
+    }
   }
 
   async rename(id, owner, input) {
@@ -2184,8 +2437,12 @@ export class WorkspaceStore {
     project,
     credentials = validateGitCredentials({}),
     actor = project.owner,
+    allocation,
   ) {
-    if (this.jobs.has(project.id)) return
+    if (this.jobs.has(project.id)) {
+      allocation?.release()
+      return
+    }
     if (credentials.token && !project.imported)
       project.repositoryAuthenticationRequired = true
     project.setupStartedAt = new Date().toISOString()
@@ -2253,6 +2510,7 @@ export class WorkspaceStore {
         }
       })
       .catch(async (error) => {
+        error = storageFailure(error)
         if (error.repositoryAuthenticationRequired && !project.imported)
           project.repositoryAuthenticationRequired = true
         project.status = 'error'
@@ -2283,6 +2541,9 @@ export class WorkspaceStore {
         this.#event(project, 'error', `${project.error}\n`)
       })
       .finally(() => {
+        if (allocation && project.setupCleanupFailed)
+          this.preparationAllocations.set(project.id, allocation)
+        else allocation?.release()
         clearGitCredentials(credentials)
         this.jobs.delete(project.id)
         this.preparationControllers.delete(project.id)
@@ -2307,21 +2568,33 @@ export class WorkspaceStore {
       if (project.setupCleanupFailed) await this.#cleanupSetupWorkers(project)
       assertIdle()
       if (this.jobs.has(id)) return project
-      project.status = 'preparing'
-      delete project.needsPreparation
-      delete project.error
-      delete project.dependencyWarning
-      delete project.log
-      if (project.setupRepair) {
-        project.setupRepairHistory = [
-          ...(project.setupRepairHistory || []),
-          project.setupRepair,
-        ]
-        delete project.setupRepair
+      const allocation = await this.storage?.reserve()
+      let handedOff = false
+      try {
+        this.requireEditor(id, owner)
+        assertIdle()
+        project.status = 'preparing'
+        delete project.needsPreparation
+        delete project.error
+        delete project.dependencyWarning
+        delete project.log
+        if (project.setupRepair) {
+          project.setupRepairHistory = [
+            ...(project.setupRepairHistory || []),
+            project.setupRepair,
+          ]
+          delete project.setupRepair
+        }
+        this.#save(project)
+        this.#beginPrepare(project, credentials, owner, allocation)
+        handedOff = true
+        return clone(project)
+      } finally {
+        if (!handedOff) {
+          allocation?.release()
+          clearGitCredentials(credentials)
+        }
       }
-      this.#save(project)
-      this.#beginPrepare(project, credentials, owner)
-      return clone(project)
     })
   }
 
@@ -2349,69 +2622,79 @@ export class WorkspaceStore {
       )
         fail('Choose the Lean version and libraries for this project.')
       assertIdle()
-      // Recover a save interrupted after files were added, or a setup supplied
-      // while this page was open. Normal preparation preserves its own pins.
-      if (
-        (await hasLeanConfiguration(project.root)) ||
-        (await this.#detectImportedProject(project, project.root))
-      ) {
-        project.status = 'preparing'
+      const allocation = await this.storage?.reserve()
+      let handedOff = false
+      try {
+        this.requireEditor(id, owner)
+        assertIdle()
+        // Recover a save interrupted after files were added, or a setup supplied
+        // while this page was open. Normal preparation preserves its own pins.
+        if (
+          (await hasLeanConfiguration(project.root)) ||
+          (await this.#detectImportedProject(project, project.root))
+        ) {
+          project.status = 'preparing'
+          delete project.error
+          delete project.needsPreparation
+          this.#beginPrepare(project, undefined, owner, allocation)
+          handedOff = true
+          this.#event(
+            project,
+            'output',
+            'Existing Lean configuration detected. Continuing setup with its pinned environment.\n',
+          )
+          return clone(project)
+        }
+        const definitions = await this.runtime.templates()
+        const selection = projectLibraries(input.libraries, definitions)
+        if (!selection)
+          fail('Choose the libraries for this project, or Lean basics.')
+        const definition = definitions.find(
+          (item) => item.id === selection.preset,
+        )
+        const toolchain = validateToolchain(
+          input.toolchain || definition.toolchain,
+        )
+        if (selection.preset !== 'lean' && toolchain !== definition.toolchain)
+          fail('The selected libraries require their compatible Lean version.')
+        let template = await this.runtime.templateRoot(selection.preset)
+        if (
+          template &&
+          selection.preset === 'lean' &&
+          readDependencyConfiguration(template)['lean-toolchain']?.trim() !==
+            toolchain
+        )
+          template = null
+        if (selection.preset !== 'lean' && !template)
+          fail(
+            'This library is not prepared. Choose an available library or try again later.',
+            503,
+          )
+        const changed = await initializeLeanEnvironment(project.root, {
+          template,
+          toolchain,
+          imports: selection.imports.length ? selection.imports : ['Lean'],
+        })
+        project.preset = selection.preset
+        project.libraries = selection.libraries
+        project.toolchain = toolchain
+        project.initializedEnvironment = true
+        project.environmentFiles = changed
         delete project.error
         delete project.needsPreparation
-        this.#beginPrepare(project, undefined, owner)
+        project.status = 'preparing'
+        this.#save(project)
+        this.#beginPrepare(project, undefined, owner, allocation)
+        handedOff = true
         this.#event(
           project,
           'output',
-          'Existing Lean configuration detected. Continuing setup with its pinned environment.\n',
+          `Added the selected Lean environment. Imported files were preserved.\n`,
         )
         return clone(project)
+      } finally {
+        if (!handedOff) allocation?.release()
       }
-      const definitions = await this.runtime.templates()
-      const selection = projectLibraries(input.libraries, definitions)
-      if (!selection)
-        fail('Choose the libraries for this project, or Lean basics.')
-      const definition = definitions.find(
-        (item) => item.id === selection.preset,
-      )
-      const toolchain = validateToolchain(
-        input.toolchain || definition.toolchain,
-      )
-      if (selection.preset !== 'lean' && toolchain !== definition.toolchain)
-        fail('The selected libraries require their compatible Lean version.')
-      let template = await this.runtime.templateRoot(selection.preset)
-      if (
-        template &&
-        selection.preset === 'lean' &&
-        readDependencyConfiguration(template)['lean-toolchain']?.trim() !==
-          toolchain
-      )
-        template = null
-      if (selection.preset !== 'lean' && !template)
-        fail(
-          'This library is not prepared. Choose an available library or try again later.',
-          503,
-        )
-      const changed = await initializeLeanEnvironment(project.root, {
-        template,
-        toolchain,
-        imports: selection.imports.length ? selection.imports : ['Lean'],
-      })
-      project.preset = selection.preset
-      project.libraries = selection.libraries
-      project.toolchain = toolchain
-      project.initializedEnvironment = true
-      project.environmentFiles = changed
-      delete project.error
-      delete project.needsPreparation
-      project.status = 'preparing'
-      this.#save(project)
-      this.#beginPrepare(project, undefined, owner)
-      this.#event(
-        project,
-        'output',
-        `Added the selected Lean environment. Imported files were preserved.\n`,
-      )
-      return clone(project)
     })
   }
 
@@ -2443,6 +2726,8 @@ export class WorkspaceStore {
     // their own roots and must remain available to other projects.
     const roots = new Set([this.repositoryRoot(project), project.root])
     for (const root of roots) await this.runtime.stopProject(root)
+    this.preparationAllocations.get(project.id)?.release()
+    this.preparationAllocations.delete(project.id)
     delete project.setupCleanupFailed
     this.#save(project)
   }
@@ -3910,7 +4195,7 @@ export class WorkspaceStore {
   }
 
   #ready(project, allowConfigurationChange = false) {
-    this.transactions.assertWritable(project.id)
+    this.#assertWritable(project.id)
     if (
       project.status !== 'ready' &&
       !(
@@ -4343,6 +4628,12 @@ export class WorkspaceStore {
         `File content must be UTF-8 text at most ${sourceFileByteLimit(typeof filename === 'string' ? filename : '') / (1024 * 1024)} MiB. Reduce the file or split Lean sources into smaller modules.`,
         413,
       )
+    if (
+      expectedHash !== undefined &&
+      expectedHash !== null &&
+      (typeof expectedHash !== 'string' || !/^[a-f0-9]{64}$/.test(expectedHash))
+    )
+      fail('Send the original file version before retrying this save.')
     return this.#locked(id, async () => {
       assertAuthorized?.()
       const project = this.requireEditor(id, owner)
@@ -4360,34 +4651,91 @@ export class WorkspaceStore {
         fail(
           'Shared project saves require the original file version. Reload the file and try again.',
         )
-      if (expectedHash !== undefined && expectedHash !== (before?.hash ?? null))
+      const exactRetry =
+        expectedHash !== undefined &&
+        expectedHash !== (before?.hash ?? null) &&
+        before?.content === content
+      if (
+        expectedHash !== undefined &&
+        expectedHash !== (before?.hash ?? null) &&
+        !exactRetry
+      )
         fail(
           'The file changed since it was opened. Reload it before saving.',
           409,
         )
-      if (CONFIGURATION_FILES.has(filename) && before?.content !== content)
+      const configurationChanged = before?.content !== content || exactRetry
+      if (CONFIGURATION_FILES.has(filename) && configurationChanged)
         this.assertConfigurationIdle?.(id, owner)
-      const parent = await writeParent(project.root, filename)
-      const temporary = `${parent.anchor}/.lemex-write-${randomUUID()}`
+      let parent
       try {
-        await fs.writeFile(temporary, content, {
-          mode: before?.mode ?? 0o600,
-          flag: 'wx',
-        })
-        assertAuthorized?.()
-        this.requireEditor(id, owner)
-        await fs.rename(temporary, `${parent.anchor}/${parent.name}`)
-      } finally {
-        await fs.rm(temporary, { force: true })
-        await parent.handle.close()
+        parent = await writeParent(project.root, filename, { durable: true })
+      } catch (cause) {
+        if (cause.status || cause.statusCode) throw cause
+        throw Object.assign(
+          new Error(
+            'Storage could not prepare this save. Your original file is unchanged. Keep or download your draft, then retry.',
+            { cause },
+          ),
+          { status: 503 },
+        )
       }
-      this.#event(project, 'saved', `Saved ${filename}.\n`)
-      const requiresPreparation = this.#invalidateConfiguration(
-        project,
-        filename,
-        before?.content !== content,
-      )
-      this.#changed(id, [filename])
+      let committed = false
+      let requiresPreparation = false
+      let saveError
+      try {
+        await durableSourceWrite({
+          parent,
+          destination,
+          content,
+          mode: before?.mode ?? 0o600,
+          unchanged: before?.content === content,
+          authorize: async () => {
+            assertAuthorized?.()
+            this.requireEditor(id, owner)
+            const current = await textFile(destination, true)
+            if ((current?.hash ?? null) !== (before?.hash ?? null))
+              fail(
+                'The file changed during saving. Reload it before saving.',
+                409,
+              )
+            assertAuthorized?.()
+            this.requireEditor(id, owner)
+          },
+        })
+        committed = true
+      } catch (error) {
+        committed = error.sourceCommitted === true
+        saveError = error
+      } finally {
+        await parent.handle
+          .close()
+          .catch((error) => this.#saveDiagnostic(id, error, 'close'))
+      }
+      if (committed) {
+        try {
+          requiresPreparation = this.#invalidateConfiguration(
+            project,
+            filename,
+            configurationChanged,
+          )
+        } catch (error) {
+          this.#saveDiagnostic(id, error, 'configuration')
+          saveError ||= Object.assign(
+            new Error(
+              'The updated file is visible, but its project setup status could not be recorded. Keep or download your draft, then retry saving before starting project work.',
+              { cause: error },
+            ),
+            { status: 503, sourceCommitted: true },
+          )
+        } finally {
+          this.#changed(id, [filename])
+        }
+        if (CONFIGURATION_FILES.has(filename))
+          this.#optionalEvent(project, 'saved', `Saved ${filename}.\n`)
+        else this.saveEvents.record(id, filename)
+      }
+      if (saveError) throw saveError
       return { content, hash: sha(content), requiresPreparation }
     })
   }
@@ -4523,18 +4871,25 @@ export class WorkspaceStore {
         fail('Invalid TeX candidate workspace.', 403)
       root = manifest.root
     }
-    return this.#locked(id, async () => {
-      this.get(id, owner)
-      this.assertRecoveryReady(id)
-      const captured = await captureTexInputs(
-        root,
-        destination,
-        signal,
-        rootFile,
-      )
-      this.get(id, owner)
-      return captured
-    })
+    const capture = () =>
+      this.#locked(id, async () => {
+        this.get(id, owner)
+        this.assertRecoveryReady(id)
+        const captured = await captureTexInputs(
+          root,
+          destination,
+          signal,
+          rootFile,
+        )
+        this.get(id, owner)
+        return captured
+      })
+    return this.storage
+      ? this.storage.withReservation(
+          { bytes: TEX_SOURCE_MAX_BYTES, signal },
+          capture,
+        )
+      : capture()
   }
 
   async snapshot(id, owner, runId, { signal } = {}) {
@@ -4602,6 +4957,7 @@ export class WorkspaceStore {
         snapshot.root,
         [...GIT_ARGS, 'init', '-b', 'terminal'],
         {
+          workload: 'interactive',
           network: 'none',
           signal,
           freshHome: true,
@@ -4985,7 +5341,18 @@ export class WorkspaceStore {
     }
   }
 
-  async #capture(
+  async #capture(project, runId, actor = project.owner, options = {}) {
+    const capture = () => {
+      const current = this.requireEditor(project.id, actor)
+      this.#ready(current)
+      return this.#captureAllocated(current, runId, actor, options)
+    }
+    return this.storage
+      ? this.storage.withReservation({ signal: options.signal }, capture)
+      : capture()
+  }
+
+  async #captureAllocated(
     project,
     runId,
     actor = project.owner,
@@ -5950,11 +6317,14 @@ export class WorkspaceStore {
     }
     if (!prepared.length) return { applied: 0, files: [] }
     let requiresPreparation = false
+    const committedHashes = new Map()
     let transaction
     try {
       transaction = await this.transactions.apply(project, prepared, {
         authorize,
         onCommitted: (current, committed) => {
+          for (const change of committed)
+            committedHashes.set(change.path, change.afterHash)
           requiresPreparation = this.#transactionConfiguration(
             current,
             committed,
@@ -5973,7 +6343,7 @@ export class WorkspaceStore {
           : reason === 'undo'
             ? `Undid ${prepared.length} live assistant edits`
             : `Applied ${prepared.length} reviewed changes`
-    this.#event(
+    this.#optionalEvent(
       project,
       reason,
       `${action}. Backup: ${path.relative(this.dataDir, transaction)}\n`,
@@ -5991,7 +6361,7 @@ export class WorkspaceStore {
       requiresPreparation,
       files: prepared.map((change) => ({
         path: change.path,
-        hash: change.after === null ? null : sha(change.after),
+        hash: committedHashes.get(change.path),
       })),
     }
   }

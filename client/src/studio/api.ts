@@ -70,9 +70,12 @@ export interface Session {
   savedModels?: string[]
   modelsUpdatedAt?: string | null
   runtime?: Record<string, unknown>
+  storage?: StorageStatusSnapshot
   capacity?: {
     workers: number
     workerQueue: number
+    interactiveWorkers: number
+    batchWorkers: number
     editors: number
     editorsPerProject: number
     terminals: number
@@ -96,6 +99,16 @@ export interface Session {
     modelError?: string | null
     [key: string]: unknown
   }
+}
+
+export interface StorageStatusSnapshot {
+  state: 'ready' | 'warning' | 'blocked' | 'unavailable'
+  freeBytes: number | null
+  reservedBytes: number
+  availableBytes: number | null
+  minimumFreeBytes: number
+  warningFreeBytes: number
+  message: string | null
 }
 
 export interface ModelAccess {
@@ -124,6 +137,8 @@ export interface Project {
   status: 'preparing' | 'needs-setup' | 'ready' | 'error'
   needsPreparation?: boolean
   fileRecoveryRequired?: boolean
+  legacyFileRecoveryRequired?: boolean
+  legacyRecoveryReviewAvailable?: boolean
   toolchain?: string
   preset?: string
   libraries?: string[]
@@ -213,6 +228,7 @@ export type GitProvider = 'github' | 'gitlab' | 'other'
 
 export interface GitConnection {
   host: string
+  repository?: string
   provider: GitProvider
   username: string
   updatedAt: string
@@ -533,9 +549,10 @@ export async function apiPdf(path: string, signal: AbortSignal): Promise<Blob> {
 
 export async function apiDownload(
   path: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<{ blob: Blob; filename: string | null }> {
   const requestUserId = sessionUserId
-  const response = await request(path)
+  const response = await request(path, options)
   if (!response.ok) await responseData(response)
   const disposition = response.headers.get('content-disposition') || ''
   const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1]

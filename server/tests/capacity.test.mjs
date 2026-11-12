@@ -2,6 +2,8 @@ import { fixtureModelDiscovery } from './fixtures/model-discovery.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import promiseFs from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
@@ -48,7 +50,7 @@ test('invalid capacity settings fail before startup rather than disabling admiss
   )
 })
 
-async function fixture(t, extraCapacity = {}) {
+async function fixture(t, extraCapacity = {}, runtimeInfo = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-capacity-'))
   const children = new Set()
   const capacity = loadCapacity({
@@ -61,7 +63,7 @@ async function fixture(t, extraCapacity = {}) {
   })
   const runtime = {
     async init() {},
-    info: () => ({ ready: true }),
+    info: () => ({ ready: true, ...runtimeInfo }),
     templates: () => [],
     spawn(_root, args) {
       assert.deepEqual(
@@ -561,5 +563,123 @@ test('one account cannot occupy all source lanes and block another account saves
   assert.deepEqual(
     (await Promise.all(saves)).map((response) => response.status),
     [200, 200],
+  )
+})
+
+test('startup explains when effective interactive capacity is smaller than the configured editor maximum', async (t) => {
+  const warnings = []
+  t.mock.method(console, 'warn', (...parts) => warnings.push(parts.join(' ')))
+  await fixture(
+    t,
+    {},
+    { workloads: { interactiveLimit: 2, active: { interactive: 0 } } },
+  )
+  assert(
+    warnings.some(
+      (message) =>
+        /Interactive workers allow 2 concurrent editors and terminals/.test(
+          message,
+        ) && /STUDIO_MAX_EDITORS is 6/.test(message),
+    ),
+  )
+})
+
+for (const phase of ['directory-sync', 'configuration-metadata'])
+  test(`committed ${phase} save uncertainty closes only the changed project's real HTTP/WebSocket editor sessions`, async (t) => {
+    const f = await fixture(t)
+    const project = f.projects[0],
+      other = f.projects[1]
+    const editor = await f.connect(project),
+      untouched = await f.connect(other)
+    assert(editor instanceof WebSocket)
+    assert(untouched instanceof WebSocket)
+    const closed = new Promise((resolve) =>
+      editor.once('close', (code) => resolve(code)),
+    )
+    let restore
+    if (phase === 'directory-sync') {
+      const open = promiseFs.open
+      const mocked = t.mock.method(promiseFs, 'open', async (...args) => {
+        const handle = await open(...args)
+        if (args[0] === project.root)
+          handle.sync = async () => {
+            throw Object.assign(new Error('Private filesystem marker'), {
+              code: 'ENOSPC',
+            })
+          }
+        return handle
+      })
+      syncBuiltinESMExports()
+      restore = () => {
+        mocked.mock.restore()
+        syncBuiltinESMExports()
+      }
+    } else {
+      const prepare = f.studio.workspaces.db.prepare.bind(
+        f.studio.workspaces.db,
+      )
+      const mocked = t.mock.method(f.studio.workspaces.db, 'prepare', (sql) => {
+        if (sql.startsWith('INSERT INTO projects(id,owner,data)'))
+          throw Object.assign(new Error('Private database marker'), {
+            code: 'SQLITE_FULL',
+          })
+        return prepare(sql)
+      })
+      restore = () => mocked.mock.restore()
+    }
+    try {
+      const response = await fetch(
+        f.base + `/api/projects/${project.id}/file?path=lakefile.toml`,
+        {
+          method: 'PUT',
+          headers: { ...f.headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: 'name = "ChangedConfiguration"\n',
+            expectedHash: null,
+          }),
+        },
+      )
+      assert.equal(response.status, 503)
+      const error = await response.json()
+      assert.match(error.error, /updated file is visible/)
+      assert.doesNotMatch(error.error, /Private filesystem|Private database/)
+      assert.equal(await closed, 1012)
+      assert.equal(untouched.readyState, WebSocket.OPEN)
+      assert.equal(
+        await fs.readFile(path.join(project.root, 'lakefile.toml'), 'utf8'),
+        'name = "ChangedConfiguration"\n',
+      )
+      if (phase === 'configuration-metadata')
+        assert.notEqual(
+          f.studio.workspaces.get(project.id, 'owner').needsPreparation,
+          true,
+          'The route must close the old editor even when the metadata write did not commit',
+        )
+    } finally {
+      restore()
+    }
+  })
+
+test('a precommit configuration version conflict preserves both project editor connections', async (t) => {
+  const f = await fixture(t)
+  const first = await f.connect(f.projects[0]),
+    second = await f.connect(f.projects[1])
+  const response = await fetch(
+    f.base + `/api/projects/${f.projects[0].id}/file?path=lakefile.toml`,
+    {
+      method: 'PUT',
+      headers: { ...f.headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content: 'name = "RejectedConfiguration"\n',
+        expectedHash: 'a'.repeat(64),
+      }),
+    },
+  )
+  assert.equal(response.status, 409)
+  assert.equal(first.readyState, WebSocket.OPEN)
+  assert.equal(second.readyState, WebSocket.OPEN)
+  await assert.rejects(
+    fs.stat(path.join(f.projects[0].root, 'lakefile.toml')),
+    { code: 'ENOENT' },
   )
 })

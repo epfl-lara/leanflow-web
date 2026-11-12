@@ -124,6 +124,168 @@ test('origin groups local hunks for selective undo without removing remote edits
   remote.destroy()
 })
 
+function assertPrivateUndoAfterExternal({
+  base,
+  local,
+  external,
+  undone,
+  options,
+}) {
+  const alice = new Y.Doc(),
+    peer = new Y.Doc()
+  const source = alice.getText('source')
+  source.insert(0, base)
+  const origin = Symbol('Alice local edit')
+  const undo = new Y.UndoManager(source, {
+    trackedOrigins: new Set([origin]),
+  })
+  try {
+    alice.transact(() => local(source), origin)
+    undo.stopCapturing()
+    Y.applyUpdate(peer, Y.encodeStateAsUpdate(alice))
+    const replacement = external(source.toString())
+    replaceDocumentText(
+      peer.getText('source'),
+      replacement,
+      'external',
+      options,
+    )
+    Y.applyUpdate(alice, Y.encodeStateAsUpdate(peer), 'external')
+    assert.equal(source.toString(), replacement)
+    assert(undo.undo())
+    const afterUndo = source.toString()
+    if (typeof undone === 'function') undone(afterUndo)
+    else assert.equal(afterUndo, undone)
+    Y.applyUpdate(peer, Y.encodeStateAsUpdate(alice))
+    assert.equal(peer.getText('source').toString(), afterUndo)
+    assert(undo.redo())
+    assert.equal(source.toString(), replacement)
+    Y.applyUpdate(peer, Y.encodeStateAsUpdate(alice))
+    assert.equal(peer.getText('source').toString(), replacement)
+  } finally {
+    undo.destroy()
+    alice.destroy()
+    peer.destroy()
+  }
+}
+
+test('private Undo preserves an external prepended comment sharing the local comment prefix', () => {
+  const base = '-- original source\nbody\n'
+  assertPrivateUndoAfterExternal({
+    base,
+    local: (text) => text.insert(0, '-- ALICE_LOCAL\n'),
+    external: (value) => '-- EXTERNAL_PREFIX\n' + value,
+    undone: '-- EXTERNAL_PREFIX\n' + base,
+  })
+})
+
+test('private Undo preserves simultaneous external prefix and suffix insertions', () => {
+  const base = '-- original source\nbody\n'
+  assertPrivateUndoAfterExternal({
+    base,
+    local: (text) => text.insert(0, '-- ALICE_LOCAL\n'),
+    external: (value) =>
+      '-- EXTERNAL_PREFIX\n' + value + '-- EXTERNAL_SUFFIX\n',
+    undone: '-- EXTERNAL_PREFIX\n' + base + '-- EXTERNAL_SUFFIX\n',
+  })
+})
+
+test('private Undo preserves an external prefix on the same line as a local comment', () => {
+  const base = 'body\n'
+  assertPrivateUndoAfterExternal({
+    base,
+    local: (text) => text.insert(0, '-- ALICE_LOCAL\n'),
+    external: (value) => '-- EXTERNAL: ' + value,
+    undone: '-- EXTERNAL: ' + base,
+  })
+})
+
+test('private Undo preserves external boundaries around a line too long for character allocation', () => {
+  assertPrivateUndoAfterExternal({
+    base: 'body',
+    local: (text) => text.insert(0, '-- ALICE_LOCAL ' + 'x'.repeat(64)),
+    external: (value) => '-- EXTERNAL: ' + value + ' :EXTERNAL_END',
+    undone: '-- EXTERNAL: body :EXTERNAL_END',
+    options: { maxTokens: 32 },
+  })
+})
+
+test('private Undo preserves an external prefix and a distant changed line when the complete old source is not retained', () => {
+  const base = '-- original source\nunchanged middle\nlast old\n'
+  assertPrivateUndoAfterExternal({
+    base,
+    local: (text) => text.insert(0, '-- ALICE_LOCAL\n'),
+    external: (value) =>
+      '-- EXTERNAL_PREFIX\n' + value.replace('last old', 'last NEW'),
+    undone: '-- EXTERNAL_PREFIX\n' + base.replace('last old', 'last NEW'),
+  })
+})
+
+test('private Undo preserves an external prefix when the external edit also changes locally inserted text', () => {
+  const prefix = '-- EXTERNAL_PREFIX\n',
+    base = 'body\n'
+  assertPrivateUndoAfterExternal({
+    base,
+    local: (text) => text.insert(0, '-- ALICE_LOCAL\n'),
+    external: (value) => prefix + value.replace('ALICE_LOCAL', 'ALICE_CHANGED'),
+    undone(value) {
+      assert(
+        value.startsWith(prefix),
+        'Undo must preserve the entire external comment.',
+      )
+      assert(
+        value.includes('CHANGED'),
+        'Undo must preserve remotely inserted replacement text.',
+      )
+      assert(value.endsWith(base), 'Undo must preserve the original source.')
+    },
+  })
+})
+
+test('private Undo preserves an external appended comment sharing the local comment suffix', () => {
+  const base = 'body\n-- original ending\n'
+  assertPrivateUndoAfterExternal({
+    base,
+    local: (text) => text.insert(text.length, '-- ALICE_LOCAL\n'),
+    external: (value) => value + '-- EXTERNAL_SUFFIX\n',
+    undone: base + '-- EXTERNAL_SUFFIX\n',
+  })
+})
+
+test('private Undo does not restore an externally deleted prefix before a retained local comment', () => {
+  const prefix = '-- EXTERNAL_PREFIX\n',
+    base = prefix + 'body\n'
+  assertPrivateUndoAfterExternal({
+    base,
+    local: (text) => text.insert(prefix.length, '-- ALICE_LOCAL\n'),
+    external: (value) => value.slice(prefix.length),
+    undone: 'body\n',
+  })
+})
+
+test('private Undo does not restore an externally deleted suffix after a retained local comment', () => {
+  const suffix = '-- EXTERNAL_SUFFIX\n',
+    base = 'body\n' + suffix
+  assertPrivateUndoAfterExternal({
+    base,
+    local: (text) =>
+      text.insert(base.length - suffix.length, '-- ALICE_LOCAL\n'),
+    external: (value) => value.slice(0, -suffix.length),
+    undone: 'body\n',
+  })
+})
+
+test('private Undo preserves external CRLF comments and supplementary Unicode through a distant replacement', () => {
+  const base = '-- original 🦉\r\nunchanged 𝒜\r\nlast old\r\n'
+  assertPrivateUndoAfterExternal({
+    base,
+    local: (text) => text.insert(0, '-- ALICE_🙂\r\n'),
+    external: (value) =>
+      '-- EXTERNAL_🌍\r\n' + value.replace('last old', 'last NEW 🧑‍💻'),
+    undone: '-- EXTERNAL_🌍\r\n' + base.replace('last old', 'last NEW 🧑‍💻'),
+  })
+})
+
 test('complexity limits reject the entire operation before any Yjs mutation or update', () => {
   const doc = new Y.Doc(),
     source = doc.getText('source')
@@ -146,6 +308,83 @@ test('complexity limits reject the entire operation before any Yjs mutation or u
   }
   assert.equal(updates, 0)
   doc.destroy()
+})
+
+test('Monaco refinement preserves surrogate pairs in changed lines', () => {
+  const before = 'a🙂\nunchanged\nlast old\n'
+  const after = '-- external\nb🦉\nunchanged\nlast NEW\n'
+  const edits = documentTextEdits(before, after)
+  let applied = before
+  for (const edit of edits.toReversed()) {
+    assert.equal(edit.insert.toWellFormed(), edit.insert)
+    assert.equal(
+      before.slice(edit.start, edit.start + edit.deleteCount).toWellFormed(),
+      before.slice(edit.start, edit.start + edit.deleteCount),
+    )
+    applied =
+      applied.slice(0, edit.start) +
+      edit.insert +
+      applied.slice(edit.start + edit.deleteCount)
+  }
+  assert.equal(applied, after)
+  // These emoji share a high surrogate; a UTF-16 diff can otherwise retain
+  // half of the old character and transmit an unpaired replacement half.
+  for (const edit of documentTextEdits('🙂\na\n', '🙃\nb\n'))
+    assert.equal(edit.insert.toWellFormed(), edit.insert)
+  assert.equal(
+    concurrent('🙂\na\n', '🙃\nb\n', () => {}),
+    '🙃\nb\n',
+  )
+})
+
+test('Monaco refinement refuses token and operation limits before changing a shared document', () => {
+  for (const options of [{ maxTokens: 8 }, { maxOperations: 1000 }]) {
+    const doc = new Y.Doc(),
+      source = doc.getText('source')
+    const before = '-- ALICE_LOCAL ' + 'word '.repeat(20) + '\nbody\n'
+    source.insert(0, before)
+    const state = Y.encodeStateAsUpdate(doc)
+    try {
+      assert.throws(
+        () =>
+          replaceDocumentText(
+            source,
+            '-- EXTERNAL_PREFIX\n' + before.replace('LOCAL', 'CHANGED'),
+            'external',
+            options,
+          ),
+        { code: 'DOCUMENT_DIFF_LIMIT' },
+      )
+      assert.equal(source.toString(), before)
+      assert.deepEqual(Y.encodeStateAsUpdate(doc), state)
+    } finally {
+      doc.destroy()
+    }
+  }
+})
+
+test('an oversized line refuses an ambiguous external prefix and replacement before changing shared identities', () => {
+  const doc = new Y.Doc(),
+    source = doc.getText('source')
+  const before = '-- ALICE_LOCAL ' + 'x'.repeat(64) + ' body'
+  source.insert(0, before)
+  const state = Y.encodeStateAsUpdate(doc)
+  try {
+    assert.throws(
+      () =>
+        replaceDocumentText(
+          source,
+          '-- EXTERNAL: ' + before.replace('LOCAL', 'CHANGED'),
+          'external',
+          { maxTokens: 32 },
+        ),
+      { code: 'DOCUMENT_DIFF_LIMIT' },
+    )
+    assert.equal(source.toString(), before)
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), state)
+  } finally {
+    doc.destroy()
+  }
 })
 
 test('a very long changed line fails safely instead of replacing an unchanged middle', () => {

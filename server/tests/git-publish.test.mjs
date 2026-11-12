@@ -1271,6 +1271,45 @@ test('truncated rejected pushes cannot expose a saved token prefix', async (t) =
   )
 })
 
+test('a token saved for a repository is reused for repeated reviewed pushes without entering it again', async (t) => {
+  const f = await fixture(t)
+  const token = 'fixture-remembered-project-token'
+  await f.gitConnections.connect('owner', {
+    repository: DEST,
+    username: 'repository-user',
+    token,
+  })
+  for (const branch of ['proof/first-push', 'proof/next-push']) {
+    const preview = await f.publisher.preview('owner', f.project.id, {
+      remoteUrl: DEST,
+      branch,
+    })
+    const response = await f.request({
+      action: 'push',
+      previewId: preview.previewId,
+    })
+    assert.equal(response.status, 200, await response.clone().text())
+    assert.equal((await response.json()).pushed, true)
+    assert.deepEqual(f.sent.at(-1).credentials, {
+      token,
+      username: 'repository-user',
+    })
+  }
+  assert.equal(
+    await f.gitConnections.credentials(
+      'owner',
+      'https://git.example.invalid/alice/other.git',
+    ),
+    null,
+  )
+  assert.equal(await f.gitConnections.credentials('bob', DEST), null)
+  assert(
+    !JSON.stringify(await f.publisher.metadata('owner', f.project.id)).includes(
+      token,
+    ),
+  )
+})
+
 async function holdWorker(runtime, root, run = runtime.run.bind(runtime)) {
   let started
   const ready = new Promise((resolve) => {

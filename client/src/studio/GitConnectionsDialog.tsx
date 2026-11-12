@@ -57,7 +57,12 @@ export function GitConnectionsDialog({
     }
   }, [data])
 
-  async function change(action: string, body?: object, removeHost?: string) {
+  async function change(
+    action: string,
+    body?: object,
+    removeHost?: string,
+    removeRepository?: string,
+  ) {
     if (pending.current) return
     pending.current = true
     setBusy(action)
@@ -67,7 +72,7 @@ export function GitConnectionsDialog({
     setToken('')
     try {
       await api<GitConnections>(
-        `/api/git-connections${removeHost ? `?host=${encodeURIComponent(removeHost)}` : ''}`,
+        `/api/git-connections${removeHost ? `?host=${encodeURIComponent(removeHost)}${removeRepository ? `&repository=${encodeURIComponent(removeRepository)}` : ''}` : ''}`,
         {
           method: removeHost ? 'DELETE' : 'PUT',
           body: JSON.stringify(body || {}),
@@ -115,7 +120,8 @@ export function GitConnectionsDialog({
           Connect the Git host you use, then clone, commit and publish from
           LeanFlow. The terminal uses the same saved connections for standard
           HTTPS Git commands. Run terminal commands only when you trust them to
-          use that access.
+          use that access. Tokens saved during import or publishing apply only
+          to that repository and take priority over a host connection.
         </p>
         {!loaded && <p className="field-help">Loading connections…</p>}
         {loaded && !data && !loadError && (
@@ -131,23 +137,32 @@ export function GitConnectionsDialog({
         )}
         {notice && <output className="git-notice">{notice}</output>}
         {!!data?.connections.length && (
-          <ul className="git-connection-list" aria-label="Connected Git hosts">
+          <ul
+            className="git-connection-list"
+            aria-label="Saved Git connections"
+          >
             {data.connections.map((connection) => (
-              <li key={connection.host}>
+              <li key={connection.repository || connection.host}>
                 <span>
-                  <strong>{connection.host}</strong>
-                  <small>{connection.username}</small>
+                  <strong>{connection.repository || connection.host}</strong>
+                  <small>
+                    {connection.username} ·{' '}
+                    {connection.repository
+                      ? 'This repository only'
+                      : 'All repositories on this host'}
+                  </small>
                 </span>
                 <button
                   type="button"
                   className="button secondary small"
-                  aria-label={`Disconnect ${connection.host}`}
+                  aria-label={`Disconnect ${connection.repository || connection.host}`}
                   disabled={!!busy}
                   onClick={() =>
                     void change(
                       'Removing connection',
                       undefined,
                       connection.host,
+                      connection.repository,
                     )
                   }
                 >

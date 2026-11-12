@@ -71,6 +71,7 @@ function argumentsObject(value, keys) {
 // receives a host token, compiler socket, or writable build-artifact mount.
 export function createTexAgentTools({
   manager,
+  parentWorker,
   job,
   snapshot,
   active,
@@ -131,7 +132,13 @@ export function createTexAgentTools({
         job.owner,
         job.projectId,
         { rootFile, engine: input.engine ?? 'pdflatex' },
-        { sourceRoot: snapshot.root, runId: job.id, signal, origin: 'agent' },
+        {
+          sourceRoot: snapshot.root,
+          runId: job.id,
+          signal,
+          origin: 'agent',
+          ...(parentWorker === undefined ? {} : { parentWorker }),
+        },
       )
       builds.add(build.id)
       onBuild(build)

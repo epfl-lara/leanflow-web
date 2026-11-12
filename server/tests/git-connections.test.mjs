@@ -144,6 +144,129 @@ test('connection restart, token replacement and revocation preserve identity wit
   assert.equal((await restarted.get('alice')).identity.name, 'Alice Example')
 })
 
+test('repository tokens survive restart and stay scoped to the account and repository with a separate host fallback', async (t) => {
+  const { store, settings } = await fixture(t)
+  const repository = 'https://github.com/example/private'
+  const metadata = await store.connect('alice', {
+    repository: repository + '/tree/main/Proofs',
+    token: fixtureToken,
+    username: 'repository-user',
+  })
+  assert.equal(metadata.connections[0].repository, repository)
+  assert(!JSON.stringify(metadata).includes(fixtureToken))
+  assert(
+    !(await fs.readFile(ownerFile(store))).includes(Buffer.from(fixtureToken)),
+  )
+  const restarted = await new GitConnections(settings).init()
+  for (const url of [repository, repository + '.git', repository + '.git/'])
+    assert.deepEqual(await restarted.credentials('alice', url), {
+      token: fixtureToken,
+      username: 'repository-user',
+    })
+  for (const url of [
+    'https://github.com/example/another.git',
+    'https://github.com/another/private.git',
+    repository + '-fork.git',
+    repository + '/other.git',
+    'https://gitlab.com/example/private.git',
+  ])
+    assert.equal(await restarted.credentials('alice', url), null)
+  assert.equal(await restarted.credentials('bob', repository), null)
+  await connect(store, 'alice', { token: 'fixture-host-fallback' })
+  assert.equal(
+    (await restarted.credentials('alice', repository)).token,
+    fixtureToken,
+  )
+  assert.equal(
+    (
+      await restarted.credentials(
+        'alice',
+        'https://github.com/example/another.git',
+      )
+    ).token,
+    'fixture-host-fallback',
+  )
+  await store.disconnect('alice', 'github.com')
+  assert.equal(
+    (await restarted.credentials('alice', repository)).token,
+    fixtureToken,
+  )
+  await store.connect('alice', {
+    repository: repository + '.git',
+    token: 'fixture-replaced-repository',
+  })
+  assert.equal((await store.get('alice')).connections.length, 1)
+  await connect(store, 'alice', { token: 'fixture-host-fallback' })
+  await store.disconnect('alice', 'github.com', repository)
+  assert.equal(
+    (await restarted.credentials('alice', repository)).token,
+    'fixture-host-fallback',
+  )
+  assert.equal((await store.get('alice')).connections.length, 1)
+})
+
+test('repository connections reject unsafe destinations and mismatched hosts before saving', async (t) => {
+  const { store } = await fixture(t)
+  for (const repository of [
+    null,
+    [],
+    '',
+    'file:///etc/passwd',
+    'http://github.com/example/repo',
+    'https://user:secret@github.com/example/repo',
+    'https://github.com:8443/example/repo',
+    'https://github.com/',
+    'https://127.0.0.1/example/repo',
+    'https://github.com/example/repo/pull/1',
+  ])
+    await assert.rejects(
+      store.connect('alice', { repository, token: fixtureToken }),
+      { status: 400 },
+    )
+  await assert.rejects(
+    store.connect('alice', {
+      host: 'gitlab.com',
+      repository: 'https://github.com/example/repo',
+      token: fixtureToken,
+    }),
+    { status: 400 },
+  )
+  await assert.rejects(
+    store.connect('alice', {
+      repository: 'https://github.com/example/repo',
+      token: 'has whitespace',
+    }),
+    { status: 400 },
+  )
+  assert.deepEqual((await store.get('alice')).connections, [])
+})
+
+test('nested GitLab repository tokens keep path boundaries and require public DNS on every use', async (t) => {
+  let address = '140.82.112.3'
+  const { store } = await fixture(t, { resolveHost: async () => [{ address }] })
+  const repository = 'https://gitlab.com/group/nested/Private'
+  await store.connect('alice', {
+    repository: repository + '/-/tree/main/Proofs',
+    token: fixtureToken,
+  })
+  assert.deepEqual(await store.credentials('alice', repository + '.git'), {
+    token: fixtureToken,
+    username: 'oauth2',
+  })
+  for (const url of [
+    repository.toLowerCase(),
+    repository + '/another.git',
+    'https://gitlab.com/group/Private.git',
+  ])
+    assert.equal(await store.credentials('alice', url), null)
+  address = '127.0.0.1'
+  await assert.rejects(store.credentials('alice', repository + '.git'), {
+    status: 400,
+  })
+  await store.disconnect('alice', 'gitlab.com', repository)
+  assert.equal(await store.credentials('alice', repository + '.git'), null)
+})
+
 test('GitLab and self-managed host connections use exact validated hosts and deployment usernames', async (t) => {
   const lookedUp = []
   const { store } = await fixture(t, {

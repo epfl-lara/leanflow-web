@@ -14,7 +14,12 @@ import { Icon } from './Icons'
 import { GitDiff } from './GitDiff'
 import { HelpTip } from './HelpTip'
 import { GitConnectionStatus } from './GitConnectionStatus'
-import { repositoryHost, useGitConnections } from './gitConnections'
+import {
+  findGitConnection,
+  saveRepositoryConnection,
+  useGitConnections,
+} from './gitConnections'
+import { RepositoryTokenSaveChoice } from './RepositoryCredentialsFields'
 import './git.css'
 
 const headOf = (info: GitInfo | null) => info?.revision || info?.head || null
@@ -88,9 +93,11 @@ export function GitModal({
   const previewSourceBranch = useRef<string | null>(null)
   const [token, setToken] = useState('')
   const [username, setUsername] = useState('')
-  const { data: gitConnections } = useGitConnections()
-  const connection = gitConnections?.connections.find(
-    (entry) => entry.host === repositoryHost(preview?.remoteUrl || remoteUrl),
+  const [rememberToken, setRememberToken] = useState(true)
+  const { data: gitConnections, canSave } = useGitConnections()
+  const connection = findGitConnection(
+    gitConnections,
+    preview?.remoteUrl || remoteUrl,
   )
   const mounted = useRef(true)
   const busyRef = useRef(busy)
@@ -335,15 +342,19 @@ export function GitModal({
     setBusy('Publishing reviewed commit')
     setError('')
     setNotice('')
-    // Remove the token from the controlled input as soon as the one-use request begins.
-    setToken('')
-    setUsername('')
+    let submitted = false
     try {
+      const saved = !!credential && rememberToken && canSave
+      if (saved)
+        await saveRepositoryConnection(reviewed.remoteUrl, credential, login)
+      setToken('')
+      setUsername('')
+      submitted = true
       const value = await post<GitPushResult>(endpoint, {
         action: 'push',
         previewId: reviewed.previewId,
-        ...(credential ? { token: credential } : {}),
-        ...(login ? { username: login } : {}),
+        ...(credential && !saved ? { token: credential } : {}),
+        ...(login && !saved ? { username: login } : {}),
       })
       if (!mounted.current) return
       if (!value.pushed)
@@ -362,9 +373,11 @@ export function GitModal({
       if (mounted.current) setError(errorText(error))
     } finally {
       if (mounted.current) {
-        setPreview(null)
-        setToken('')
-        setUsername('')
+        if (submitted) {
+          setPreview(null)
+          setToken('')
+          setUsername('')
+        }
         setBusy('')
       }
     }
@@ -909,7 +922,7 @@ export function GitModal({
                   >
                     <summary>
                       {connection
-                        ? 'Use a different token once'
+                        ? 'Use a different token'
                         : 'Repository access'}
                     </summary>
                     <label
@@ -943,10 +956,20 @@ export function GitModal({
                       placeholder="Repository account username"
                     />
                     <p className="field-help">
-                      The token is used once for this push, then cleared. It is
-                      not saved as a connection. The server checks the reviewed
-                      commit again before publishing.
+                      Use a token with write access to this repository. The
+                      server checks the reviewed commit again before publishing.
                     </p>
+                    {canSave ? (
+                      <RepositoryTokenSaveChoice
+                        remember={rememberToken}
+                        onChange={setRememberToken}
+                        disabled={locked}
+                      />
+                    ) : (
+                      <p className="field-help">
+                        Used once for this push, then cleared.
+                      </p>
+                    )}
                   </details>
                   <button
                     className="button primary"

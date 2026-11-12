@@ -112,7 +112,7 @@ export function validateGitCredentials(input = {}) {
       input.token.length > 16_000 ||
       /[^\x21-\x7e]/.test(input.token))
   )
-    throw Object.assign(new Error('Enter a valid one-use repository token.'), {
+    throw Object.assign(new Error('Enter a valid repository token.'), {
       status: 400,
     })
   if (

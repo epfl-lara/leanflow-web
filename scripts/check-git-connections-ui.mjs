@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import express from 'express'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
+import { repositoryConnectionKey } from '../shared/git-connections.mjs'
 
 const output = path.resolve('.runtime/git-connections-ui')
 await fs.mkdir(output, { recursive: true })
@@ -17,6 +18,7 @@ const server = await new Promise((resolve) => {
 const base = `http://127.0.0.1:${server.address().port}`
 const fakeToken = `fixture-common-git-${randomUUID()}`
 const oneUse = `fixture-one-use-${randomUUID()}`
+const repositoryToken = `fixture-repository-${randomUUID()}`
 let fixture
 try {
   fixture = await chatBrowserFixture({
@@ -60,6 +62,8 @@ try {
     external = []
   let releaseConnection = null,
     holdConnection = false,
+    failRepositorySave = false,
+    failMetadata = false,
     legacy = false
   const git = {
     repository: true,
@@ -91,10 +95,22 @@ try {
         status: 404,
         json: { error: 'API endpoint not found.' },
       })
+    if (request.method() === 'GET' && failMetadata)
+      return route.fulfill({
+        status: 503,
+        json: { error: 'Saved connections are temporarily unavailable.' },
+      })
     if (request.method() === 'PUT') {
       const body = request.postDataJSON()
       if (body.action === 'connect') {
-        assert.equal(body.token, fakeToken)
+        assert.equal(body.token, body.repository ? repositoryToken : fakeToken)
+        if (body.repository && failRepositorySave) {
+          failRepositorySave = false
+          return route.fulfill({
+            status: 503,
+            json: { error: 'The token could not be saved. Please retry.' },
+          })
+        }
         if (holdConnection) {
           holdConnection = false
           await new Promise((resolve) => {
@@ -102,14 +118,23 @@ try {
           })
           releaseConnection = null
         }
+        const repository =
+          body.repository && repositoryConnectionKey(body.repository)
+        const host = repository ? new URL(repository).hostname : body.host
         const entry = {
-          host: body.host,
-          provider: body.provider,
+          host,
+          provider:
+            body.provider || (host === 'github.com' ? 'github' : 'gitlab'),
+          ...(repository ? { repository } : {}),
           username: body.username || 'fixture-user',
           updatedAt: new Date().toISOString(),
         }
         metadata.connections = metadata.connections
-          .filter((value) => value.host !== entry.host)
+          .filter((value) =>
+            repository
+              ? value.repository !== repository
+              : value.repository || value.host !== entry.host,
+          )
           .concat(entry)
       } else {
         assert.equal(body.action, 'identity')
@@ -121,12 +146,17 @@ try {
         {},
         'disconnect must satisfy the server JSON request contract',
       )
-      const host = new URL(request.url()).searchParams.get('host')
-      metadata.connections = metadata.connections.filter(
-        (value) => value.host !== host,
+      const params = new URL(request.url()).searchParams
+      const host = params.get('host')
+      const repository = params.get('repository')
+      metadata.connections = metadata.connections.filter((value) =>
+        repository
+          ? value.repository !== repository
+          : value.repository || value.host !== host,
       )
     } else assert.equal(request.method(), 'GET')
     assert(!JSON.stringify(metadata).includes(fakeToken))
+    assert(!JSON.stringify(metadata).includes(repositoryToken))
     return route.fulfill({ json: metadata })
   })
   await page.route('**/api/projects', async (route) => {
@@ -365,6 +395,9 @@ try {
     .waitFor()
   assert.equal(await publish().isDisabled(), true)
   await source().getByLabel('Repository token', { exact: true }).fill(oneUse)
+  await source()
+    .getByLabel('Save for this repository', { exact: true })
+    .uncheck()
   await publish().click()
   const mr = source().getByRole('link', {
     name: 'Open merge request on GitLab',
@@ -444,6 +477,161 @@ try {
     'Retrying an authenticated import can use the same saved connection without resending a token from the browser.',
   )
 
+  // Save a repository token during import, then reuse it across visits and
+  // publishing without giving another repository on GitHub that access.
+  const repository = 'https://github.com/fixture/common'
+  failMetadata = true
+  await page
+    .getByRole('button', { name: 'Import or create project', exact: true })
+    .first()
+    .click()
+  await importDialog()
+    .getByLabel('Repository or GitHub / GitLab folder link')
+    .fill(repository + '.git')
+  await importDialog()
+    .getByText('Private repository access', { exact: true })
+    .click()
+  const tokenField = importDialog().getByLabel('Repository token', {
+    exact: false,
+  })
+  await tokenField.fill(repositoryToken)
+  assert.equal(
+    await importDialog()
+      .getByLabel('Save for this repository', { exact: true })
+      .isChecked(),
+    true,
+  )
+  const importedBefore = imports.length
+  failRepositorySave = true
+  await importDialog()
+    .getByRole('button', { name: 'Import project', exact: true })
+    .click()
+  await importDialog().getByRole('alert').waitFor()
+  assert.equal(
+    await tokenField.inputValue(),
+    repositoryToken,
+    'a failed save must retain the masked token for retry',
+  )
+  assert.equal(imports.length, importedBefore)
+  failMetadata = false
+  await importDialog()
+    .getByRole('button', { name: 'Import project', exact: true })
+    .click()
+  await importDialog().waitFor({ state: 'hidden' })
+  assert.equal(imports.at(-1).repositoryToken, undefined)
+  assert(metadata.connections.some((entry) => entry.repository === repository))
+  for (let visit = 0; visit < 2; visit++) {
+    if (visit) await page.reload()
+    await page.getByRole('button', { name: 'Publish', exact: true }).click()
+    await preview()
+    await source()
+      .getByText(`Uses your saved token for ${repository}.`, { exact: false })
+      .waitFor()
+    assert.equal(await publish().isDisabled(), false)
+    await publish().click()
+    await source()
+      .getByRole('link', { name: 'Open pull request on GitHub', exact: true })
+      .waitFor()
+    assert.equal(pushes.at(-1).token, undefined)
+    if (!visit)
+      await source().getByRole('button', { name: 'Close', exact: true }).click()
+  }
+  await source()
+    .getByLabel('Repository URL', { exact: true })
+    .fill('https://github.com/fixture/another.git')
+  await preview()
+  await source()
+    .getByRole('heading', { name: 'Review before publishing' })
+    .waitFor()
+  assert.equal(await publish().isDisabled(), true)
+  await source().getByLabel('Repository token', { exact: true }).fill(oneUse)
+  await source()
+    .getByLabel('Save for this repository', { exact: true })
+    .uncheck()
+  await publish().click()
+  await source()
+    .getByRole('link', { name: 'Open pull request on GitHub', exact: true })
+    .waitFor()
+  assert.equal(pushes.at(-1).token, oneUse)
+  assert.equal(
+    metadata.connections.some((entry) =>
+      entry.repository?.endsWith('/another'),
+    ),
+    false,
+  )
+  report.checks.push(
+    'A repository token is saved by default during import, reused for repeated pushes after reload, and never reused for another repository on the same host. Failed saves keep the token available; opting out uses it once.',
+  )
+
+  await preview()
+  await source()
+    .getByLabel('Repository token', { exact: true })
+    .fill(repositoryToken)
+  await source().getByLabel('Save for this repository', { exact: true }).check()
+  failRepositorySave = true
+  const pushesBefore = pushes.length
+  await publish().click()
+  await source().getByRole('alert').waitFor()
+  assert.equal(
+    await source().getByLabel('Repository token', { exact: true }).inputValue(),
+    repositoryToken,
+  )
+  assert.equal(pushes.length, pushesBefore)
+  await publish().click()
+  await source()
+    .getByRole('link', { name: 'Open pull request on GitHub', exact: true })
+    .waitFor()
+  assert.equal(pushes.at(-1).token, undefined)
+  await preview()
+  await source()
+    .getByText(
+      'Uses your saved token for https://github.com/fixture/another.',
+      { exact: false },
+    )
+    .waitFor()
+  assert.equal(await publish().isDisabled(), false)
+  report.checks.push(
+    'Publishing can also save a repository token; failed saves preserve the token and review for retry, and the next push reuses the saved token.',
+  )
+
+  await source()
+    .getByRole('button', { name: 'Git connections', exact: true })
+    .first()
+    .click()
+  await connections()
+    .getByRole('button', { name: `Disconnect ${repository}`, exact: true })
+    .click()
+  await until(
+    () =>
+      !metadata.connections.some((entry) => entry.repository === repository),
+    'repository token removed',
+  )
+  await closeConnections()
+  await source().getByRole('button', { name: 'Close', exact: true }).click()
+  const retryProject = state.projects.at(-1)
+  retryProject.status = 'error'
+  retryProject.repository = repository + '.git'
+  retryProject.repositoryAuthenticationRequired = true
+  retryProject.error = 'Repository authentication needed.'
+  await page.reload()
+  await page.getByRole('button', { name: 'Retry setup', exact: true }).click()
+  await retry
+    .getByLabel('Repository token', { exact: true })
+    .fill(repositoryToken)
+  assert.equal(
+    await retry
+      .getByLabel('Save for this repository', { exact: true })
+      .isChecked(),
+    true,
+  )
+  await retry.getByRole('button', { name: 'Retry setup', exact: true }).click()
+  await retry.waitFor({ state: 'hidden' })
+  assert.deepEqual(prepares.at(-1), {})
+  assert(metadata.connections.some((entry) => entry.repository === repository))
+  report.checks.push(
+    'Repository tokens can be removed without disconnecting the host, and Retry setup saves a new repository token for later Git operations.',
+  )
+
   legacy = true
   await page.getByRole('button', { name: 'Publish', exact: true }).click()
   await preview()
@@ -457,6 +645,7 @@ try {
     JSON.stringify({ ...localStorage, ...sessionStorage }),
   )
   assert(!storage.includes(fakeToken) && !storage.includes(oneUse))
+  assert(!storage.includes(repositoryToken))
   assert.equal(external.length, 0)
   fixture.assertClean()
   await page.screenshot({
