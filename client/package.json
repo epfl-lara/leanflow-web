@@ -25,7 +25,7 @@
     "cross-env": "^10.1.0",
     "file-saver": "^2.0.5",
     "focus-trap-react": "^12.0.3",
-    "jotai": "^2.16.1",
+    "jotai": "^3.0.1",
     "jotai-location": "^0.6.2",
     "jotai-react": "^0.0.0",
     "jotai-tanstack-query": "^0.11.0",
