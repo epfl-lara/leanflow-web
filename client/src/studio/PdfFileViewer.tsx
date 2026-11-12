@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react'
-import { apiPdf, errorText, SESSION_RESTORED_EVENT } from './api'
+import {
+  apiPdf,
+  errorText,
+  sessionBoundUrl,
+  SESSION_RESTORED_EVENT,
+} from './api'
 
 export function PdfFileViewer({
   projectId,
@@ -77,7 +82,7 @@ export function PdfFileViewer({
             </a>
             <a
               className="button small subtle"
-              href={previewPath}
+              href={sessionBoundUrl(previewPath)}
               target="_blank"
               rel="noopener noreferrer"
             >

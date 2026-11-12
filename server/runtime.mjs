@@ -580,6 +580,44 @@ export class Runtime {
     return true
   }
 
+  async releaseVerificationWorkspace(root) {
+    const actual = path.resolve(root)
+    if (!actual.startsWith(this.dataDir + path.sep))
+      throw new Error('Invalid verification workspace')
+    if (
+      [...this.children].some((child) => child.workspaceRoot === actual) ||
+      this.queue.some((job) => path.resolve(job.root) === actual)
+    )
+      throw Object.assign(
+        new Error(
+          'The independent check is still stopping. Retry cleanup shortly.',
+        ),
+        { status: 409 },
+      )
+    this.#reloadDependencies()
+    if (
+      [...this.dependencies].some(
+        ([target, source]) => target !== actual && source === actual,
+      )
+    )
+      throw Object.assign(
+        new Error('Another workspace still uses this verification copy.'),
+        { status: 409 },
+      )
+    await this.#persistDependencies({ delete: [actual] })
+    this.dependencies.delete(actual)
+    const digest = createHash('sha256').update(actual).digest('hex')
+    await removeDisposableTree(path.join(this.runtimeDir, 'homes', digest))
+    await fsp.rm(
+      path.join(
+        this.runtimeDir,
+        'shared-dependency-bindings',
+        digest + '.json',
+      ),
+      { force: true },
+    )
+  }
+
   #sharedSource(source) {
     return (
       typeof source === 'string' &&

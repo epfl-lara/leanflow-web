@@ -774,15 +774,25 @@ test('HTTP delete forever requires authentication, owner and archived receipt an
 })
 
 test('project deletion measures and removes interrupted snapshots before their manifest exists', async (t) => {
-  const { store, project, dataDir, runtime } = await fixture(t)
+  const { store, project, dataDir } = await fixture(t)
   const runId = 'interrupted-snapshot'
   const container = path.join(dataDir, 'candidates', runId)
-  runtime.inheritDependencies = async () => {
-    throw new Error('dependency registry write failed')
-  }
-  await assert.rejects(
-    store.snapshot(project.id, 'owner', runId),
-    /dependency registry write failed/,
+  const root = path.join(container, 'workspace')
+  // Model an interruption from an earlier server, before automatic failed-copy cleanup.
+  await fs.mkdir(root, { recursive: true, mode: 0o700 })
+  await fs.writeFile(
+    path.join(container, 'ownership.json'),
+    JSON.stringify({
+      projectId: project.id,
+      owner: 'owner',
+      actor: 'owner',
+      runId,
+      root,
+    }),
+  )
+  await fs.writeFile(
+    path.join(root, 'Main.lean'),
+    (await store.readFile(project.id, 'owner', 'Main.lean')).content,
   )
   assert.equal(
     await fs.readFile(path.join(container, 'workspace', 'Main.lean'), 'utf8'),

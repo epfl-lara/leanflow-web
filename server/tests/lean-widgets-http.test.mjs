@@ -107,8 +107,20 @@ test('authenticated editor blocks executable widgets while goals, hover and diag
   const cookie = login.headers.get('set-cookie').split(';')[0]
   for (const [expected, endpoint, headers] of [
     [401, project.id, { Origin: base }],
-    [403, project.id, { Cookie: cookie, Origin: 'https://attacker.invalid' }],
-    [404, 'missing-widget-project', { Cookie: cookie, Origin: base }],
+    [
+      403,
+      project.id,
+      {
+        Cookie: cookie,
+        'X-Leanflow-User': 'owner',
+        Origin: 'https://attacker.invalid',
+      },
+    ],
+    [
+      404,
+      'missing-widget-project',
+      { Cookie: cookie, 'X-Leanflow-User': 'owner', Origin: base },
+    ],
   ]) {
     const response = await new Promise((resolve, reject) => {
       const request = http.request(
@@ -157,6 +169,7 @@ test('authenticated editor blocks executable widgets while goals, hover and diag
     {
       headers: {
         Cookie: cookie,
+        'X-Leanflow-User': 'owner',
         Origin: base,
       },
     },

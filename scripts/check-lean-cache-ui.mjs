@@ -59,6 +59,10 @@ try {
     violations = []
   report.leanNotifications = messages
   state.onLeanMessage = (message, socket, connection) => {
+    assert.equal(
+      new URL(socket).searchParams.get('expectedUserId'),
+      'fixture-owner',
+    )
     messages.push({ socket, ...message })
     const uri = message.params?.textDocument?.uri
     if (!uri) return
@@ -92,7 +96,7 @@ try {
       (message) =>
         message.method === 'textDocument/' + method &&
         message.params.textDocument.uri === 'file:///workspace/' + filename &&
-        message.socket.endsWith('/' + projectId),
+        new URL(message.socket).pathname === '/websocket/' + projectId,
     )
   async function opened(filename, marker) {
     await until(

@@ -60,8 +60,12 @@ try {
     )
   }
   await page.routeWebSocket(
-    `**/websocket/collaboration/${projectId}`,
+    (url) => url.pathname === `/websocket/collaboration/${projectId}`,
     (socket) => {
+      assert.equal(
+        new URL(socket.url()).searchParams.get('expectedUserId'),
+        'fixture-owner',
+      )
       collaborationSocket = socket
       socket.onMessage((raw) => {
         const message = JSON.parse(String(raw))
@@ -75,14 +79,24 @@ try {
       socket.send(JSON.stringify({ type: 'ready' }))
     },
   )
-  await page.routeWebSocket(`**/websocket/${projectId}`, (socket) => {
-    connections++
-    socket.onMessage((raw) => {
-      const message = JSON.parse(String(raw))
-      if (message.method === 'initialize')
-        socket.close({ code: 1011, reason: 'Isolated initialization failure' })
-    })
-  })
+  await page.routeWebSocket(
+    (url) => url.pathname === `/websocket/${projectId}`,
+    (socket) => {
+      assert.equal(
+        new URL(socket.url()).searchParams.get('expectedUserId'),
+        'fixture-owner',
+      )
+      connections++
+      socket.onMessage((raw) => {
+        const message = JSON.parse(String(raw))
+        if (message.method === 'initialize')
+          socket.close({
+            code: 1011,
+            reason: 'Isolated initialization failure',
+          })
+      })
+    },
+  )
   await page.goto(base)
   await page.locator('.monaco-editor textarea').first().waitFor()
   await page

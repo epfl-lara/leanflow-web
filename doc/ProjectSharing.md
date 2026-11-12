@@ -20,9 +20,13 @@ A link grants ongoing account membership when redeemed. Revoking the link stops 
 
 Project membership shares project files. Each account keeps its own chats, prompts, reasoning, run history, API key, provider, model, reasoning effort, Git connections, and commit identity. A Viewer confirms their profile but does not need an API key to read a shared project. An Admin cannot open another member's conversations or keys through sharing.
 
+Each browser tab stays bound to the account that opened it. Signing into another account in a second tab does not move drafts, private history, or assistant requests into that account. The original tab asks you to sign in again as its account. Older tabs must copy or download unsaved work and reload before continuing.
+
 Each agent receives an isolated copy of the selected project and its initiating account's configuration. Shared dependencies remain read only. The agent does not receive a parent project directory, other projects, or another member's worker home. Once a subfolder project is shared, Source control cannot use its containing repository, including for the original importer. A private import remains usable by its sole original account; parent-repository access is not delegated with project roles. Import the folder as a standalone project to use Git without exposing files outside it.
 
 Agents coordinate through saved file revisions. There is no automatic exchange of private prompts or agent messages.
+
+Disposable verification copies are removed after their workers stop. The candidate used for reviewing a run stays private and available. Retained run candidates and file history still consume disk space; monitor free space and plan retention before expanding to larger teams.
 
 ## Concurrent file updates
 
@@ -33,6 +37,8 @@ Agent and terminal changes enter through checked file transactions and then upda
 Configuration files use the normal save path and its active-work checks. They do not use the live text connection. Changing Lean or Lake configuration requires preparing the shared environment again. The selected Lean release and dependency pins are preserved.
 
 If the connection fails, keep the tab open until saving succeeds. Files that switch to normal version-checked saving stay in that mode until you switch to another project and back, or reload the page, which prevents the same edit from being saved twice during reconnection. Unacknowledged edits remain local. If both the saved file and a local draft changed while a document was disconnected, download the draft before reloading. The interface does not silently replace it.
+
+If an edit exceeds the file limit or includes unsupported text, remove that text or use Undo. Corrected text resumes saving after reconnection. Other members' edits and your remaining draft are preserved.
 
 ## Private terminals and recovery
 
@@ -52,7 +58,9 @@ Preparation temporarily pauses live saves. Other members see the setup status; p
 
 Live editing initially allows 128 connections across the server, 12 per account, 16 live files per tab, 32 per account, and 128 retained documents with 64 MiB of encoded document state. Worker limits separately control active Lean sessions. Review these limits and measure memory, save traffic, and retained history before expanding to larger teams.
 
-Crash recovery for multi-file transactions remains limited. If the server stops between file replacements, publication can be partly applied or a file can be missing. The server does not automatically repair an interrupted transaction on startup. Stop further edits and ask the server administrator to inspect the retained file history and private working copy before recovering the project. This limitation also affects private projects.
+New multi-file updates save a durable recovery record before replacing files. After a restart, an unfinished update restores every original file; an update with a verified commit record keeps every saved change. Recovery records allow at most 12,000 files and 32 MiB of original content per update; editor batch saves and agent changes retain their 1,000-file limits, and uploads retain their 5,000-file limit. If a file has an unexpected edit, a symbolic link, or a damaged recovery record, editing and jobs pause only for that project. You can still read and download available files and local drafts and manage sharing. After a temporary storage problem clears, a project Admin can choose **Retry file recovery** without restarting the server. Recovery checks that the project has no active work and never overwrites unexpected content. Archiving stays blocked until recovery succeeds.
+
+If retry still fails, ask the server administrator to back up the project, its retained history, and the workspace database before making manual changes. Server logs identify the project, transaction, relative file, and failing check. The matching record is in `pending_project_transactions` in `workspaces.sqlite`; originals remain in the transaction's `history/<project>/<transaction>/before/` directory or its durable recovery record. Resolve the storage problem or recover the expected original files, then retry through the project. Do not delete pending records or change their hashes to bypass a conflict. Interrupted histories from releases without recovery records still require manual administrator recovery. These rules also apply to private projects. External writes from administrator shells or unsupported workers can race project operations; stop those writers before recovery. Empty folders created by an interrupted update may remain.
 
 ## Validate sharing before deployment
 
@@ -69,6 +77,8 @@ node scripts/check-project-sharing-editor.mjs
 node scripts/check-session-project-drafts-ui.mjs
 node scripts/check-terminal-opening-ui.mjs
 node scripts/check-editor-startup-ui.mjs
+node scripts/check-session-account-switch-ui.mjs
+node scripts/check-account-setup-invitation-ui.mjs
 node scripts/check-project-sharing-runtime.mjs
 ```
 

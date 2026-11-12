@@ -1,6 +1,10 @@
 import { removeDisposableTree } from './temporary-workspaces.mjs'
 import { ProjectMemberships } from './project-memberships.mjs'
 import {
+  ProjectTransactions,
+  assertTransactionPaths,
+} from './project-transactions.mjs'
+import {
   storedDiskBytes,
   storedManifest,
   removeStoredTree,
@@ -67,6 +71,7 @@ import {
 import {
   sourceFileByteLimit,
   MAX_SOURCE_UPLOAD_BYTES,
+  MAX_PROJECT_FILES,
 } from '../shared/source-limits.mjs'
 import {
   MAX_PDF_FILE_BYTES,
@@ -85,7 +90,7 @@ import {
 import { validateSetupBuildTimeout } from './capacity.mjs'
 import { validateGitBranch } from './git-branches.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
-const MAX_FILES = 12000
+const MAX_FILES = MAX_PROJECT_FILES
 const PRESETS = new Set(['lean', 'mathlib', 'cslib', 'physlib'])
 const CONFIGURATION_FILES = new Set(PROJECT_CONFIGURATION_FILES)
 const SECRET_PARTS = new Set([
@@ -793,6 +798,7 @@ export class WorkspaceStore {
       ),
     )
     this.db = new DatabaseSync(path.join(this.dataDir, 'workspaces.sqlite'))
+    this.db.exec('PRAGMA synchronous=FULL;')
     this.db.exec(
       'PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, owner TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS projects_owner ON projects(owner); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, time TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS events_project ON events(project, id);',
     )
@@ -800,6 +806,12 @@ export class WorkspaceStore {
       'CREATE TABLE IF NOT EXISTS trash (id TEXT PRIMARY KEY, owner TEXT NOT NULL, project TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS trash_owner ON trash(owner);',
     )
     this.memberships = new ProjectMemberships(this.db)
+    this.transactions = new ProjectTransactions({
+      db: this.db,
+      historyDir: this.historyDir,
+      validatePath: (filename) => relativeFile(filename, { write: true }),
+      openParent: writeParent,
+    })
     for (const row of this.db.prepare('SELECT data FROM projects').all()) {
       const project = JSON.parse(row.data)
       const checkout = path.join(this.projectsDir, validateId(project.id))
@@ -890,8 +902,14 @@ export class WorkspaceStore {
         this.#event(project, 'interrupted', project.error)
       }
     }
+    await this.transactions.recoverPending({
+      projectFor: (id) => this.#record(id),
+      onCommitted: (project, changes) =>
+        this.#transactionConfiguration(project, changes),
+    })
     for (const row of this.db.prepare('SELECT data FROM trash').all()) {
       const entry = JSON.parse(row.data)
+      if (this.transactions.errors.has(entry.projectId)) continue
       if (!['moving', 'restoring'].includes(entry.state)) continue
       const content = await exists(
         path.join(this.trashDir, validateId(entry.trashId, 'trash'), 'content'),
@@ -963,6 +981,16 @@ export class WorkspaceStore {
     const stored = { ...project }
     delete stored.log
     delete stored.accessRole
+    delete stored.fileRecoveryRequired
+    if (project.fileRecoveryRequired === true) {
+      // Recovery is a temporary read view. An allowed metadata edit must not
+      // persist it over the project's readiness before the interrupted write.
+      const original = this.#record(project.id)
+      for (const key of ['status', 'error', 'needsPreparation']) {
+        if (Object.hasOwn(original, key)) stored[key] = original[key]
+        else delete stored[key]
+      }
+    }
     this.db
       .prepare(
         'INSERT INTO projects(id,owner,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,owner=excluded.owner',
@@ -1029,6 +1057,14 @@ export class WorkspaceStore {
   }
 
   #dependencyStatus(project) {
+    const recoveryError = this.transactions.errors.get(project.id)
+    if (recoveryError) {
+      project.status = 'error'
+      project.needsPreparation = false
+      project.error = recoveryError
+      project.fileRecoveryRequired = true
+      return project
+    }
     if (project.status !== 'ready') return project
     const reason = this.runtime.dependencyPreparationReason?.(project.root)
     if (reason) {
@@ -1053,6 +1089,7 @@ export class WorkspaceStore {
     const project = this.#record(id)
     if (this.memberships.role(id, owner) !== 'admin')
       fail('Project admin access is required.', 403)
+    this.transactions.assertWritable(id)
     return project
   }
 
@@ -1084,7 +1121,26 @@ export class WorkspaceStore {
         'This project is shared with view access. Ask a project admin for editor access.',
         403,
       )
+    this.transactions.assertWritable(id)
     return project
+  }
+
+  assertRecoveryReady(id) {
+    this.transactions.assertWritable(id)
+  }
+
+  async retryFileRecovery(id, actor, { assertIdle = () => {} } = {}) {
+    this.requireAdmin(id, actor)
+    return this.#locked(id, async () => {
+      this.requireAdmin(id, actor)
+      assertIdle()
+      await this.transactions.retry(this.#record(id), {
+        onCommitted: (project, changes) =>
+          this.#transactionConfiguration(project, changes),
+      })
+      this.#changed(id, [], 'project')
+      return this.get(id, actor)
+    })
   }
 
   requireAdmin(id, actor) {
@@ -1447,6 +1503,7 @@ export class WorkspaceStore {
         filename === undefined
           ? this.requireAdmin(id, owner)
           : this.requireEditor(id, owner)
+      this.transactions.assertWritable(id)
       this.#assertPlaygroundFile(project, filename)
       if (project.protected && filename === undefined)
         fail(
@@ -3086,7 +3143,11 @@ export class WorkspaceStore {
     timeoutMs = 900000,
     network = 'none',
     env = {},
-    { emptyRepositoryClone = false, queue = true } = {},
+    {
+      emptyRepositoryClone = false,
+      queue = true,
+      signal = this.preparationControllers.get(project.id)?.signal,
+    } = {},
   ) {
     const label = setupCommandLabel(args, { gitCommand: args[GIT_ARGS.length] })
     const onOutput = (output) =>
@@ -3109,7 +3170,7 @@ export class WorkspaceStore {
             network,
             emptyRepositoryClone,
             queue,
-            signal: this.preparationControllers.get(project.id)?.signal,
+            signal,
             ...(args[0] !== 'git' && project.repairedConfiguration
               ? { readOnlyWorkspace: true, writeLakeCache: true }
               : {}),
@@ -3122,7 +3183,7 @@ export class WorkspaceStore {
             onOutput: label ? onOutput : undefined,
           },
         ),
-      { onOutput, signal: this.preparationControllers.get(project.id)?.signal },
+      { onOutput, signal },
     )
     if (result.code !== 0)
       throw Object.assign(
@@ -3849,6 +3910,7 @@ export class WorkspaceStore {
   }
 
   #ready(project, allowConfigurationChange = false) {
+    this.transactions.assertWritable(project.id)
     if (
       project.status !== 'ready' &&
       !(
@@ -4442,6 +4504,7 @@ export class WorkspaceStore {
     { sourceRoot, runId, signal, rootFile = 'main.tex' } = {},
   ) {
     const project = this.get(id, owner)
+    this.assertRecoveryReady(id)
     const parent = path.dirname(destination)
     if (
       path.basename(destination) !== 'source' ||
@@ -4462,6 +4525,7 @@ export class WorkspaceStore {
     }
     return this.#locked(id, async () => {
       this.get(id, owner)
+      this.assertRecoveryReady(id)
       const captured = await captureTexInputs(
         root,
         destination,
@@ -4473,7 +4537,8 @@ export class WorkspaceStore {
     })
   }
 
-  async snapshot(id, owner, runId) {
+  async snapshot(id, owner, runId, { signal } = {}) {
+    signal?.throwIfAborted()
     const project = this.get(id, owner)
     this.#ready(project)
     validateId(runId, 'run')
@@ -4481,6 +4546,7 @@ export class WorkspaceStore {
       this.requireEditor(id, owner),
       runId,
       owner,
+      { signal },
     )
     this.requireEditor(id, owner)
     return snapshot
@@ -4561,44 +4627,13 @@ export class WorkspaceStore {
           await this.cleanupTerminalSnapshot(snapshot, {
             finalize: true,
           }).catch(() => {})
-        else if (createdContainer) {
-          // Exclusive mkdir identifies our container even if its first marker
-          // write failed. Never clean an existing run or a replaced directory.
-          const container = path.join(this.snapshotsDir, runId)
-          const root = path.join(container, 'workspace')
-          const current = await exists(container)
-          if (
-            current?.isDirectory() &&
-            !current.isSymbolicLink() &&
-            current.dev === createdContainer.dev &&
-            current.ino === createdContainer.ino &&
-            (await fs.realpath(container)) === container
-          ) {
-            const claim = await storedManifest(
-              this.snapshotsDir,
-              runId,
-              'ownership.json',
-            )
-            if (
-              claim?.projectId === id &&
-              claim.owner === project.owner &&
-              claim.actor === actor &&
-              claim.runId === runId &&
-              claim.root === root
-            ) {
-              if (await exists(root))
-                await this.#releaseTerminalDependencies(root)
-              await removeDisposableTree(container)
-            } else if (!claim && !(await exists(root))) {
-              // A failed marker write precedes all workspace content. Remove
-              // only its partial file, then require the container to be empty.
-              await fs.rm(path.join(container, 'ownership.json'), {
-                force: true,
-              })
-              await fs.rmdir(container)
-            }
-          }
-        }
+        else if (createdContainer)
+          await this.#cleanupIncompleteCapture(
+            project,
+            runId,
+            actor,
+            createdContainer,
+          )
       } finally {
         // Reservations are ours even when mkdir/ownership creation failed.
         if (this.terminalCopies.get(runId) === reservation)
@@ -4911,12 +4946,52 @@ export class WorkspaceStore {
     )
   }
 
+  async #cleanupIncompleteCapture(project, runId, actor, createdContainer) {
+    // Exclusive mkdir identifies our container even if its first marker
+    // write failed. Never clean an existing run or a replaced directory.
+    const container = path.join(this.snapshotsDir, runId)
+    const root = path.join(container, 'workspace')
+    if (await exists(path.join(container, 'manifest.json'))) return
+    const current = await exists(container)
+    if (
+      current?.isDirectory() &&
+      !current.isSymbolicLink() &&
+      current.dev === createdContainer.dev &&
+      current.ino === createdContainer.ino &&
+      (await fs.realpath(container)) === container
+    ) {
+      const claim = await storedManifest(
+        this.snapshotsDir,
+        runId,
+        'ownership.json',
+      )
+      if (
+        claim?.projectId === project.id &&
+        claim.owner === project.owner &&
+        claim.actor === actor &&
+        claim.runId === runId &&
+        claim.root === root
+      ) {
+        if (await exists(root)) await this.#releaseTerminalDependencies(root)
+        await removeDisposableTree(container)
+      } else if (!claim && !(await exists(root))) {
+        // A failed marker write precedes all workspace content. Remove
+        // only its partial file, then require the container to be empty.
+        await fs.rm(path.join(container, 'ownership.json'), {
+          force: true,
+        })
+        await fs.rmdir(container)
+      }
+    }
+  }
+
   async #capture(
     project,
     runId,
     actor = project.owner,
-    { purpose, signal, onClaimed } = {},
+    { purpose, sourceRunId, signal, onClaimed } = {},
   ) {
+    signal?.throwIfAborted()
     const { id, owner } = project
     const container = path.join(this.snapshotsDir, runId)
     await fs
@@ -4926,89 +5001,122 @@ export class WorkspaceStore {
           fail('A candidate workspace already exists for this run', 409)
         throw error
       })
-    if (onClaimed) onClaimed(await fs.lstat(container))
-    const root = path.join(container, 'workspace')
-    // This server-owned marker precedes every source copy and dependency bind.
-    // An interrupted capture remains attributable even without its manifest.
-    await fs.writeFile(
-      path.join(container, 'ownership.json'),
-      JSON.stringify({ projectId: id, owner, actor, runId, root }),
-      { mode: 0o600, flag: 'wx' },
-    )
-    const inherit = typeof this.runtime.inheritDependencies === 'function'
-    await copyWorkspace(project.root, root, {
-      omitDependencies: inherit,
-      signal,
-    })
-    if (inherit) await this.runtime.inheritDependencies(project.root, root)
-    const files = []
-    const links = []
-    for (const entry of await this.#walk(root, {
-      includeLinks: true,
-      limit: Infinity,
-    })) {
-      if (entry.link !== undefined)
-        links.push({ path: entry.path, target: entry.link })
-      else
-        files.push({
-          path: entry.path,
-          hash: await fileHash(await guarded(root, entry.path)),
-        })
-    }
-    let sourceRevision = project.sourceRevision || null
-    if (await exists(path.join(this.repositoryRoot(project), '.git'))) {
-      try {
-        sourceRevision = (
-          await this.#command(
-            project,
-            [...GIT_ARGS, 'rev-parse', 'HEAD'],
-            30000,
-          )
-        ).stdout.trim()
-      } catch {
-        /* No commit yet. */
-      }
-    }
-    const snapshot = {
-      root,
-      files,
-      links,
-      sourceRevision,
-      projectId: id,
-      owner,
-      actor,
-      runId,
-      ...(purpose ? { purpose } : {}),
-      ...(purpose === 'terminal' ? { projectName: project.name } : {}),
-      createdAt: new Date().toISOString(),
-    }
-    // Record original content outside the writable candidate. It is needed for
-    // review and allows recovery after the server restarts.
-    const baseline = path.join(container, 'baseline')
-    await fs.mkdir(baseline, { mode: 0o700 })
-    for (const file of files) {
-      const destination = path.join(baseline, file.path)
-      await fs.mkdir(path.dirname(destination), {
-        recursive: true,
-        mode: 0o700,
-      })
-      await fs.copyFile(
-        path.join(root, file.path),
-        destination,
-        constants.COPYFILE_FICLONE,
+    const createdContainer = await fs.lstat(container)
+    try {
+      onClaimed?.(createdContainer)
+      const root = path.join(container, 'workspace')
+      // This server-owned marker precedes every source copy and dependency bind.
+      // An interrupted capture remains attributable even without its manifest.
+      await fs.writeFile(
+        path.join(container, 'ownership.json'),
+        JSON.stringify({
+          projectId: id,
+          owner,
+          actor,
+          runId,
+          root,
+          ...(purpose ? { purpose } : {}),
+          ...(sourceRunId ? { sourceRunId } : {}),
+        }),
+        { mode: 0o600, flag: 'wx' },
       )
+      const inherit = typeof this.runtime.inheritDependencies === 'function'
+      await copyWorkspace(project.root, root, {
+        omitDependencies: inherit,
+        signal,
+      })
+      signal?.throwIfAborted()
+      if (inherit) await this.runtime.inheritDependencies(project.root, root)
+      signal?.throwIfAborted()
+      const files = []
+      const links = []
+      for (const entry of await this.#walk(root, {
+        includeLinks: true,
+        limit: Infinity,
+        signal,
+      })) {
+        signal?.throwIfAborted()
+        if (entry.link !== undefined)
+          links.push({ path: entry.path, target: entry.link })
+        else
+          files.push({
+            path: entry.path,
+            hash: await fileHash(await guarded(root, entry.path), signal),
+          })
+      }
+      let sourceRevision = project.sourceRevision || null
+      if (await exists(path.join(this.repositoryRoot(project), '.git'))) {
+        try {
+          sourceRevision = (
+            await this.#command(
+              project,
+              [...GIT_ARGS, 'rev-parse', 'HEAD'],
+              30000,
+              'none',
+              {},
+              { signal, queue: false },
+            )
+          ).stdout.trim()
+        } catch {
+          signal?.throwIfAborted()
+          /* Commit metadata is optional; file hashes still bind this copy. */
+        }
+      }
+      signal?.throwIfAborted()
+      const snapshot = {
+        root,
+        files,
+        links,
+        sourceRevision,
+        projectId: id,
+        owner,
+        actor,
+        runId,
+        ...(purpose ? { purpose } : {}),
+        ...(sourceRunId ? { sourceRunId } : {}),
+        ...(purpose === 'terminal' ? { projectName: project.name } : {}),
+        createdAt: new Date().toISOString(),
+      }
+      // Record original content outside the writable candidate. It is needed for
+      // review and allows recovery after the server restarts.
+      const baseline = path.join(container, 'baseline')
+      await fs.mkdir(baseline, { mode: 0o700 })
+      for (const file of files) {
+        signal?.throwIfAborted()
+        const destination = path.join(baseline, file.path)
+        await fs.mkdir(path.dirname(destination), {
+          recursive: true,
+          mode: 0o700,
+        })
+        await fs.copyFile(
+          path.join(root, file.path),
+          destination,
+          constants.COPYFILE_FICLONE,
+        )
+      }
+      signal?.throwIfAborted()
+      await fs.writeFile(
+        path.join(container, 'manifest.json'),
+        JSON.stringify(snapshot),
+        { mode: 0o600, flag: 'wx' },
+      )
+      this.#event(
+        project,
+        'snapshot',
+        `Created candidate workspace for run ${runId}.\n`,
+      )
+      return snapshot
+    } catch (error) {
+      await this.#cleanupIncompleteCapture(
+        project,
+        runId,
+        actor,
+        createdContainer,
+      ).catch((cleanupError) => {
+        error.captureCleanupError = cleanupError
+      })
+      throw error
     }
-    await fs.writeFile(
-      path.join(container, 'manifest.json'),
-      JSON.stringify(snapshot),
-      { mode: 0o600, flag: 'wx' },
-    )
-    this.#event(
-      project,
-      'snapshot',
-      `Created candidate workspace for run ${runId}.\n`,
-    )
-    return snapshot
   }
 
   async #manifest(snapshot) {
@@ -5128,12 +5236,13 @@ export class WorkspaceStore {
       fail(message, 409)
   }
 
-  async #assertCurrent(manifest, project, liveChanges = []) {
+  async #assertCurrent(manifest, project, liveChanges = [], { signal } = {}) {
     if (manifest.projectId !== project.id || manifest.owner !== project.owner)
       fail('Candidate belongs to another project', 403)
     const entries = await this.#walk(project.root, {
       includeLinks: true,
       limit: Infinity,
+      signal,
     })
     this.#checkLinks(
       manifest,
@@ -5152,9 +5261,10 @@ export class WorkspaceStore {
         409,
       )
     for (const entry of current) {
+      signal?.throwIfAborted()
       if (
         base.get(entry.path) !==
-        (await fileHash(await guarded(project.root, entry.path)))
+        (await fileHash(await guarded(project.root, entry.path), signal))
       )
         fail(
           `Project changed during the assistant run: ${entry.path}. Start a new run from the current project.`,
@@ -5164,12 +5274,19 @@ export class WorkspaceStore {
     return true
   }
 
-  async #assertLiveCurrent(manifest, project, previous, next = []) {
+  async #assertLiveCurrent(
+    manifest,
+    project,
+    previous,
+    next = [],
+    { signal } = {},
+  ) {
     if (manifest.projectId !== project.id || manifest.owner !== project.owner)
       fail('Candidate belongs to another project', 403)
     const entries = await this.#walk(project.root, {
       includeLinks: true,
       limit: Infinity,
+      signal,
     })
     this.#checkLinks(
       manifest,
@@ -5196,10 +5313,11 @@ export class WorkspaceStore {
     const protectedPath = (filename) =>
       configuration.has(path.posix.basename(filename)) || touched.has(filename)
     for (const filename of new Set([...base.keys(), ...current.keys()])) {
+      signal?.throwIfAborted()
       if (!protectedPath(filename)) continue
       const expected = base.get(filename) ?? null
       const actual = current.has(filename)
-        ? await fileHash(await guarded(project.root, filename))
+        ? await fileHash(await guarded(project.root, filename), signal)
         : null
       if (expected !== actual)
         fail(
@@ -5248,7 +5366,7 @@ export class WorkspaceStore {
     manifest,
     container,
     changes,
-    { allowProjectFiles = false } = {},
+    { allowProjectFiles = false, signal } = {},
   ) {
     if (!Array.isArray(changes) || changes.length > 1000)
       fail('Invalid assistant change set')
@@ -5258,6 +5376,7 @@ export class WorkspaceStore {
     const seen = new Set(),
       result = []
     for (const change of changes) {
+      signal?.throwIfAborted()
       if (!change || typeof change !== 'object')
         fail('Invalid assistant change')
       const filename = relativeFile(change.path, { write: true })
@@ -5421,8 +5540,113 @@ export class WorkspaceStore {
     })
   }
 
+  async cleanupVerificationCopy(snapshot, { stopWorkers = false } = {}) {
+    if (snapshot?.purpose !== 'verification')
+      fail('Invalid verification workspace.', 403)
+    const runId = validateId(
+      snapshot?.runId || path.basename(path.dirname(snapshot?.root || '')),
+      'run',
+    )
+    const container = path.join(this.snapshotsDir, runId)
+    const root = path.join(container, 'workspace')
+    if (snapshot?.root !== root) fail('Invalid verification workspace.', 403)
+    return this.#locked(`\0verification-cleanup\0${runId}`, () =>
+      this.#cleanupVerificationCopy(
+        snapshot,
+        runId,
+        container,
+        root,
+        stopWorkers,
+      ),
+    )
+  }
+
+  async #cleanupVerificationCopy(
+    snapshot,
+    runId,
+    container,
+    root,
+    stopWorkers,
+  ) {
+    const current = await exists(container)
+    if (!current) return
+    if (
+      !current.isDirectory() ||
+      current.isSymbolicLink() ||
+      (await fs.realpath(container)) !== container
+    )
+      fail('Invalid verification workspace.', 403)
+    const manifest = await storedManifest(this.snapshotsDir, runId)
+    const ownership = await storedManifest(
+      this.snapshotsDir,
+      runId,
+      'ownership.json',
+    )
+    const records = [manifest, ownership].filter((record) => record !== null)
+    const originalId = validateId(snapshot.sourceRunId, 'run')
+    const original = await storedManifest(this.snapshotsDir, originalId)
+    if (
+      !records.length ||
+      !original ||
+      original.purpose === 'terminal' ||
+      original.purpose === 'verification' ||
+      originalId === runId ||
+      original.runId !== originalId ||
+      original.root !== path.join(this.snapshotsDir, originalId, 'workspace') ||
+      original.projectId !== snapshot.projectId ||
+      (original.actor || original.owner) !== snapshot.actor ||
+      records.some(
+        (record) =>
+          record.purpose !== 'verification' ||
+          record.sourceRunId !== originalId ||
+          record.runId !== runId ||
+          record.root !== root ||
+          record.projectId !== original.projectId ||
+          record.owner !== original.owner ||
+          (record.actor || record.owner) !== (original.actor || original.owner),
+      )
+    )
+      fail(
+        'This copy is not a disposable verification workspace for this run.',
+        403,
+      )
+    if (stopWorkers) await this.runtime.stopProject?.(root)
+    if (
+      this.runtime.isActive?.(root) ||
+      [...(this.runtime.children || [])].some(
+        (child) => child.workspaceRoot === root,
+      ) ||
+      (this.runtime.queue || []).some((job) => path.resolve(job.root) === root)
+    )
+      fail(
+        'The independent check is still stopping. Retry cleanup shortly.',
+        409,
+      )
+    if (this.runtime.releaseVerificationWorkspace)
+      await this.runtime.releaseVerificationWorkspace(root)
+    else await this.runtime.clearInheritedDependencies?.(root, { force: true })
+    // Keep the server-owned claims until all disposable payload is removed,
+    // so a failed removal can be validated and retried without losing attribution.
+    for (const name of ['workspace', 'baseline', 'reverted'])
+      await removeDisposableTree(path.join(container, name))
+    const remaining = await fs.readdir(container)
+    if (
+      remaining.some(
+        (name) => !['manifest.json', 'ownership.json'].includes(name),
+      )
+    )
+      fail(
+        'The verification copy contains unexpected recovery files. Ask the administrator to inspect it.',
+        409,
+      )
+    await fs.rm(path.join(container, 'manifest.json'), { force: true })
+    await fs.rm(path.join(container, 'ownership.json'), { force: true })
+    await fs.rmdir(container)
+  }
+
   async verificationCopy(snapshot, changes, options = {}) {
     for (let attempt = 0; ; attempt++) {
+      options.signal?.throwIfAborted()
       try {
         return await this.#verificationCopyOnce(snapshot, changes, options)
       } catch (error) {
@@ -5432,7 +5656,8 @@ export class WorkspaceStore {
   }
 
   async #verificationCopyOnce(snapshot, changes, options = {}) {
-    const { liveChanges = [] } = options
+    const { liveChanges = [], signal } = options
+    signal?.throwIfAborted()
     const { manifest, container } = await this.#manifest(snapshot)
     const initial = this.requireEditor(
       manifest.projectId,
@@ -5448,11 +5673,12 @@ export class WorkspaceStore {
         manifest.actor || manifest.owner,
       )
       this.#ready(currentProject)
+      signal?.throwIfAborted()
       const previous = await this.#candidateChanges(
         manifest,
         container,
         liveChanges,
-        { allowProjectFiles: options.allowProjectFiles === true },
+        { allowProjectFiles: options.allowProjectFiles === true, signal },
       )
       const proposed = await this.#candidateChanges(
         manifest,
@@ -5460,6 +5686,7 @@ export class WorkspaceStore {
         changes,
         {
           allowProjectFiles: options.allowProjectFiles === true,
+          signal,
         },
       )
       if (Object.hasOwn(options, 'liveChanges'))
@@ -5468,8 +5695,9 @@ export class WorkspaceStore {
           currentProject,
           previous,
           proposed,
+          { signal },
         )
-      else await this.#assertCurrent(manifest, currentProject)
+      else await this.#assertCurrent(manifest, currentProject, [], { signal })
       // Live runs intentionally retain unrelated collaborator edits. Bind the
       // copy to that current context; review-first runs stay bound to their
       // original snapshot. Neither path can accept edits raced into the copy.
@@ -5484,13 +5712,18 @@ export class WorkspaceStore {
         const entries = await this.#walk(currentProject.root, {
           includeLinks: true,
           limit: Infinity,
+          signal,
         })
         const capturedContext = new Map()
         for (const entry of entries) {
+          signal?.throwIfAborted()
           if (entry.link !== undefined) continue
           capturedContext.set(
             entry.path,
-            await fileHash(await guarded(currentProject.root, entry.path)),
+            await fileHash(
+              await guarded(currentProject.root, entry.path),
+              signal,
+            ),
           )
         }
         const protectedPaths = new Set([
@@ -5515,69 +5748,81 @@ export class WorkspaceStore {
         currentProject,
         randomUUID(),
         manifest.actor || manifest.owner,
+        { signal, purpose: 'verification', sourceRunId: manifest.runId },
       )
-      const sameLinks =
-        JSON.stringify(
-          [...verified.links].sort((a, b) => a.path.localeCompare(b.path)),
-        ) ===
-        JSON.stringify(
-          [...(manifest.links || [])].sort((a, b) =>
-            a.path.localeCompare(b.path),
-          ),
-        )
-      if (
-        !sameLinks ||
-        verified.files.length !== expected.size ||
-        verified.files.some((file) => expected.get(file.path) !== file.hash)
-      ) {
-        await this.runtime.clearInheritedDependencies?.(verified.root, {
-          force: true,
-        })
-        await removeDisposableTree(path.dirname(verified.root))
-        throw Object.assign(
-          new WorkspaceError(
-            'Project context changed while preparing verification. Retry the check from the current project.',
-            409,
-          ),
-          { verificationCaptureChanged: true },
-        )
-      }
-      this.requireEditor(project.id, manifest.actor || manifest.owner)
-      const transitions = this.#liveTransition(previous, proposed)
-      for (const change of transitions) {
-        const destination = await guarded(verified.root, change.path, {
-          write: true,
-        })
-        const before = await textFile(destination, true)
-        if ((before?.hash ?? null) !== change.beforeHash)
-          fail(`Verification baseline changed for ${change.path}`, 409)
-        const parent = await writeParent(verified.root, change.path)
-        const temporary = `${parent.anchor}/.lemex-write-${randomUUID()}`
-        try {
-          if (change.after === null) {
-            const reverted = path.join(path.dirname(verified.root), 'reverted')
-            await fs.mkdir(reverted, { recursive: true, mode: 0o700 })
-            await fs.rename(
-              `${parent.anchor}/${parent.name}`,
-              path.join(reverted, randomUUID()),
-            )
-          } else {
-            await fs.writeFile(temporary, change.after, {
-              flag: 'wx',
-              mode: before?.mode ?? 0o600,
-            })
-            await fs.rename(temporary, `${parent.anchor}/${parent.name}`)
-          }
-        } finally {
-          await fs.rm(temporary, { force: true })
-          await parent.handle.close()
+      try {
+        options.onCaptured?.(verified)
+        const sameLinks =
+          JSON.stringify(
+            [...verified.links].sort((a, b) => a.path.localeCompare(b.path)),
+          ) ===
+          JSON.stringify(
+            [...(manifest.links || [])].sort((a, b) =>
+              a.path.localeCompare(b.path),
+            ),
+          )
+        if (
+          !sameLinks ||
+          verified.files.length !== expected.size ||
+          verified.files.some((file) => expected.get(file.path) !== file.hash)
+        ) {
+          throw Object.assign(
+            new WorkspaceError(
+              'Project context changed while preparing verification. Retry the check from the current project.',
+              409,
+            ),
+            { verificationCaptureChanged: true },
+          )
         }
-      }
-      return {
-        ...verified,
-        sourceRevision: manifest.sourceRevision,
-        purpose: 'verification',
-        sourceRunId: manifest.runId,
+        this.requireEditor(project.id, manifest.actor || manifest.owner)
+        const transitions = this.#liveTransition(previous, proposed)
+        for (const change of transitions) {
+          signal?.throwIfAborted()
+          const destination = await guarded(verified.root, change.path, {
+            write: true,
+          })
+          const before = await textFile(destination, true)
+          if ((before?.hash ?? null) !== change.beforeHash)
+            fail(`Verification baseline changed for ${change.path}`, 409)
+          const parent = await writeParent(verified.root, change.path)
+          const temporary = `${parent.anchor}/.lemex-write-${randomUUID()}`
+          try {
+            if (change.after === null) {
+              const reverted = path.join(
+                path.dirname(verified.root),
+                'reverted',
+              )
+              await fs.mkdir(reverted, { recursive: true, mode: 0o700 })
+              await fs.rename(
+                `${parent.anchor}/${parent.name}`,
+                path.join(reverted, randomUUID()),
+              )
+            } else {
+              await fs.writeFile(temporary, change.after, {
+                flag: 'wx',
+                mode: before?.mode ?? 0o600,
+              })
+              await fs.rename(temporary, `${parent.anchor}/${parent.name}`)
+            }
+          } finally {
+            await fs.rm(temporary, { force: true })
+            await parent.handle.close()
+          }
+        }
+        return {
+          ...verified,
+          sourceRevision: manifest.sourceRevision,
+          purpose: 'verification',
+          sourceRunId: manifest.runId,
+        }
+      } catch (error) {
+        await this.cleanupVerificationCopy(verified).catch((cleanupError) => {
+          error.verificationCleanupError = cleanupError
+          // Retain this exact copy for the caller's cleanup retry instead of
+          // replacing its attribution with another verification attempt.
+          error.verificationCaptureChanged = false
+        })
+        throw error
       }
     })()
   }
@@ -5643,12 +5888,16 @@ export class WorkspaceStore {
     project = this.#record(project.id)
     if (project.archivedAt) fail('Project not found', 404)
     this.#ready(project, reason === 'undo' || reason === 'saved')
-    const { id, owner } = project
+    const { id } = project
+    const filenames = changes.map((change) => {
+      if (!change || typeof change !== 'object') fail('Invalid file change')
+      return relativeFile(change.path, { write: true })
+    })
+    assertTransactionPaths(filenames)
     const seen = new Set()
     const prepared = []
-    for (const change of changes) {
-      if (!change || typeof change !== 'object') fail('Invalid file change')
-      const filename = relativeFile(change.path, { write: true })
+    for (const [index, change] of changes.entries()) {
+      const filename = filenames[index]
       this.#assertPlaygroundFile(project, filename)
       if (seen.has(filename)) fail('A change set contains duplicate paths')
       seen.add(filename)
@@ -5700,89 +5949,22 @@ export class WorkspaceStore {
       })
     }
     if (!prepared.length) return { applied: 0, files: [] }
-    const transaction = path.join(
-      this.historyDir,
-      id,
-      `${Date.now()}-${randomUUID()}`,
-    )
-    await fs.mkdir(path.join(transaction, 'staged'), {
-      recursive: true,
-      mode: 0o700,
-    })
-    await fs.mkdir(path.join(transaction, 'before'), { mode: 0o700 })
-    await fs.writeFile(
-      path.join(transaction, 'manifest.json'),
-      JSON.stringify({
-        projectId: id,
-        owner,
-        createdAt: new Date().toISOString(),
-        changes: prepared.map(({ path: filename, beforeHash, after }) => ({
-          path: filename,
-          beforeHash,
-          afterHash: after === null ? null : sha(after),
-        })),
-      }),
-      { mode: 0o600 },
-    )
-    for (let i = 0; i < prepared.length; i++) {
-      if (prepared[i].after !== null)
-        await fs.writeFile(
-          path.join(transaction, 'staged', String(i)),
-          prepared[i].after,
-          { mode: prepared[i].mode },
-        )
-    }
-    const applied = []
+    let requiresPreparation = false
+    let transaction
     try {
-      for (let i = 0; i < prepared.length; i++) {
-        const change = prepared[i]
-        const parent = await writeParent(project.root, change.path)
-        const anchored = `${parent.anchor}/${parent.name}`
-        try {
-          authorize?.()
-          if (change.existed)
-            await fs.rename(
-              anchored,
-              path.join(transaction, 'before', String(i)),
-            )
-          applied.push({ ...change, index: i, parent, anchored })
-          authorize?.()
-          if (change.after !== null)
-            await fs.rename(
-              path.join(transaction, 'staged', String(i)),
-              anchored,
-            )
-        } catch (error) {
-          if (!applied.some((item) => item.parent === parent))
-            await parent.handle.close()
-          throw error
-        }
-      }
-    } catch (error) {
-      for (const change of applied.reverse()) {
-        await fs.rm(change.anchored, { force: true })
-        if (change.existed)
-          await fs.rename(
-            path.join(transaction, 'before', String(change.index)),
-            change.anchored,
+      transaction = await this.transactions.apply(project, prepared, {
+        authorize,
+        onCommitted: (current, committed) => {
+          requiresPreparation = this.#transactionConfiguration(
+            current,
+            committed,
           )
-      }
+        },
+      })
+    } catch (error) {
+      if (error.projectRecovery) this.#changed(id, [], 'project')
       throw error
-    } finally {
-      await Promise.all(applied.map((change) => change.parent.handle.close()))
     }
-    await fs.writeFile(
-      path.join(transaction, 'applied.json'),
-      JSON.stringify({ appliedAt: new Date().toISOString() }),
-      { mode: 0o600 },
-    )
-    const requiresPreparation = prepared.some((change) =>
-      this.#invalidateConfiguration(
-        project,
-        change.path,
-        change.before !== change.after,
-      ),
-    )
     const action =
       reason === 'live'
         ? `Saved ${prepared.length} live assistant edits`
@@ -5812,5 +5994,17 @@ export class WorkspaceStore {
         hash: change.after === null ? null : sha(change.after),
       })),
     }
+  }
+
+  #transactionConfiguration(project, changes) {
+    let requiresPreparation = false
+    for (const change of changes)
+      requiresPreparation =
+        this.#invalidateConfiguration(
+          project,
+          change.path,
+          change.beforeHash !== change.afterHash,
+        ) || requiresPreparation
+    return requiresPreparation
   }
 }

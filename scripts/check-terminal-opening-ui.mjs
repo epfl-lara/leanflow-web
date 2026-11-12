@@ -41,12 +41,20 @@ try {
   const stops = []
   let holdStop = true
   await page.routeWebSocket('**/websocket/terminal/**', (socket) => {
+    assert.equal(
+      new URL(socket.url()).searchParams.get('expectedUserId'),
+      'terminal-opening-user',
+    )
     const openingId = new URL(socket.url()).searchParams.get('openingId')
     openings.push({ openingId, socket })
     socket.send(Buffer.from('Private shell ready\r\n/workspace $ '))
     socket.onMessage(() => {})
   })
   await page.route('**/api/projects/*/terminal/stop', async (route) => {
+    assert.equal(
+      route.request().headers()['x-leanflow-user'],
+      'terminal-opening-user',
+    )
     const body = route.request().postDataJSON()
     if (holdStop) {
       holdStop = false

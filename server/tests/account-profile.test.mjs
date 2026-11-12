@@ -81,7 +81,7 @@ test('profile names persist without changing account identity, tokens, sessions 
   const response = await f.request('/api/profile', {
     method: 'PUT',
     token: null,
-    headers: { Cookie: cookie },
+    headers: { Cookie: cookie, 'X-Leanflow-User': id },
     body: { name: '  Émilie O’Neill-Smith  ' },
   })
   assert.equal(response.status, 200)

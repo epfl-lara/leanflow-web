@@ -347,8 +347,17 @@ try {
       .fill('A follow-up remains editable after a failed replay.')
     await until(
       () =>
-        legacy.page.evaluate(() =>
-          window.__chatFixture.urls.some((url) => url.endsWith('after=0')),
+        legacy.page.evaluate(
+          (id) =>
+            window.__chatFixture.urls.some((value) => {
+              const url = new URL(value, location.href)
+              return (
+                url.pathname === `/api/runs/${id}/events` &&
+                url.searchParams.get('after') === '0' &&
+                url.searchParams.get('expectedUserId') === 'fixture-owner'
+              )
+            }),
+          active.id,
         ),
       'failed legacy reasoning replay',
     )

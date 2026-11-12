@@ -548,6 +548,13 @@ try {
   })
   await recoveryLink.waitFor()
   assert((await recoveryLink.getAttribute('href')).includes(fixture.project.id))
+  assert.equal(
+    new URL(
+      await recoveryLink.getAttribute('href'),
+      fixture.origin,
+    ).searchParams.get('expectedUserId'),
+    fixture.accounts.editorB.id,
+  )
   await recoveryLink.scrollIntoViewIfNeeded()
   await editorB.screenshot({
     path: path.join(output, 'desktop-account-recovery.png'),

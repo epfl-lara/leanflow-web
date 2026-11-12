@@ -60,12 +60,13 @@ async function fixture(t) {
     request,
     login: (credential = token) =>
       request('/api/login', { method: 'POST', body: { token: credential } }),
-    activity: (cookie, options = {}) =>
+    activity: (cookie, { userId = 'owner', headers, ...options } = {}) =>
       request('/api/session/activity', {
         method: 'POST',
         cookie,
         body: {},
         ...options,
+        headers: { 'X-Leanflow-User': userId, ...headers },
       }),
     async restart() {
       await studio.close()
@@ -100,7 +101,10 @@ test('sign-in lasts 48 hours and background API polling cannot extend inactivity
     t.mock.timers.setTime(START + elapsed)
     await statusWithoutRenewal(await f.request('/api/session', { cookie }), 200)
     await statusWithoutRenewal(
-      await f.request('/api/templates', { cookie }),
+      await f.request('/api/templates', {
+        cookie,
+        headers: { 'X-Leanflow-User': 'owner' },
+      }),
       200,
     )
   }
@@ -204,7 +208,10 @@ test('renewal requires authenticated same-origin JSON activity and validates its
   ])
     await statusWithoutRenewal(await f.activity(cookie, { body }), 400)
   await statusWithoutRenewal(
-    await f.request('/api/session/activity', { cookie }),
+    await f.request('/api/session/activity', {
+      cookie,
+      headers: { 'X-Leanflow-User': 'owner' },
+    }),
     404,
   )
   await sessionCookie(
@@ -226,7 +233,10 @@ test('activity cannot renew a revoked account or extend another account session'
   t.mock.timers.setTime(START + 47 * HOUR)
   const activeOwner = await sessionCookie(await f.activity(owner))
   t.mock.timers.setTime(START + 48 * HOUR)
-  await statusWithoutRenewal(await f.activity(collaborator), 401)
+  await statusWithoutRenewal(
+    await f.activity(collaborator, { userId: invited.user.id }),
+    401,
+  )
   await statusWithoutRenewal(
     await f.request('/api/session', { cookie: activeOwner }),
     200,
@@ -235,7 +245,10 @@ test('activity cannot renew a revoked account or extend another account session'
   await f.auth.mutate(() => {
     f.auth.users = f.auth.users.filter((user) => user.id !== invited.user.id)
   })
-  await statusWithoutRenewal(await f.activity(newCollaborator), 401)
+  await statusWithoutRenewal(
+    await f.activity(newCollaborator, { userId: invited.user.id }),
+    401,
+  )
   await statusWithoutRenewal(
     await f.request('/api/session', { cookie: newCollaborator }),
     401,

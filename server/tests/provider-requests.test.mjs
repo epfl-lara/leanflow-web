@@ -655,6 +655,7 @@ test('a long RCP run defers automatic naming without queue capacity and names on
   child.workerStopped = new Promise((resolve) => {
     cleanup = resolve
   })
+  const nativeClosed = new Promise((resolve) => child.once('close', resolve))
   const chats = new ChatStore({
     dataDir: root,
     events,
@@ -699,7 +700,8 @@ test('a long RCP run defers automatic naming without queue capacity and names on
   assert.equal(chats.titleQueue.length, 0)
   assert.equal(chats.get(chat.id, 'alice').titleStatus, 'pending')
   finish()
-  await until(() => events.get(run.id).status === 'completed')
+  await nativeClosed
+  assert.notEqual(events.get(run.id).status, 'completed')
   assert.equal(
     calls,
     0,
@@ -707,6 +709,7 @@ test('a long RCP run defers automatic naming without queue capacity and names on
   )
   assert.equal(chats.titleTasks.size, 0)
   cleanup()
+  await until(() => events.get(run.id).status === 'completed')
   await until(() => chats.get(chat.id, 'alice').titleStatus === 'ready')
   assert.equal(chats.get(chat.id, 'alice').title, 'Explain Nat.add_comm')
   chats.finishRun(run.id)

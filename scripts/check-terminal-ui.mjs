@@ -44,11 +44,16 @@ let closed = 0
 let expectedHash
 let onTerminalStop = () => {}
 await f.page.route('**/api/projects/*/terminal/stop', (route) => {
+  assert.equal(route.request().headers()['x-leanflow-user'], 'fixture')
   onTerminalStop()
   return route.fulfill({ json: { stopped: true } })
 })
 await f.page.routeWebSocket('**/websocket/terminal/**', (socket) => {
   sockets.push(socket)
+  assert.equal(
+    new URL(socket.url()).searchParams.get('expectedUserId'),
+    'fixture',
+  )
   const projectId = decodeURIComponent(
     new URL(socket.url()).pathname.split('/').at(-1),
   )

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, errorText } from './api'
+import { api, errorText, sessionBoundUrl } from './api'
 import { TerminalRecoveryFiles } from './TerminalRecoveryFiles'
 import './terminal.css'
 
@@ -150,7 +150,9 @@ export function TerminalRecoveries({
             </div>
             <a
               className="button small secondary"
-              href={`/api/projects/${encodeURIComponent(recovery.projectId)}/terminal-recoveries/${encodeURIComponent(recovery.runId)}/download`}
+              href={sessionBoundUrl(
+                `/api/projects/${encodeURIComponent(recovery.projectId)}/terminal-recoveries/${encodeURIComponent(recovery.runId)}/download`,
+              )}
               download
             >
               Download terminal files

@@ -360,11 +360,16 @@ try {
   const upgradeHandlers = fixture.studio.server.listeners('upgrade')
   let blockCollaboration = true
   const blockUpgrade = (request, socket, head) => {
+    const url = new URL(request.url, fixture.origin)
     if (
       blockCollaboration &&
-      request.url === `/websocket/collaboration/${fixture.project.id}` &&
+      url.pathname === `/websocket/collaboration/${fixture.project.id}` &&
       fixture.studio.auth.identify(request)?.id === fixture.accounts.editorA.id
     ) {
+      assert.equal(
+        url.searchParams.get('expectedUserId'),
+        fixture.accounts.editorA.id,
+      )
       socket.end(
         'HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
       )
