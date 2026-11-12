@@ -197,6 +197,21 @@ textarea {
   font-size: 12px;
   padding: 7px 10px;
 }
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.button-row > .button {
+  min-height: 40px;
+  max-width: 100%;
+  white-space: normal;
+}
+.model-access {
+  margin-top: 28px;
+}
 .icon-button {
   border: 0;
   background: transparent;
@@ -1619,6 +1634,7 @@ textarea {
   max-height: calc(100dvh - 40px);
   box-shadow: var(--shadow);
   overflow: auto;
+  scroll-padding: 24px;
 }
 .studio-dialog::backdrop {
   background: #10182869;
@@ -1646,18 +1662,25 @@ textarea {
 .dialog-header .icon-button {
   margin-top: -4px;
   margin-right: -8px;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
 }
 .dialog-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
-  margin-top: 25px;
-  padding-top: 17px;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 20px;
   border-top: 1px solid var(--border);
 }
 .dialog-actions .button {
   font-size: 12px;
+  min-height: 40px;
+  max-width: 100%;
+  white-space: normal;
 }
 .dialog-body {
   font-size: 13px;
@@ -1692,6 +1715,9 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.project-source {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .preset-option {
   display: flex;
@@ -2176,11 +2202,11 @@ textarea {
     font-size: 19px;
   }
   .dialog-actions {
-    flex-wrap: wrap;
-    gap: 7px;
+    gap: 12px;
   }
   .dialog-actions .button {
-    font-size: 11px;
+    min-height: 44px;
+    font-size: 12px;
   }
   .caption-hint {
     display: none;
@@ -3026,5 +3052,68 @@ body.panel-resizing iframe {
   justify-content: center;
 }
 .account-setup .login-card {
-  width: min(100%, 640px);
+  width: 100%;
+  max-width: 560px;
+  padding: 48px 32px;
+}
+.account-setup .login-card > .brand {
+  margin-bottom: 36px;
+}
+.account-setup .login-card h1 {
+  font-size: clamp(26px, 4vw, 30px);
+  margin-bottom: 12px;
+}
+.account-setup .login-card > p {
+  margin: 0;
+  line-height: 1.7;
+}
+.account-setup .login-card form {
+  margin-top: 28px;
+}
+.account-setup .dialog-actions {
+  margin-top: 24px;
+  padding-top: 0;
+  border-top: 0;
+}
+.account-setup .login-card form .button {
+  min-height: 44px;
+  margin-top: 0;
+  font-size: 13px;
+}
+.account-setup-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+.account-setup-footer .button {
+  min-height: 44px;
+}
+.account-setup-footer .error-message {
+  align-self: stretch;
+  margin: 0;
+}
+@media (max-width: 480px) {
+  .account-setup .login-card {
+    padding: 32px 24px;
+  }
+  .dialog-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .dialog-actions .button {
+    width: 100%;
+  }
+  .button-row > .button {
+    flex: 1 1 160px;
+    min-height: 44px;
+  }
+  .project-source button {
+    flex-direction: column;
+    gap: 4px;
+    min-height: 52px;
+    padding: 8px 4px;
+    white-space: normal;
+  }
 }

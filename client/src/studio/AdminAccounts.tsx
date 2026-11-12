@@ -51,7 +51,7 @@ export function AdminAccounts({
   }
   return (
     <section>
-      <h3>Accounts</h3>
+      <h3 className="account-settings-heading">Accounts</h3>
       <p className="field-help">
         Administrators can invite users. The owner can also appoint
         administrators. API keys are private to each account.
@@ -125,13 +125,15 @@ export function AdminAccounts({
             onFocus={(event) => event.target.select()}
             autoComplete="off"
           />
-          <button
-            type="button"
-            className="button secondary"
-            onClick={() => setToken('')}
-          >
-            Hide token
-          </button>
+          <div className="button-row">
+            <button
+              type="button"
+              className="button secondary"
+              onClick={() => setToken('')}
+            >
+              Hide token
+            </button>
+          </div>
         </div>
       )}
     </section>

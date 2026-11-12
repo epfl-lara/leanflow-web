@@ -65,16 +65,28 @@ export function ModelAccess({
           {error}
         </p>
       )}
-      {access && (
+      <div className="button-row">
+        {access && (
+          <button
+            type="button"
+            className="button secondary"
+            disabled={busy || !access.models.length}
+            onClick={() => setLibraryOpen(true)}
+          >
+            Edit saved models
+          </button>
+        )}
         <button
           type="button"
           className="button secondary"
-          disabled={busy || !access.models.length}
-          onClick={() => setLibraryOpen(true)}
+          disabled={busy}
+          onClick={() => {
+            void refresh()
+          }}
         >
-          Edit saved models
+          {busy ? 'Refreshing models…' : 'Refresh models'}
         </button>
-      )}
+      </div>
       {access && libraryOpen && (
         <ModelLibrary
           models={access.models}
@@ -86,16 +98,6 @@ export function ModelAccess({
           onClose={() => setLibraryOpen(false)}
         />
       )}
-      <button
-        type="button"
-        className="button secondary"
-        disabled={busy}
-        onClick={() => {
-          void refresh()
-        }}
-      >
-        {busy ? 'Refreshing models…' : 'Refresh models'}
-      </button>
     </section>
   )
 }

@@ -44,10 +44,7 @@ export function AccountSetup({
         <h1>Welcome, {session.user.name}.</h1>
         {session.user.profileComplete === false ? (
           <>
-            <p>
-              Confirm the name you want to use in LeanFlow. You can change it
-              later by clicking your account in the sidebar.
-            </p>
+            <p>Confirm your display name to get started.</p>
             <ProfileForm
               user={session.user}
               firstLogin
@@ -92,19 +89,21 @@ export function AccountSetup({
             <output>Opening your workspace…</output>
           </div>
         )}
-        <button
-          type="button"
-          className="button secondary"
-          disabled={providerBusy || profileBusy || refreshing || loggingOut}
-          onClick={() => void logout()}
-        >
-          {loggingOut ? 'Signing out…' : 'Sign out'}
-        </button>
-        {logoutError && (
-          <p className="error-message" role="alert">
-            {logoutError}
-          </p>
-        )}
+        <footer className="account-setup-footer">
+          <button
+            type="button"
+            className="button subtle"
+            disabled={providerBusy || profileBusy || refreshing || loggingOut}
+            onClick={() => void logout()}
+          >
+            {loggingOut ? 'Signing out…' : 'Sign out'}
+          </button>
+          {logoutError && (
+            <p className="error-message" role="alert">
+              {logoutError}
+            </p>
+          )}
+        </footer>
       </div>
     </main>
   )

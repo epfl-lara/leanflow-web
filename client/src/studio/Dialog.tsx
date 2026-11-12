@@ -31,6 +31,7 @@ export function Dialog({
       className="studio-dialog"
       onCancel={(event) => {
         event.preventDefault()
+        event.stopPropagation()
         if (!busy) onClose()
       }}
       onClick={(event) => {

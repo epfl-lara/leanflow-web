@@ -133,6 +133,14 @@ try {
   assert(
     await dialog.getByRole('link', { name: /EPFL RCP portal/ }).isVisible(),
   )
+  await dialog
+    .getByRole('button', { name: 'Edit saved models', exact: true })
+    .click()
+  const library = page.getByRole('dialog', { name: 'Your models', exact: true })
+  await library.waitFor()
+  await page.keyboard.press('Escape')
+  await library.waitFor({ state: 'hidden' })
+  assert.equal(await dialog.isVisible(), true)
   await page.screenshot({
     path: new URL('rcp-default.png', directory).pathname,
   })
@@ -202,6 +210,9 @@ try {
     .click()
   await page.locator('.monaco-editor').waitFor()
   assert.equal(saved.length, 3)
+  report.checks.push(
+    'Escape closes the model picker while keeping account settings open',
+  )
   report.checks.push(
     'RCP opens by default with its key portal; custom provider fields are optional',
   )

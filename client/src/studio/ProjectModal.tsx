@@ -126,7 +126,10 @@ export function ProjectModal({
       busy={busy}
     >
       <form onSubmit={submit} autoComplete="off">
-        <div className="segmented-control" aria-label="Project source">
+        <div
+          className="segmented-control project-source"
+          aria-label="Project source"
+        >
           <button
             type="button"
             aria-pressed={kind === 'import'}
