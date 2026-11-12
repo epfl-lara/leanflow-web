@@ -119,20 +119,16 @@ try {
   await open('paper.tex')
   for (const name of ['Proofs', 'Optimize']) {
     await mode(name)
-    await composer.fill('Work on this proof.')
-    assert.equal(await send.isDisabled(), true)
+    await composer.fill('Edit and compile this LaTeX document.')
+    assert.equal(await send.isEnabled(), true)
     await note
-      .getByRole('button', {
-        name: 'Use Ask & Search for LaTeX editing and compilation',
-        exact: true,
-      })
+      .getByText('Lemex can read, edit, and compile your LaTeX document here.')
       .waitFor()
-    await page
-      .getByText('Select a writable Lean file to begin.', { exact: true })
-      .waitFor()
+    const request = await submit()
+    assert.equal(request.mode, name === 'Optimize' ? 'optimize' : 'proofs')
   }
   report.checks.push(
-    'Proofs and Optimize retain the LaTeX editing link and require a writable Lean target.',
+    'Explicit document requests can be sent in Proofs and Optimize without switching modes or selecting a Lean target.',
   )
 
   for (const document of [

@@ -513,6 +513,46 @@ test('live edits reject unsafe paths, configuration, deletions, forged baselines
   )
 })
 
+test('checked configuration publication and undo wait for other project work', async (t) => {
+  const { store, project, snapshot } = await fixture(t)
+  const original = await store.readFile(project.id, 'alice', 'lakefile.toml')
+  const change = {
+    path: 'lakefile.toml',
+    beforeHash: original.hash,
+    after: original.content + '\n# requested module registration\n',
+  }
+  let busy = true
+  store.assertConfigurationIdle = () => {
+    if (busy)
+      throw Object.assign(new Error('Another project check is running.'), {
+        status: 409,
+      })
+  }
+  const options = { allowProjectConfiguration: true }
+  await assert.rejects(store.syncLive(snapshot, [change], [], options), {
+    status: 409,
+  })
+  assert.equal(
+    (await store.readFile(project.id, 'alice', change.path)).hash,
+    original.hash,
+  )
+  busy = false
+  const live = await store.syncLive(snapshot, [change], [], options)
+  assert.equal(await store.assertLive(snapshot, live, options), true)
+  busy = true
+  await assert.rejects(store.undoLive(snapshot, live, options), { status: 409 })
+  assert.equal(
+    (await store.readFile(project.id, 'alice', change.path)).content,
+    change.after,
+  )
+  busy = false
+  await store.undoLive(snapshot, live, options)
+  assert.equal(
+    (await store.readFile(project.id, 'alice', change.path)).hash,
+    original.hash,
+  )
+})
+
 test('simultaneous live updates with the same previous state have only one successful writer', async (t) => {
   const { store, project, snapshot, main } = await fixture(t)
   const results = await Promise.allSettled([

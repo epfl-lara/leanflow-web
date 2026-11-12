@@ -14,6 +14,7 @@ export class LiveMirror {
     intervalMs = 1000,
     previousChanges = [],
     allowProjectFiles = false,
+    allowProjectConfiguration = false,
   }) {
     Object.assign(this, {
       snapshot,
@@ -24,6 +25,7 @@ export class LiveMirror {
       onNotice,
       intervalMs,
       allowProjectFiles,
+      allowProjectConfiguration,
     })
     this.liveChanges = previousChanges
     this.pending = null
@@ -70,16 +72,19 @@ export class LiveMirror {
       if (
         change.path
           .split('/')
-          .some((part) =>
-            ['.git', '.lake', ...PROJECT_CONFIGURATION_FILES].includes(part),
-          )
+          .some((part) => ['.git', '.lake'].includes(part)) ||
+        PROJECT_CONFIGURATION_FILES.includes(change.path) ||
+        (!this.allowProjectConfiguration &&
+          change.path
+            .split('/')
+            .some((part) => PROJECT_CONFIGURATION_FILES.includes(part)))
       )
         return false
       const lean = change.path.endsWith('.lean')
       return (
         (this.allowProjectFiles || lean) &&
         (typeof change.after === 'string' ||
-          (this.allowProjectFiles && !lean && change.after === null))
+          (this.allowProjectFiles && change.after === null))
       )
     })
     const fingerprint = createHash('sha256')
@@ -95,7 +100,10 @@ export class LiveMirror {
       this.snapshot,
       changes,
       previous,
-      { allowProjectFiles: this.allowProjectFiles },
+      {
+        allowProjectFiles: this.allowProjectFiles,
+        allowProjectConfiguration: this.allowProjectConfiguration,
+      },
     )
     const old = new Map(previous.map((change) => [change.path, change.after]))
     const fresh = new Map(next.map((change) => [change.path, change.after]))

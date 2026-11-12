@@ -81,7 +81,7 @@ test('optimization context reports measured values and unavailable reasons witho
   assert(unavailable.includes('unsupported syntax'))
 })
 
-test('Optimize validates a selected proof and rejects an invalid baseline before any provider worker starts', async (t) => {
+test('Optimize permits user requests without a proof target and does not veto a broken baseline', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-opt-agent-'))
   const events = new EventStore(root),
     measurements = []
@@ -115,9 +115,7 @@ test('Optimize validates a selected proof and rejects an invalid baseline before
         assert.fail('Invalid baseline must never start a provider worker')
       },
       home() {
-        assert.fail(
-          'Invalid baseline does not need agent credentials or config',
-        )
+        throw new Error('Fixture reached agent startup')
       },
     },
     optimizationMeasure: async (...args) => {
@@ -136,16 +134,16 @@ test('Optimize validates a selected proof and rejects an invalid baseline before
     ['Notes.md'],
     ['.lake/packages/mathlib/Mathlib.lean'],
     ['Nested/lakefile.lean'],
-  ])
-    await assert.rejects(
-      () =>
-        manager.start('alice', 'p', {
-          mode: 'optimize',
-          prompt: 'Reduce proof cost.',
-          files,
-        }),
-      { status: 400 },
-    )
+  ]) {
+    const request = await manager.start('alice', 'p', {
+      mode: 'optimize',
+      prompt: 'Work on the requested document.',
+      files,
+      liveEdits: false,
+    })
+    await Promise.all([...manager.tasks])
+    assert.match(events.get(request.id).error, /Fixture reached agent startup/)
+  }
   const job = await manager.start('alice', 'p', {
     mode: 'optimize',
     prompt: 'Reduce proof cost.',
@@ -163,7 +161,7 @@ test('Optimize validates a selected proof and rejects an invalid baseline before
   assert.deepEqual(measurements[0][2], ['Main.lean'])
   assert(measurements[0][3].signal instanceof AbortSignal)
   assert.equal(events.get(job.id).optimization.baseline.compiled, false)
-  assert.match(events.get(job.id).error, /already valid proof.*Repair/)
+  assert.match(events.get(job.id).error, /Fixture reached agent startup/)
   assert.equal(events.get(job.id).optimization.candidate, undefined)
 })
 

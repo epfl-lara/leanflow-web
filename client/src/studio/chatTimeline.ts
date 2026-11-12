@@ -137,6 +137,16 @@ export function runStatusLabel(run: Run) {
   )
 }
 
+export function canApplyRequestedEdits(run: Run): boolean {
+  const value = run.verification
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    (('editsAllowed' in value && value.editsAllowed === true) ||
+      ('complete' in value && value.complete === true))
+  )
+}
+
 export function finalVerificationIssue(run: Run): string {
   const value = run.verification
   if (

@@ -34,6 +34,7 @@ import {
   runChangePaths,
   runChangeCount,
   finalVerificationIssue,
+  canApplyRequestedEdits,
 } from './chatTimeline'
 import type {
   EditorProofState,
@@ -209,7 +210,6 @@ export function AssistantPanel({
             !path.startsWith('.lake/') &&
             !files.find((item) => item.path === path)?.readOnly,
         ))
-  const requiresLeanTarget = mode === 'proofs' || mode === 'optimize'
   const formalizingDocument =
     mode === 'formalize' &&
     [currentFile, ...contextFiles].some(
@@ -861,8 +861,7 @@ export function AssistantPanel({
     !dialogRun.liveEdits &&
     dialogRun.status === 'completed' &&
     !!dialogRun.changes?.length &&
-    (dialogRun.verification as { complete?: boolean } | undefined)?.complete ===
-      true &&
+    canApplyRequestedEdits(dialogRun) &&
     !hasActive
   return (
     <div className="assistant-panel chat-workbench">
@@ -912,15 +911,9 @@ export function AssistantPanel({
       </div>
       {(texLanguage(currentFile) || formalizingDocument) && (
         <div className="assistant-tex-note">
-          {formalizingDocument ? (
-            'Use your source document to formalize mathematics in Lean.'
-          ) : mode === 'search' ? (
-            'Lemex can read, edit, and compile your LaTeX document here.'
-          ) : (
-            <button type="button" onClick={() => draft.setMode('search')}>
-              Use Ask &amp; Search for LaTeX editing and compilation
-            </button>
-          )}
+          {formalizingDocument
+            ? 'Use your source document to formalize mathematics in Lean.'
+            : 'Lemex can read, edit, and compile your LaTeX document here.'}
         </div>
       )}
       <ChatOptions
@@ -1188,7 +1181,7 @@ export function AssistantPanel({
             placeholder={
               acceptingUpdate
                 ? 'Share an observation or change of direction…'
-                : mode === 'search' && texLanguage(currentFile)
+                : texLanguage(currentFile) && mode !== 'formalize'
                   ? 'Ask about this document, edit LaTeX, or compile and check its PDF…'
                   : currentMode.placeholder
             }
@@ -1219,9 +1212,7 @@ export function AssistantPanel({
                   : activeHere
                     ? 'Checking or stopping; your next draft is kept.'
                     : 'Open the active chat to send an update.'
-                : requiresLeanTarget && !target
-                  ? 'Select a writable Lean file to begin.'
-                  : 'Enter to send · Shift+Enter for a new line'}
+                : 'Enter to send · Shift+Enter for a new line'}
             </span>
             <button
               type="submit"
@@ -1234,9 +1225,7 @@ export function AssistantPanel({
                 busy ||
                 (hasActive
                   ? !acceptingUpdate
-                  : (requiresLeanTarget && !target) ||
-                    !selectedModel ||
-                    !effortAvailable)
+                  : !selectedModel || !effortAvailable)
               }
             >
               {busy ? (
@@ -1282,7 +1271,9 @@ export function AssistantPanel({
               <p className="review-note">
                 {dialogRun.liveEdits
                   ? 'Lemex has finished this run. The edits are saved, but the final Lean check did not pass. Continue in chat to request a correction, or undo the edits from the chat.'
-                  : 'Lemex has finished this run. These edits cannot be applied because the final Lean check did not pass. Continue in chat to request a correction.'}
+                  : canApplyRequestedEdits(dialogRun)
+                    ? 'The Lean check did not pass. You can apply the requested edits as they are or continue in chat to request a correction.'
+                    : 'Lemex has finished this run. These edits cannot be applied because the final Lean check did not pass. Continue in chat to request a correction.'}
               </p>
             )}
             {hasActive && !dialogRun.liveEdits && (
@@ -1380,19 +1371,21 @@ export function AssistantPanel({
                 Continue in chat
               </button>
             )}
-            {canRun && !dialogRun.liveEdits && !dialogIssue && (
-              <button
-                className="button primary"
-                disabled={!canApply || applying || dirty || discarding}
-                onClick={() => void apply()}
-              >
-                {applying
-                  ? 'Applying…'
-                  : dialogRun.status === 'applied'
-                    ? 'Already applied'
-                    : 'Apply changes'}
-              </button>
-            )}
+            {canRun &&
+              !dialogRun.liveEdits &&
+              (!dialogIssue || canApplyRequestedEdits(dialogRun)) && (
+                <button
+                  className="button primary"
+                  disabled={!canApply || applying || dirty || discarding}
+                  onClick={() => void apply()}
+                >
+                  {applying
+                    ? 'Applying…'
+                    : dialogRun.status === 'applied'
+                      ? 'Already applied'
+                      : 'Apply changes'}
+                </button>
+              )}
           </footer>
         </Dialog>
       )}

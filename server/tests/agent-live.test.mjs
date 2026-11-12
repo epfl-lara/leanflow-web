@@ -130,7 +130,7 @@ test('a saved-context conflict pauses mirroring without retrying or replacing us
   assert(mirror.paused)
 })
 
-test('general live mirroring includes text deletions while keeping configuration and Lean deletions protected', async () => {
+test('general live mirroring includes requested text and Lean deletions while staging root configuration', async () => {
   const writes = [],
     updates = []
   const candidates = [
@@ -159,9 +159,14 @@ test('general live mirroring includes text deletions while keeping configuration
   await mirror.stop()
   assert.deepEqual(
     writes[0].map((change) => change.path),
-    ['Notes.md', 'Old.txt', 'Main.lean'],
+    ['Notes.md', 'Old.txt', 'Main.lean', 'Delete.lean'],
   )
-  assert.deepEqual(updates[0], ['Notes.md', 'Old.txt', 'Main.lean'])
+  assert.deepEqual(updates[0], [
+    'Notes.md',
+    'Old.txt',
+    'Main.lean',
+    'Delete.lean',
+  ])
 })
 
 test('temporary candidate collection errors produce one notice and retry without a saved-context conflict', async () => {

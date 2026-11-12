@@ -553,11 +553,10 @@ test('proof checks preserve statements and context and reject unfinished or trus
     )
   }
   for (const filename of [
-    'lakefile.lean',
-    'lakefile.toml',
-    'lean-toolchain',
-    'lake-manifest.json',
+    'Nested/lakefile.lean',
+    'Nested/lean-toolchain',
     '.lake/packages/mathlib/Mathlib.lean',
+    '.git/config.lean',
   ])
     assert.ok(
       proofRisks([{ path: filename, before: '', after: good }], 'prove').length,
@@ -566,6 +565,29 @@ test('proof checks preserve statements and context and reject unfinished or trus
     proofRisks([{ path: 'Main.lean', before: good, after: null }], 'repair')
       .length,
   )
+})
+
+test('requested root configuration changes are allowed independently of the proof mode', () => {
+  for (const mode of ['search', 'proofs', 'formalize', 'optimize'])
+    for (const filename of [
+      'lakefile.lean',
+      'lakefile.toml',
+      'lean-toolchain',
+      'lake-manifest.json',
+    ])
+      assert.deepEqual(
+        proofRisks(
+          [
+            {
+              path: filename,
+              before: '',
+              after: '# requested configuration edit\n',
+            },
+          ],
+          mode,
+        ),
+        [],
+      )
 })
 
 test('proof checks distinguish theorems with the same short name in different namespaces', () => {

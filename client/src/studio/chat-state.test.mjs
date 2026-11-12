@@ -63,6 +63,7 @@ const {
   conversationSegments,
   liveEditStatus,
   finalVerificationIssue,
+  canApplyRequestedEdits,
 } = load('./chatTimeline.ts')
 const {
   clearDraftSubmission,
@@ -78,6 +79,27 @@ const {
 } = require('../../../shared/reasoning-timeline.mjs')
 const { UsageSummary } = load('./UsageSummary.tsx')
 const { Verification } = load('./RunReview.tsx')
+
+test('requested edits remain applicable without turning failed checks into verified proofs', () => {
+  const failed = run({
+    verification: {
+      complete: false,
+      editsAllowed: true,
+      errors: ['Unfinished proof.'],
+    },
+  })
+  assert.equal(canApplyRequestedEdits(failed), true)
+  assert.equal(finalVerificationIssue(failed), 'Unfinished proof.')
+  assert.equal(runStatusLabel(failed), 'Finished · Lean check did not pass')
+  assert.equal(
+    canApplyRequestedEdits(run({ verification: { complete: false } })),
+    false,
+  )
+  assert.equal(
+    canApplyRequestedEdits(run({ verification: { complete: true } })),
+    true,
+  )
+})
 
 test('Ask & Search reports conversation and file review separately from Lean verification', () => {
   for (const kind of ['chat', 'workspace']) {

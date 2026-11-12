@@ -229,8 +229,8 @@ test('completed turns reject late native TeX callbacks and extracted text report
   await f.tools.dispose()
 })
 
-test('native assistant advertises and executes TeX tools in search while proof mode preserves its protocol', async (t) => {
-  for (const mode of ['search', 'proofs'])
+test('native assistant advertises and executes requested TeX work in every mode', async (t) => {
+  for (const mode of ['search', 'proofs', 'formalize', 'optimize'])
     await t.test(mode, async (t) => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tex-native-rpc-'))
       const candidate = path.join(root, 'candidate'),
@@ -295,19 +295,17 @@ test('native assistant advertises and executes TeX tools in search while proof m
                     })
                     if (request.method === 'turn/start')
                       queueMicrotask(() => {
-                        if (mode === 'search')
-                          send({
-                            id: 1001,
-                            method: 'item/tool/call',
-                            params: {
-                              threadId: 'thread',
-                              turnId: 'turn',
-                              callId: 'compile',
-                              tool: 'tex_build',
-                              arguments: { rootFile: 'main.tex' },
-                            },
-                          })
-                        else complete()
+                        send({
+                          id: 1001,
+                          method: 'item/tool/call',
+                          params: {
+                            threadId: 'thread',
+                            turnId: 'turn',
+                            callId: 'compile',
+                            tool: 'tex_build',
+                            arguments: { rootFile: 'main.tex' },
+                          },
+                        })
                       })
                   } else if (request.id === 1001) {
                     send({
@@ -401,33 +399,27 @@ test('native assistant advertises and executes TeX tools in search while proof m
       ).params
       assert.equal(thread.model, DEFAULT_MODEL)
       assert.equal(turn.effort, 'max')
-      if (mode === 'search') {
-        assert.equal(init.capabilities.experimentalApi, true)
-        assert.deepEqual(
-          thread.dynamicTools.map((tool) => [tool.type, tool.name]),
-          [
-            ['function', 'tex_build'],
-            ['function', 'tex_build_status'],
-            ['function', 'tex_read_pdf'],
-          ],
-        )
-        assert.equal(starts.length, 1)
-        assert.equal(starts[0][3].sourceRoot, candidate)
-        assert.equal(starts[0][3].runId, job.id)
-        assert.equal(
-          requests.find((request) => request.id === 1001).result.success,
-          true,
-        )
-        assert.match(
-          requests.find((request) => request.id === 1002).result.contentItems[0]
-            .text,
-          /Rendered theorem text/,
-        )
-        assert.equal(events.get(job.id).verification.kind, 'chat')
-      } else {
-        assert.equal(init.capabilities, undefined)
-        assert.equal(thread.dynamicTools, undefined)
-        assert.equal(starts.length, 0)
-      }
+      assert.equal(init.capabilities.experimentalApi, true)
+      assert.deepEqual(
+        thread.dynamicTools.map((tool) => [tool.type, tool.name]),
+        [
+          ['function', 'tex_build'],
+          ['function', 'tex_build_status'],
+          ['function', 'tex_read_pdf'],
+        ],
+      )
+      assert.equal(starts.length, 1)
+      assert.equal(starts[0][3].sourceRoot, candidate)
+      assert.equal(starts[0][3].runId, job.id)
+      assert.equal(
+        requests.find((request) => request.id === 1001).result.success,
+        true,
+      )
+      assert.match(
+        requests.find((request) => request.id === 1002).result.contentItems[0]
+          .text,
+        /Rendered theorem text/,
+      )
+      assert.equal(events.get(job.id).verification.kind, 'chat')
     })
 })

@@ -40,6 +40,7 @@
   padding-inline-end: 36px;
 }
 .chat-picker-select {
+  --select-arrow: none;
   position: relative;
 }
 .chat-picker-select > svg {

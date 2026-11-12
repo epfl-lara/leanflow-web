@@ -62,6 +62,31 @@ const livePassed = makeRun('passed-live', {
   liveChanges: [change],
   verification: { complete: true, compiled: true, kernelChecked: true },
 })
+const configuration = makeRun('configuration-review', {
+  liveEdits: false,
+  prompt: 'Register the Proofs folder I added in lakefile.toml.',
+  message: 'Registered Proofs and checked the project build.',
+  changes: [
+    {
+      path: 'lakefile.toml',
+      before: 'name = "fixture"\n',
+      after: 'name = "fixture"\n[[lean_lib]]\nname = "Proofs"\n',
+    },
+  ],
+  verification: {
+    complete: true,
+    compiled: true,
+    kind: 'workspace',
+    reason:
+      'Project configuration builds successfully. No Lean source changes to check.',
+  },
+})
+const requested = makeRun('requested-unfinished-edits', {
+  liveEdits: false,
+  prompt: 'Create an unfinished proof skeleton for me to complete.',
+  message: 'Created the requested skeleton. Its proof is unfinished.',
+  verification: { ...verification, editsAllowed: true },
+})
 const fixture = await chatBrowserFixture({
   session: {
     user: { id: 'fixture-owner', name: 'Fixture owner' },
@@ -81,13 +106,13 @@ const fixture = await chatBrowserFixture({
   ],
   files: { [projectId]: { 'Main.lean': after } },
   chats: [{ id: chatId, projectId, title: 'Proof review' }],
-  runs: [blocked, liveBlocked, passed, livePassed],
+  runs: [blocked, liveBlocked, passed, livePassed, configuration, requested],
 })
 const { page, state, report, browser } = fixture
 const turn = (run) => page.locator(`[data-run-id="${run.id}"]`)
 const dialog = page.getByRole('dialog')
 state.onApply = ({ run, respond }) => {
-  assert.equal(run.verification.complete, true)
+  assert(run.verification.complete || run.verification.editsAllowed)
   run.status = 'applied'
   return respond(run)
 }
@@ -214,6 +239,43 @@ try {
   })
   report.checks.push(
     'Successful live edits have no pending approval or recurring live-edit help message',
+  )
+  await turn(configuration)
+    .getByRole('button', { name: 'Review changes 1' })
+    .click()
+  await dialog.getByText('Project file review', { exact: true }).waitFor()
+  await dialog.getByText('lakefile.toml', { exact: true }).waitFor()
+  await dialog
+    .getByRole('button', { name: 'Apply changes', exact: true })
+    .click()
+  await turn(configuration).getByText('Applied', { exact: true }).waitFor()
+  assert.doesNotMatch(
+    await turn(configuration).innerText(),
+    /Final Lean check passed/,
+  )
+  report.checks.push(
+    'Requested Lake configuration edits can be reviewed and applied without claiming proof verification',
+  )
+  await turn(requested)
+    .getByRole('button', { name: 'Review changes 1' })
+    .click()
+  await dialog
+    .getByText(/You can apply the requested edits as they are/)
+    .waitFor()
+  await dialog
+    .getByRole('button', { name: 'Apply changes', exact: true })
+    .click()
+  await turn(requested).getByText('Applied', { exact: true }).waitFor()
+  assert.match(
+    await turn(requested).innerText(),
+    /Final Lean check did not pass/,
+  )
+  assert.doesNotMatch(
+    await turn(requested).innerText(),
+    /Final Lean check passed/,
+  )
+  report.checks.push(
+    'User-requested edits remain applicable when checks fail, with the failed proof result preserved',
   )
   fixture.assertClean()
   console.log(JSON.stringify({ checks: report.checks }, null, 2))
