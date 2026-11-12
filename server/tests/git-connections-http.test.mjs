@@ -184,4 +184,56 @@ test('Git connection API keeps account tokens private and reuses them only for m
     ),
     null,
   )
+
+  const scoped = 'fixture-saved-repository-token'
+  response = await request('/api/git-connections', 'PUT', {
+    action: 'connect',
+    repository: 'https://github.com/example/private/tree/main/Proofs',
+    token: scoped,
+  })
+  assert.equal(response.status, 200, await response.clone().text())
+  const savedMetadata = await response.json()
+  assert.equal(
+    savedMetadata.connections[0].repository,
+    'https://github.com/example/private',
+  )
+  assert(!JSON.stringify(savedMetadata).includes(scoped))
+  for (const [repository, expected] of [
+    ['https://github.com/example/private.git', scoped],
+    ['https://github.com/example/other.git', null],
+  ]) {
+    response = await request('/api/projects', 'POST', {
+      repository,
+      autoRepair: false,
+    })
+    assert.equal(response.status, 201, await response.clone().text())
+    const project = await response.json()
+    await studio.workspaces.jobs.get(project.id)
+    assert.equal(studio.workspaces.get(project.id, 'owner').status, 'ready')
+    const clone = calls.filter((call) => call.args.includes('clone')).at(-1)
+    assert.equal(clone.args[0], expected ? 'python3' : 'git')
+    if (expected) assert.equal(JSON.parse(clone.options.input).token, expected)
+    assert(!JSON.stringify(project).includes(scoped))
+  }
+  assert.deepEqual(
+    (
+      await (
+        await request('/api/git-connections', 'GET', undefined, bob)
+      ).json()
+    ).connections,
+    [],
+  )
+  response = await request(
+    '/api/git-connections?host=github.com&repository=' +
+      encodeURIComponent('https://github.com/example/private.git'),
+    'DELETE',
+  )
+  assert.equal(response.status, 200)
+  assert.equal(
+    await connections.credentials(
+      'owner',
+      'https://github.com/example/private.git',
+    ),
+    null,
+  )
 })

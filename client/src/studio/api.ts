@@ -228,6 +228,7 @@ export type GitProvider = 'github' | 'gitlab' | 'other'
 
 export interface GitConnection {
   host: string
+  repository?: string
   provider: GitProvider
   username: string
   updatedAt: string

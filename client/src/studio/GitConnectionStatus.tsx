@@ -12,7 +12,9 @@ export function GitConnectionStatus({
   return (
     <p className="field-help git-connection-status">
       {connection
-        ? `Uses your saved connection to ${connection.host}.`
+        ? connection.repository
+          ? `Uses your saved token for ${connection.repository}.`
+          : `Uses your saved connection to ${connection.host}.`
         : 'Connect an account to share Git access between projects and the terminal.'}{' '}
       {onOpenConnections && (
         <button

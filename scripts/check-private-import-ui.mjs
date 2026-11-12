@@ -44,6 +44,10 @@ try {
     runs: [],
   })
   const { page, state, report } = fixture
+  // Exercise explicit one-use credentials on servers without saved connections.
+  await page.route('**/api/git-connections', (route) =>
+    route.fulfill({ status: 404, json: { error: 'API endpoint not found.' } }),
+  )
   const imports = []
   const prepareRequests = []
   const externalRequests = []

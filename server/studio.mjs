@@ -826,7 +826,13 @@ export async function createStudio({
     )
   })
   app.delete('/api/git-connections', async (req, res) =>
-    res.json(await gitConnections.disconnect(req.user.id, req.query.host)),
+    res.json(
+      await gitConnections.disconnect(
+        req.user.id,
+        req.query.host,
+        req.query.repository,
+      ),
+    ),
   )
   app.post(
     '/api/projects',

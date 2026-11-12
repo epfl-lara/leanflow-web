@@ -9,9 +9,12 @@ import {
   randomBytes,
 } from 'node:crypto'
 import { validateGitCredentials } from './git-credentials.mjs'
+import { repositoryLocation } from './project-import.mjs'
+import { repositoryConnectionKey } from '../shared/git-connections.mjs'
 
 const locks = new Map()
 const providers = new Set(['github', 'gitlab', 'other'])
+const maxRepositoryConnections = 64
 const emptyIdentity = () => ({ name: '', email: '' })
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status })
@@ -129,11 +132,12 @@ function identity(value) {
 function metadata(record) {
   return {
     connections: record.connections.map(
-      ({ host, provider, username, updatedAt }) => ({
+      ({ host, provider, username, updatedAt, repository }) => ({
         host,
         provider,
         username,
         updatedAt,
+        ...(repository ? { repository } : {}),
       }),
     ),
     identity: { ...record.identity },
@@ -154,7 +158,7 @@ async function privateFile(filename) {
       stat.nlink !== 1 ||
       (stat.mode & 0o777) !== 0o600 ||
       (process.getuid && stat.uid !== process.getuid()) ||
-      stat.size > 512_000
+      stat.size > 2_000_000
     )
       unavailable()
     return await file.readFile()
@@ -336,9 +340,11 @@ export class GitConnections {
         !record ||
         record.owner !== owner ||
         !Array.isArray(record.connections) ||
-        record.connections.length > 8 ||
-        new Set(record.connections.map((item) => item.host)).size !==
-          record.connections.length
+        record.connections.filter((item) => !item.repository).length > 8 ||
+        record.connections.filter((item) => item.repository).length >
+          maxRepositoryConnections ||
+        new Set(record.connections.map((item) => item.repository || item.host))
+          .size !== record.connections.length
       )
         unavailable()
       record.identity = identity(record.identity)
@@ -346,6 +352,11 @@ export class GitConnections {
         if (
           !connection ||
           parsedHost(connection.host) !== connection.host ||
+          (connection.repository !== undefined &&
+            (!connection.repository ||
+              repositoryConnectionKey(connection.repository) !==
+                connection.repository ||
+              repositoryHost(connection.repository) !== connection.host)) ||
           !providers.has(connection.provider) ||
           !connection.token ||
           typeof connection.username !== 'string' ||
@@ -404,7 +415,17 @@ export class GitConnections {
     await this.init()
     if (!input || typeof input !== 'object' || Array.isArray(input))
       fail('Enter a Git host and repository token.')
-    const host = await this.validatedHost(input.host)
+    let repository
+    let host
+    if (input.repository !== undefined) {
+      const location = repositoryLocation(input.repository)
+      host = repositoryHost(location.repository)
+      await this.validateRepository(location.repository, this.resolveHost)
+      repository = repositoryConnectionKey(location.repository)
+      if (!repository) fail('Enter an HTTPS Git repository URL.')
+      if (input.host !== undefined && parsedHost(input.host) !== host)
+        fail('The Git host must match the repository URL.')
+    } else host = await this.validatedHost(input.host)
     const provider =
       input.provider ||
       (host === 'github.com'
@@ -432,16 +453,32 @@ export class GitConnections {
     try {
       return await locked(`${this.dir}/${ownerHash(owner)}`, async () => {
         const record = await this.readRecord(owner)
-        const existing = record.connections.findIndex(
-          (item) => item.host === host,
+        const existing = record.connections.findIndex((item) =>
+          repository
+            ? item.repository === repository
+            : !item.repository && item.host === host,
         )
-        if (existing < 0 && record.connections.length >= 8)
+        if (
+          existing < 0 &&
+          !repository &&
+          record.connections.filter((item) => !item.repository).length >= 8
+        )
           fail(
             'You can connect up to eight Git hosts. Disconnect one before adding another.',
+          )
+        if (
+          existing < 0 &&
+          repository &&
+          record.connections.filter((item) => item.repository).length >=
+            maxRepositoryConnections
+        )
+          fail(
+            'You can save tokens for up to 64 repositories. Remove an unused repository token in Git connections first.',
           )
         const connection = {
           host,
           provider,
+          ...(repository ? { repository } : {}),
           ...credentials,
           updatedAt: new Date().toISOString(),
         }
@@ -455,13 +492,22 @@ export class GitConnections {
     }
   }
 
-  async disconnect(owner, host) {
+  async disconnect(owner, host, repository) {
     await this.init()
     const normalized = parsedHost(host)
+    const key =
+      repository === undefined ? undefined : repositoryConnectionKey(repository)
+    if (
+      repository !== undefined &&
+      (!key || repositoryHost(key) !== normalized)
+    )
+      fail('Choose a saved repository token to remove.')
     return await locked(`${this.dir}/${ownerHash(owner)}`, async () => {
       const record = await this.readRecord(owner)
-      record.connections = record.connections.filter(
-        (item) => item.host !== normalized,
+      record.connections = record.connections.filter((item) =>
+        key
+          ? item.repository !== key
+          : item.repository || item.host !== normalized,
       )
       await this.writeRecord(owner, record)
       return metadata(record)
@@ -482,9 +528,14 @@ export class GitConnections {
   async credentials(owner, repositoryUrl) {
     await this.init()
     const host = repositoryHost(repositoryUrl)
+    const repository = repositoryConnectionKey(repositoryUrl)
     return await locked(`${this.dir}/${ownerHash(owner)}`, async () => {
       const record = await this.readRecord(owner)
-      const connection = record.connections.find((item) => item.host === host)
+      const connection =
+        record.connections.find((item) => item.repository === repository) ||
+        record.connections.find(
+          (item) => !item.repository && item.host === host,
+        )
       if (!connection) return null
       await this.validateRepository(repositoryUrl, this.resolveHost)
       return { token: connection.token, username: connection.username }

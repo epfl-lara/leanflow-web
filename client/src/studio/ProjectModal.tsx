@@ -9,7 +9,11 @@ import { Icon } from './Icons'
 import { HelpTip } from './HelpTip'
 import { RepositoryCredentialsFields } from './RepositoryCredentialsFields'
 import { GitConnectionStatus } from './GitConnectionStatus'
-import { repositoryHost, useGitConnections } from './gitConnections'
+import {
+  findGitConnection,
+  saveRepositoryConnection,
+  useGitConnections,
+} from './gitConnections'
 import { errorText, post, type Preset, type Project } from './api'
 
 export function ProjectModal({
@@ -34,6 +38,7 @@ export function ProjectModal({
   const [repository, setRepository] = useState('')
   const [repositoryToken, setRepositoryToken] = useState('')
   const [repositoryUsername, setRepositoryUsername] = useState('')
+  const [rememberToken, setRememberToken] = useState(true)
   const [revision, setRevision] = useState('')
   const [subdirectory, setSubdirectory] = useState('')
   const [autoRepair, setAutoRepair] = useState(repairAvailable)
@@ -44,10 +49,8 @@ export function ProjectModal({
   const { unavailableLibrary } = environment
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const { data: gitConnections } = useGitConnections()
-  const connection = gitConnections?.connections.find(
-    (entry) => entry.host === repositoryHost(repository),
-  )
+  const { data: gitConnections, canSave } = useGitConnections()
+  const connection = findGitConnection(gitConnections, repository)
 
   function clearRepositoryCredentials() {
     setRepositoryToken('')
@@ -83,8 +86,12 @@ export function ProjectModal({
     setError('')
     const credential = repositoryToken.trim()
     const login = repositoryUsername.trim()
-    clearRepositoryCredentials()
     try {
+      const saved =
+        kind === 'import' && !!credential && rememberToken && canSave
+      if (saved)
+        await saveRepositoryConnection(repository.trim(), credential, login)
+      clearRepositoryCredentials()
       const project = await post<Project>('/api/projects', {
         name: name.trim() || undefined,
         autoRepair,
@@ -94,7 +101,7 @@ export function ProjectModal({
         ...(kind === 'import'
           ? {
               repository: repository.trim(),
-              ...(credential
+              ...(credential && !saved
                 ? {
                     repositoryToken: credential,
                     ...(login ? { repositoryUsername: login } : {}),
@@ -211,7 +218,7 @@ export function ProjectModal({
             <details className="repository-access-options">
               <summary>
                 {connection
-                  ? 'Use a different token once'
+                  ? 'Use a different token'
                   : 'Private repository access'}
               </summary>
               <RepositoryCredentialsFields
@@ -221,6 +228,8 @@ export function ProjectModal({
                 onTokenChange={setRepositoryToken}
                 onUsernameChange={setRepositoryUsername}
                 disabled={busy}
+                remember={rememberToken}
+                onRememberChange={canSave ? setRememberToken : undefined}
               />
             </details>
             <div className="help-label">
@@ -237,8 +246,8 @@ export function ProjectModal({
               </label>
               <HelpTip label="Publishing changes">
                 Prepare a working branch, then save, commit and review changes
-                before pushing. Import and publishing use your saved Git
-                connection, or a token you provide for one operation. After a
+                before pushing. Save a repository token to reuse it for pulls
+                and pushes, or connect your account in Git connections. After a
                 GitHub or GitLab push, open the pull request or merge request
                 form to finish submitting your changes.
               </HelpTip>

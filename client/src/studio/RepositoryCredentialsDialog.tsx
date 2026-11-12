@@ -2,7 +2,11 @@ import { useState, type FormEvent } from 'react'
 import { Dialog } from './Dialog'
 import { errorText } from './api'
 import { GitConnectionStatus } from './GitConnectionStatus'
-import { repositoryHost, useGitConnections } from './gitConnections'
+import {
+  findGitConnection,
+  saveRepositoryConnection,
+  useGitConnections,
+} from './gitConnections'
 import {
   RepositoryCredentialsFields,
   type RepositoryCredentials,
@@ -21,12 +25,11 @@ export function RepositoryCredentialsDialog({
 }) {
   const [token, setToken] = useState('')
   const [username, setUsername] = useState('')
+  const [rememberToken, setRememberToken] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const { data } = useGitConnections()
-  const connection = data?.connections.find(
-    (entry) => entry.host === repositoryHost(repository),
-  )
+  const { data, canSave } = useGitConnections()
+  const connection = findGitConnection(data, repository)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -41,12 +44,15 @@ export function RepositoryCredentialsDialog({
     setError('')
     const credential = token.trim()
     const login = username.trim()
-    setToken('')
-    setUsername('')
     try {
+      const saved = !!credential && rememberToken && canSave && !!repository
+      if (saved && repository)
+        await saveRepositoryConnection(repository, credential, login)
+      setToken('')
+      setUsername('')
       await onSubmit({
-        ...(credential ? { repositoryToken: credential } : {}),
-        ...(login ? { repositoryUsername: login } : {}),
+        ...(credential && !saved ? { repositoryToken: credential } : {}),
+        ...(login && !saved ? { repositoryUsername: login } : {}),
       })
       setToken('')
       setUsername('')
@@ -74,7 +80,7 @@ export function RepositoryCredentialsDialog({
         />
         <details className="repository-access-options" open={!connection}>
           <summary>
-            {connection ? 'Use a different token once' : 'Repository token'}
+            {connection ? 'Use a different token' : 'Repository token'}
           </summary>
           <RepositoryCredentialsFields
             idPrefix="retry-repository"
@@ -85,6 +91,10 @@ export function RepositoryCredentialsDialog({
             disabled={busy}
             required={!connection}
             autoFocus
+            remember={rememberToken}
+            onRememberChange={
+              canSave && repository ? setRememberToken : undefined
+            }
           />
         </details>
         {error && (
