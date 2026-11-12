@@ -8,6 +8,7 @@ import type { SourceRequest } from './LibrarySourceDialog'
 import {
   CancellationTokenSource,
   KeyCode,
+  Selection,
   Uri,
   editor as monacoEditor,
   languages,
@@ -31,10 +32,16 @@ import { RenameModels } from './renameModels'
 import { initializeLeanEditor } from './leanEditorServices'
 import { DefinitionPreviewFiles } from './definitionPreviewFiles'
 import { WorkspaceEditor } from './workspaceEditor'
+import { installLeanClientLifecycle } from './leanClientLifecycle'
+import { installCollaborativeEditorUndo } from './collaborativeEditorUndo'
 import { LeanModelCache } from './leanModelCache'
 import type { RenameSource } from './workspaceBuffers'
 import { installLeanRenameMiddleware } from './leanRenameMiddleware'
 import { LEAN_EDIT_DISABLED_MESSAGE } from '../../../shared/lean-edit-policy.mjs'
+import {
+  documentTextEdit,
+  documentOffsetAfterEdit,
+} from '../../../shared/document-text.mjs'
 import type { ChatMode } from './chatModes'
 import {
   proofDeclarations,
@@ -194,6 +201,8 @@ interface Runtime {
   renameModels?: RenameModels
   modelCache: LeanModelCache
   disabledRenameAction?: { dispose(): void }
+  clientLifecycle?: ReturnType<typeof installLeanClientLifecycle>
+  collaborativeUndo?: ReturnType<typeof installCollaborativeEditorUndo>
   definitionPreviewFiles?: DefinitionPreviewFiles
 }
 interface ConnectionClient {
@@ -215,6 +224,8 @@ export function LeanWorkspace({
   bufferRemoveVersion,
   removedPaths,
   onRenameSources,
+  onCollaborativeUndo,
+  onCollaborativeRedo,
   theme,
   onChange,
   onState,
@@ -241,6 +252,8 @@ export function LeanWorkspace({
   bufferRemoveVersion: number
   removedPaths: readonly string[]
   onRenameSources: (sources: RenameSource[]) => void
+  onCollaborativeUndo?: (path: string) => boolean
+  onCollaborativeRedo?: (path: string) => boolean
   theme: 'light' | 'dark'
   onChange: (path: string, content: string) => void
   onState: (state: string) => void
@@ -272,11 +285,14 @@ export function LeanWorkspace({
   const buffersRef = useRef(buffers)
   buffersRef.current = buffers
   const syncingContent = useRef(false)
-  const pendingLocalChange = useRef<{
-    path: string
-    generation: number
-    content: string
-  } | null>(null)
+  const collaborativeCommands = useRef({
+    undo: onCollaborativeUndo,
+    redo: onCollaborativeRedo,
+  })
+  collaborativeCommands.current = {
+    undo: onCollaborativeUndo,
+    redo: onCollaborativeRedo,
+  }
   const onChangeRef = useRef(onChange)
   const onRenameSourcesRef = useRef(onRenameSources)
   const onStateRef = useRef(onState)
@@ -431,6 +447,22 @@ export function LeanWorkspace({
             const rootDocument = new FileUri('/workspace/__lemex_client__.lean')
             provider.ensureClient = (uri) =>
               ensureClient(uri.scheme === 'file' ? rootDocument : uri)
+            own.clientLifecycle = installLeanClientLifecycle(
+              provider,
+              new FileUri('/workspace'),
+              (error) => {
+                if (!cancelled) {
+                  setRequestIssue(
+                    'Lean could not connect. Use Restart Lean or reopen the project to retry.',
+                  )
+                  onStateRef.current('Lean connection failed')
+                }
+                console.warn(
+                  '[LeanFlow Web] Lean connection ended during startup or shutdown.',
+                  error,
+                )
+              },
+            )
             own.connectionSubscriptions.push(
               provider.clientAdded((client: ConnectionClient) => {
                 if (cancelled) return
@@ -511,6 +543,7 @@ export function LeanWorkspace({
         )
         own?.restoreOpenEditor?.()
         own?.disabledRenameAction?.dispose()
+        own?.collaborativeUndo?.dispose()
         const closingFile = own?.editor?.modelRef?.object
         if (closingFile) {
           // Virtual file changes can still be reloading this managed model.
@@ -526,8 +559,7 @@ export function LeanWorkspace({
         if (closingModel && !closingModel.isDisposed()) closingModel.dispose()
         // The upstream provider calls stop() without awaiting it. Finish socket
         // shutdown before another project uses the shared /workspace model URIs.
-        const clients = own?.lean.clientProvider?.getClients() || []
-        await Promise.allSettled(clients.map((client) => client.stop()))
+        await own?.clientLifecycle?.close()
         own?.lean.dispose()
         if (own?.virtualFiles.size) {
           const textFiles = await getService(ITextFileService)
@@ -553,6 +585,14 @@ export function LeanWorkspace({
           own.virtualFiles.clear()
         }
         if (runtime.current === own) runtime.current = null
+      }).catch((error) => {
+        own?.definitionPreviewFiles?.dispose()
+        own?.lean.dispose()
+        if (runtime.current === own) runtime.current = null
+        console.error(
+          '[LeanFlow Web] Could not finish closing the Lean editor.',
+          error,
+        )
       })
     }
   }, [projectId])
@@ -657,6 +697,8 @@ export function LeanWorkspace({
       active.restoreOpenEditor = undefined
       active.disabledRenameAction?.dispose()
       active.disabledRenameAction = undefined
+      active.collaborativeUndo?.dispose()
+      active.collaborativeUndo = undefined
       active.visibleReadyPath = undefined
       await active.lean.closeHiddenDocuments()
       if (cancelled || runtime.current !== active || active.lean.disposed)
@@ -670,15 +712,21 @@ export function LeanWorkspace({
       }
       try {
         ownEditor = new WorkspaceEditor()
-        active.editor = ownEditor
         if (!snapshot.readOnly) active.virtualFiles.add(uri)
         await ownEditor.start(host, uri, snapshot.content, !!snapshot.readOnly)
         if (cancelled || runtime.current !== active || !host.isConnected) {
           ownEditor.dispose()
           return
         }
+        active.editor = ownEditor
         const editor = ownEditor.editor
         const languageModel = editor.getModel()
+        if (languageModel)
+          active.collaborativeUndo = installCollaborativeEditorUndo(
+            languageModel,
+            snapshot.path,
+            () => collaborativeCommands.current,
+          )
         if (
           snapshot.path.endsWith('.lean') &&
           languageModel &&
@@ -703,17 +751,23 @@ export function LeanWorkspace({
           monacoEditor.setModelLanguage(languageModel, tex)
         // The model URI is shared by projects. Set the fetched contents explicitly
         // so a retained VS Code model cannot show a previous project's buffer.
-        if (editor.getValue() !== snapshot.content)
-          editor.setValue(snapshot.content)
+        const currentFile = fileRef.current
+        if (
+          !currentFile ||
+          currentFile.path !== snapshot.path ||
+          currentFile.generation !== snapshot.generation
+        )
+          return
+        if (editor.getValue() !== currentFile.content)
+          editor.setValue(currentFile.content)
         if (!snapshot.readOnly) await active.modelCache.retain(uri)
         if (cancelled || runtime.current !== active) return
         active.visibleReadyPath = snapshot.path
-        pendingLocalChange.current = null
         editor.updateOptions({
           scrollBeyondLastLine: false,
           padding: { top: 16, bottom: 16 },
           fontSize: 14,
-          readOnly: !!snapshot.readOnly,
+          readOnly: !!fileRef.current?.readOnly,
           // Monaco assigns definition links to the other mouse modifier.
           multiCursorModifier: 'ctrlCmd',
         })
@@ -791,11 +845,6 @@ export function LeanWorkspace({
         active.subscription = editor.onDidChangeModelContent(() => {
           if (syncingContent.current) return
           const content = editor.getValue()
-          pendingLocalChange.current = {
-            path: snapshot.path,
-            generation: snapshot.generation,
-            content,
-          }
           onChangeRef.current(snapshot.path, content)
         })
         await active.lean.showVisibleDocument()
@@ -940,22 +989,19 @@ export function LeanWorkspace({
     }
   }, [projectId, file?.path, file?.generation])
 
-  useLayoutEffect(() => {
-    const draft = pendingLocalChange.current
-    if (
-      draft &&
-      draft.path === file?.path &&
-      draft.generation === file?.generation &&
-      draft.content === file?.content
-    )
-      pendingLocalChange.current = null
-  }, [file?.path, file?.generation, file?.content])
-
   useEffect(() => {
-    let cancelled = false
+    runtime.current?.editor?.editor.updateOptions({
+      readOnly: !!file?.readOnly,
+    })
+  }, [file?.readOnly])
+
+  useLayoutEffect(() => {
     const snapshot = fileRef.current
-    void serialize(() => {
-      if (cancelled || !snapshot) return
+    // The source buffer is authoritative. Apply it before the next input event,
+    // independently of Lean startup/import work in the shared lifecycle queue.
+    // Otherwise a keystroke in a stale model can delete a pending remote edit.
+    try {
+      if (!snapshot) return
       const current = fileRef.current
       if (
         !current ||
@@ -974,50 +1020,69 @@ export function LeanWorkspace({
       )
         return
 
-      // A keystroke may arrive after the server update was rendered but before
-      // this queued effect runs. Wait for the parent to acknowledge that local
-      // draft rather than replacing it with an earlier saved-file notification.
-      const draft = pendingLocalChange.current
-      if (
-        draft?.path === snapshot.path &&
-        draft.generation === snapshot.generation
-      ) {
-        if (draft.content !== snapshot.content) return
-        pendingLocalChange.current = null
-      }
       if (model.getValue() === snapshot.content) return
 
-      const viewState = editor.saveViewState()
+      const edit = documentTextEdit(model.getValue(), snapshot.content)
+      if (!edit) return
+      const start = model.getPositionAt(edit.start)
+      const end = model.getPositionAt(edit.start + edit.deleteCount)
+      const selections = editor.getSelections() || []
+      const offsets = selections.map((selection) => ({
+        anchor: documentOffsetAfterEdit(
+          model.getOffsetAt({
+            lineNumber: selection.selectionStartLineNumber,
+            column: selection.selectionStartColumn,
+          }),
+          edit,
+        ),
+        active: documentOffsetAfterEdit(
+          model.getOffsetAt(selection.getPosition()),
+          edit,
+        ),
+      }))
+      const scrollTop = editor.getScrollTop(),
+        scrollLeft = editor.getScrollLeft()
       syncingContent.current = true
       try {
         model.pushStackElement()
-        model.pushEditOperations(
-          editor.getSelections() || [],
+        const nextSelections = model.pushEditOperations(
+          selections,
           [
             {
-              range: model.getFullModelRange(),
-              text: snapshot.content,
-              forceMoveMarkers: true,
+              range: {
+                startLineNumber: start.lineNumber,
+                startColumn: start.column,
+                endLineNumber: end.lineNumber,
+                endColumn: end.column,
+              },
+              text: edit.insert,
+              forceMoveMarkers: false,
             },
           ],
-          () => null,
+          () =>
+            offsets.map(({ anchor, active }) => {
+              const from = model.getPositionAt(anchor),
+                to = model.getPositionAt(active)
+              return new Selection(
+                from.lineNumber,
+                from.column,
+                to.lineNumber,
+                to.column,
+              )
+            }),
         )
         model.pushStackElement()
-        if (viewState) editor.restoreViewState(viewState)
+        if (nextSelections) editor.setSelections(nextSelections)
+        editor.setScrollPosition({ scrollTop, scrollLeft })
       } finally {
         syncingContent.current = false
       }
-    }).catch((error) => {
-      if (!cancelled) {
-        onStateRef.current('Editor update failed')
-        console.error(
-          '[LeanFlow Web] Could not update the saved file in the editor.',
-          error,
-        )
-      }
-    })
-    return () => {
-      cancelled = true
+    } catch (error) {
+      onStateRef.current('Editor update failed')
+      console.error(
+        '[LeanFlow Web] Could not update the saved file in the editor.',
+        error,
+      )
     }
   }, [projectId, file?.path, file?.generation, file?.content])
 

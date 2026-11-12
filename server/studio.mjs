@@ -37,6 +37,10 @@ import { GitPublisher } from './git-publish.mjs'
 import { validateGitBranch } from './git-branches.mjs'
 import { pdfDisposition } from './pdf-preview.mjs'
 import { installProjectDownloadRoutes } from './project-downloads.mjs'
+import { installProjectSharingRoutes } from './project-sharing.mjs'
+import { ProjectDocuments } from './project-documents.mjs'
+import { installTerminalRecoveryRoutes } from './terminal-recovery.mjs'
+import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
 import { proofTargetReference } from './proof-target.mjs'
 import { loadCapacity } from './capacity.mjs'
 import { LeanBooks, installBookRoutes } from './lean-books.mjs'
@@ -275,6 +279,16 @@ export async function createStudio({
       gitConnections.credentials(owner, repository),
   })
   await workspaces.init()
+  workspaces.memberships.isActiveUser = (actor) => auth.isActive(actor)
+  workspaces.assertActorActive = (actor) => {
+    if (!auth.isActive(actor))
+      throw Object.assign(new Error('Account access is no longer available.'), {
+        status: 404,
+      })
+  }
+  const isAuthenticated = (request, actor) =>
+    auth.identify(request)?.id === actor
+  const projectDocuments = new ProjectDocuments({ workspaces, isAuthenticated })
   const events = new EventStore(dataDir),
     settings = new Settings(dataDir)
   const chats = new ChatStore({
@@ -349,12 +363,26 @@ export async function createStudio({
     server = http.createServer(app),
     sockets = new Set(),
     languageServers = new Map(),
-    socketProjects = new Map()
+    socketProjects = new Map(),
+    socketActors = new Map()
   const closeProjectEditors = (projectId) => {
     for (const ws of sockets)
       if (socketProjects.get(ws) === projectId)
         ws.close(1012, 'Project configuration changed. Retry setup.')
   }
+  const configurationPaths = new Set(PROJECT_CONFIGURATION_FILES)
+  const unsubscribeConfigurationChanges = workspaces.subscribeChanges(
+    (event) => {
+      if (!event.paths.some((filename) => configurationPaths.has(filename)))
+        return
+      const project = workspaces.db
+        .prepare(
+          "SELECT json_extract(data,'$.needsPreparation') AS needsPreparation FROM projects WHERE id=?",
+        )
+        .get(event.projectId)
+      if (project?.needsPreparation) closeProjectEditors(event.projectId)
+    },
+  )
   const origin = process.env.STUDIO_ORIGIN
   const terminals = new Terminals({
     runtime,
@@ -363,6 +391,7 @@ export async function createStudio({
     gitConnections,
     gitIdentity,
     redact: config.redact,
+    isAuthenticated,
   })
   let publisher
   const requireNoGit = (
@@ -371,12 +400,19 @@ export async function createStudio({
     { includeArchived = false, ignoreStopping = false } = {},
   ) => {
     if (includeArchived) {
-      if (
-        !workspaces.db
-          .prepare('SELECT 1 FROM projects WHERE id=? AND owner=?')
-          .get(projectId, owner)
-      )
-        throw Object.assign(new Error('Project not found.'), { status: 404 })
+      try {
+        workspaces.get(projectId, owner)
+      } catch (error) {
+        if (
+          error.status !== 404 ||
+          !workspaces.db
+            .prepare(
+              "SELECT 1 FROM projects AS p JOIN project_members AS m ON m.project=p.id WHERE p.id=? AND m.user=? AND m.role='admin'",
+            )
+            .get(projectId, owner)
+        )
+          throw error
+      }
     } else workspaces.get(projectId, owner)
     if (!ignoreStopping) activity.assertCanStart(owner, projectId)
     if (publisher?.busy.has(projectId))
@@ -390,17 +426,18 @@ export async function createStudio({
   const requireNoRun = (projectId, owner, { ignoreGit = false } = {}) => {
     if (!ignoreGit) requireNoGit(projectId, owner)
     else activity.assertCanStart(owner, projectId)
-    terminals.assertIdle(projectId)
-    if (
-      events.db
-        .prepare(
-          "SELECT 1 FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND (json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') OR json_extract(payload,'$.cleanupFailed')=1) LIMIT 1",
-        )
-        .get(owner, projectId)
-    )
+    terminals.assertIdle(projectId, { actor: owner })
+    const active = events.db
+      .prepare(
+        "SELECT owner FROM jobs WHERE json_extract(payload,'$.projectId')=? AND (json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') OR json_extract(payload,'$.cleanupFailed')=1) ORDER BY owner<>? DESC LIMIT 1",
+      )
+      .get(projectId, owner)
+    if (active)
       throw Object.assign(
         new Error(
-          'Stop active Lean checks, TeX builds, and Lemex runs before changing the project environment.',
+          active.owner !== owner
+            ? 'Another collaborator has active work in this project. Wait for it to finish before changing the project environment.'
+            : 'Stop active Lean checks, TeX builds, and Lemex runs before changing the project environment.',
         ),
         { status: 409 },
       )
@@ -408,23 +445,32 @@ export async function createStudio({
   const requireNoActiveWork = (
     projectId,
     owner,
-    { ignoreStopping = false } = {},
+    { ignoreStopping = false, ignoreTerminalRunId } = {},
   ) => {
     requireNoGit(projectId, owner, { includeArchived: true, ignoreStopping })
-    terminals.assertIdle(projectId)
+    terminals.assertIdle(projectId, {
+      ignoreRunId: ignoreTerminalRunId,
+      actor: owner,
+    })
     const active = events.db
       .prepare(
-        "SELECT 1 FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND (json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') OR json_extract(payload,'$.cleanupFailed')=1) LIMIT 1",
+        "SELECT owner FROM jobs WHERE json_extract(payload,'$.projectId')=? AND (json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') OR json_extract(payload,'$.cleanupFailed')=1) ORDER BY owner<>? DESC LIMIT 1",
       )
-      .get(owner, projectId)
+      .get(projectId, owner)
     if (active || workspaces.jobs.has(projectId))
       throw Object.assign(
         new Error(
-          'Stop active Lean checks, TeX builds, and Lemex runs, and wait for project preparation, before deleting or restoring project data.',
+          (active && active.owner !== owner) ||
+            (workspaces.jobs.has(projectId) &&
+              workspaces.preparationActors.get(projectId) !== owner)
+            ? 'Another collaborator has active work in this project. Wait for it to finish before moving project data.'
+            : 'Stop active Lean checks, TeX builds, and Lemex runs, and wait for project preparation, before deleting or restoring project data.',
         ),
         { status: 409 },
       )
   }
+  workspaces.assertConfigurationIdle = (id, actor, { terminalRunId } = {}) =>
+    requireNoActiveWork(id, actor, { ignoreTerminalRunId: terminalRunId })
   const trash = new TrashManager({
     texBuilds,
     workspaces,
@@ -641,6 +687,85 @@ export async function createStudio({
   app.get('/api/projects', (req, res) =>
     res.json(workspaces.list(req.user.id).map(publicProject)),
   )
+  installProjectSharingRoutes(app, {
+    workspaces,
+    auth,
+    async onAccessChanged(projectId, actor, { previousRole } = {}) {
+      const currentRole = workspaces.memberships.role(projectId, actor)
+      const rank = { viewer: 1, editor: 2, admin: 3 }
+      // Promotions and repeated grants preserve ongoing sessions. Revocation
+      // and downgrades close them before any further privileged activity.
+      if (
+        currentRole &&
+        (!previousRole || rank[currentRole] >= rank[previousRole])
+      )
+        return
+      projectDocuments.closeAccess(projectId, actor)
+      for (const ws of sockets)
+        if (
+          socketProjects.get(ws) === projectId &&
+          socketActors.get(ws) === actor
+        )
+          ws.close(1008, 'Project access changed. Reopen the project.')
+      const stopping = [terminals.closeProject(projectId, actor)]
+      let editor = false
+      try {
+        workspaces.requireEditor(projectId, actor)
+        editor = true
+      } catch (error) {
+        if (![403, 404].includes(error.status)) throw error
+      }
+      if (!editor) {
+        const runs = new Map(
+          events.activeMetadata(actor, projectId).map((job) => [job.id, job]),
+        )
+        for (const manager of [agents, jobs])
+          for (const id of manager.active.keys()) {
+            const job = events.getMetadata(id)
+            if (job.projectId === projectId && job.owner === actor)
+              runs.set(id, job)
+          }
+        for (const job of runs.values()) {
+          if (job.kind === 'agent')
+            stopping.push(
+              agents.stop(
+                actor,
+                job.id,
+                'Editor access to this project was removed.',
+              ),
+            )
+          if (job.kind === 'check') stopping.push(jobs.stop(actor, job.id))
+        }
+      }
+      const results = await Promise.allSettled(stopping)
+      const failed = results.find((result) => result.status === 'rejected')
+      if (failed) throw failed.reason
+    },
+  })
+  installTerminalRecoveryRoutes(app, workspaces)
+  // File permissions also live in WorkspaceStore. This boundary protects
+  // process launch and owner-only administration before any side effects.
+  app.use('/api/projects/:id', (req, _res, next) => {
+    const ownerOnly = new Set(['/convert', '/rename'])
+    if (
+      ownerOnly.has(req.path) ||
+      (req.path === '/trash' && req.body?.path === undefined)
+    )
+      workspaces.requireAdmin(req.params.id, req.user.id)
+    else if (
+      [
+        '/terminal/stop',
+        '/prepare',
+        '/environment',
+        '/prepare/stop',
+        '/git',
+      ].includes(req.path) ||
+      (!['GET', 'HEAD'].includes(req.method) &&
+        ['/file', '/files', '/folders', '/upload', '/trash'].includes(req.path))
+    )
+      workspaces.requireEditor(req.params.id, req.user.id)
+    next()
+  })
   app.get('/api/git-connections', async (req, res) =>
     res.json(await gitConnections.get(req.user.id)),
   )
@@ -676,7 +801,7 @@ export async function createStudio({
   )
   app.post('/api/projects/:id/terminal/stop', async (req, res) => {
     workspaces.get(req.params.id, req.user.id)
-    await terminals.closeProject(req.params.id)
+    await terminals.closeProject(req.params.id, req.user.id)
     res.json({ stopped: true })
   })
   app.post('/api/projects/:id/convert', async (req, res) =>
@@ -831,6 +956,18 @@ export async function createStudio({
       )
     workspaces.get(req.params.id, req.user.id)
     requireNoGit(req.params.id, req.user.id)
+    if (
+      [...terminals.sessions].some(
+        (session) =>
+          session.projectId === req.params.id && session.actor !== req.user.id,
+      )
+    )
+      throw Object.assign(
+        new Error(
+          'Another collaborator has an open terminal. Ask them to close it before moving project data.',
+        ),
+        { status: 409 },
+      )
     const move = async () => {
       const assertIdle = () =>
         requireNoActiveWork(req.params.id, req.user.id, {
@@ -853,10 +990,14 @@ export async function createStudio({
       async () => {
         await terminals.closeProject(req.params.id)
         for (const ws of sockets)
-          if (socketProjects.get(ws) === req.params.id)
+          if (
+            req.body.path === undefined &&
+            socketProjects.get(ws) === req.params.id
+          )
             ws.close(1001, 'Project processes stopped for Trash.')
         return move()
       },
+      { preserveEditors: req.body.path !== undefined },
     )
     if (receipt.kind === 'project')
       for (const ws of sockets)
@@ -929,11 +1070,12 @@ export async function createStudio({
     author: await gitIdentity(user.id),
   })
   app.get('/api/projects/:id/git', async (req, res) => {
-    workspaces.get(req.params.id, req.user.id)
+    publisher.requireProjectAccess(req.user.id, req.params.id)
     activity.assertCanStart(req.user.id, req.params.id)
     res.json(await gitInfo(req.params.id, req.user))
   })
   app.post('/api/projects/:id/git', async (req, res) => {
+    publisher.requireProjectAccess(req.user.id, req.params.id)
     const { action, name, message, authorName, authorEmail, reviewToken } =
       req.body
     if (action === 'preview-push')
@@ -1257,7 +1399,9 @@ export async function createStudio({
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
     res.flushHeaders()
-    streamRunEvents(req, res, events, req.params.id, after)
+    streamRunEvents(req, res, events, req.params.id, after, {
+      isAuthorized: () => isAuthenticated(req, req.user.id),
+    })
   })
   app.use('/api/books', compression())
   installBookRoutes(app, books)
@@ -1296,6 +1440,8 @@ export async function createStudio({
     const terminalMatch = /^\/websocket\/terminal\/([a-zA-Z0-9_-]+)$/.exec(
       req.url || '',
     )
+    const collaborationMatch =
+      /^\/websocket\/collaboration\/([a-zA-Z0-9_-]+)$/.exec(req.url || '')
     const reject = (status) => {
       socket.end(
         `HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\nCache-Control: no-store\r\n\r\n`,
@@ -1303,25 +1449,39 @@ export async function createStudio({
     }
     if (!user) return reject('401 Unauthorized')
     if (!sameOrigin(req, origin)) return reject('403 Forbidden')
-    if (!match && !terminalMatch) return reject('404 Not Found')
+    if (!match && !terminalMatch && !collaborationMatch)
+      return reject('404 Not Found')
     let project
     try {
-      project = workspaces.get((terminalMatch || match)[1], user.id)
+      project = workspaces.get(
+        (collaborationMatch || terminalMatch || match)[1],
+        user.id,
+      )
     } catch {
       return reject('404 Not Found')
     }
-    if (project.status !== 'ready') return reject('409 Conflict')
     if (activity.isStopping(user.id, project.id)) return reject('409 Conflict')
+    if (collaborationMatch)
+      return projectDocuments.upgrade(req, socket, head, {
+        projectId: project.id,
+        actor: user.id,
+      })
+    if (project.status !== 'ready') return reject('409 Conflict')
     if (terminalMatch) {
       try {
+        workspaces.requireEditor(project.id, user.id)
         requireNoGit(project.id, user.id)
         terminals.assertCapacity(project.id)
       } catch (error) {
         return reject(
-          error.status === 429 ? '429 Too Many Requests' : '409 Conflict',
+          error.status === 429
+            ? '429 Too Many Requests'
+            : error.status === 403
+              ? '403 Forbidden'
+              : '409 Conflict',
         )
       }
-      return terminals.upgrade(req, socket, head, project)
+      return terminals.upgrade(req, socket, head, project, user.id)
     }
     if (
       sockets.size >= capacity.editors ||
@@ -1329,12 +1489,13 @@ export async function createStudio({
     )
       return reject('429 Too Many Requests')
     wss.handleUpgrade(req, socket, head, (ws) =>
-      wss.emit('connection', ws, req, project),
+      wss.emit('connection', ws, req, project, user.id),
     )
   })
-  wss.on('connection', (ws, _req, project) => {
+  wss.on('connection', (ws, request, project, actor) => {
     sockets.add(ws)
     socketProjects.set(ws, project.id)
+    socketActors.set(ws, actor)
     languageServers.set(project.id, (languageServers.get(project.id) || 0) + 1)
     let child,
       alive = true,
@@ -1343,11 +1504,17 @@ export async function createStudio({
     try {
       child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
         network: 'none',
-        ...(project.repairedConfiguration
-          ? { readOnlyWorkspace: true, writeLakeCache: true }
-          : {}),
+        readOnlyWorkspace: true,
+        writeLakeCache: true,
+        freshHome: true,
+        cleanHome: true,
       })
       const sendToClient = (message) => {
+        if (!isAuthenticated(request, actor)) {
+          ws.close(1008, 'Account access changed. Sign in again.')
+          child?.kill()
+          return
+        }
         if (ws.readyState === 1) ws.send(JSON.stringify(message))
       }
       requests = new LeanRequests({
@@ -1391,6 +1558,12 @@ export async function createStudio({
       ws.on('message', (data) => {
         lastActivity = Date.now()
         try {
+          if (!isAuthenticated(request, actor)) {
+            ws.close(1008, 'Account access changed. Sign in again.')
+            child?.kill()
+            return
+          }
+          workspaces.get(project.id, actor)
           const message = validateClientUris(JSON.parse(data.toString()))
           requests.track(message)
           progress.client(message)
@@ -1408,6 +1581,11 @@ export async function createStudio({
       alive = true
     })
     const heartbeat = setInterval(() => {
+      if (!isAuthenticated(request, actor)) {
+        ws.close(1008, 'Account access changed. Sign in again.')
+        child?.kill()
+        return
+      }
       if (!alive || Date.now() - lastActivity > 30 * 60_000)
         return ws.terminate()
       alive = false
@@ -1421,6 +1599,7 @@ export async function createStudio({
       child?.kill()
       sockets.delete(ws)
       socketProjects.delete(ws)
+      socketActors.delete(ws)
       languageServers.set(
         project.id,
         Math.max(0, (languageServers.get(project.id) || 1) - 1),
@@ -1435,7 +1614,8 @@ export async function createStudio({
       chats.stopNaming()
       const stopped = new Promise((resolve) => server.close(resolve))
       server.closeAllConnections()
-      terminals.close()
+      const terminalsStopped = terminals.close()
+      await projectDocuments.close()
       for (const ws of sockets) ws.terminate()
       const checksStopped = jobs.shutdown(),
         agentsStopped = agents.shutdown(),
@@ -1446,12 +1626,14 @@ export async function createStudio({
         checksStopped,
         agentsStopped,
         texStopped,
+        terminalsStopped,
         playgroundPreparation,
         presetPreparation,
         ...workspaces.jobs.values(),
       ])
       await stopped
       chats.close()
+      unsubscribeConfigurationChanges()
       workspaces.close()
       events.close()
     })()
@@ -1463,6 +1645,7 @@ export async function createStudio({
     auth,
     runtime,
     workspaces,
+    projectDocuments,
     events,
     agents,
     texBuilds,

@@ -179,7 +179,7 @@ export class Auth {
     this.writeQueue = task
     return task
   }
-  identify(req) {
+  #readCurrentUsers() {
     try {
       const filename = path.join(this.dir, 'users.json')
       const stamp = (stat) =>
@@ -191,7 +191,7 @@ export class Auth {
         try {
           const loadedStamp = stamp(fstatSync(fd, { bigint: true }))
           const users = JSON.parse(readFileSync(fd, 'utf8'))
-          if (!Array.isArray(users)) return null
+          if (!Array.isArray(users)) return false
           this.users = users
           this.usersStamp = loadedStamp
         } finally {
@@ -199,8 +199,15 @@ export class Auth {
         }
       }
     } catch {
-      return null
+      return false
     }
+    return true
+  }
+  isActive(id) {
+    return this.#readCurrentUsers() && this.users.some((user) => user.id === id)
+  }
+  identify(req) {
+    if (!this.#readCurrentUsers()) return null
     const bearer = /^Bearer ([A-Za-z0-9_-]+)$/.exec(
       req.headers.authorization || '',
     )?.[1]

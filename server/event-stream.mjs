@@ -1,6 +1,13 @@
 // Replay from durable storage in small pages. A slow tab must not accumulate
 // the whole run in the HTTP write buffer or in a separate in-memory queue.
-export function streamRunEvents(request, response, events, id, after) {
+export function streamRunEvents(
+  request,
+  response,
+  events,
+  id,
+  after,
+  { isAuthorized = () => true } = {},
+) {
   let cursor = after,
     scheduled,
     waiting = false,
@@ -13,6 +20,11 @@ export function streamRunEvents(request, response, events, id, after) {
     schedule()
   }
   const write = (text) => {
+    if (!isAuthorized()) {
+      close()
+      response.end()
+      return false
+    }
     if (response.write(text)) return true
     waiting = true
     response.once('drain', onDrain)
@@ -49,6 +61,11 @@ export function streamRunEvents(request, response, events, id, after) {
     }
   }
   const heartbeat = setInterval(() => {
+    if (!closed && !isAuthorized()) {
+      close()
+      response.end()
+      return
+    }
     if (!closed && !waiting) write(': heartbeat\n\n')
   }, 15_000)
   heartbeat.unref()

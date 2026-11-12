@@ -298,7 +298,7 @@ try {
     .waitFor()
   await f.page
     .getByText(
-      'Connect your account to Lemex to open your workspace. You can update your key later in Assistant settings.',
+      'Connect your account to Lemex to open your workspace. Click your account in the sidebar to update your profile, API key, or settings.',
       { exact: true },
     )
     .waitFor()

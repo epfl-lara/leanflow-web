@@ -48,6 +48,7 @@ const chatSuites = [
 ]
 const workspaceSuites = [
   'account-controls',
+  'project-sharing',
   'file-lifecycle',
   'books',
   'downloads',

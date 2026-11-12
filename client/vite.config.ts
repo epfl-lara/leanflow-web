@@ -5,13 +5,16 @@ import { defineConfig } from 'vite'
 import { nodePolyfills } from 'vite-plugin-node-polyfills'
 import { viteStaticCopy } from 'vite-plugin-static-copy'
 import svgr from 'vite-plugin-svgr'
+import { leanClientCompatibility } from './build/lean-client-compat.mjs'
+
+const leanClientCompat = leanClientCompatibility()
 
 // https://vitejs.dev/config/
 export default defineConfig({
   optimizeDeps: {
     esbuildOptions: {
       // @ts-ignore           // TODO
-      plugins: [importMetaUrlPlugin],
+      plugins: [importMetaUrlPlugin, leanClientCompat.esbuild],
     },
     // exclude: ["Projects"],
   },
@@ -20,6 +23,7 @@ export default defineConfig({
     outDir: 'dist',
   },
   plugins: [
+    leanClientCompat.vite,
     react(),
     tailwindcss(),
     svgr({

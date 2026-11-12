@@ -213,11 +213,32 @@ export class GitPublisher {
     if (this.busy.has(projectId))
       return 'A Git operation is already running for this project.'
     try {
-      this.assertIdle(projectId, owner)
+      this.#assertIdle(projectId, owner)
     } catch (error) {
       return error.message
     }
     return null
+  }
+  requireProjectAccess(actor, projectId) {
+    const project = this.workspaces.requireEditor
+      ? this.workspaces.requireEditor(projectId, actor)
+      : this.workspaces.get(projectId, actor)
+    const privateImport =
+      project.owner === actor &&
+      this.workspaces.memberships?.list(projectId).members.length === 1
+    if (
+      this.workspaces.repositoryRoot(project) !== project.root &&
+      !privateImport
+    )
+      fail(
+        'Source control includes files outside this project folder. Import the folder as a standalone project to manage its Git history.',
+        403,
+      )
+    return project
+  }
+  #assertIdle(projectId, actor) {
+    this.requireProjectAccess(actor, projectId)
+    this.assertIdle(projectId, actor)
   }
   async #locked(projectId, action) {
     const previous = this.workspaces.locks?.get(projectId) || Promise.resolve()
@@ -231,15 +252,15 @@ export class GitPublisher {
     }
   }
   async withProject(owner, projectId, action, { workspaceLock = true } = {}) {
-    this.workspaces.get(projectId, owner)
+    this.requireProjectAccess(owner, projectId)
     if (this.busy.has(projectId))
       fail('A Git operation is already running for this project.', 409)
     this.busy.add(projectId)
     const execute = async () => {
-      const project = this.workspaces.get(projectId, owner)
+      const project = this.requireProjectAccess(owner, projectId)
       if (project.status !== 'ready')
         fail('Prepare this project before changing Git history.', 409)
-      this.assertIdle(projectId, owner)
+      this.#assertIdle(projectId, owner)
       return action(project)
     }
     try {
@@ -476,7 +497,7 @@ export class GitPublisher {
     })
   }
   async metadata(owner, projectId, status) {
-    const project = this.workspaces.get(projectId, owner)
+    const project = this.requireProjectAccess(owner, projectId)
     status ||= await this.workspaces.gitStatus(projectId, owner)
     const blockedReason = this.blocked(owner, projectId)
     const remembered = await this.#remembered(owner, projectId)
@@ -546,6 +567,7 @@ export class GitPublisher {
       }
       review.update('\0')
     }
+    this.requireProjectAccess(owner, projectId)
     return {
       ...status,
       remoteUrl,
@@ -604,7 +626,7 @@ export class GitPublisher {
         try {
           let shallowHashes = []
           await this.#locked(projectId, async () => {
-            this.assertIdle(projectId, owner)
+            this.#assertIdle(projectId, owner)
             let child
             try {
               const exported = await this.#queued(
@@ -792,7 +814,7 @@ export class GitPublisher {
             { readOnlyWorkspace: true, readOnlyHome: true },
           )
           await this.#locked(projectId, async () => {
-            this.assertIdle(projectId, owner)
+            this.#assertIdle(projectId, owner)
             if (
               bareHead.stdout.trim() !== head ||
               (await this.#head(source)) !== head
@@ -881,7 +903,7 @@ export class GitPublisher {
         try {
           const source = await this.#source(project)
           await this.#locked(projectId, async () => {
-            this.assertIdle(projectId, owner)
+            this.#assertIdle(projectId, owner)
             if ((await this.#head(source)) !== preview.head)
               fail(
                 'The branch HEAD changed after this preview. Preview the new commits before publishing.',
@@ -889,7 +911,7 @@ export class GitPublisher {
               )
           })
           const destination = await this.#destination(preview.remoteUrl)
-          this.assertIdle(projectId, owner)
+          this.#assertIdle(projectId, owner)
           this.previews.delete(input.previewId)
           attempted = true
           const env = { ...gitEnv }

@@ -17,14 +17,18 @@ export function TerminalPanel({
   projectName,
   theme,
   onClose,
+  onStateChange,
 }: {
   projectId: string
   projectName: string
   theme: 'light' | 'dark'
   onClose: () => void
+  onStateChange?: (active: boolean) => void
 }) {
   const host = useRef<HTMLDivElement>(null)
   const terminal = useRef<Terminal | null>(null)
+  const stateChange = useRef(onStateChange)
+  stateChange.current = onStateChange
   const themeRef = useRef(theme)
   themeRef.current = theme
   const [attempt, setAttempt] = useState(0)
@@ -39,6 +43,7 @@ export function TerminalPanel({
 
   useEffect(() => {
     if (!host.current) return
+    stateChange.current?.(true)
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 13,
@@ -148,12 +153,14 @@ export function TerminalPanel({
       if (disposed) return
       term.options.disableStdin = true
       setConnected(false)
+      stateChange.current?.(false)
       setStatus(
         failure || 'Terminal disconnected. Reopen it to start a new shell.',
       )
     }
     return () => {
       disposed = true
+      stateChange.current?.(false)
       observer.disconnect()
       input.dispose()
       socket.close()
@@ -193,9 +200,9 @@ export function TerminalPanel({
             </span>
             <span
               className="terminal-location"
-              title="Run pwd to see this project's folder."
+              title="Commands run in your private working copy of this project."
             >
-              Project folder
+              Private working copy
             </span>
           </div>
           <output className="terminal-status" data-connected={connected}>
@@ -226,8 +233,11 @@ export function TerminalPanel({
         <p className="terminal-help">
           <Icon name="info" size={13} />
           <span>
-            These are the same saved files as in the file browser. Save editor
-            changes first. <kbd>Ctrl+C</kbd> stops a command.
+            File edits sync from your private copy with conflict checks.
+            Terminal Git history stays private; use Source control to publish
+            project history. If updates pause, close this terminal and recover
+            its files below.
+            <kbd>Ctrl+C</kbd> stops a command.
           </span>
         </p>
         <div className="terminal-screen" ref={host} />

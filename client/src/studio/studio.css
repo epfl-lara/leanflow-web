@@ -720,6 +720,21 @@ textarea {
 .workspace-alert > .icon-button {
   color: var(--danger);
 }
+.draft-protection-alert {
+  flex-wrap: wrap;
+}
+.draft-downloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+.draft-downloads .button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .file-toolbar {
   display: flex;
   justify-content: space-between;
@@ -3092,6 +3107,14 @@ body.panel-resizing iframe {
   gap: 12px;
   margin-top: 20px;
 }
+.account-viewer-projects {
+  margin-top: 20px;
+}
+.account-viewer-projects .button {
+  width: 100%;
+  margin-top: 8px;
+  white-space: normal;
+}
 .account-setup-footer .button {
   min-height: 44px;
 }
@@ -3120,5 +3143,110 @@ body.panel-resizing iframe {
     min-height: 52px;
     padding: 8px 4px;
     white-space: normal;
+  }
+}
+
+.project-sharing {
+  width: min(600px, 100%);
+}
+.project-sharing output {
+  display: block;
+  margin: 10px 0;
+}
+.project-sharing section + section {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+.project-sharing h3 {
+  margin: 12px 0;
+  font-size: 14px;
+}
+.sharing-person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+}
+.sharing-person-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sharing-person-name small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+.sharing-person select,
+.sharing-link-form select {
+  width: auto;
+  margin: 0;
+  padding: 6px 8px;
+}
+.sharing-people {
+  margin-bottom: 16px;
+}
+.sharing-link-form,
+.sharing-link-copy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sharing-link-copy input {
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  font-size: 12px;
+}
+.sharing-link {
+  padding: 8px 0;
+}
+.viewer-agent-note {
+  margin: 12px 16px;
+}
+.sharing-admin-confirmation {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 16px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.sharing-admin-confirmation input {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.sharing-self-confirmation {
+  margin: 16px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.sharing-self-confirmation p {
+  margin: 6px 0 12px;
+}
+@media (max-width: 480px) {
+  .sharing-person {
+    flex-wrap: wrap;
+  }
+  .sharing-person-name {
+    flex-basis: 100%;
+  }
+  .sharing-link-copy {
+    flex-wrap: wrap;
+  }
+  .project-sharing .button,
+  .project-sharing .copy-button,
+  .project-sharing select {
+    min-height: 44px;
   }
 }

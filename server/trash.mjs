@@ -30,6 +30,23 @@ export class TrashManager {
     }
   }
 
+  #projectActors(projectId) {
+    return [
+      ...new Set([
+        ...this.events.db
+          .prepare(
+            "SELECT DISTINCT owner FROM jobs WHERE json_extract(payload,'$.projectId')=?",
+          )
+          .all(projectId)
+          .map((row) => row.owner),
+        ...this.chats.db
+          .prepare('SELECT DISTINCT owner FROM chats WHERE project=?')
+          .all(projectId)
+          .map((row) => row.owner),
+      ]),
+    ]
+  }
+
   async deleteForever(owner, id) {
     const entry = this.get(owner, id)
     if (entry.kind === 'chat') {
@@ -38,19 +55,24 @@ export class TrashManager {
     }
     const assertIdle = () => this.assertIdle(entry.projectId, owner)
     assertIdle()
-    if (entry.kind === 'project')
-      await this.texBuilds?.removeProject(owner, entry.projectId)
+    const actors =
+      entry.kind === 'project' ? this.#projectActors(entry.projectId) : []
+    for (const actor of actors)
+      await this.texBuilds?.removeProject(actor, entry.projectId)
     const result = await this.workspaces.deleteForever(id, owner, {
       assertIdle,
       candidateRunIds:
         entry.kind === 'project'
-          ? this.events
-              .projectMetadata(owner, entry.projectId)
-              .map((job) => job.id)
+          ? actors.flatMap((actor) =>
+              this.events
+                .projectMetadata(actor, entry.projectId)
+                .map((job) => job.id),
+            )
           : [],
     })
     if (entry.kind === 'project') {
-      this.chats.deleteProject(owner, entry.projectId)
+      for (const actor of actors)
+        this.chats.deleteProject(actor, entry.projectId)
     }
     return result
   }

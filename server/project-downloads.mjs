@@ -139,6 +139,7 @@ export async function createProjectDownload(
   ])
   const check = () => {
     if (signal.aborted) throw cancelledDownload()
+    workspaces.get(id, owner)
   }
   check()
   if (filename !== undefined) {

@@ -190,3 +190,75 @@ try {
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /FIFO replacement rejected/)
   })
+
+for (const operation of [
+  'batch save',
+  'terminal publication',
+  'agent publication',
+])
+  test(`${operation} cannot commit after account access is removed during staging`, async (t) => {
+    const { store, project } = await fixture(t)
+    const before = await store.readFile(project.id, 'alice', 'Main.lean')
+    let active = true
+    store.assertActorActive = () => {
+      if (!active)
+        throw Object.assign(new Error('Account removed'), { status: 404 })
+    }
+    let snapshot
+    if (operation === 'terminal publication')
+      snapshot = await store.terminalSnapshot(
+        project.id,
+        'alice',
+        'staged-terminal',
+      )
+    if (operation === 'agent publication')
+      snapshot = await store.snapshot(project.id, 'alice', 'staged-agent')
+    if (snapshot)
+      await fs.writeFile(
+        path.join(snapshot.root, 'Main.lean'),
+        '-- private pending edit\n',
+      )
+    const changes =
+      operation === 'agent publication' ? await store.changes(snapshot) : null
+    const originalWrite = promiseFs.writeFile
+    let staged = false
+    const mockedWrite = t.mock.method(
+      promiseFs,
+      'writeFile',
+      async (...args) => {
+        const result = await originalWrite(...args)
+        if (
+          String(args[0]).startsWith(store.historyDir + path.sep) &&
+          String(args[0]).includes('/staged/')
+        ) {
+          staged = true
+          active = false
+        }
+        return result
+      },
+    )
+    syncBuiltinESMExports()
+    try {
+      const pending =
+        operation === 'batch save'
+          ? store.writeFiles(project.id, 'alice', [
+              {
+                path: 'Main.lean',
+                content: '-- private pending edit\n',
+                expectedHash: before.hash,
+              },
+            ])
+          : operation === 'terminal publication'
+            ? store.syncTerminal(snapshot)
+            : store.syncLive(snapshot, changes)
+      await assert.rejects(pending, { status: 404 })
+      assert.equal(staged, true)
+      assert.equal(
+        await fs.readFile(path.join(project.root, 'Main.lean'), 'utf8'),
+        before.content,
+      )
+    } finally {
+      mockedWrite.mock.restore()
+      syncBuiltinESMExports()
+    }
+  })

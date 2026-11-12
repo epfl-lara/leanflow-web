@@ -102,3 +102,24 @@ test('storage failures close the stream instead of leaving a live subscription',
   assert.equal(f.events.listenerCount('run'), 0)
   assert.equal(f.request.listenerCount('aborted'), 0)
 })
+
+test('an open event stream stops before private output after its account credential is revoked', async (t) => {
+  const f = fixture(t, 1)
+  let authorized = true,
+    ended = false
+  f.response.end = () => {
+    ended = true
+    f.response.emit('close')
+  }
+  streamRunEvents(f.request, f.response, f.events, 'run', 0, {
+    isAuthorized: () => authorized,
+  })
+  await tick()
+  assert.equal(f.written.length, 1)
+  authorized = false
+  f.add(1)
+  await tick()
+  assert.equal(f.written.length, 1)
+  assert.equal(ended, true)
+  assert.equal(f.events.listenerCount('run'), 0)
+})

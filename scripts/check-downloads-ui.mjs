@@ -68,6 +68,14 @@ try {
       {
         id: 'preparing-download-fixture',
         name: 'Preparing project',
+        accessRole: 'viewer',
+        status: 'preparing',
+        protected: true,
+      },
+      {
+        id: 'preparing-admin-download-fixture',
+        name: 'Preparing managed project',
+        accessRole: 'admin',
         status: 'preparing',
         protected: true,
       },
@@ -76,6 +84,7 @@ try {
       [projectId]: sources,
       [playgroundId]: { 'Main.lean': '-- Saved playground\n' },
       'preparing-download-fixture': { 'Main.lean': '-- Preparing\n' },
+      'preparing-admin-download-fixture': { 'Main.lean': '-- Preparing\n' },
     },
     chats: [
       { id: 'download-chat', projectId, title: 'Download fixture' },
@@ -249,8 +258,33 @@ try {
     ),
     true,
   )
+  await project('Preparing managed project').focus()
+  await page.keyboard.press('Shift+F10')
+  assert.equal(
+    await menu
+      .getByRole('menuitem', { name: 'Download project ZIP', exact: true })
+      .isDisabled(),
+    true,
+  )
+  const preparingShare = menu.getByRole('menuitem', {
+    name: 'Share project',
+    exact: true,
+  })
+  assert.equal(await preparingShare.isEnabled(), true)
+  await until(
+    () =>
+      preparingShare.evaluate((element) => element === document.activeElement),
+    'preparing project admin menu focus',
+  )
+  await page.keyboard.press('Escape')
+  assert.equal(
+    await project('Preparing managed project').evaluate(
+      (element) => element === document.activeElement,
+    ),
+    true,
+  )
   report.checks.push(
-    'Right-click preserves selection; saved Unicode and binary files download exactly; keyboard navigation, Escape focus restoration (including disabled-only menus), and outside dismissal work.',
+    'Right-click preserves selection; saved Unicode and binary files download exactly; keyboard navigation, Escape focus restoration (including viewer disabled-only menus), and outside dismissal work. Preparing projects keep downloads disabled while Admin sharing remains available and receives menu focus.',
   )
 
   await tree.locator('.dependency-toggle').click()

@@ -686,6 +686,12 @@ try {
         .join('\n')
         .trimEnd()
     await editor().focus()
+    assert(
+      report.collaborationFallbacks.some(
+        (file) => file.projectId === projectId && file.path === 'chapter.tex',
+      ),
+      'The compiler fixture explicitly keeps chapter.tex on ordinary version-checked saving',
+    )
     // TeX's comment trigger may split one insertion into multiple undo stops.
     for (
       let step = 0;

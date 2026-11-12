@@ -11,12 +11,8 @@ export class ProjectActivity {
     this.stopping = new Set()
   }
 
-  #key(owner, projectId) {
-    return JSON.stringify([owner, projectId])
-  }
-
-  isStopping(owner, projectId) {
-    return this.stopping.has(this.#key(owner, projectId))
+  isStopping(_owner, projectId) {
+    return this.stopping.has(projectId)
   }
 
   assertCanStart(owner, projectId) {
@@ -27,11 +23,48 @@ export class ProjectActivity {
       )
   }
 
-  async withStopped(owner, projectId, action) {
+  async withStopped(
+    owner,
+    projectId,
+    action,
+    { preserveEditors = false } = {},
+  ) {
     const project = this.workspaces.get(projectId, owner)
     this.assertCanStart(owner, projectId)
-    const key = this.#key(owner, projectId)
-    this.stopping.add(key)
+    const setupActor = this.workspaces.preparationActors?.get(projectId)
+    if (
+      this.workspaces.jobs.has(projectId) &&
+      setupActor &&
+      setupActor !== owner
+    )
+      throw Object.assign(
+        new Error(
+          'Another collaborator is preparing this project. Wait for setup to finish before moving files.',
+        ),
+        { status: 409 },
+      )
+    const otherWork = this.events.db
+      .prepare(
+        "SELECT 1 FROM jobs WHERE owner<>? AND json_extract(payload,'$.projectId')=? AND (json_extract(payload,'$.status') IN ('queued','starting','running','stopping','verifying','preparing') OR json_extract(payload,'$.cleanupFailed')=1) LIMIT 1",
+      )
+      .get(owner, projectId)
+    const finishingOtherWork = [this.jobs, this.agents, this.texBuilds].some(
+      (manager) =>
+        [...(manager?.active?.keys() || [])].some((id) => {
+          const job = this.events.getMetadata(id)
+          return job.projectId === projectId && job.owner !== owner
+        }),
+    )
+    if (otherWork || finishingOtherWork)
+      throw Object.assign(
+        new Error(
+          'Another collaborator has active work in this project. Wait for it to finish before moving project data.',
+        ),
+        { status: 409 },
+      )
+    // Block starts for every member before awaiting worker teardown. No store
+    // lock is held: a stopping mirror may still need to finish its short commit.
+    this.stopping.add(projectId)
     try {
       const results = await Promise.allSettled([
         this.jobs.stopProject(owner, projectId),
@@ -42,7 +75,7 @@ export class ProjectActivity {
       // The runtime also owns editors and retains workers whose cleanup failed.
       // A stopped job receipt alone does not prove its container has exited.
       const roots = new Set([
-        project.root,
+        ...(preserveEditors ? [] : [project.root]),
         ...(this.texBuilds?.workerRoots(owner, projectId) || []),
       ])
       for (const job of this.events.projectMetadata(owner, projectId)) {
@@ -62,7 +95,7 @@ export class ProjectActivity {
         )
       return await action()
     } finally {
-      this.stopping.delete(key)
+      this.stopping.delete(projectId)
     }
   }
 }

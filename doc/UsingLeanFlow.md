@@ -4,13 +4,13 @@
 
 Choose **Mathlib Playground** on the welcome screen, or expand **Playgrounds** in the sidebar and choose **New playground**. It opens a private scratch file with `import Mathlib`, using the prepared Lean and Mathlib versions. New playgrounds have distinct names such as `Scratch.lean` and `Scratch2.lean`. Paste your code; files save automatically after a short pause. **Save** or **Ctrl+S** (**Cmd+S** on macOS) saves immediately.
 
-Autosave is enabled for editable files, including Lean, Markdown, and TeX. It waits about 1.5 seconds after typing, saves periodically during longer edits, and finishes pending saves before changing workspaces. The status bar shows **Saving…**, **All changes saved**, or a save problem. Connection failures retry with a delay. Conflicts pause autosave and preserve your edits in the current tab; resolve the conflict or use **Reload file** to discard local changes. Keep the tab open until saving succeeds. Read-only library sources are never saved.
+Autosave is enabled for editable files, including Lean, Markdown, and TeX. Live text edits save through the shared document connection. The fallback save path waits about 1.5 seconds after typing. Pending saves finish before changing workspaces. The status bar shows **Saving…**, **All changes saved**, or a save problem. Connection failures retry with a delay. Conflicts pause autosave and preserve your edits in the current tab; resolve the conflict or use **Reload file** to discard local changes. Keep the tab open until saving succeeds. Read-only library sources are never saved.
 
 Choose **Open .lean file** to upload one UTF-8 Lean file of at most 2 MiB. Its contents open as `Main.lean` in a new workspace. Files importing other modules from your own project need the full project instead.
 
 Saved files appear under **Playgrounds** and can be reopened with their chats. Hover over a playground or focus it with the keyboard to show **Rename playground** and **Delete playground**. Rename changes its displayed name and download name, keeping its code and chats. Deleted playgrounds can be restored with **Undo** or **Trash**. Moving a playground to Trash automatically stops its active work first.
 
-Use **Check File** to run a Lean check or **Download .lean** to download the current editor contents, including unsaved edits. Use **Convert to project** to enable source control and multi-file Lemex requests; conversion keeps the same folder, files, chats, and pinned environment. If a terminal command adds extra files to a playground, its file tree appears so you can open them. The editor and terminal both use `Main.lean`. The playground name, such as `Scratch.lean`, identifies the workspace and names its download; renaming it does not change Lean imports. The terminal header shows which workspace is connected, and switching workspaces closes its terminal.
+Use **Check File** to run a Lean check or **Download .lean** to download the current editor contents, including unsaved edits. Use **Convert to project** to enable source control and multi-file Lemex requests; conversion keeps the same folder, files, chats, and pinned environment. If a terminal command adds extra files to a playground, its file tree appears so you can open them. The editor and each private terminal copy use `Main.lean`. The playground name, such as `Scratch.lean`, identifies the workspace and names its download; renaming it does not change Lean imports. The terminal header shows which workspace is connected, and switching workspaces closes its terminal.
 
 The shared Mathlib template stays protected; your own playgrounds can be deleted. The server verifies the prepared environment once and reuses that check when opening new playgrounds. If you see **Checking the prepared Mathlib environment…**, other projects remain available while the check runs. Use **Retry Mathlib preparation** after a failed check. If Mathlib is not installed, ask the server administrator to prepare it. Opening a playground does not call Lemex automatically.
 
@@ -47,6 +47,14 @@ Setup shows its current stage, from preparing Lean and libraries to testing the 
 Setup also checks that local Lean files can resolve their compiled imports. After live assistant edits finish, or you accept reviewed Lean edits, LeanFlow rebuilds the saved project's modules and refreshes the open Lean document. Your editor text is preserved. If imports still cannot load, **Project setup** shows a warning: fix the build errors, run **Check Project**, then use **Restart Lean**. Import readiness does not certify unfinished proofs.
 
 Use **Refresh setup** in an open project to recheck its environment. Valid compiled caches are reused. Choose the adjacent info icon for details about cache reuse and automatic repair. Stop active checks and chats, and close the terminal before refreshing.
+
+## Share a project
+
+Choose **Share project** to find an account or create an Editor or Viewer link. Project roles are **Admin**, **Editor**, and **Viewer**. Admins manage access and deletion; granting another Admin requires acknowledging those powers. Keep at least one Admin.
+
+Concurrent browser edits merge live. Each person's chats, API key, provider, model, and Git connections stay private. Editors can run their own agents, use their own credentials, and prepare the project. Terminals use private copies and publish checked file changes. A conflicting terminal copy can be downloaded with **Recover terminal files**.
+
+Revoking an invitation link stops new joins. Remove existing members separately. See [Project sharing](ProjectSharing.md) for permissions, conflict handling, and terminal recovery.
 
 ## Change a Lean identifier
 
@@ -105,19 +113,17 @@ If an older imported project reports a ProofWidgets `package-lock.json.hash` rea
 
 ## Use the project terminal
 
-Choose **Terminal** in an open, prepared workspace. Save editor changes first, then run commands such as `lake env lean Main.lean` or `lake build`. The terminal starts in the selected project folder with its pinned Lean environment. For a project imported from a repository subfolder, Git can access the containing checkout. Project files are writable, shared dependencies and toolchains are read only, and outbound network access is available. Host files, other projects, and the server's assistant credentials are not mounted into the terminal.
+Choose **Terminal** in an open, prepared workspace. Save editor changes first, then run commands such as `lake env lean Main.lean` or `lake build`. The terminal starts in a private copy of the selected project, using its pinned Lean environment. It cannot access a containing checkout or another project. Shared dependencies and toolchains are read only, and outbound network access is available.
 
-Type normally, use the arrow keys for command history, and press **Ctrl+C** to interrupt a command. Drag the separator above the terminal to resize it. Saved file changes refresh in the editor; unsaved editor text stays intact and the usual save conflict checks still apply. Terminal edits are saved directly. Run a Lean check to verify them.
+Type normally, use the arrow keys for command history, and press **Ctrl+C** to interrupt a command. Drag the separator above the terminal to resize it. Text file edits publish to the saved project with version checks. If another collaborator changed the same file, publication pauses and preserves the private copy. Close the terminal and choose **Recover terminal files** to download it. Run a Lean check after publication to verify the saved code.
 
-The worker includes the Lemex CLI. Run `lemex` to open it, or `lemex --version` to see its version. Configure your own CLI login or provider inside the terminal if needed; the server's assistant credentials stay private. The terminal home is temporary, so save lasting work in the project folder.
+The worker includes the Lemex CLI. Run `lemex` to open it, or `lemex --version` to see its version. Configure your own CLI login or provider inside the terminal if needed. The server's assistant credentials stay private, and the terminal home is temporary.
 
-Git is available for advanced work. Set up **Git connections** once, then use ordinary HTTPS Git commands such as `git status`, `git switch -c proof/my-change`, `git add Main.lean`, `git commit -m "Prove the lemma"` and `git push -u origin HEAD`. Clone another repository with `git clone https://github.com/owner/project.git`. Saved connections apply to their matching host. Run terminal commands only when you trust them to use your Git access; the terminal's commands can use those connections. Close the terminal before returning to Source control, so both views agree on the saved files and current branch.
+Git is available in the private copy with a new local repository. Its commits, branches, and remote settings do not change the saved project's Git history. Use **Source control** to publish that history. To use a separate remote from the terminal, configure it explicitly with `git remote add origin https://github.com/owner/project.git`, using your own URL. Set up **Git connections** to use your account's HTTPS credentials for the matching host. Run commands only when you trust them to use that Git access.
 
-For a new or uploaded project, add its remote first with `git remote add origin https://github.com/owner/project.git`, using your own repository URL. Repository imports already have an `origin` remote.
+Closing the terminal, changing workspaces, or disconnecting stops its shell and background processes, then finishes checked file publication. An idle terminal closes after 30 minutes without input or output. Builds that continue producing output stay connected. **Reconnect terminal** starts a new private copy. If published changes modify Lean or Lake configuration, close the terminal and use **Retry setup** to prepare the updated environment.
 
-Closing the terminal, changing workspaces, or disconnecting stops its shell and background processes. An idle terminal closes after 30 minutes without input or output. Builds that continue producing output stay connected. **Reconnect terminal** starts a new shell. If terminal commands change Lean or Lake configuration, close the terminal and use **Retry setup** to prepare the updated environment. Close the terminal before preparing again, using source control to change or publish the project, or uploading files. **Move to Trash** automatically stops the project's terminal and other processes before moving its data. Terminals share the server's worker capacity with editors, agents, setup, and checks.
-
-Finish a terminal build before starting a Lean check, and finish a check before starting another build in the terminal. Both can write the project's build cache. Git branch labels refresh when you close the terminal.
+Close the terminal before preparing, changing or publishing Git history, or uploading files. Moving project data to Trash refuses another collaborator's active work. Terminal builds use the private copy's cache; checks use the saved project. Terminals share worker capacity with editors, agents, setup, and checks.
 
 ## Ask about one proof
 

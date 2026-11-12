@@ -20,6 +20,7 @@ export interface ChatPickerProps {
   disabled: boolean
   loading?: boolean
   deleteDisabled?: boolean
+  newDisabled?: boolean
 }
 
 function ChatRenameForm({
@@ -203,6 +204,7 @@ export function ChatPicker({
   selectedId,
   onSelect,
   onNew,
+  newDisabled = false,
   onDelete,
   onRenamed,
   disabled,
@@ -281,7 +283,7 @@ export function ChatPicker({
         type="button"
         className="chat-control-button chat-picker-new"
         onClick={onNew}
-        disabled={disabled || loading}
+        disabled={disabled || loading || newDisabled}
       >
         <Icon name="plus" size={14} />
         New chat

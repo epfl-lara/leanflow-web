@@ -30,6 +30,22 @@ const source = (path, content, hash = hashA, unsaved = false) => ({
   unsaved,
 })
 
+test('read-only permission changes preserve draft discovery while excluding those files from saving', () => {
+  const store = new WorkspaceBuffers()
+  store.selectProject('shared')
+  store.setFile(file('Main.lean', 'saved'))
+  store.change('Main.lean', 'unsaved local work')
+  store.permissions(true)
+  assert.deepEqual(store.dirty(), [])
+  assert.equal(store.drafts()[0].content, 'unsaved local work')
+  assert.equal(store.drafts()[0].readOnly, true)
+  store.permissions(false)
+  assert.equal(store.dirty().length, 1)
+  store.permissions(true)
+  store.discard(2)
+  assert.deepEqual(store.drafts(), [])
+})
+
 test('project selection clears visible and retained files before notifying subscribers', () => {
   const store = new WorkspaceBuffers()
   store.selectProject('alpha')

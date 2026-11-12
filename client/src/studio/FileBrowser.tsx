@@ -65,6 +65,7 @@ export const FileBrowser = memo(function FileBrowser({
   disabled,
   filter,
   ready,
+  writable = true,
   onSelect,
   onDelete,
   onDownload,
@@ -80,6 +81,7 @@ export const FileBrowser = memo(function FileBrowser({
   disabled: boolean
   filter: string
   ready: boolean
+  writable?: boolean
   onSelect: (path: string) => void
   onDelete: (path: string, kind: 'file' | 'folder') => void
   onDownload: (path: string) => void
@@ -99,8 +101,7 @@ export const FileBrowser = memo(function FileBrowser({
     const dependencies: FileEntry[] = []
     for (const file of files) {
       if (query && !file.path.toLowerCase().includes(query)) continue
-      if (file.readOnly || file.path.startsWith('.lake/'))
-        dependencies.push(file)
+      if (file.path.startsWith('.lake/')) dependencies.push(file)
       else project.push(file)
     }
     return {
@@ -226,17 +227,20 @@ export const FileBrowser = memo(function FileBrowser({
       >
         <Icon name="more" size={15} />
       </button>
-      {!dependency && !file.readOnly && !file.path.startsWith('.lake/') && (
-        <button
-          className="icon-button file-delete"
-          title={`Move ${file.path} to trash`}
-          aria-label={`Move file ${file.path} to trash`}
-          disabled={disabled || !ready}
-          onClick={() => onDelete(file.path, 'file')}
-        >
-          <Icon name="trash" size={14} />
-        </button>
-      )}
+      {writable &&
+        !dependency &&
+        !file.readOnly &&
+        !file.path.startsWith('.lake/') && (
+          <button
+            className="icon-button file-delete"
+            title={`Move ${file.path} to trash`}
+            aria-label={`Move file ${file.path} to trash`}
+            disabled={disabled || !ready}
+            onClick={() => onDelete(file.path, 'file')}
+          >
+            <Icon name="trash" size={14} />
+          </button>
+        )}
     </div>
   )
 
@@ -272,15 +276,17 @@ export const FileBrowser = memo(function FileBrowser({
                   <Icon name="folder" size={15} />
                   <span>{folder.name}</span>
                 </button>
-                <button
-                  className="icon-button file-delete"
-                  title={`Move ${folder.path} to trash`}
-                  aria-label={`Move folder ${folder.path} to trash`}
-                  disabled={disabled || !ready}
-                  onClick={() => onDelete(folder.path, 'folder')}
-                >
-                  <Icon name="trash" size={14} />
-                </button>
+                {writable && (
+                  <button
+                    className="icon-button file-delete"
+                    title={`Move ${folder.path} to trash`}
+                    aria-label={`Move folder ${folder.path} to trash`}
+                    disabled={disabled || !ready}
+                    onClick={() => onDelete(folder.path, 'folder')}
+                  >
+                    <Icon name="trash" size={14} />
+                  </button>
+                )}
               </div>
               {open &&
                 (folder.folders.size || folder.files.length ? (
@@ -416,7 +422,9 @@ export const FileBrowser = memo(function FileBrowser({
                       disabled,
                       onSelect: () => onDownload(file.path),
                     },
-                    ...(!file.readOnly && !file.path.startsWith('.lake/')
+                    ...(writable &&
+                    !file.readOnly &&
+                    !file.path.startsWith('.lake/')
                       ? [
                           {
                             label: 'Move to trash',

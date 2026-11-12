@@ -200,6 +200,10 @@ try {
   })
   await page.locator(`.file-item[title="${failing}"]`).click()
   await page.locator('.editor-failure').waitFor()
+  await page
+    .locator('.editor-failure')
+    .getByText(/Fixture editor initialization failed once\./)
+    .waitFor()
   await open('Main.lean', 'projectValue')
   await readonly(dependency, 'CLI_LIBRARY_SOURCE')
   report.checks.push(

@@ -656,7 +656,7 @@ test('large single-file uploads retain the prepared Mathlib environment and hash
   assert.equal(f.providerCalls(), 0)
 })
 
-test('project and playground terminals share saved Lean and TeX files with the editor after switching workspaces', async (t) => {
+test('private project and playground terminals publish checked Lean and TeX changes after switching workspaces', async (t) => {
   const f = await fixture(t)
   const previous = await f.create({
     name: 'Previous full project',
@@ -750,6 +750,13 @@ test('project and playground terminals share saved Lean and TeX files with the e
       socket.once('open', resolve)
       socket.once('error', reject)
     })
+    const expectedRoot = project.root
+    for (
+      let attempt = 0;
+      (!spawned.length || spawned.at(-1).killed) && attempt < 200;
+      attempt++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 5))
     const child = spawned.at(-1)
     await new Promise((resolve, reject) => {
       const timer = setTimeout(
@@ -769,7 +776,7 @@ test('project and playground terminals share saved Lean and TeX files with the e
         })
         .catch(reject)
     })
-    assert.equal(child.root, project.root)
+    assert.notEqual(child.root, expectedRoot)
     assert.equal(
       await fs.readFile(path.join(child.root, 'Main.lean'), 'utf8'),
       saved.content,
@@ -779,32 +786,21 @@ test('project and playground terminals share saved Lean and TeX files with the e
       texSources.get(project.id),
       'TeX is in the same selected directory as Main.lean',
     )
-    const updatedTex = `${texSources.get(project.id)}% edited with the terminal open\n`
-    const editorSave = await f.request(
-      `/api/projects/${project.id}/file?path=test.tex`,
-      {
-        content: updatedTex,
-        expectedHash: createHash('sha256')
-          .update(texSources.get(project.id))
-          .digest('hex'),
-      },
-      undefined,
-      'PUT',
-    )
-    assert.equal(editorSave.status, 200)
-    assert.equal(
-      await fs.readFile(path.join(child.root, 'test.tex'), 'utf8'),
-      updatedTex,
-    )
-    const terminalTex = `${updatedTex}% terminal edit\n`
+    const terminalTex = `${texSources.get(project.id)}% terminal edit\n`
     await fs.writeFile(path.join(child.root, 'test.tex'), terminalTex)
-    const editorRead = await f.request(
-      `/api/projects/${project.id}/file?path=test.tex`,
-      undefined,
-      undefined,
-      'GET',
-    )
-    assert.equal((await editorRead.json()).content, terminalTex)
+    let savedTex
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const editorRead = await f.request(
+        `/api/projects/${project.id}/file?path=test.tex`,
+        undefined,
+        undefined,
+        'GET',
+      )
+      savedTex = (await editorRead.json()).content
+      if (savedTex === terminalTex) break
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.equal(savedTex, terminalTex)
     texSources.set(project.id, terminalTex)
     if (project.kind === 'single-file')
       assert.equal(
@@ -822,9 +818,12 @@ test('project and playground terminals share saved Lean and TeX files with the e
     await closed
     assert.equal(child.killed, true)
   }
-  assert.deepEqual(
-    spawned.map((child) => child.root),
-    [previous.root, first.root, second.root, first.root],
+  assert.equal(spawned.length, 4)
+  assert.equal(new Set(spawned.map((child) => child.root)).size, 4)
+  assert(
+    spawned.every(
+      (child) => ![previous.root, first.root, second.root].includes(child.root),
+    ),
   )
   const converted = await f.request(`/api/projects/${first.id}/convert`, {})
   assert.equal(converted.status, 200)

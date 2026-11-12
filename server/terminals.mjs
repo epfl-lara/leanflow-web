@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { WebSocketServer } from 'ws'
+import { randomUUID } from 'node:crypto'
 import { removeDisposableTree } from './temporary-workspaces.mjs'
+import { TerminalSourceMirror } from './terminal-live.mjs'
 import {
   createTerminalGitBroker,
   terminalGitEnvironment,
@@ -21,6 +23,7 @@ export class Terminals {
     gitConnections,
     gitIdentity,
     redact = String,
+    isAuthenticated = () => true,
   }) {
     Object.assign(this, {
       runtime,
@@ -29,16 +32,24 @@ export class Terminals {
       gitConnections,
       gitIdentity,
       redact,
+      isAuthenticated,
     })
     this.sessions = new Set()
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 })
   }
 
-  assertIdle(projectId) {
-    if ([...this.sessions].some((session) => session.projectId === projectId))
+  assertIdle(projectId, { ignoreRunId, actor } = {}) {
+    const blocking = [...this.sessions].find(
+      (session) =>
+        session.projectId === projectId &&
+        (ignoreRunId === undefined || session.snapshot?.runId !== ignoreRunId),
+    )
+    if (blocking)
       throw Object.assign(
         new Error(
-          'Close the project terminal before preparing, publishing, or moving project data.',
+          actor !== undefined && blocking.actor !== actor
+            ? 'Another collaborator has a project terminal open or finishing its file updates. Ask them to close it, then try again.'
+            : 'Close the project terminal and wait for its file updates before preparing, publishing, or moving project data.',
         ),
         { status: 409 },
       )
@@ -58,14 +69,24 @@ export class Terminals {
       )
   }
 
-  upgrade(req, socket, head, project) {
-    this.wss.handleUpgrade(req, socket, head, (ws) => this.connect(ws, project))
+  upgrade(req, socket, head, project, actor = project.owner) {
+    this.wss.handleUpgrade(req, socket, head, (ws) =>
+      this.connect(ws, project, actor, req),
+    )
   }
 
-  connect(ws, project) {
-    const session = { ws, projectId: project.id }
+  connect(ws, project, actor = project.owner, request) {
+    const session = { ws, projectId: project.id, actor }
     this.sessions.add(session)
     let child
+    const assertAuthenticated = () => {
+      if (this.isAuthenticated(request, actor)) return
+      ws.close(1008, 'Account access changed. Sign in again.')
+      child?.kill()
+      throw Object.assign(new Error('Account access changed. Sign in again.'), {
+        status: 401,
+      })
+    }
     let broker
     let setup = Promise.resolve()
     let initialized = false
@@ -73,13 +94,26 @@ export class Terminals {
     let outstanding = 0
     let lastActivity = Date.now()
     let alive = true
+    const startupController = new AbortController()
     const fail = (message, code = 1011) => {
       if (ws.readyState === 1)
         ws.send(JSON.stringify({ type: 'error', message }))
       ws.close(code, 'Terminal closed')
       child?.kill()
     }
+    const startupTimeout = setTimeout(() => {
+      startupController.abort(new Error('Terminal startup timed out.'))
+      fail(
+        'The private terminal copy took too long to prepare. Close it and retry.',
+      )
+    }, 60_000)
+    startupTimeout.unref?.()
     const heartbeat = setInterval(() => {
+      try {
+        assertAuthenticated()
+      } catch {
+        return
+      }
       if (!alive || Date.now() - lastActivity > 30 * 60_000) {
         child?.kill()
         return ws.terminate()
@@ -92,197 +126,310 @@ export class Terminals {
     })
     ws.on('error', () => child?.kill())
     ws.on('close', () => {
+      startupController.abort(new Error('Terminal closed.'))
       clearInterval(heartbeat)
       child?.kill()
-      if (!child) this.sessions.delete(session)
+      if (!child && !session.starting) this.sessions.delete(session)
     })
-    try {
-      const configuration = this.workspaces?.configurationFingerprint(
-        project.id,
-        project.owner,
-      )
-      const checkout = this.workspaces?.repositoryRoot?.(project)
-      child = this.runtime.spawn(
-        project.root,
-        ['python3', '-u', '-c', workerScript],
-        {
-          network: 'bridge',
-          freshHome: true,
-          cleanHome: true,
-          ...(checkout && checkout !== project.root
-            ? { repositoryRoot: checkout }
-            : {}),
-          env: {
-            TERM: 'xterm-256color',
-            COLORTERM: 'truecolor',
-            PS1: '\\w \\$ ',
-            ...(this.gitConnections ? terminalGitEnvironment() : {}),
-          },
-        },
-      )
-      session.child = child
-      child.stdout.on('data', (chunk) => {
-        if (ws.readyState !== 1) return
-        lastActivity = Date.now()
-        outstanding += chunk.length
-        if (outstanding >= outputWindow) child.stdout.pause()
-        ws.send(chunk, { binary: true }, (error) => {
-          if (error) child.kill()
-        })
-      })
-      // Startup diagnostics stay server-side and never include provider credentials.
-      child.stderr.on('data', (chunk) =>
-        console.error(
-          `[LeanFlow terminal] ${this.redact(chunk.toString()).slice(0, 2000)}`,
-        ),
-      )
-      child.stdin.on('error', () =>
-        fail('Terminal input closed. Reopen the terminal to continue.'),
-      )
-      child.on('error', () =>
-        fail(
-          'The terminal could not start. Reopen it, or ask the administrator to check the worker service.',
-        ),
-      )
-      child.on('close', (code) => {
-        if (ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'exit', code }))
-          ws.close(1000, 'Shell exited')
-        }
-      })
-      session.finalize = async () => {
-        await setup.catch(() => {})
-        await broker?.close()
-        if (configuration !== undefined) {
-          try {
-            await this.workspaces.refreshExternalConfiguration(
-              project.id,
-              project.owner,
-              configuration,
-            )
-          } catch (error) {
-            if (error.status !== 404) throw error
-          }
-        }
-        this.sessions.delete(session)
-        try {
-          if (child.workerHome) await removeDisposableTree(child.workerHome)
-        } catch {
-          console.error(
-            '[LeanFlow terminal] Could not remove a closed terminal home.',
-          )
-        }
-      }
-      session.finished = (
-        child.workerStopped ||
-        new Promise((resolve) => child.once('close', resolve))
-      ).then(session.finalize)
-      // Retain failed cleanup guards for an explicit stop/Trash retry.
-      session.finished.catch(() => {})
-      ws.on('message', (raw, binary) => {
-        try {
-          const message = JSON.parse(raw.toString())
+    ws.on('message', (raw, binary) => {
+      try {
+        assertAuthenticated()
+        this.workspaces?.requireEditor?.(project.id, actor)
+        const message = JSON.parse(raw.toString())
+        if (
+          binary ||
+          !message ||
+          typeof message !== 'object' ||
+          Array.isArray(message)
+        )
+          throw new Error()
+        if (message.type === 'ack') {
           if (
-            binary ||
-            !message ||
-            typeof message !== 'object' ||
-            Array.isArray(message)
+            !Number.isSafeInteger(message.bytes) ||
+            message.bytes <= 0 ||
+            message.bytes > outstanding
           )
             throw new Error()
-          if (message.type === 'ack') {
-            if (
-              !Number.isSafeInteger(message.bytes) ||
-              message.bytes <= 0 ||
-              message.bytes > outstanding
+          outstanding -= message.bytes
+          lastActivity = Date.now()
+          if (outstanding < outputWindow / 2) child.stdout.resume()
+          return
+        }
+        if (message.type === 'input') {
+          if (
+            typeof message.data !== 'string' ||
+            Buffer.byteLength(message.data) > maxInput
+          )
+            throw new Error()
+        } else if (message.type === 'resize') {
+          if (
+            ![message.cols, message.rows].every(
+              (value) =>
+                Number.isSafeInteger(value) && value >= 1 && value <= 1000,
             )
-              throw new Error()
-            outstanding -= message.bytes
-            lastActivity = Date.now()
-            if (outstanding < outputWindow / 2) child.stdout.resume()
+          )
+            throw new Error()
+        } else throw new Error()
+        lastActivity = Date.now()
+        if ((child?.stdin.writableLength || 0) > 64 * 1024)
+          return fail(
+            'Too much terminal input is waiting. Reopen the terminal and send a smaller paste.',
+            1008,
+          )
+        // Forward only validated fields. Clients cannot select a root, command, or environment.
+        const input =
+          message.type === 'input'
+            ? { type: 'input', data: message.data }
+            : { type: 'resize', cols: message.cols, rows: message.rows }
+        if (initialized) child.stdin.write(JSON.stringify(input) + '\n')
+        else {
+          if (pendingInput.length >= 8)
+            return fail('Too much terminal input arrived before startup.', 1008)
+          pendingInput.push(input)
+        }
+      } catch {
+        fail('Invalid terminal input. Reopen the terminal to continue.', 1008)
+      }
+    })
+    const start = async () => {
+      try {
+        assertAuthenticated()
+        this.workspaces?.requireEditor?.(project.id, actor)
+        if (this.workspaces?.terminalSnapshot) {
+          session.snapshot = await this.workspaces.terminalSnapshot(
+            project.id,
+            actor,
+            randomUUID(),
+            { signal: startupController.signal },
+          )
+          if (ws.readyState !== 1) return
+          assertAuthenticated()
+          this.workspaces.requireEditor(project.id, actor)
+        }
+        const configuration = this.workspaces?.configurationFingerprint(
+          project.id,
+          actor,
+        )
+        // Sharing a nested project never grants a shell in its parent checkout.
+        // Members can use Source control for repository operations outside root.
+        const checkout =
+          !session.snapshot && actor === project.owner
+            ? this.workspaces?.repositoryRoot?.(project)
+            : null
+        child = this.runtime.spawn(
+          session.snapshot?.root || project.root,
+          ['python3', '-u', '-c', workerScript],
+          {
+            network: 'bridge',
+            freshHome: true,
+            cleanHome: true,
+            ...(checkout && checkout !== project.root
+              ? { repositoryRoot: checkout }
+              : {}),
+            env: {
+              TERM: 'xterm-256color',
+              COLORTERM: 'truecolor',
+              PS1: '\\w \\$ ',
+              ...(this.gitConnections ? terminalGitEnvironment() : {}),
+            },
+          },
+        )
+        session.child = child
+        const notice = (message) => {
+          if (ws.readyState !== 1) return
+          try {
+            assertAuthenticated()
+          } catch {
             return
           }
-          if (message.type === 'input') {
-            if (
-              typeof message.data !== 'string' ||
-              Buffer.byteLength(message.data) > maxInput
-            )
-              throw new Error()
-          } else if (message.type === 'resize') {
-            if (
-              ![message.cols, message.rows].every(
-                (value) =>
-                  Number.isSafeInteger(value) && value >= 1 && value <= 1000,
-              )
-            )
-              throw new Error()
-          } else throw new Error()
-          lastActivity = Date.now()
-          if (child.stdin.writableLength > 64 * 1024)
-            return fail(
-              'Too much terminal input is waiting. Reopen the terminal and send a smaller paste.',
-              1008,
-            )
-          // Forward only validated fields. Clients cannot select a root, command, or environment.
-          const input =
-            message.type === 'input'
-              ? { type: 'input', data: message.data }
-              : { type: 'resize', cols: message.cols, rows: message.rows }
-          if (initialized) child.stdin.write(JSON.stringify(input) + '\n')
-          else {
-            if (pendingInput.length >= 8)
-              return fail(
-                'Too much terminal input arrived before startup.',
-                1008,
-              )
-            pendingInput.push(input)
-          }
-        } catch {
-          fail('Invalid terminal input. Reopen the terminal to continue.', 1008)
+          const output = Buffer.from(`\r\n[LeanFlow] ${message}\r\n`)
+          outstanding += output.length
+          ws.send(output, { binary: true })
         }
-      })
-      setup = (async () => {
-        if (this.gitConnections) {
-          if (!child.workerHome)
-            throw new Error(
-              'The terminal worker has no private credential home.',
-            )
-          broker = await createTerminalGitBroker({
-            home: child.workerHome,
-            owner: project.owner,
-            connections: this.gitConnections,
+        const preserve = (error) => {
+          const status = error.status || error.statusCode
+          const message = [403, 404].includes(status)
+            ? 'Your project access changed. Download this private copy from Account settings to keep your files. Ask a project Admin to restore editing access before publishing.'
+            : status
+              ? this.redact(error.message)
+              : 'The file updates could not be published. Your private working copy is preserved for recovery.'
+          session.recovery = true
+          session.publicationPaused = true
+          session.recoveryMessage = message
+          notice(
+            `File updates paused: ${message} Close this terminal to recover its preserved private working copy (${session.snapshot.runId}) from /api/projects/${project.id}/terminal-recoveries/${session.snapshot.runId}/download.`,
+          )
+        }
+        if (session.snapshot)
+          session.mirror = new TerminalSourceMirror({
+            workspaces: this.workspaces,
+            snapshot: session.snapshot,
+            assertAuthorized: assertAuthenticated,
+            onUnpublished: (paths) => {
+              if (session.publicationPaused) return
+              session.recovery = paths.length > 0
+              if (!paths.length) {
+                session.unpublished = ''
+                return
+              }
+              const fingerprint = paths.join('\0')
+              if (fingerprint === session.unpublished) return
+              session.unpublished = fingerprint
+              session.recoveryMessage = `Some generated, binary or oversized files remain in this private terminal copy: ${paths.slice(0, 5).join(', ')}${paths.length > 5 ? ', …' : ''}. Download the copy to recover them. Text changes continue to publish.`
+              notice(session.recoveryMessage)
+            },
+            onConflict: preserve,
+            onError: preserve,
           })
+        child.stdout.on('data', (chunk) => {
+          if (ws.readyState !== 1) return
+          try {
+            assertAuthenticated()
+          } catch {
+            return
+          }
+          lastActivity = Date.now()
+          outstanding += chunk.length
+          if (outstanding >= outputWindow) child.stdout.pause()
+          ws.send(chunk, { binary: true }, (error) => {
+            if (error) child.kill()
+          })
+        })
+        // Startup diagnostics stay server-side and never include provider credentials.
+        child.stderr.on('data', (chunk) =>
+          console.error(
+            `[LeanFlow terminal] ${this.redact(chunk.toString()).slice(0, 2000)}`,
+          ),
+        )
+        child.stdin.on('error', () =>
+          fail('Terminal input closed. Reopen the terminal to continue.'),
+        )
+        child.on('error', () =>
+          fail(
+            'The terminal could not start. Reopen it, or ask the administrator to check the worker service.',
+          ),
+        )
+        child.on('close', (code) => {
+          if (ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: 'exit', code }))
+            ws.close(1000, 'Shell exited')
+          }
+        })
+        session.finalize = async () => {
+          this.workspaces?.markTerminalFinalizing?.(session.snapshot)
+          await setup.catch(() => {})
+          await broker?.close()
+          await session.mirror?.stop({ flush: true })
+          if (configuration !== undefined && !session.snapshot) {
+            try {
+              await this.workspaces.refreshExternalConfiguration(
+                project.id,
+                actor,
+                configuration,
+              )
+            } catch (error) {
+              if (![403, 404].includes(error.status)) throw error
+            }
+          }
+          if (session.snapshot) {
+            if (session.recovery)
+              await this.workspaces.retainTerminalSnapshot(
+                session.snapshot,
+                session.recoveryMessage,
+              )
+            else
+              await this.workspaces.cleanupTerminalSnapshot(session.snapshot, {
+                finalize: true,
+              })
+          }
+          this.sessions.delete(session)
+          try {
+            if (child.workerHome) await removeDisposableTree(child.workerHome)
+          } catch {
+            console.error(
+              '[LeanFlow terminal] Could not remove a closed terminal home.',
+            )
+          }
         }
-        const identity = this.gitIdentity
-          ? await this.gitIdentity(project.owner)
-          : (await this.gitConnections?.get(project.owner))?.identity
-        if (ws.readyState !== 1 || child.killed) return
-        child.stdin.write(JSON.stringify({ type: 'setup', identity }) + '\n')
-        initialized = true
-        for (const input of pendingInput)
-          child.stdin.write(JSON.stringify(input) + '\n')
-        pendingInput.length = 0
-      })()
-      setup.catch(() =>
-        fail('Git setup could not start. Reopen the terminal to try again.'),
-      )
-    } catch (error) {
-      console.error(
-        `[LeanFlow terminal] ${this.redact(error.message).slice(0, 2000)}`,
-      )
-      fail(
-        error.status === 409
-          ? 'The project environment changed. Close the terminal and use Refresh setup before reopening it.'
-          : 'The terminal could not start. Close an unused terminal or editor and try again. If it still fails, ask the administrator to check the worker service.',
-      )
+        session.finished = (
+          child.workerStopped ||
+          new Promise((resolve) => child.once('close', resolve))
+        ).then(session.finalize)
+        // Retain failed cleanup guards for an explicit stop/Trash retry.
+        session.finished.catch(() => {})
+        setup = (async () => {
+          if (this.gitConnections) {
+            if (!child.workerHome)
+              throw new Error(
+                'The terminal worker has no private credential home.',
+              )
+            broker = await createTerminalGitBroker({
+              home: child.workerHome,
+              owner: actor,
+              connections: this.gitConnections,
+            })
+          }
+          const identity = this.gitIdentity
+            ? await this.gitIdentity(actor)
+            : (await this.gitConnections?.get(actor))?.identity
+          if (ws.readyState !== 1 || child.killed) return
+          assertAuthenticated()
+          this.workspaces?.requireEditor?.(project.id, actor)
+          child.stdin.write(JSON.stringify({ type: 'setup', identity }) + '\n')
+          initialized = true
+          clearTimeout(startupTimeout)
+          if (session.snapshot) {
+            notice(
+              'Private working copy. File changes sync with conflict checks; Source control publishes the project history. If a conflict appears, this copy is preserved for recovery.',
+            )
+            session.mirror.start()
+          }
+          for (const input of pendingInput)
+            child.stdin.write(JSON.stringify(input) + '\n')
+          pendingInput.length = 0
+        })()
+        setup.catch(() =>
+          fail('Git setup could not start. Reopen the terminal to try again.'),
+        )
+        await setup
+      } catch (error) {
+        console.error(
+          `[LeanFlow terminal] ${this.redact(error.message).slice(0, 2000)}`,
+        )
+        fail(
+          error.status >= 400 && error.status < 500
+            ? this.redact(error.message)
+            : 'The terminal could not start. Close an unused terminal or editor and try again. If it still fails, ask the administrator to check the worker service.',
+        )
+      } finally {
+        clearTimeout(startupTimeout)
+        session.starting = false
+        if (!child) {
+          if (session.snapshot)
+            await this.workspaces.cleanupTerminalSnapshot(session.snapshot, {
+              finalize: true,
+            })
+          this.sessions.delete(session)
+        }
+      }
     }
+    session.starting = true
+    session.startup = start()
+    session.startup.catch(() => {})
   }
 
-  async closeProject(projectId) {
+  async closeProject(projectId, actor) {
     await Promise.all(
       [...this.sessions]
-        .filter((session) => session.projectId === projectId)
+        .filter(
+          (session) =>
+            session.projectId === projectId &&
+            (actor === undefined || session.actor === actor),
+        )
         .map(async (session) => {
           session.ws.close(1000, 'Terminal closed')
+          session.child?.kill()
+          await session.startup
           session.child?.kill()
           try {
             await session.finished
@@ -295,8 +442,18 @@ export class Terminals {
     )
   }
 
-  close() {
-    for (const session of this.sessions) session.ws.terminate()
+  async close() {
+    const sessions = [...this.sessions]
+    const stopped = sessions.map(async (session) => {
+      session.ws.terminate()
+      session.child?.kill()
+      await session.startup
+      session.child?.kill()
+      await session.finished
+    })
     this.wss.close()
+    const results = await Promise.allSettled(stopped)
+    const failed = results.find((result) => result.status === 'rejected')
+    if (failed) throw failed.reason
   }
 }

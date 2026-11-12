@@ -493,9 +493,12 @@ export class JobManager {
             signal: controller.signal,
             readOnlyWorkspace: true,
             writeLakeCache: true,
+            freshHome: true,
+            cleanHome: true,
             onOutput: (text) =>
               this.events.append(job.id, 'log', text, 'activity'),
           }
+          this.workspaces.get(projectId, owner)
           let result = kernelCheck
             ? await this.runtime.checkProject(project.root, {
                 ...options,

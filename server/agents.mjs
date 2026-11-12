@@ -91,6 +91,20 @@ function mcpToml(servers) {
 }
 
 export class AgentManager {
+  #editableProject(projectId, actor) {
+    const project = this.workspaces.requireEditor
+      ? this.workspaces.requireEditor(projectId, actor)
+      : this.workspaces.get(projectId, actor)
+    if (project.accessRole === 'viewer')
+      throw Object.assign(
+        new Error(
+          'Editor access is required to run the assistant or apply its changes.',
+        ),
+        { status: 403 },
+      )
+    return project
+  }
+
   constructor({
     runtime,
     workspaces,
@@ -145,7 +159,7 @@ export class AgentManager {
         ),
         { status: 503 },
       )
-    const project = this.workspaces.get(projectId, owner)
+    const project = this.#editableProject(projectId, owner)
     if (project.status !== 'ready' || project.needsPreparation)
       throw Object.assign(
         new Error('Prepare this project before asking Lemex to work on it.'),
@@ -247,7 +261,7 @@ export class AgentManager {
         new Error('The server is shutting down. Try again after it restarts.'),
         { status: 503 },
       )
-    if (this.workspaces.get(projectId, owner).status !== 'ready')
+    if (this.#editableProject(projectId, owner).status !== 'ready')
       throw Object.assign(
         new Error('Prepare this project before asking Lemex to work on it.'),
         { status: 409 },
@@ -405,6 +419,7 @@ export class AgentManager {
   }
   async message(owner, id, input) {
     const job = this.events.getMetadata(id, owner)
+    this.#editableProject(job.projectId, owner)
     assertAgentJob(job)
     const files = selectedContextFiles(
       { files: input?.files },
@@ -672,6 +687,8 @@ export class AgentManager {
       }, job.maxSeconds * 1000)
     let provider
     try {
+      this.#editableProject(job.projectId, job.owner)
+      this.assertCanStart(job.owner, job.projectId)
       provider = await providerFor(this.config, job.owner)
       if (!this.providerReservations.get(id)?.matches(provider))
         throw new Error(
@@ -1388,6 +1405,7 @@ export class AgentManager {
   async apply(owner, id) {
     const job = this.events.get(id, owner)
     assertAgentJob(job)
+    this.#editableProject(job.projectId, owner)
     if (job.status === 'applied') return job
     if (job.status !== 'completed' || !job.verification?.complete)
       throw Object.assign(
@@ -1431,6 +1449,7 @@ export class AgentManager {
   }
   async undo(owner, id) {
     const job = this.events.get(id, owner)
+    this.#editableProject(job.projectId, owner)
     assertAgentJob(job)
     if (this.active.has(id) || !TERMINAL.has(job.status))
       throw Object.assign(

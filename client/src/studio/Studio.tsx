@@ -28,7 +28,10 @@ import {
 } from './api'
 import { AssistantPanel } from './AssistantPanel'
 import { TerminalPanel } from './TerminalPanel'
+import { TerminalRecoveries } from './TerminalRecoveries'
 import { Dialog } from './Dialog'
+import { DraftDownloads } from './DraftDownloads'
+import { DraftNavigationDialog } from './DraftNavigationDialog'
 import { CheckControls } from './CheckControls'
 import { TrashDialog } from './TrashDialog'
 import { Icon } from './Icons'
@@ -53,6 +56,8 @@ import { UploadModal, type UploadFile } from './UploadFiles'
 import { SingleFileActions } from './SingleFileActions'
 import { WorkspaceList } from './WorkspaceList'
 import { RenameWorkspaceDialog } from './RenameWorkspaceDialog'
+import { ProjectSharingDialog } from './ProjectSharingDialog'
+import { useProjectCollaboration } from './useProjectCollaboration'
 import { usePlaygroundPreparation } from './usePlaygroundPreparation'
 import { playgroundDownloadName } from './playgroundNames'
 import { downloadProject, downloadWorkspaceFile } from './downloads'
@@ -195,6 +200,17 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
   )
 }
 
+function pendingProjectInvitation() {
+  const token = new URLSearchParams(window.location.hash.slice(1)).get('share')
+  if (token) {
+    sessionStorage.setItem('lemex-project-invitation', token)
+    const url = new URL(window.location.href)
+    url.hash = ''
+    window.history.replaceState(null, '', url)
+  }
+  return token || sessionStorage.getItem('lemex-project-invitation')
+}
+
 export function Studio() {
   const [studioElement, setStudioElement] = useState<HTMLDivElement | null>(
     null,
@@ -250,6 +266,19 @@ export function Studio() {
   const [sessionRefreshing, setSessionRefreshing] = useState(false)
   const sessionRequest = useRef(0)
   const profileRevision = useRef(0)
+  const [invitationToken, setInvitationToken] = useState(
+    pendingProjectInvitation,
+  )
+  useEffect(() => {
+    const changed = () => {
+      const token = pendingProjectInvitation()
+      if (token) setInvitationToken(token)
+    }
+    window.addEventListener('hashchange', changed)
+    return () => window.removeEventListener('hashchange', changed)
+  }, [])
+  const [invitationIssue, setInvitationIssue] = useState('')
+  const [invitationAttempt, setInvitationAttempt] = useState(0)
   const [projects, setProjects] = useState<Project[]>([])
   const [projectId, setSelectedProjectId] = useState<string | null>(null)
   const [files, setFiles] = useState<FileEntry[]>([])
@@ -309,6 +338,7 @@ export function Studio() {
     null,
   )
   const [renameTarget, setRenameTarget] = useState<Project | null>(null)
+  const [sharingTarget, setSharingTarget] = useState<Project | null>(null)
   const [creatingSingleFile, setCreatingSingleFile] = useState(false)
   const [creatingPlaygroundSource, setCreatingPlaygroundSource] = useState<
     'blank' | 'upload'
@@ -346,6 +376,8 @@ export function Studio() {
   const bookRequestId = useRef(0)
   const closeBooks = useCallback(() => setBooksOpen(false), [])
   const [showInfoview, setShowInfoview] = useState(true)
+  const [terminalActive, setTerminalActive] = useState(false)
+  const [terminalRecoveryVersion, setTerminalRecoveryVersion] = useState(0)
   const [terminalProjectId, setTerminalProjectId] = useState<string | null>(
     null,
   )
@@ -378,6 +410,7 @@ export function Studio() {
     gitOpen ||
     deleteTarget ||
     renameTarget ||
+    sharingTarget ||
     repositoryAccessId ||
     trashOpen ||
     settingsModal ||
@@ -410,7 +443,26 @@ export function Studio() {
   filesRef.current = files
   projectIdRef.current = projectId
   const project = projects.find((item) => item.id === projectId)
-  const terminalOpen = !!project && terminalProjectId === project.id
+  useEffect(() => {
+    if (
+      sharingTarget &&
+      !projects.some(
+        (item) =>
+          item.id === sharingTarget.id &&
+          (!item.accessRole || item.accessRole === 'admin'),
+      )
+    )
+      setSharingTarget(null)
+  }, [projects, sharingTarget])
+  const projectAdmin = !project?.accessRole || project.accessRole === 'admin'
+  const projectCanEdit = !!project && project.accessRole !== 'viewer'
+  const projectAccessRef = useRef(project?.accessRole)
+  projectAccessRef.current = project?.accessRole
+  useEffect(() => {
+    bufferStore.permissions(!projectCanEdit)
+  }, [bufferStore, buffers, scope, projectCanEdit])
+  const terminalOpen =
+    !!project && projectCanEdit && terminalProjectId === project.id
   const projectKindRef = useRef(project?.kind)
   projectKindRef.current = project?.kind
   const singleFileMode = project?.kind === 'single-file'
@@ -464,7 +516,8 @@ export function Studio() {
     Math.min(80, 100 - (100 / sourceSectionsSize.height) * 100),
   )
   const fileTreePercent = clamp(fileTreeSize, fileTreeMinimum, fileTreeMaximum)
-  const dirtyFiles = bufferStore.dirty()
+  const dirtyFiles = bufferStore.drafts()
+  const readOnlyDrafts = dirtyFiles.some((file) => file.readOnly)
   const dirtyKey = dirtyFiles
     .map((file) => file.path)
     .sort()
@@ -523,6 +576,7 @@ export function Studio() {
       setGit(null)
       setGitOpen(null)
       setTerminalProjectId(null)
+      setTerminalActive(false)
       setJob(null)
       setFileFilter('')
       setLeanState('')
@@ -700,7 +754,7 @@ export function Studio() {
   }, [sessionOwner])
 
   useEffect(() => {
-    if (!session) return
+    if (!session || invitationToken) return
     let cancelled = false
     void api<Project[]>('/api/projects')
       .then((value) => {
@@ -719,7 +773,7 @@ export function Studio() {
     return () => {
       cancelled = true
     }
-  }, [session, setProjectId])
+  }, [session, setProjectId, invitationToken])
 
   const preparing = projects.some((item) => item.status === 'preparing')
   useEffect(() => {
@@ -869,6 +923,7 @@ export function Studio() {
           hash: value.hash,
           generation: ++generation.current,
           readOnly:
+            projectAccessRef.current === 'viewer' ||
             value.readOnly ||
             path.startsWith('.lake/packages/') ||
             filesRef.current.find((item) => item.path === path)?.readOnly,
@@ -973,73 +1028,100 @@ export function Studio() {
       : downloadArchive(item)
   }
 
+  const collaboration = useProjectCollaboration({
+    store: bufferStore,
+    scope,
+    enabled: !!session && !authRequired && workspaceEditable,
+    canEdit: projectCanEdit,
+    onFilesChanged: async () => {
+      if (scope.projectId) await loadFiles(scope.projectId)
+    },
+    onAccessChanged: async () => {
+      await loadProjects()
+    },
+  })
+  const flushCollaboration = collaboration.flush
+
   const saveFile = useCallback(
     async ({ automatic = false } = {}) => {
       if (savePromise.current) return savePromise.current.promise
       const expected = bufferStore.getSnapshot().scope
-      const snapshots = bufferStore.dirty()
-      const snapshot = snapshots[0]
-      const id = projectIdRef.current
-      if (!snapshot || !id || snapshot.readOnly || !snapshots.length) return
-      const task = (async () => {
-        setSaving(true)
-        try {
-          if (snapshots.length > 1 || snapshot.path !== fileRef.current?.path) {
-            const value = await api<{
-              applied: number
-              requiresPreparation: boolean
-              files: { path: string; hash: string }[]
-            }>(`/api/projects/${encodeURIComponent(id)}/files`, {
-              method: 'PUT',
-              signal: AbortSignal.timeout(60_000),
-              body: JSON.stringify({
-                files: snapshots.map((file) => ({
-                  path: file.path,
-                  content: file.content,
-                  expectedHash: file.hash,
-                })),
-              }),
-            })
+      const id = expected.projectId
+      if (!projectCanEdit || !id) return
+      // Reserve the whole operation before live flushing can yield. Manual and
+      // automatic saves share this promise, including its original visit.
+      setSaving(true)
+      const pending = {
+        scope: expected,
+        promise: Promise.resolve()
+          .then(async () => {
             if (!bufferStore.isCurrent(expected)) return
-            bufferStore.saved(snapshots, value.files)
-            if (!automatic) setNotice(`Saved ${snapshots.length} files`)
+            if (await flushCollaboration()) return
+            if (!bufferStore.isCurrent(expected)) return
+            const snapshots = bufferStore.dirty()
+            const snapshot = snapshots[0]
+            if (!snapshot || snapshot.readOnly) return
+            if (
+              snapshots.length > 1 ||
+              snapshot.path !== fileRef.current?.path
+            ) {
+              const value = await api<{
+                applied: number
+                requiresPreparation: boolean
+                files: { path: string; hash: string }[]
+              }>(`/api/projects/${encodeURIComponent(id)}/files`, {
+                method: 'PUT',
+                signal: AbortSignal.timeout(60_000),
+                body: JSON.stringify({
+                  files: snapshots.map((file) => ({
+                    path: file.path,
+                    content: file.content,
+                    expectedHash: file.hash,
+                  })),
+                }),
+              })
+              if (!bufferStore.isCurrent(expected)) return
+              bufferStore.saved(snapshots, value.files)
+              if (!automatic) setNotice(`Saved ${snapshots.length} files`)
+              if (value.requiresPreparation) await loadProjects()
+              else if (!automatic) void loadGit(id)
+              return
+            }
+            const value = await api<{
+              content: string
+              hash: string
+              requiresPreparation: boolean
+            }>(
+              `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(snapshot.path)}`,
+              {
+                method: 'PUT',
+                signal: AbortSignal.timeout(60_000),
+                body: JSON.stringify({
+                  content: snapshot.content,
+                  expectedHash: snapshot.hash,
+                }),
+              },
+            )
+            if (!bufferStore.isCurrent(expected)) return
+            bufferStore.saved(snapshots, [
+              { path: snapshot.path, hash: value.hash },
+            ])
+            if (!automatic) setNotice('File saved')
             if (value.requiresPreparation) await loadProjects()
             else if (!automatic) void loadGit(id)
-            return
-          }
-          const value = await api<{
-            content: string
-            hash: string
-            requiresPreparation: boolean
-          }>(
-            `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(snapshot.path)}`,
-            {
-              method: 'PUT',
-              signal: AbortSignal.timeout(60_000),
-              body: JSON.stringify({
-                content: snapshot.content,
-                expectedHash: snapshot.hash,
-              }),
-            },
-          )
-          if (!bufferStore.isCurrent(expected)) return
-          bufferStore.saved(snapshots, [
-            { path: snapshot.path, hash: value.hash },
-          ])
-          if (!automatic) setNotice('File saved')
-          if (value.requiresPreparation) await loadProjects()
-          else if (!automatic) void loadGit(id)
-        } finally {
-          if (savePromise.current?.scope === expected) {
-            setSaving(false)
-            savePromise.current = null
-          }
-        }
-      })()
-      savePromise.current = { scope: expected, promise: task }
-      return task
+          })
+          .finally(() => {
+            // A previous visit must never release a newer visit's save lock.
+            if (savePromise.current === pending) {
+              setSaving(false)
+              savePromise.current = null
+            }
+          }),
+      }
+      savePromise.current = pending
+      return pending.promise
     },
-    [loadGit, loadProjects, bufferStore],
+    [loadGit, loadProjects, bufferStore, projectCanEdit, flushCollaboration],
   )
 
   const automaticSave = useCallback(
@@ -1054,6 +1136,7 @@ export function Studio() {
       !!session &&
       !authRequired &&
       workspaceEditable &&
+      projectCanEdit &&
       !opening &&
       !pendingAction &&
       !reloadTarget &&
@@ -1071,6 +1154,10 @@ export function Studio() {
   }, [saveVersion, scope, bufferStore, loadGit])
 
   const saveCompletely = useCallback(async () => {
+    if (bufferStore.drafts().some((file) => file.readOnly))
+      throw new Error(
+        'Your drafts can no longer be saved to this project. Download them before continuing, or discard them.',
+      )
     const expected = bufferStore.getSnapshot().scope
     // Saving is optimistic: preserve edits made during the request and save them
     // before handing a snapshot to an assistant or changing the current file.
@@ -1081,7 +1168,7 @@ export function Studio() {
     if (bufferStore.dirty().length) await saveFile()
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
     requireScope(expected)
-    if (bufferStore.dirty().length)
+    if (bufferStore.drafts().length)
       throw new Error(
         'Files are still being edited. Save them before continuing.',
       )
@@ -1097,7 +1184,7 @@ export function Studio() {
       throw new Error(
         'A file save is still in progress. Wait for it to finish before applying the candidate.',
       )
-    if (bufferStore.dirty().length)
+    if (bufferStore.drafts().length)
       throw new Error(
         'The editor has unsaved changes. Keep them and start a new run, or discard them before applying this candidate.',
       )
@@ -1121,7 +1208,7 @@ export function Studio() {
       }
     }
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (bufferStore.dirty().length || savePromise.current) {
+      if (bufferStore.drafts().length || savePromise.current) {
         event.preventDefault()
         event.returnValue = ''
       }
@@ -1149,7 +1236,7 @@ export function Studio() {
       setNavigationTarget(destination)
       void (async () => {
         try {
-          if (bufferStore.dirty().length || savePromise.current)
+          if (bufferStore.drafts().length || savePromise.current)
             await saveCompletely()
           if (
             request !== navigationRequest.current ||
@@ -1157,6 +1244,10 @@ export function Studio() {
             !bufferStore.isCurrent(expected)
           )
             return
+          if (bufferStore.drafts().length)
+            throw new Error(
+              'Your drafts are still in this tab. Download or save them before continuing, or discard them.',
+            )
           await action()
         } catch (error) {
           if (
@@ -1164,7 +1255,7 @@ export function Studio() {
             !bufferStore.isCurrent(expected)
           )
             return
-          if (bufferStore.dirty().length) {
+          if (bufferStore.drafts().length) {
             setNavigationError(errorText(error))
             setPendingAction(() => action)
           } else setError(errorText(error))
@@ -1173,6 +1264,42 @@ export function Studio() {
     },
     [bufferStore, saveCompletely],
   )
+
+  useEffect(() => {
+    if (!sessionUser || !invitationToken || authRequired) return
+    let cancelled = false
+    setInvitationIssue('')
+    void post<Project>('/api/project-invitations/join', {
+      token: invitationToken,
+    })
+      .then((joined) => {
+        if (cancelled) return
+        sessionStorage.removeItem('lemex-project-invitation')
+        setProjects((previous) => [
+          ...previous.filter((item) => item.id !== joined.id),
+          joined,
+        ])
+        navigate(async () => {
+          localStorage.setItem('lemex-project', joined.id)
+          setProjectId(joined.id)
+          setInvitationToken(null)
+          setNotice('Shared project opened')
+        }, joined.name)
+      })
+      .catch((error) => {
+        if (!cancelled) setInvitationIssue(errorText(error))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    sessionUser,
+    invitationToken,
+    invitationAttempt,
+    authRequired,
+    setProjectId,
+    navigate,
+  ])
 
   const chooseFile = useCallback(
     (path: string) => {
@@ -1276,6 +1403,7 @@ export function Studio() {
   }
 
   async function check() {
+    if (!projectCanEdit) return
     if (!projectId || !file || checkRequest.current) return
     const id = projectId
     checkRequest.current = true
@@ -1549,6 +1677,7 @@ export function Studio() {
 
   async function closeTerminal() {
     setTerminalProjectId(null)
+    setTerminalActive(false)
     const id = terminalProjectId
     if (!id) return
     try {
@@ -1559,6 +1688,9 @@ export function Studio() {
       void loadGit(id)
     } catch (error) {
       if (projectIdRef.current === id) setError(errorText(error))
+    } finally {
+      if (projectIdRef.current === id)
+        setTerminalRecoveryVersion((value) => value + 1)
     }
   }
 
@@ -1616,7 +1748,7 @@ export function Studio() {
         target.kind !== 'chat' &&
         projectIdRef.current === target.projectId &&
         bufferStore
-          .dirty()
+          .drafts()
           .some(
             (buffer) =>
               !target.path ||
@@ -1777,6 +1909,18 @@ export function Studio() {
     }
   }
 
+  const draftNavigationDialog = pendingAction && (
+    <DraftNavigationDialog
+      files={dirtyFiles}
+      destination={navigationTarget}
+      error={navigationError}
+      saving={saving}
+      onClose={() => setPendingAction(null)}
+      onDiscard={() => void continueNavigation(false)}
+      onSave={() => void continueNavigation(true)}
+    />
+  )
+
   if (authRequired && !session)
     return (
       <Login
@@ -1789,7 +1933,7 @@ export function Studio() {
   if (
     session &&
     (session.user.profileComplete === false ||
-      session.lemex?.configured === false)
+      (session.lemex?.configured === false && project?.accessRole !== 'viewer'))
   )
     return (
       <>
@@ -1803,7 +1947,19 @@ export function Studio() {
           }}
           onProfileSaved={acceptProfile}
           onLogout={logout}
+          viewerProjects={
+            session.user.profileComplete === false
+              ? []
+              : projects.filter((item) => item.accessRole === 'viewer')
+          }
+          onOpenViewer={(id) =>
+            navigate(async () => {
+              localStorage.setItem('lemex-project', id)
+              setProjectId(id)
+            })
+          }
         />
+        {draftNavigationDialog}
         {authRequired && <SessionRecovery user={session.user} />}
       </>
     )
@@ -1894,7 +2050,7 @@ export function Studio() {
                     <button
                       className="button small subtle"
                       onClick={() => setUploadProjectId(projectId)}
-                      disabled={project?.status !== 'ready'}
+                      disabled={!projectCanEdit || project?.status !== 'ready'}
                       title="Upload local files or a folder"
                     >
                       Upload
@@ -1902,7 +2058,12 @@ export function Studio() {
                     <button
                       className="icon-button"
                       onClick={() => setNewEntryKind('file')}
-                      disabled={!workspaceEditable || opening || saving}
+                      disabled={
+                        !projectCanEdit ||
+                        !workspaceEditable ||
+                        opening ||
+                        saving
+                      }
                       title="New file"
                       aria-label="New file"
                     >
@@ -1916,6 +2077,7 @@ export function Studio() {
                           setNewEntryKind('folder')
                         }}
                         disabled={
+                          !projectCanEdit ||
                           !workspaceEditable ||
                           opening ||
                           saving ||
@@ -1974,6 +2136,7 @@ export function Studio() {
                   disabled={opening || saving}
                   filter={fileFilter}
                   ready={workspaceEditable}
+                  writable={projectCanEdit}
                   onSelect={chooseFile}
                   onDownload={(path) =>
                     project && void downloadFile(project, path)
@@ -2078,6 +2241,7 @@ export function Studio() {
                 })
               }
               onRename={setRenameTarget}
+              onShare={setSharingTarget}
               playgroundActions={
                 <SingleFileActions
                   available={mathlibAvailable}
@@ -2109,7 +2273,8 @@ export function Studio() {
             className="sidebar-resize-handle"
           />
         )}
-        {!singleFileMode &&
+        {projectCanEdit &&
+          !singleFileMode &&
           git &&
           git.repository !== false &&
           project?.status === 'ready' && (
@@ -2214,7 +2379,8 @@ export function Studio() {
                 {git.branch}
               </span>
             )}
-            {project?.status === 'ready' &&
+            {projectCanEdit &&
+              project?.status === 'ready' &&
               project.repository &&
               !singleFileMode && (
                 <ToolbarAction
@@ -2234,6 +2400,19 @@ export function Studio() {
               )}
           </div>
           <div className="header-actions">
+            {project && !singleFileMode && projectAdmin && (
+              <ToolbarAction
+                label="Share"
+                icon={<Icon name="external" size={15} />}
+                onClick={() => setSharingTarget(project)}
+                help="Invite editors or viewers to this project. Your chats and provider settings stay private."
+              />
+            )}
+            {project?.accessRole && (
+              <span className="tag">
+                {projectAdmin ? 'Admin' : projectCanEdit ? 'Editor' : 'Viewer'}
+              </span>
+            )}
             <ToolbarAction
               label="Goals"
               onClick={() => setShowInfoview((value) => !value)}
@@ -2252,7 +2431,7 @@ export function Studio() {
               pressed={toolsOpen}
               help="Show or hide your Lemex assistant. Ask questions about the project, work on proofs, and review its changes in chat."
             />
-            {project?.status === 'ready' && (
+            {projectCanEdit && project?.status === 'ready' && (
               <ToolbarAction
                 label="Terminal"
                 icon={<Icon name="terminal" size={15} />}
@@ -2261,26 +2440,28 @@ export function Studio() {
                   if (terminalOpen) closeTerminal()
                   else setTerminalProjectId(project.id)
                 }}
-                help="Open a terminal in this project to run commands and inspect their output. Commands can change project files; close the terminal before refreshing setup."
+                help="Run commands in your private working copy. File changes sync with conflict checks. Terminal Git history stays private; use Source control to publish project history."
               />
             )}
-            {project?.status === 'ready' && !singleFileMode && (
-              <ToolbarAction
-                label="Refresh setup"
-                icon={<Icon name="refresh" size={14} />}
-                onClick={retryPrepare}
-                disabled={saving || !!(job && !terminalJob(job))}
-                help={
-                  <>
-                    Recheck the project’s Lean environment, reuse valid compiled
-                    caches, and prepare missing libraries. If setup still fails,
-                    Lemex repairs it automatically when enabled. Your files and
-                    pinned versions are preserved. Stop active checks and chats,
-                    and close the terminal first.
-                  </>
-                }
-              />
-            )}
+            {projectCanEdit &&
+              project?.status === 'ready' &&
+              !singleFileMode && (
+                <ToolbarAction
+                  label="Refresh setup"
+                  icon={<Icon name="refresh" size={14} />}
+                  onClick={retryPrepare}
+                  disabled={saving || !!(job && !terminalJob(job))}
+                  help={
+                    <>
+                      Recheck the project’s Lean environment, reuse valid
+                      compiled caches, and prepare missing libraries. If setup
+                      still fails, Lemex repairs it automatically when enabled.
+                      Your files and pinned versions are preserved. Stop active
+                      checks and chats, and close the terminal first.
+                    </>
+                  }
+                />
+              )}
             <button
               className="icon-button"
               aria-label="Git connections"
@@ -2316,7 +2497,16 @@ export function Studio() {
             />
           </div>
         </header>
-        {project?.status === 'ready' &&
+        {projectId && (
+          <TerminalRecoveries
+            key={`${session.user.id}:${projectId}`}
+            projectId={projectId}
+            active={terminalOpen && terminalActive}
+            refreshKey={`${terminalRecoveryVersion}:${project?.accessRole || (project ? 'admin' : 'revoked')}`}
+          />
+        )}
+        {projectCanEdit &&
+          project?.status === 'ready' &&
           project.setupRepair?.status === 'completed' && (
             <div className="workspace-alert live-edit-alert">
               <span>
@@ -2440,6 +2630,40 @@ export function Studio() {
             </button>
           </div>
         )}
+        {invitationToken && (
+          <div
+            className="workspace-alert"
+            role={invitationIssue ? 'alert' : 'status'}
+          >
+            <span>{invitationIssue || 'Opening shared project…'}</span>
+            {invitationIssue && (
+              <>
+                <button
+                  className="button small secondary"
+                  onClick={() => setInvitationAttempt((value) => value + 1)}
+                >
+                  Retry invitation
+                </button>
+                <button
+                  className="button small subtle"
+                  onClick={() => {
+                    sessionStorage.removeItem('lemex-project-invitation')
+                    setInvitationToken(null)
+                    setInvitationIssue('')
+                  }}
+                >
+                  Dismiss
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        {collaboration.issue && project && (
+          <div className="workspace-alert draft-protection-alert" role="status">
+            <span>{collaboration.issue}</span>
+            <DraftDownloads files={dirtyFiles} />
+          </div>
+        )}
         {error && (
           <div className="workspace-alert" role="alert">
             <span>{error}</span>
@@ -2450,6 +2674,18 @@ export function Studio() {
             >
               <Icon name="close" size={16} />
             </button>
+          </div>
+        )}
+        {projectId && !project && (
+          <div
+            className="workspace-alert revoked-access-notice draft-protection-alert"
+            role="status"
+          >
+            <span>
+              Your access to this project has ended. Any drafts are kept in this
+              tab. Download them before opening another project.
+            </span>
+            <DraftDownloads files={dirtyFiles} />
           </div>
         )}
         {!project ? (
@@ -2500,6 +2736,11 @@ export function Studio() {
               ))}
             </div>
           </div>
+        ) : project.status === 'needs-setup' && !projectCanEdit ? (
+          <div className="preparation-state">
+            <h1>Project setup is pending</h1>
+            <p>An editor needs to choose this project’s Lean environment.</p>
+          </div>
         ) : project.status === 'needs-setup' ? (
           <ImportedProjectSetup
             key={project.id}
@@ -2526,25 +2767,27 @@ export function Studio() {
                     ? 'Opening your private copy of the prepared Mathlib environment.'
                     : 'Setting up the Lean toolchain and project dependencies. You can return to another project while this runs.'}
                 </p>
-                <button
-                  className="button secondary"
-                  disabled={stoppingSetup}
-                  onClick={async () => {
-                    setStoppingSetup(true)
-                    try {
-                      await post(
-                        `/api/projects/${encodeURIComponent(project.id)}/prepare/stop`,
-                      )
-                      await loadProjects()
-                    } catch (error) {
-                      setError(errorText(error))
-                    } finally {
-                      setStoppingSetup(false)
-                    }
-                  }}
-                >
-                  {stoppingSetup ? 'Stopping setup…' : 'Stop setup'}
-                </button>
+                {projectCanEdit && (
+                  <button
+                    className="button secondary"
+                    disabled={stoppingSetup}
+                    onClick={async () => {
+                      setStoppingSetup(true)
+                      try {
+                        await post(
+                          `/api/projects/${encodeURIComponent(project.id)}/prepare/stop`,
+                        )
+                        await loadProjects()
+                      } catch (error) {
+                        setError(errorText(error))
+                      } finally {
+                        setStoppingSetup(false)
+                      }
+                    }}
+                  >
+                    {stoppingSetup ? 'Stopping setup…' : 'Stop setup'}
+                  </button>
+                )}
               </>
             ) : (
               <>
@@ -2556,17 +2799,21 @@ export function Studio() {
                 <p className="error-message">
                   {project.error || 'The environment could not be prepared.'}
                 </p>
-                <button className="button primary" onClick={retryPrepare}>
-                  <Icon name="refresh" size={16} />
-                  {singleFileMode ? 'Retry opening' : 'Retry setup'}
-                </button>
+                {projectCanEdit && (
+                  <button className="button primary" onClick={retryPrepare}>
+                    <Icon name="refresh" size={16} />
+                    {singleFileMode ? 'Retry opening' : 'Retry setup'}
+                  </button>
+                )}
               </>
             )}
-            {!singleFileMode && <ProjectSetupDetails project={project} />}
+            {projectCanEdit && !singleFileMode && (
+              <ProjectSetupDetails project={project} />
+            )}
           </div>
         ) : (
           <>
-            {project.status === 'error' && (
+            {projectCanEdit && project.status === 'error' && (
               <div className="workspace-alert" role="status">
                 <span>
                   {project.error}{' '}
@@ -2583,7 +2830,9 @@ export function Studio() {
                 </button>
               </div>
             )}
-            {!singleFileMode && <ProjectSetupPanel project={project} />}
+            {projectCanEdit && !singleFileMode && (
+              <ProjectSetupPanel project={project} />
+            )}
             <div className="file-toolbar">
               <div className="file-tab">
                 <Icon name="file" size={15} />
@@ -2630,7 +2879,9 @@ export function Studio() {
                     <button
                       className="button small subtle"
                       disabled={
-                        project.status === 'preparing' || convertingSingleFile
+                        !projectCanEdit ||
+                        project.status === 'preparing' ||
+                        convertingSingleFile
                       }
                       onClick={() => void convertSingleFile()}
                     >
@@ -2645,7 +2896,13 @@ export function Studio() {
                   onClick={() =>
                     void saveFile().catch((error) => setError(errorText(error)))
                   }
-                  disabled={!dirty || saving || opening || file?.readOnly}
+                  disabled={
+                    !projectCanEdit ||
+                    !dirty ||
+                    saving ||
+                    opening ||
+                    file?.readOnly
+                  }
                   title="Autosave is enabled. Save now with Ctrl+S or ⌘S."
                 >
                   <Icon name="save" size={14} />
@@ -2668,6 +2925,7 @@ export function Studio() {
                   onCheck={() => void check()}
                   onStop={() => void stopCheck()}
                   disabled={
+                    !projectCanEdit ||
                     project.status !== 'ready' ||
                     project.needsPreparation ||
                     !file?.path.endsWith('.lean') ||
@@ -2704,6 +2962,8 @@ export function Studio() {
                     requireScope(scope)
                     bufferStore.register(sources)
                   }}
+                  onCollaborativeUndo={collaboration.undo}
+                  onCollaborativeRedo={collaboration.redo}
                   theme={theme}
                   showInfoview={showInfoview && !!file?.path.endsWith('.lean')}
                   goalsSize={goalsSize}
@@ -2874,17 +3134,22 @@ export function Studio() {
         )}
         {terminalOpen && project?.status === 'ready' && (
           <TerminalPanel
-            key={project.id}
+            key={`${session.user.id}:${project.id}`}
             projectId={project.id}
             projectName={project.name}
             theme={theme}
             onClose={closeTerminal}
+            onStateChange={(active) => {
+              if (!bufferStore.isCurrent(scope)) return
+              setTerminalActive(active)
+              setTerminalRecoveryVersion((value) => value + 1)
+            }}
           />
         )}
         {booksMounted && (
           <BooksPanel
             open={booksOpen}
-            canAsk={project?.status === 'ready'}
+            canAsk={projectCanEdit && project?.status === 'ready'}
             pageRequest={bookPageRequest}
             onClose={closeBooks}
             onAsk={(text) => {
@@ -2915,13 +3180,15 @@ export function Studio() {
           <span className="statusbar-notice" role="status">
             {saving
               ? 'Saving…'
-              : dirty
-                ? autosave.issue
-                  ? autosave.issue.retrying
-                    ? 'Waiting to save'
-                    : 'Autosave paused'
-                  : 'Autosave pending…'
-                : notice || (file ? 'All changes saved' : '')}
+              : readOnlyDrafts
+                ? 'Unsaved drafts · download to keep'
+                : dirty
+                  ? autosave.issue
+                    ? autosave.issue.retrying
+                      ? 'Waiting to save'
+                      : 'Autosave paused'
+                    : 'Autosave pending…'
+                  : notice || (file ? 'All changes saved' : '')}
           </span>
           <span title={project?.toolchain}>
             {project?.toolchain?.replace('leanprover/lean4:', 'Lean ')}
@@ -2972,7 +3239,7 @@ export function Studio() {
             {project?.status === 'ready' ? (
               <AssistantPanel
                 onOpenSettings={() => setSettingsModal(true)}
-                key={project.id}
+                key={`${session.user.id}:${project.id}`}
                 projectId={project.id}
                 file={pdfPreview ? undefined : file?.path}
                 currentFile={file?.path}
@@ -3023,6 +3290,7 @@ export function Studio() {
                   })
                 }
                 readOnly={file?.readOnly}
+                canRun={projectCanEdit}
                 session={session}
                 onModelsUpdated={(access) =>
                   setSession((current) =>
@@ -3185,6 +3453,18 @@ export function Studio() {
           }
         />
       )}
+      {sharingTarget &&
+        (!sharingTarget.accessRole || sharingTarget.accessRole === 'admin') && (
+          <ProjectSharingDialog
+            key={sharingTarget.id}
+            project={sharingTarget}
+            currentUserId={session.user.id}
+            onChanged={async () => {
+              await loadProjects()
+            }}
+            onClose={() => setSharingTarget(null)}
+          />
+        )}
       {renameTarget && (
         <RenameWorkspaceDialog
           project={renameTarget}
@@ -3248,7 +3528,7 @@ export function Studio() {
       {gitConnectionsOpen && (
         <GitConnectionsDialog onClose={() => setGitConnectionsOpen(false)} />
       )}
-      {gitOpen && project && (
+      {gitOpen && project && projectCanEdit && (
         <GitModal
           key={project.id}
           project={project}
@@ -3330,58 +3610,7 @@ export function Studio() {
           </footer>
         </Dialog>
       )}
-      {pendingAction && (
-        <Dialog
-          title="Save your changes?"
-          subtitle={
-            dirtyFiles.length > 1
-              ? `${dirtyFiles.length} files have unsaved edits.`
-              : `${file?.path || 'This file'} has unsaved edits.`
-          }
-          onClose={() => setPendingAction(null)}
-          busy={saving}
-        >
-          <p className="dialog-body">
-            {navigationTarget
-              ? `Save all changed files before opening ${navigationTarget}, or discard these edits.`
-              : 'Save all changed files before continuing, or discard these edits.'}
-          </p>
-          {navigationError && (
-            <p className="error-message" role="alert">
-              {navigationError} Your edits are still in the editor. Cancel to
-              keep editing.
-            </p>
-          )}
-          <footer className="dialog-actions">
-            <button
-              className="button secondary"
-              onClick={() => setPendingAction(null)}
-              disabled={saving}
-            >
-              Cancel
-            </button>
-            <button
-              className="button secondary"
-              onClick={() => void continueNavigation(false)}
-              disabled={saving}
-            >
-              Discard edits
-            </button>
-            <button
-              className="button primary"
-              onClick={() => void continueNavigation(true)}
-              disabled={saving}
-            >
-              {saving ? (
-                <span className="spinner" />
-              ) : (
-                <Icon name="save" size={15} />
-              )}
-              Save &amp; continue
-            </button>
-          </footer>
-        </Dialog>
-      )}
+      {draftNavigationDialog}
       {newEntryKind &&
         project &&
         (newEntryKind === 'file' || !singleFileMode) && (

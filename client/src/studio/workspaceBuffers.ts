@@ -171,6 +171,12 @@ export class WorkspaceBuffers {
     [...this.state.buffers.values()].filter(
       (file) => !file.readOnly && file.content !== file.savedContent,
     )
+  // Permission changes cannot erase a local draft. Autosave uses dirty();
+  // leaving, status and downloads must include drafts that are now read-only.
+  drafts = () =>
+    [...this.state.buffers.values()].filter(
+      (file) => file.content !== file.savedContent,
+    )
   saved = (snapshots: OpenFile[], files: { path: string; hash: string }[]) => {
     const hashes = new Map(files.map((file) => [file.path, file.hash]))
     const buffers = new Map(this.state.buffers)
@@ -195,6 +201,54 @@ export class WorkspaceBuffers {
         : null,
       buffers,
     )
+  }
+  // Shared document updates carry both the converged local source (which can
+  // include unacknowledged typing) and the durable server baseline.
+  collaborated = (
+    path: string,
+    content: string,
+    savedContent: string,
+    hash: string,
+  ) => {
+    const current = this.state.buffers.get(path)
+    if (!current) return
+    if (
+      current.content === content &&
+      current.savedContent === savedContent &&
+      current.hash === hash
+    )
+      return
+    const file = { ...current, content, savedContent, hash }
+    const buffers = new Map(this.state.buffers)
+    buffers.set(path, file)
+    this.state = {
+      ...this.state,
+      saveVersion: this.state.saveVersion + 1,
+      savedPaths: [path],
+    }
+    this.publish(
+      this.state.file?.path === path ? file : this.state.file,
+      buffers,
+    )
+  }
+  permissions = (readOnly: boolean) => {
+    const buffers = new Map(this.state.buffers)
+    let changed = false
+    for (const [path, file] of buffers) {
+      const restricted =
+        readOnly || path.startsWith('.lake/') || file.preview === 'pdf'
+      if (!!file.readOnly !== restricted) {
+        buffers.set(path, { ...file, readOnly: restricted })
+        changed = true
+      }
+    }
+    if (changed)
+      this.publish(
+        this.state.file
+          ? (buffers.get(this.state.file.path) ?? this.state.file)
+          : null,
+        buffers,
+      )
   }
   remove = (path: string) => {
     const matches = (name: string) =>

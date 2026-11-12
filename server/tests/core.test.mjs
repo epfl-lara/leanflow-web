@@ -25,9 +25,12 @@ import { createStudio } from '../studio.mjs'
 const hash = (value) => createHash('sha256').update(value).digest('hex')
 const TOOLCHAIN = 'leanprover/lean4:v4.34.1'
 
-async function temp(t) {
+async function temp(t, beforeRemove = async () => {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-core-'))
-  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  t.after(async () => {
+    await beforeRemove()
+    await fs.rm(directory, { recursive: true, force: true })
+  })
   return directory
 }
 
@@ -111,8 +114,18 @@ class FakeRuntime {
 }
 
 async function fixture(t, capacity) {
-  const dataDir = await temp(t),
+  let studio
+  let teardown
+  const closeFixture = () => {
+    teardown ||= (async () => {
+      await studio?.close()
+      await fs.rm(dataDir, { recursive: true, force: true })
+    })()
+    return teardown
+  }
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-core-')),
     runtime = new FakeRuntime()
+  t.after(closeFixture)
   const providerSecret = 'test-provider-secret'
   const config = {
     defaultModel: 'test-model',
@@ -121,7 +134,7 @@ async function fixture(t, capacity) {
     lemex: { configured: true, revision: 'test-revision' },
     redact: (value) => String(value).split(providerSecret).join('[redacted]'),
   }
-  const studio = await createStudio({
+  studio = await createStudio({
     dataDir,
     runtime,
     config,
@@ -130,7 +143,6 @@ async function fixture(t, capacity) {
   })
   await studio.providers.save('owner', providerSecret)
   await new Promise((resolve) => studio.server.listen(0, '127.0.0.1', resolve))
-  t.after(() => studio.close())
   const url = `http://127.0.0.1:${studio.server.address().port}`
   const token = (
     await fs.readFile(path.join(dataDir, 'auth', 'owner.token'), 'utf8')
@@ -170,6 +182,7 @@ async function fixture(t, capacity) {
     runtime,
     request,
     providerSecret,
+    closeFixture,
   }
 }
 
@@ -1163,7 +1176,24 @@ test('active Lean checks block project configuration, preparation, and Git mutat
   )
 
   events.update(check.id, { status: 'completed' })
-  events.create('bob', { kind: 'check', projectId: project.id })
+  await workspaces.setMember(project.id, 'owner', 'bob', 'editor')
+  const sharedCheck = events.create('bob', {
+    kind: 'check',
+    projectId: project.id,
+  })
+  assert.equal(
+    (
+      await request(`/api/projects/${project.id}/prepare`, {
+        method: 'POST',
+        ...json({}),
+      })
+    ).status,
+    409,
+    'Another member’s active check blocks changing the shared environment',
+  )
+  assert.equal(events.getMetadata(sharedCheck.id).status, 'queued')
+  events.update(sharedCheck.id, { status: 'completed' })
+  events.create('bob', { kind: 'check', projectId: 'another-members-project' })
   events.create('owner', { kind: 'check', projectId: 'a-different-project' })
   const source = configs.get('lean-toolchain')
   const saved = await request(
@@ -1176,7 +1206,7 @@ test('active Lean checks block project configuration, preparation, and Git mutat
   assert.equal(
     saved.status,
     200,
-    'Finished checks and active jobs in another owner/project must not block this project',
+    'Finished checks and active jobs in other projects must not block this project',
   )
   const branch = await request(`/api/projects/${project.id}/git`, {
     method: 'POST',
@@ -1247,11 +1277,26 @@ async function connectTerminal(t, f) {
       headers: { Authorization: `Bearer ${f.token}` },
     },
   )
+  const announced = new Promise((resolve) => {
+    ws.on('message', (data, binary) => {
+      if (binary && data.toString().includes('Private working copy.')) {
+        ws.send(JSON.stringify({ type: 'ack', bytes: data.length }))
+        resolve()
+      }
+    })
+  })
   t.after(() => ws.terminate())
   await new Promise((resolve, reject) => {
     ws.once('open', resolve)
     ws.once('error', reject)
   })
+  for (
+    let attempt = 0;
+    (!f.runtime.spawned.length || f.runtime.spawned.at(-1).killed) &&
+    attempt < 200;
+    attempt++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 5))
   await new Promise((resolve, reject) => {
     const child = f.runtime.spawned.at(-1)
     const timer = setTimeout(
@@ -1275,6 +1320,7 @@ async function connectTerminal(t, f) {
       })
       .catch(reject)
   })
+  await announced
   return ws
 }
 
@@ -1282,7 +1328,7 @@ test('terminal relays bytes, accepts bounded input and resize, and stops its wor
   const f = await fixture(t)
   const ws = await connectTerminal(t, f)
   const child = f.runtime.spawned[0]
-  assert.equal(child.root, f.workspaces.get(f.project.id, 'owner').root)
+  assert.notEqual(child.root, f.workspaces.get(f.project.id, 'owner').root)
   assert.equal(child.args[0], 'python3')
   assert.equal(child.options.network, 'bridge')
   assert.equal(child.options.freshHome, true)
@@ -1342,7 +1388,7 @@ test('terminal output pauses until the browser acknowledges bytes', async (t) =>
 test('closing a terminal reconciles configuration and exposes the existing setup recovery flow', async (t) => {
   const f = await fixture(t)
   await connectTerminal(t, f)
-  const root = f.workspaces.get(f.project.id, 'owner').root
+  const root = f.runtime.spawned.at(-1).root
   await fs.appendFile(path.join(root, 'lean-toolchain'), '\n')
   const options = {
     method: 'POST',
@@ -1374,7 +1420,7 @@ test('closing a terminal reconciles configuration and exposes the existing setup
 test('terminal stop authenticates and scopes ownership; ordinary source edits do not invalidate setup', async (t) => {
   const f = await fixture(t)
   await connectTerminal(t, f)
-  const root = f.workspaces.get(f.project.id, 'owner').root
+  const root = f.runtime.spawned.at(-1).root
   await fs.appendFile(
     path.join(root, 'Main.lean'),
     '\n-- terminal source edit\n',
@@ -1392,6 +1438,45 @@ test('terminal stop authenticates and scopes ownership; ordinary source edits do
   assert.equal(f.workspaces.get(f.project.id, 'owner').status, 'ready')
 })
 
+test('fixture teardown keeps terminal files until worker finalization and closes its listener before deleting data', async (t) => {
+  const f = await fixture(t)
+  const spawn = f.runtime.spawn.bind(f.runtime)
+  let finishCleanup
+  f.runtime.spawn = (...args) => {
+    const child = spawn(...args)
+    child.workerStopped = new Promise((resolve) => {
+      finishCleanup = resolve
+    })
+    return child
+  }
+  const ws = await connectTerminal(t, f)
+  const closed = new Promise((resolve) => ws.once('close', resolve))
+  ws.send(JSON.stringify({ type: 'input', data: 3 }))
+  assert.equal(await closed, 1008)
+  const cleanup = f.closeFixture()
+  try {
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(f.server.listening, false)
+    assert.equal((await fs.stat(f.dataDir)).isDirectory(), true)
+    assert.equal(
+      (await fs.stat(path.join(f.dataDir, 'auth/users.json'))).isFile(),
+      true,
+    )
+    assert.equal(
+      (await fs.stat(path.join(f.dataDir, 'workspaces.sqlite'))).isFile(),
+      true,
+    )
+  } finally {
+    finishCleanup()
+    await cleanup
+  }
+  await assert.rejects(fs.stat(f.dataDir), { code: 'ENOENT' })
+  assert.equal(
+    f.runtime.spawned.every((child) => child.killed),
+    true,
+  )
+})
+
 test('terminal stop waits for worker cleanup before configuration reconciliation and preparation', async (t) => {
   const f = await fixture(t)
   const spawn = f.runtime.spawn.bind(f.runtime)
@@ -1404,7 +1489,7 @@ test('terminal stop waits for worker cleanup before configuration reconciliation
     return child
   }
   await connectTerminal(t, f)
-  const root = f.workspaces.get(f.project.id, 'owner').root
+  const root = f.runtime.spawned.at(-1).root
   await fs.appendFile(path.join(root, 'lean-toolchain'), '\n')
   const options = {
     method: 'POST',
@@ -1755,9 +1840,10 @@ test('configuration saves close only that project editor and expose setup retry 
 })
 
 test('automatic setup repair requires the project owner personal key', async (t) => {
-  const dataDir = await temp(t),
+  let studio
+  const dataDir = await temp(t, () => studio?.close()),
     runtime = new FakeRuntime()
-  const studio = await createStudio({
+  studio = await createStudio({
     modelDiscoverer: fixtureModelDiscovery,
     dataDir,
     runtime,
@@ -1770,7 +1856,6 @@ test('automatic setup repair requires the project owner personal key', async (t)
     },
     titleGenerator: async () => null,
   })
-  t.after(() => studio.close())
   assert.equal(typeof studio.workspaces.setupRepair, 'function')
   await assert.rejects(
     () => studio.workspaces.setupRepair({ owner: 'owner' }),
@@ -1779,12 +1864,16 @@ test('automatic setup repair requires the project owner personal key', async (t)
 })
 
 test('startup migrates existing aliased project directories and retains missing projects as errors', async (t) => {
-  const base = await temp(t),
+  let first, restarted
+  const base = await temp(t, async () => {
+      await restarted?.close()
+      await first?.close()
+    }),
     real = path.join(base, 'data'),
     alias = path.join(base, 'alias')
   await fs.mkdir(real)
   await fs.symlink(real, alias)
-  const first = await createStudio({
+  first = await createStudio({
     modelDiscoverer: fixtureModelDiscovery,
     dataDir: real,
     runtime: new FakeRuntime(),
@@ -1820,7 +1909,7 @@ test('startup migrates existing aliased project directories and retains missing 
   }
   await fs.rm(projects[1].root, { recursive: true })
   await first.close()
-  const restarted = await createStudio({
+  restarted = await createStudio({
     modelDiscoverer: fixtureModelDiscovery,
     dataDir: alias,
     runtime: new FakeRuntime(),
@@ -1833,7 +1922,6 @@ test('startup migrates existing aliased project directories and retains missing 
     },
     titleGenerator: async () => null,
   })
-  t.after(() => restarted.close())
   const ready = restarted.workspaces.get(projects[0].id, 'owner')
   assert.equal(ready.root, path.join(real, 'projects', projects[0].id))
   assert.equal(ready.status, 'ready')

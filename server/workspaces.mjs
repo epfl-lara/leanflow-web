@@ -1,4 +1,5 @@
 import { removeDisposableTree } from './temporary-workspaces.mjs'
+import { ProjectMemberships } from './project-memberships.mjs'
 import {
   storedDiskBytes,
   storedManifest,
@@ -772,6 +773,10 @@ export class WorkspaceStore {
     this.jobs = new Map()
     this.locks = new Map()
     this.preparationControllers = new Map()
+    this.preparationActors = new Map()
+    this.changeListeners = new Set()
+    this.terminalStarts = new Map()
+    this.terminalCopies = new Map()
   }
 
   async init() {
@@ -794,6 +799,7 @@ export class WorkspaceStore {
     this.db.exec(
       'CREATE TABLE IF NOT EXISTS trash (id TEXT PRIMARY KEY, owner TEXT NOT NULL, project TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS trash_owner ON trash(owner);',
     )
+    this.memberships = new ProjectMemberships(this.db)
     for (const row of this.db.prepare('SELECT data FROM projects').all()) {
       const project = JSON.parse(row.data)
       const checkout = path.join(this.projectsDir, validateId(project.id))
@@ -892,7 +898,7 @@ export class WorkspaceStore {
       )
       if (entry.state === 'moving') entry.state = content ? 'trashed' : 'failed'
       else if (content) {
-        const project = this.#owned(entry.projectId, entry.owner)
+        const project = this.#record(entry.projectId)
         try {
           const destination = await guarded(project.root, entry.path, {
             write: true,
@@ -932,7 +938,7 @@ export class WorkspaceStore {
           entry.state = 'trashed'
         }
       } else {
-        const project = this.#owned(entry.projectId, entry.owner)
+        const project = this.#record(entry.projectId)
         try {
           entry.state = (await exists(
             await guarded(project.root, entry.path, { write: true }),
@@ -956,6 +962,7 @@ export class WorkspaceStore {
     project.updatedAt = new Date().toISOString()
     const stored = { ...project }
     delete stored.log
+    delete stored.accessRole
     this.db
       .prepare(
         'INSERT INTO projects(id,owner,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,owner=excluded.owner',
@@ -1008,12 +1015,15 @@ export class WorkspaceStore {
   list(owner) {
     validateOwner(owner)
     return this.db
-      .prepare('SELECT data FROM projects WHERE owner=? ORDER BY rowid DESC')
+      .prepare(
+        'SELECT data FROM projects WHERE id IN (SELECT project FROM project_members WHERE user=?) ORDER BY rowid DESC',
+      )
       .all(owner)
       .map((r) => JSON.parse(r.data))
       .filter((project) => !project.archivedAt)
       .map((project) => {
         delete project.log
+        project.accessRole = this.memberships.role(project.id, owner)
         return this.#dependencyStatus(project)
       })
   }
@@ -1039,19 +1049,170 @@ export class WorkspaceStore {
   #owned(id, owner) {
     validateId(id)
     validateOwner(owner)
-    const row = this.db
-      .prepare('SELECT data FROM projects WHERE id=? AND owner=?')
-      .get(id, owner)
+    this.assertActorActive?.(owner)
+    const project = this.#record(id)
+    if (this.memberships.role(id, owner) !== 'admin')
+      fail('Project admin access is required.', 403)
+    return project
+  }
+
+  #record(id) {
+    const row = this.db.prepare('SELECT data FROM projects WHERE id=?').get(id)
     if (!row) fail('Project not found', 404)
     return JSON.parse(row.data)
   }
 
-  get(id, owner) {
-    const project = this.#owned(id, owner)
-    if (project.archivedAt) fail('Project not found', 404)
+  get(id, actor) {
+    validateId(id)
+    validateOwner(actor)
+    this.assertActorActive?.(actor)
+    const row = this.db.prepare('SELECT data FROM projects WHERE id=?').get(id)
+    if (!row) fail('Project not found', 404)
+    const project = JSON.parse(row.data)
+    const accessRole = this.memberships.role(id, actor)
+    if (!accessRole || project.archivedAt) fail('Project not found', 404)
+    project.accessRole = accessRole
     this.#dependencyStatus(project)
     project.log = this.#setupLog(project)
     return project
+  }
+
+  requireEditor(id, actor) {
+    const project = this.get(id, actor)
+    if (project.accessRole === 'viewer')
+      fail(
+        'This project is shared with view access. Ask a project admin for editor access.',
+        403,
+      )
+    return project
+  }
+
+  requireAdmin(id, actor) {
+    const project = this.get(id, actor)
+    if (project.accessRole !== 'admin')
+      fail(
+        'Project admin access is required to change sharing or project settings.',
+        403,
+      )
+    return project
+  }
+
+  subscribeChanges(listener) {
+    this.changeListeners.add(listener)
+    return () => this.changeListeners.delete(listener)
+  }
+
+  #changed(projectId, paths = [], kind = 'files', removedPaths = []) {
+    // Listeners enqueue their own work. Never await a socket, agent or another
+    // workspace operation while the nonreentrant project write queue is held.
+    if (kind === 'access') {
+      const actor = this.preparationActors.get(projectId)
+      if (actor) {
+        try {
+          this.requireEditor(projectId, actor)
+        } catch {
+          this.preparationControllers
+            .get(projectId)
+            ?.abort(new Error('Project editor access was removed.'))
+        }
+      }
+    }
+    for (const listener of this.changeListeners) {
+      try {
+        listener({ projectId, paths, kind, removedPaths })
+      } catch {
+        /* A transport cannot fail a durable write. */
+      }
+    }
+  }
+
+  sharing(id, actor) {
+    this.requireAdmin(id, actor)
+    return this.memberships.list(id)
+  }
+
+  async setMember(
+    id,
+    actor,
+    userId,
+    role,
+    { assertAuthorized, onPreviousRole } = {},
+  ) {
+    assertAuthorized?.()
+    this.requireAdmin(id, actor)
+    return this.#locked(id, () => {
+      assertAuthorized?.()
+      const project = this.requireAdmin(id, actor)
+      this.assertActorActive?.(userId)
+      onPreviousRole?.(this.memberships.role(id, userId))
+      this.memberships.set(project, userId, role)
+      this.#changed(id, [], 'access')
+      return this.memberships.list(id)
+    })
+  }
+
+  async removeMember(
+    id,
+    actor,
+    userId,
+    { assertAuthorized, onPreviousRole } = {},
+  ) {
+    assertAuthorized?.()
+    this.requireAdmin(id, actor)
+    return this.#locked(id, () => {
+      assertAuthorized?.()
+      const project = this.requireAdmin(id, actor)
+      onPreviousRole?.(this.memberships.role(id, userId))
+      this.memberships.remove(project, userId)
+      this.#changed(id, [], 'access')
+      return this.memberships.list(id)
+    })
+  }
+
+  async createShareLink(id, actor, role, { assertAuthorized } = {}) {
+    assertAuthorized?.()
+    this.requireAdmin(id, actor)
+    return this.#locked(id, () => {
+      assertAuthorized?.()
+      this.requireAdmin(id, actor)
+      return this.memberships.createLink(id, role)
+    })
+  }
+
+  async revokeShareLink(id, actor, linkId, { assertAuthorized } = {}) {
+    assertAuthorized?.()
+    this.requireAdmin(id, actor)
+    return this.#locked(id, () => {
+      assertAuthorized?.()
+      this.requireAdmin(id, actor)
+      this.memberships.revokeLink(id, linkId)
+      return this.sharing(id, actor)
+    })
+  }
+
+  async joinShareLink(actor, token, { assertAuthorized } = {}) {
+    validateOwner(actor)
+    assertAuthorized?.()
+    this.assertActorActive?.(actor)
+    const invitation = this.memberships.invitation(token)
+    return this.#locked(invitation.project, () => {
+      assertAuthorized?.()
+      this.assertActorActive?.(actor)
+      const current = this.memberships.invitation(token)
+      const row = this.db
+        .prepare('SELECT data FROM projects WHERE id=?')
+        .get(current.project)
+      if (!row) fail('This invitation is no longer available.', 404)
+      const project = JSON.parse(row.data)
+      if (project.archivedAt)
+        fail('This invitation is no longer available.', 404)
+      const previous = this.memberships.role(project.id, actor)
+      // Joining a viewer link must not downgrade an existing Editor or Admin.
+      if (previous !== 'admin' && previous !== 'editor')
+        this.memberships.set(project, actor, current.role)
+      this.#changed(project.id, [], 'access')
+      return this.get(project.id, actor)
+    })
   }
 
   #setupLog(project) {
@@ -1118,7 +1279,7 @@ export class WorkspaceStore {
   }
 
   #trashReceipt(entry) {
-    const project = this.#owned(entry.projectId, entry.owner)
+    const project = this.#record(entry.projectId)
     return {
       trashId: entry.trashId,
       projectId: entry.projectId,
@@ -1142,7 +1303,7 @@ export class WorkspaceStore {
     validateOwner(owner)
     return this.db
       .prepare(
-        "SELECT data FROM trash WHERE owner=? AND json_extract(data,'$.state') IN ('trashed','deleting') ORDER BY rowid DESC",
+        "SELECT data FROM trash WHERE project IN (SELECT project FROM project_members WHERE user=? AND role='admin') AND json_extract(data,'$.state') IN ('trashed','deleting') ORDER BY rowid DESC",
       )
       .all(owner)
       .map((row) => this.#trashReceipt(JSON.parse(row.data)))
@@ -1153,7 +1314,9 @@ export class WorkspaceStore {
       if (receipt.sizeBytes !== null) continue
       await this.#locked(receipt.projectId, async () => {
         const row = this.db
-          .prepare('SELECT data FROM trash WHERE id=? AND owner=?')
+          .prepare(
+            "SELECT data FROM trash WHERE id=? AND project IN (SELECT project FROM project_members WHERE user=? AND role='admin')",
+          )
           .get(receipt.trashId, owner)
         if (!row) return
         const entry = JSON.parse(row.data)
@@ -1204,6 +1367,9 @@ export class WorkspaceStore {
             'A saved candidate has invalid project metadata. Contact the administrator.',
             409,
           )
+      // Terminal recovery belongs to its initiating account, independently of
+      // project membership and the shared project's lifetime.
+      if (manifest?.purpose === 'terminal') continue
       snapshots.push(name)
     }
     return snapshots
@@ -1231,7 +1397,7 @@ export class WorkspaceStore {
       entry.kind === 'project'
         ? [
             ...(await this.#projectStorage(
-              this.#owned(entry.projectId, entry.owner),
+              this.#record(entry.projectId),
               candidateRunIds,
             )),
             {
@@ -1252,7 +1418,9 @@ export class WorkspaceStore {
     validateId(trashId, 'trash')
     validateOwner(owner)
     const row = this.db
-      .prepare('SELECT data FROM trash WHERE id=? AND owner=?')
+      .prepare(
+        "SELECT data FROM trash WHERE id=? AND project IN (SELECT project FROM project_members WHERE user=? AND role='admin')",
+      )
       .get(trashId, owner)
     if (!row) fail('Recoverable deletion not found', 404)
     return this.#trashReceipt(JSON.parse(row.data))
@@ -1264,10 +1432,14 @@ export class WorkspaceStore {
     filename,
     { assertIdle = () => {}, candidateRunIds = [] } = {},
   ) {
-    this.get(id, owner)
+    if (filename === undefined) this.requireAdmin(id, owner)
+    else this.requireEditor(id, owner)
     if (filename !== undefined) relativeFile(filename, { write: true })
     return this.#locked(id, async () => {
-      const project = this.get(id, owner)
+      const project =
+        filename === undefined
+          ? this.requireAdmin(id, owner)
+          : this.requireEditor(id, owner)
       this.#assertPlaygroundFile(project, filename)
       if (project.protected && filename === undefined)
         fail(
@@ -1289,7 +1461,7 @@ export class WorkspaceStore {
           projectId: id,
           projectName: project.name,
           name: project.name,
-          owner,
+          owner: project.owner,
           path: null,
           kind: 'project',
           createdAt,
@@ -1326,6 +1498,7 @@ export class WorkspaceStore {
           this.db.exec('ROLLBACK')
           throw error
         }
+        this.#changed(id, [], 'project')
         return this.#trashReceipt(entry)
       }
       const destination = await guarded(project.root, filename, { write: true })
@@ -1339,7 +1512,7 @@ export class WorkspaceStore {
         projectId: id,
         projectName: project.name,
         name: path.posix.basename(filename),
-        owner,
+        owner: project.owner,
         path: filename,
         kind: stat.isDirectory() ? 'folder' : 'file',
         createdAt,
@@ -1381,6 +1554,7 @@ export class WorkspaceStore {
           'trashed',
           `Moved ${filename} to recoverable trash (${trashId}).\n`,
         )
+        this.#changed(id, [filename], 'files', [filename])
         return this.#trashReceipt(entry)
       } catch (error) {
         const moved = await exists(path.join(container, 'content'))
@@ -1401,13 +1575,17 @@ export class WorkspaceStore {
     validateId(trashId, 'trash')
     validateOwner(owner)
     const row = this.db
-      .prepare('SELECT data FROM trash WHERE id=? AND owner=?')
+      .prepare(
+        "SELECT data FROM trash WHERE id=? AND project IN (SELECT project FROM project_members WHERE user=? AND role='admin')",
+      )
       .get(trashId, owner)
     if (!row) fail('Recoverable deletion not found', 404)
     const initial = JSON.parse(row.data)
     return this.#locked(initial.projectId, async () => {
       const current = this.db
-        .prepare('SELECT data FROM trash WHERE id=? AND owner=?')
+        .prepare(
+          "SELECT data FROM trash WHERE id=? AND project IN (SELECT project FROM project_members WHERE user=? AND role='admin')",
+        )
         .get(trashId, owner)
       if (!current) fail('Recoverable deletion not found', 404)
       const entry = JSON.parse(current.data)
@@ -1445,6 +1623,11 @@ export class WorkspaceStore {
           this.db.exec('ROLLBACK')
           throw error
         }
+        this.#changed(
+          entry.projectId,
+          entry.path ? [entry.path] : [],
+          entry.kind === 'project' ? 'project' : 'files',
+        )
         return this.#trashReceipt(entry)
       }
       if (project.archivedAt)
@@ -1528,6 +1711,11 @@ export class WorkspaceStore {
           'restored',
           `Restored ${entry.path} from recoverable trash.\n`,
         )
+        this.#changed(
+          entry.projectId,
+          entry.path ? [entry.path] : [],
+          entry.kind === 'project' ? 'project' : 'files',
+        )
         return this.#trashReceipt(entry)
       } catch (error) {
         if (await exists(content)) {
@@ -1554,12 +1742,16 @@ export class WorkspaceStore {
     validateId(trashId, 'trash')
     validateOwner(owner)
     const initial = this.db
-      .prepare('SELECT project FROM trash WHERE id=? AND owner=?')
+      .prepare(
+        "SELECT project FROM trash WHERE id=? AND project IN (SELECT project FROM project_members WHERE user=? AND role='admin')",
+      )
       .get(trashId, owner)
     if (!initial) fail('Recoverable deletion not found', 404)
     return this.#locked(initial.project, async () => {
       const row = this.db
-        .prepare('SELECT data FROM trash WHERE id=? AND owner=?')
+        .prepare(
+          "SELECT data FROM trash WHERE id=? AND project IN (SELECT project FROM project_members WHERE user=? AND role='admin')",
+        )
         .get(trashId, owner)
       if (!row) fail('Recoverable deletion not found', 404)
       const entry = JSON.parse(row.data)
@@ -1588,7 +1780,9 @@ export class WorkspaceStore {
           (await this.#projectSnapshots(project, candidateRunIds))
         const trash =
           entry.deletion?.trash ||
-          this.#projectTrash(project.id, owner).map((item) => item.trashId)
+          this.#projectTrash(project.id, project.owner).map(
+            (item) => item.trashId,
+          )
         snapshots.forEach((id) => validateId(id, 'run'))
         trash.forEach((id) => validateId(id, 'trash'))
         const roots = [
@@ -1660,14 +1854,20 @@ export class WorkspaceStore {
           this.db.prepare('DELETE FROM events WHERE project=?').run(project.id)
           this.db
             .prepare('DELETE FROM trash WHERE project=? AND owner=?')
-            .run(project.id, owner)
+            .run(project.id, project.owner)
           this.db
             .prepare('DELETE FROM projects WHERE id=? AND owner=?')
-            .run(project.id, owner)
+            .run(project.id, project.owner)
+          this.db
+            .prepare('DELETE FROM project_members WHERE project=?')
+            .run(project.id)
+          this.db
+            .prepare('DELETE FROM project_share_links WHERE project=?')
+            .run(project.id)
         } else
           this.db
             .prepare('DELETE FROM trash WHERE id=? AND owner=?')
-            .run(trashId, owner)
+            .run(trashId, entry.owner)
         this.db.exec('COMMIT')
       } catch (error) {
         this.db.exec('ROLLBACK')
@@ -1852,12 +2052,14 @@ export class WorkspaceStore {
   }
 
   async rename(id, owner, input) {
-    this.get(id, owner)
+    this.requireAdmin(id, owner)
     if (!input || typeof input !== 'object' || Array.isArray(input))
       fail('Enter a name for this workspace.')
     const name = projectName(input.name)
     return this.#locked(id, async () => {
-      const project = this.get(id, owner)
+      const project = this.requireAdmin(id, owner)
+      if (this.jobs.has(id))
+        fail('Wait for setup to finish before renaming this project.', 409)
       if (
         this.#namedWorkspaces(owner).some(
           (item) => item.id !== id && item.name === name,
@@ -1875,9 +2077,9 @@ export class WorkspaceStore {
   }
 
   async convertSingleFile(id, owner) {
-    this.get(id, owner)
+    this.requireAdmin(id, owner)
     return this.#locked(id, async () => {
-      const project = this.get(id, owner)
+      const project = this.requireAdmin(id, owner)
       if (project.status === 'preparing' || this.jobs.has(id))
         fail(
           'Wait for playground preparation to finish before converting.',
@@ -1914,7 +2116,11 @@ export class WorkspaceStore {
     return saved ? validateGitCredentials(saved) : explicit
   }
 
-  #beginPrepare(project, credentials = validateGitCredentials({})) {
+  #beginPrepare(
+    project,
+    credentials = validateGitCredentials({}),
+    actor = project.owner,
+  ) {
     if (this.jobs.has(project.id)) return
     if (credentials.token && !project.imported)
       project.repositoryAuthenticationRequired = true
@@ -1927,61 +2133,61 @@ export class WorkspaceStore {
     this.#save(project)
     const controller = new AbortController()
     this.preparationControllers.set(project.id, controller)
+    this.preparationActors.set(project.id, actor)
     const job = Promise.resolve()
-      .then(() =>
-        this.#locked(project.id, async () => {
-          try {
-            await this.#prepareProject(project, credentials)
-          } catch (error) {
-            if (
-              !project.autoRepair ||
-              !this.setupRepair ||
-              error.unsupportedEnvironment ||
-              error.repositoryValidation ||
-              controller.signal.aborted ||
-              (!project.imported &&
-                !project.uploaded &&
-                !error.setupEnvironment) ||
-              [403, 404, 409, 413, 429, 503].includes(error.status) ||
-              error.infrastructure
-            ) {
-              if (!controller.signal.aborted)
-                this.#event(
-                  project,
-                  'warning',
-                  !project.imported && project.repository
-                    ? project.repositoryCloned
-                      ? 'The repository was cloned, but its selected revision could not be prepared. Check the revision and repository connection, then retry.\n'
-                      : 'The repository could not be imported. Lemex setup repair can run after the project files are available. Check the clone error and retry with the direct HTTPS clone URL.\n'
-                    : !this.setupRepair
-                      ? 'Lemex setup repair is unavailable on this server. You can edit setup files and retry.\n'
-                      : !project.autoRepair
-                        ? 'Automatic setup repair is disabled for this project. You can edit setup files and retry.\n'
-                        : error.pinnedEnvironment
-                          ? 'Automatic repair cannot change the chosen Lean version or resolved dependency pins. Check the configuration described in the setup error before retrying.\n'
-                          : error.repositoryValidation
-                            ? 'A dependency repository is not permitted during setup. Follow the repository URL error before retrying; automatic repair cannot change its pinned source.\n'
-                            : error.unsupportedEnvironment
-                              ? 'Automatic repair cannot change the chosen Lean version. Check the supported release and dependency requirements in the setup error.\n'
-                              : error.infrastructure ||
-                                  [429, 503].includes(error.status)
-                                ? 'Automatic repair cannot resolve a network or worker failure. Follow the setup error and retry when access or capacity is available.\n'
-                                : 'Automatic repair was skipped to preserve the project files. Follow the setup error before retrying.\n',
-                )
-              throw error
-            }
-            try {
-              await this.#repairPreparation(project, error, controller.signal)
-            } catch (repairError) {
-              throw new Error(
-                `${error.message}\nAutomatic setup repair also failed: ${repairError.message}`,
-                { cause: repairError },
+      .then(async () => {
+        try {
+          this.requireEditor(project.id, actor)
+          await this.#prepareProject(project, credentials)
+        } catch (error) {
+          if (
+            !project.autoRepair ||
+            !this.setupRepair ||
+            error.unsupportedEnvironment ||
+            error.repositoryValidation ||
+            controller.signal.aborted ||
+            (!project.imported &&
+              !project.uploaded &&
+              !error.setupEnvironment) ||
+            [403, 404, 409, 413, 429, 503].includes(error.status) ||
+            error.infrastructure
+          ) {
+            if (!controller.signal.aborted)
+              this.#event(
+                project,
+                'warning',
+                !project.imported && project.repository
+                  ? project.repositoryCloned
+                    ? 'The repository was cloned, but its selected revision could not be prepared. Check the revision and repository connection, then retry.\n'
+                    : 'The repository could not be imported. Lemex setup repair can run after the project files are available. Check the clone error and retry with the direct HTTPS clone URL.\n'
+                  : !this.setupRepair
+                    ? 'Lemex setup repair is unavailable on this server. You can edit setup files and retry.\n'
+                    : !project.autoRepair
+                      ? 'Automatic setup repair is disabled for this project. You can edit setup files and retry.\n'
+                      : error.pinnedEnvironment
+                        ? 'Automatic repair cannot change the chosen Lean version or resolved dependency pins. Check the configuration described in the setup error before retrying.\n'
+                        : error.repositoryValidation
+                          ? 'A dependency repository is not permitted during setup. Follow the repository URL error before retrying; automatic repair cannot change its pinned source.\n'
+                          : error.unsupportedEnvironment
+                            ? 'Automatic repair cannot change the chosen Lean version. Check the supported release and dependency requirements in the setup error.\n'
+                            : error.infrastructure ||
+                                [429, 503].includes(error.status)
+                              ? 'Automatic repair cannot resolve a network or worker failure. Follow the setup error and retry when access or capacity is available.\n'
+                              : 'Automatic repair was skipped to preserve the project files. Follow the setup error before retrying.\n',
               )
-            }
-            await this.#prepareProject(project, credentials)
+            throw error
           }
-        }),
-      )
+          try {
+            await this.#repairPreparation(project, error, controller.signal)
+          } catch (repairError) {
+            throw new Error(
+              `${error.message}\nAutomatic setup repair also failed: ${repairError.message}`,
+              { cause: repairError },
+            )
+          }
+          await this.#prepareProject(project, credentials)
+        }
+      })
       .catch(async (error) => {
         if (error.repositoryAuthenticationRequired && !project.imported)
           project.repositoryAuthenticationRequired = true
@@ -2016,14 +2222,17 @@ export class WorkspaceStore {
         clearGitCredentials(credentials)
         this.jobs.delete(project.id)
         this.preparationControllers.delete(project.id)
+        this.preparationActors.delete(project.id)
+        this.#changed(project.id, [], 'project')
       })
     this.jobs.set(project.id, job)
+    this.#changed(project.id, [], 'project')
   }
 
   async prepare(id, owner, { assertIdle = () => {}, ...input } = {}) {
-    this.get(id, owner)
+    this.requireEditor(id, owner)
     return this.#locked(id, async () => {
-      const project = this.#owned(id, owner)
+      const project = this.requireEditor(id, owner)
       const credentials = await this.#importCredentials(
         owner,
         input,
@@ -2047,7 +2256,7 @@ export class WorkspaceStore {
         delete project.setupRepair
       }
       this.#save(project)
-      this.#beginPrepare(project, credentials)
+      this.#beginPrepare(project, credentials, owner)
       return clone(project)
     })
   }
@@ -2058,9 +2267,9 @@ export class WorkspaceStore {
     input,
     { assertIdle = () => {} } = {},
   ) {
-    this.get(id, owner)
+    this.requireEditor(id, owner)
     return this.#locked(id, async () => {
-      const project = this.get(id, owner)
+      const project = this.requireEditor(id, owner)
       if (project.status !== 'needs-setup' || this.jobs.has(id))
         fail(
           'Choose an environment only for an imported repository without Lean setup.',
@@ -2085,7 +2294,7 @@ export class WorkspaceStore {
         project.status = 'preparing'
         delete project.error
         delete project.needsPreparation
-        this.#beginPrepare(project)
+        this.#beginPrepare(project, undefined, owner)
         this.#event(
           project,
           'output',
@@ -2132,7 +2341,7 @@ export class WorkspaceStore {
       delete project.needsPreparation
       project.status = 'preparing'
       this.#save(project)
-      this.#beginPrepare(project)
+      this.#beginPrepare(project, undefined, owner)
       this.#event(
         project,
         'output',
@@ -2143,13 +2352,13 @@ export class WorkspaceStore {
   }
 
   async stopPreparation(id, owner) {
-    const project = this.get(id, owner)
+    const project = this.requireEditor(id, owner)
     this.preparationControllers
       .get(id)
       ?.abort(new Error('Project setup stopped.'))
     if (project.setupCleanupFailed) {
       await this.#locked(id, async () => {
-        const current = this.#owned(id, owner)
+        const current = this.requireEditor(id, owner)
         if (current.setupCleanupFailed) await this.#cleanupSetupWorkers(current)
       })
       this.preparationControllers
@@ -2157,7 +2366,7 @@ export class WorkspaceStore {
         ?.abort(new Error('Project setup stopped.'))
     }
     await this.jobs.get(id)
-    return this.get(id, owner)
+    return this.requireEditor(id, owner)
   }
 
   async #cleanupSetupWorkers(project) {
@@ -2180,7 +2389,7 @@ export class WorkspaceStore {
 
   async enablePublishing(id, owner, { assertIdle = () => {} } = {}) {
     return this.#locked(id, async () => {
-      const project = this.#owned(id, owner)
+      const project = this.requireEditor(id, owner)
       if (project.archivedAt) fail('Project not found', 404)
       this.#ready(project)
       assertIdle()
@@ -2312,12 +2521,15 @@ export class WorkspaceStore {
   }
 
   async upload(id, owner, input) {
-    const project = this.get(id, owner)
+    const project = this.requireEditor(id, owner)
     this.#ready(project)
     const files = uploadedFiles(input, (value) =>
       relativeFile(value, { write: true }),
     )
     return this.#locked(id, async () => {
+      this.requireEditor(id, owner)
+      if (files.some((file) => CONFIGURATION_FILES.has(file.path)))
+        this.assertConfigurationIdle?.(id, owner)
       for (const file of files)
         if (
           await exists(await guarded(project.root, file.path, { write: true }))
@@ -2335,6 +2547,7 @@ export class WorkspaceStore {
           after: file.content,
         })),
         'uploaded',
+        () => this.requireEditor(id, owner),
       )
     })
   }
@@ -2420,7 +2633,7 @@ export class WorkspaceStore {
       )
     signal.throwIfAborted()
     await this.setupRepair({
-      owner: project.owner,
+      owner: this.preparationActors.get(project.id) || project.owner,
       root: candidate,
       project: { name: project.name, toolchain: project.toolchain },
       error: cause.message,
@@ -2946,7 +3159,7 @@ export class WorkspaceStore {
     let shared
     try {
       shared = await this.runtime.prepareSharedDependencies(project.root, {
-        owner: project.owner,
+        owner: this.preparationActors.get(project.id) || project.owner,
         toolchain: project.toolchain,
         configuration,
         signal,
@@ -3768,7 +3981,13 @@ export class WorkspaceStore {
     const project = this.get(id, owner)
     const dependencyRoot =
       (await this.runtime.dependencyRoot?.(project.root)) || project.root
-    return this.#walk(project.root, { dependencies: true, dependencyRoot })
+    const files = await this.#walk(project.root, {
+      dependencies: true,
+      dependencyRoot,
+    })
+    return project.accessRole === 'viewer'
+      ? files.map((file) => ({ ...file, readOnly: true }))
+      : files
   }
 
   async folders(id, owner) {
@@ -3779,7 +3998,7 @@ export class WorkspaceStore {
   }
 
   async createFolder(id, owner, input) {
-    this.get(id, owner)
+    this.requireEditor(id, owner)
     if (!input || typeof input !== 'object' || Array.isArray(input))
       fail('Enter a folder name.')
     const filename = relativeFile(input.path, { write: true })
@@ -3788,7 +4007,7 @@ export class WorkspaceStore {
         'This name is reserved for a project setup file. Choose another folder name.',
       )
     return this.#locked(id, async () => {
-      const project = this.get(id, owner)
+      const project = this.requireEditor(id, owner)
       this.#ready(project, true)
       if (project.kind === 'single-file')
         fail(
@@ -3815,6 +4034,7 @@ export class WorkspaceStore {
         await parent.handle.close()
       }
       this.#event(project, 'saved', `Created folder ${filename}.\n`)
+      this.#changed(id, [filename])
       return { path: filename }
     })
   }
@@ -3852,7 +4072,20 @@ export class WorkspaceStore {
       ? (await this.runtime.dependencyRoot?.(project.root)) || project.root
       : project.root
     const { content, hash } = await textFile(await guarded(root, filename))
-    return { content, hash }
+    return {
+      content,
+      hash,
+      ...(project.accessRole === 'viewer' ? { readOnly: true } : {}),
+    }
+  }
+
+  async readCollaborativeFile(id, actor, filename) {
+    this.get(id, actor)
+    return this.#locked(id, async () => {
+      const source = await this.readFile(id, actor, filename)
+      this.get(id, actor)
+      return source
+    })
   }
 
   async readDownloadFile(id, owner, filename, { byteLimit, signal } = {}) {
@@ -4014,8 +4247,16 @@ export class WorkspaceStore {
     })
   }
 
-  async writeFile(id, owner, filename, content, expectedHash) {
-    const project = this.get(id, owner)
+  async writeFile(
+    id,
+    owner,
+    filename,
+    content,
+    expectedHash,
+    { assertAuthorized } = {},
+  ) {
+    assertAuthorized?.()
+    const project = this.requireEditor(id, owner)
     this.#ready(project, true)
     if (isBinaryAssetFile(filename))
       fail(
@@ -4033,7 +4274,8 @@ export class WorkspaceStore {
         413,
       )
     return this.#locked(id, async () => {
-      const project = this.#owned(id, owner)
+      assertAuthorized?.()
+      const project = this.requireEditor(id, owner)
       if (project.archivedAt) fail('Project not found', 404)
       this.#ready(project, true)
       if (this.jobs.has(id))
@@ -4041,11 +4283,20 @@ export class WorkspaceStore {
       this.#assertPlaygroundFile(project, filename)
       const destination = await guarded(project.root, filename, { write: true })
       const before = await textFile(destination, true)
+      if (
+        expectedHash === undefined &&
+        this.memberships.list(id).members.length > 1
+      )
+        fail(
+          'Shared project saves require the original file version. Reload the file and try again.',
+        )
       if (expectedHash !== undefined && expectedHash !== (before?.hash ?? null))
         fail(
           'The file changed since it was opened. Reload it before saving.',
           409,
         )
+      if (CONFIGURATION_FILES.has(filename) && before?.content !== content)
+        this.assertConfigurationIdle?.(id, owner)
       const parent = await writeParent(project.root, filename)
       const temporary = `${parent.anchor}/.lemex-write-${randomUUID()}`
       try {
@@ -4053,6 +4304,8 @@ export class WorkspaceStore {
           mode: before?.mode ?? 0o600,
           flag: 'wx',
         })
+        assertAuthorized?.()
+        this.requireEditor(id, owner)
         await fs.rename(temporary, `${parent.anchor}/${parent.name}`)
       } finally {
         await fs.rm(temporary, { force: true })
@@ -4064,6 +4317,7 @@ export class WorkspaceStore {
         filename,
         before?.content !== content,
       )
+      this.#changed(id, [filename])
       return { content, hash: sha(content), requiresPreparation }
     })
   }
@@ -4186,22 +4440,395 @@ export class WorkspaceStore {
       const { manifest } = await this.#manifest({ root: sourceRoot, runId })
       if (
         manifest.projectId !== id ||
-        manifest.owner !== owner ||
+        (manifest.actor || manifest.owner) !== owner ||
         manifest.runId !== runId
       )
         fail('Invalid TeX candidate workspace.', 403)
       root = manifest.root
     }
-    return this.#locked(id, () =>
-      captureTexInputs(root, destination, signal, rootFile),
-    )
+    return this.#locked(id, async () => {
+      this.get(id, owner)
+      const captured = await captureTexInputs(
+        root,
+        destination,
+        signal,
+        rootFile,
+      )
+      this.get(id, owner)
+      return captured
+    })
   }
 
   async snapshot(id, owner, runId) {
     const project = this.get(id, owner)
     this.#ready(project)
     validateId(runId, 'run')
-    return this.#locked(id, () => this.#capture(this.get(id, owner), runId))
+    const snapshot = await this.#capture(
+      this.requireEditor(id, owner),
+      runId,
+      owner,
+    )
+    this.requireEditor(id, owner)
+    return snapshot
+  }
+
+  async terminalSnapshot(id, actor, runId, { signal } = {}) {
+    const project = this.requireEditor(id, actor)
+    this.#ready(project)
+    validateId(runId, 'terminal')
+    signal?.throwIfAborted()
+    let snapshot
+    await this.#locked(`\0terminal-admission\0${actor}`, async () => {
+      const retained = await this.#terminalRecoveryReceipts(actor, undefined, {
+        includeActive: true,
+      })
+      const starting = this.terminalStarts.get(actor) || new Set()
+      const occupied = new Set([
+        ...retained.map((receipt) => receipt.runId),
+        ...starting,
+        ...[...this.terminalCopies]
+          .filter(([, copy]) => copy.actor === actor)
+          .map(([copyId]) => copyId),
+      ])
+      if (occupied.size >= 8)
+        fail(
+          'You have 8 private terminal copies awaiting recovery. Download and delete unneeded copies before opening another terminal.',
+          409,
+        )
+      if (this.terminalCopies.has(runId))
+        fail('A private terminal already exists for this run.', 409)
+      starting.add(runId)
+      this.terminalStarts.set(actor, starting)
+      this.terminalCopies.set(runId, {
+        actor,
+        projectId: id,
+        phase: 'starting',
+      })
+    })
+    try {
+      snapshot = await this.#capture(project, runId, actor, {
+        purpose: 'terminal',
+        signal,
+      })
+      signal?.throwIfAborted()
+      this.requireEditor(id, actor)
+      // Private Git metadata never includes the original checkout's history,
+      // hooks, sibling folders or credentials. Source control owns publication.
+      const initialized = await this.runtime.run(
+        snapshot.root,
+        [...GIT_ARGS, 'init', '-b', 'terminal'],
+        {
+          network: 'none',
+          signal,
+          freshHome: true,
+          cleanHome: true,
+          timeoutMs: 30000,
+        },
+      )
+      if (initialized.code !== 0)
+        fail(
+          'The private terminal repository could not be prepared. Try opening it again.',
+          503,
+        )
+      this.requireEditor(id, actor)
+      await this.retainTerminalSnapshot(
+        snapshot,
+        'The terminal was interrupted before all edits were published. Download this private copy to recover its files.',
+        { active: true },
+      )
+      return snapshot
+    } catch (error) {
+      if (snapshot)
+        await this.cleanupTerminalSnapshot(snapshot, { finalize: true }).catch(
+          () => {},
+        )
+      else {
+        // #capture writes ownership before copying; do not retain an aborted,
+        // incomplete copy that was never handed to a worker.
+        const container = path.join(this.snapshotsDir, runId)
+        const claim = await storedManifest(
+          this.snapshotsDir,
+          runId,
+          'ownership.json',
+        )
+        if (claim?.projectId === id && claim.actor === actor) {
+          await removeDisposableTree(container)
+          this.terminalCopies.delete(runId)
+        }
+      }
+      throw error
+    } finally {
+      const starting = this.terminalStarts.get(actor)
+      starting?.delete(runId)
+      if (!starting?.size) this.terminalStarts.delete(actor)
+    }
+  }
+
+  async syncTerminal(snapshot, previousChanges = [], options = {}) {
+    const runId = validateId(snapshot?.runId, 'terminal')
+    return this.#locked(`\0terminal-copy\0${runId}`, () =>
+      this.#syncTerminal(snapshot, previousChanges, options),
+    )
+  }
+
+  async #syncTerminal(
+    snapshot,
+    previousChanges,
+    { assertAuthorized, onUnpublished },
+  ) {
+    assertAuthorized?.()
+    const { manifest } = await this.#manifest(snapshot)
+    if (manifest.purpose !== 'terminal')
+      fail('Invalid private terminal copy.', 403)
+    if (!this.terminalCopies.has(manifest.runId))
+      fail(
+        'This terminal has finished. Reopen a terminal to publish changes.',
+        409,
+      )
+    const identity = await fs.lstat(manifest.root)
+    const assertCopyCurrent = async () => {
+      let current
+      try {
+        current = await fs.lstat(manifest.root)
+        await this.#manifest(snapshot)
+      } catch {
+        fail(
+          'The private terminal copy changed during publication. Its changes were not published.',
+          409,
+        )
+      }
+      if (current.dev !== identity.dev || current.ino !== identity.ino)
+        fail(
+          'The private terminal copy changed during publication. Its changes were not published.',
+          409,
+        )
+    }
+    const actor = manifest.actor
+    this.requireEditor(manifest.projectId, actor)
+    const unpublished = new Set()
+    const changes = await this.changes(snapshot, {
+      skipNoneditable: true,
+      onSkipped: (filename) => unpublished.add(filename),
+    })
+    // A temporary partial UTF-8 write, generated binary, or oversized output
+    // must not look like an intentional reversion/deletion of an earlier edit.
+    // Keep the last published version until this private file is editable again.
+    for (const previous of previousChanges)
+      if (unpublished.has(previous.path)) changes.push(previous)
+    const published = await this.#locked(manifest.projectId, async () => {
+      await assertCopyCurrent()
+      assertAuthorized?.()
+      const project = this.requireEditor(manifest.projectId, actor)
+      if (this.jobs.has(project.id))
+        fail('Wait for project setup before publishing terminal changes.', 409)
+      this.#ready(project, true)
+      const configuration = new Map(
+        manifest.files
+          .filter((file) => CONFIGURATION_FILES.has(file.path))
+          .map((file) => [file.path, file.hash]),
+      )
+      for (const change of previousChanges) {
+        if (!CONFIGURATION_FILES.has(change.path)) continue
+        configuration.set(
+          change.path,
+          change.after === null ? null : sha(change.after),
+        )
+      }
+      // A changed environment invalidates terminal commands even when they edit
+      // a different file. Reject publication rather than guessing its context.
+      for (const filename of CONFIGURATION_FILES) {
+        const current = await textFile(
+          await guarded(project.root, filename, { write: true }),
+          true,
+        )
+        if ((current?.hash ?? null) !== (configuration.get(filename) ?? null))
+          fail(
+            `Project configuration changed: ${filename}. Reopen the terminal from the current project.`,
+            409,
+          )
+      }
+      const transition = this.#liveTransition(previousChanges, changes)
+      if (transition.some((change) => CONFIGURATION_FILES.has(change.path)))
+        this.assertConfigurationIdle?.(project.id, actor, {
+          terminalRunId: manifest.runId,
+        })
+      assertAuthorized?.()
+      await assertCopyCurrent()
+      await this.#applyLocked(project, transition, 'saved', () => {
+        assertAuthorized?.()
+        this.requireEditor(project.id, actor)
+      })
+      return changes
+    })
+    onUnpublished?.([...unpublished])
+    return published
+  }
+
+  markTerminalFinalizing(snapshot) {
+    const active = this.terminalCopies.get(snapshot?.runId)
+    if (active) active.phase = 'finalizing'
+  }
+
+  async retainTerminalSnapshot(snapshot, message, { active = false } = {}) {
+    const runId = validateId(snapshot?.runId, 'terminal')
+    return this.#locked(`\0terminal-copy\0${runId}`, () =>
+      this.#retainTerminalSnapshot(snapshot, message, { active }),
+    )
+  }
+
+  async #retainTerminalSnapshot(snapshot, message, { active }) {
+    const { manifest, container } = await this.#manifest(snapshot)
+    if (manifest.purpose !== 'terminal')
+      fail('Invalid private terminal copy.', 403)
+    const receipt = {
+      runId: manifest.runId,
+      projectId: manifest.projectId,
+      actor: manifest.actor,
+      ...(manifest.projectName ? { projectName: manifest.projectName } : {}),
+      createdAt: manifest.createdAt,
+      status: active ? 'active' : 'ready',
+      message:
+        typeof message === 'string'
+          ? message.slice(0, 2000)
+          : 'Download your private terminal copy to recover its files.',
+    }
+    const destination = path.join(container, 'terminal-recovery.json')
+    const temporary = destination + '-' + randomUUID()
+    await fs.writeFile(temporary, JSON.stringify(receipt), { mode: 0o600 })
+    await fs.rename(temporary, destination)
+    if (active) this.terminalCopies.get(manifest.runId).phase = 'active'
+    else this.terminalCopies.delete(manifest.runId)
+    return receipt
+  }
+
+  async #terminalRecoveryReceipts(actor, id, { includeActive = false } = {}) {
+    const receipts = []
+    for (const runId of await fs.readdir(this.snapshotsDir)) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(runId)) continue
+      if (!includeActive && this.terminalCopies.has(runId)) continue
+      const receipt = await storedManifest(
+        this.snapshotsDir,
+        runId,
+        'terminal-recovery.json',
+      )
+      if (
+        !receipt ||
+        (id !== undefined && receipt.projectId !== id) ||
+        receipt.actor !== actor ||
+        receipt.runId !== runId
+      )
+        continue
+      receipts.push({
+        projectId: receipt.projectId,
+        ...(receipt.projectName ? { projectName: receipt.projectName } : {}),
+        runId,
+        createdAt: receipt.createdAt,
+        status: receipt.status === 'active' ? 'interrupted' : 'ready',
+        message: receipt.message,
+      })
+    }
+    return receipts.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  }
+
+  async terminalRecoveries(id, actor) {
+    validateId(id)
+    validateOwner(actor)
+    return this.#terminalRecoveryReceipts(actor, id)
+  }
+
+  async personalTerminalRecoveries(actor) {
+    validateOwner(actor)
+    this.assertActorActive?.(actor)
+    const receipts = await this.#terminalRecoveryReceipts(actor)
+    this.assertActorActive?.(actor)
+    return receipts
+  }
+
+  async terminalRecovery(id, actor, runId) {
+    validateId(id)
+    validateId(runId, 'terminal')
+    validateOwner(actor)
+    const root = path.join(this.snapshotsDir, runId, 'workspace')
+    let manifest
+    try {
+      ;({ manifest } = await this.#manifest({ root, runId }))
+    } catch {
+      fail('Private terminal recovery not found.', 404)
+    }
+    if (
+      manifest.purpose !== 'terminal' ||
+      manifest.projectId !== id ||
+      manifest.actor !== actor
+    )
+      fail('Private terminal recovery not found.', 404)
+    if (this.terminalCopies.has(runId))
+      fail(
+        'This terminal is open or finishing its file updates. Wait for it to close before recovering or discarding its private copy.',
+        409,
+      )
+    return {
+      ...manifest,
+      id,
+      name: manifest.projectName
+        ? `${manifest.projectName} terminal files`
+        : 'Terminal recovery',
+    }
+  }
+
+  async deleteTerminalRecovery(id, actor, runId) {
+    const snapshot = await this.terminalRecovery(id, actor, runId)
+    await this.cleanupTerminalSnapshot(snapshot)
+    return { removed: true, runId }
+  }
+
+  async readTerminalRecoveryFile(id, actor, runId, filename, options = {}) {
+    const snapshot = await this.terminalRecovery(id, actor, runId)
+    return workspaceFileBytes(await guarded(snapshot.root, filename), {
+      ...options,
+      requireUnchanged: true,
+    })
+  }
+
+  async cleanupTerminalSnapshot(snapshot, { finalize = false } = {}) {
+    const runId = validateId(snapshot?.runId, 'terminal')
+    return this.#locked(`\0terminal-copy\0${runId}`, () =>
+      this.#cleanupTerminalSnapshot(snapshot, { finalize }),
+    )
+  }
+
+  async #cleanupTerminalSnapshot(snapshot, { finalize }) {
+    const { manifest, container } = await this.#manifest(snapshot)
+    if (manifest.purpose !== 'terminal')
+      fail('Invalid private terminal copy.', 403)
+    if (!finalize && this.terminalCopies.has(manifest.runId))
+      fail(
+        'This terminal is open or finishing its file updates. Wait for it to close before discarding its private copy.',
+        409,
+      )
+    if (
+      this.runtime.isActive?.(manifest.root) ||
+      [...(this.runtime.children || [])].some(
+        (child) => child.workspaceRoot === manifest.root,
+      )
+    )
+      fail('The terminal worker is still stopping. Try again shortly.', 409)
+    await this.runtime.clearInheritedDependencies?.(manifest.root, {
+      force: true,
+    })
+    // Remove the public recovery name atomically before walking/deleting files.
+    // A scan can never mistake a partially removed copy for intended deletions.
+    const discarded = path.join(
+      this.snapshotsDir,
+      `.terminal-discard-${randomUUID()}`,
+    )
+    await fs.rename(container, discarded)
+    try {
+      await removeDisposableTree(discarded)
+    } catch (error) {
+      await fs.rename(discarded, container).catch(() => {})
+      throw error
+    }
+    this.terminalCopies.delete(manifest.runId)
   }
 
   checkFingerprint(id, owner, options) {
@@ -4210,7 +4837,12 @@ export class WorkspaceStore {
     )
   }
 
-  async #capture(project, runId) {
+  async #capture(
+    project,
+    runId,
+    actor = project.owner,
+    { purpose, signal } = {},
+  ) {
     const { id, owner } = project
     const container = path.join(this.snapshotsDir, runId)
     await fs
@@ -4225,11 +4857,14 @@ export class WorkspaceStore {
     // An interrupted capture remains attributable even without its manifest.
     await fs.writeFile(
       path.join(container, 'ownership.json'),
-      JSON.stringify({ projectId: id, owner, runId, root }),
+      JSON.stringify({ projectId: id, owner, actor, runId, root }),
       { mode: 0o600, flag: 'wx' },
     )
     const inherit = typeof this.runtime.inheritDependencies === 'function'
-    await copyWorkspace(project.root, root, { omitDependencies: inherit })
+    await copyWorkspace(project.root, root, {
+      omitDependencies: inherit,
+      signal,
+    })
     if (inherit) await this.runtime.inheritDependencies(project.root, root)
     const files = []
     const links = []
@@ -4266,7 +4901,10 @@ export class WorkspaceStore {
       sourceRevision,
       projectId: id,
       owner,
+      actor,
       runId,
+      ...(purpose ? { purpose } : {}),
+      ...(purpose === 'terminal' ? { projectName: project.name } : {}),
       createdAt: new Date().toISOString(),
     }
     // Record original content outside the writable candidate. It is needed for
@@ -4321,13 +4959,18 @@ export class WorkspaceStore {
     return { manifest, container }
   }
 
-  async changes(snapshot) {
+  async changes(snapshot, { skipNoneditable = false, onSkipped } = {}) {
     const { manifest, container } = await this.#manifest(snapshot)
     const base = new Map(manifest.files.map((file) => [file.path, file]))
     const entries = await this.#walk(manifest.root, {
       includeLinks: true,
-      limit: Infinity,
+      limit: MAX_FILES + 1,
     })
+    if (entries.length > MAX_FILES)
+      fail(
+        'The private copy contains too many files. Remove generated output or download the copy for recovery.',
+        413,
+      )
     this.#checkLinks(manifest, entries, 'Candidate symbolic links changed')
     const current = new Map(
       entries
@@ -4357,6 +5000,10 @@ export class WorkspaceStore {
           ).content
         } catch (error) {
           if (!(error instanceof WorkspaceError)) throw error
+          if (skipNoneditable && [413, 415].includes(error.status)) {
+            onSkipped?.(filename)
+            continue
+          }
           fail(`Candidate changed a noneditable file: ${filename}`, 409)
         }
       }
@@ -4366,6 +5013,10 @@ export class WorkspaceStore {
             .content
         } catch (error) {
           if (!(error instanceof WorkspaceError)) throw error
+          if (skipNoneditable && [413, 415].includes(error.status)) {
+            onSkipped?.(filename)
+            continue
+          }
           fail(`Candidate changed a noneditable file: ${filename}`, 409)
         }
       } else {
@@ -4506,9 +5157,15 @@ export class WorkspaceStore {
 
   async assertSnapshotCurrent(snapshot) {
     const { manifest } = await this.#manifest(snapshot)
-    const project = this.get(manifest.projectId, manifest.owner)
+    const project = this.requireEditor(
+      manifest.projectId,
+      manifest.actor || manifest.owner,
+    )
     return this.#locked(project.id, () =>
-      this.#assertCurrent(manifest, project),
+      this.#assertCurrent(
+        manifest,
+        this.requireEditor(project.id, manifest.actor || manifest.owner),
+      ),
     )
   }
 
@@ -4606,9 +5263,15 @@ export class WorkspaceStore {
 
   async syncLive(snapshot, changes, previousChanges = [], options = {}) {
     const { manifest, container } = await this.#manifest(snapshot)
-    const initial = this.get(manifest.projectId, manifest.owner)
+    const initial = this.requireEditor(
+      manifest.projectId,
+      manifest.actor || manifest.owner,
+    )
     return this.#locked(initial.id, async () => {
-      const project = this.get(initial.id, initial.owner)
+      const project = this.requireEditor(
+        initial.id,
+        manifest.actor || manifest.owner,
+      )
       this.#ready(project)
       const previous = await this.#candidateChanges(
         manifest,
@@ -4627,6 +5290,7 @@ export class WorkspaceStore {
         project,
         this.#liveTransition(previous, next),
         'live',
+        () => this.requireEditor(project.id, manifest.actor || manifest.owner),
       )
       return next
     })
@@ -4634,9 +5298,15 @@ export class WorkspaceStore {
 
   async assertLive(snapshot, liveChanges = [], options = {}) {
     const { manifest, container } = await this.#manifest(snapshot)
-    const initial = this.get(manifest.projectId, manifest.owner)
+    const initial = this.requireEditor(
+      manifest.projectId,
+      manifest.actor || manifest.owner,
+    )
     return this.#locked(initial.id, async () => {
-      const project = this.get(initial.id, initial.owner)
+      const project = this.requireEditor(
+        initial.id,
+        manifest.actor || manifest.owner,
+      )
       this.#ready(project)
       const live = await this.#candidateChanges(
         manifest,
@@ -4650,9 +5320,15 @@ export class WorkspaceStore {
 
   async undoLive(snapshot, liveChanges, options = {}) {
     const { manifest, container } = await this.#manifest(snapshot)
-    const initial = this.get(manifest.projectId, manifest.owner)
+    const initial = this.requireEditor(
+      manifest.projectId,
+      manifest.actor || manifest.owner,
+    )
     return this.#locked(initial.id, async () => {
-      const project = this.get(initial.id, initial.owner)
+      const project = this.requireEditor(
+        initial.id,
+        manifest.actor || manifest.owner,
+      )
       this.#ready(project, true)
       const live = await this.#candidateChanges(
         manifest,
@@ -4661,20 +5337,41 @@ export class WorkspaceStore {
         options,
       )
       await this.#assertTouched(manifest, project, live)
-      return this.#applyLocked(project, this.#liveTransition(live, []), 'undo')
+      return this.#applyLocked(
+        project,
+        this.#liveTransition(live, []),
+        'undo',
+        () => this.requireEditor(project.id, manifest.actor || manifest.owner),
+      )
     })
   }
 
   async verificationCopy(snapshot, changes, options = {}) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.#verificationCopyOnce(snapshot, changes, options)
+      } catch (error) {
+        if (!error.verificationCaptureChanged || attempt >= 2) throw error
+      }
+    }
+  }
+
+  async #verificationCopyOnce(snapshot, changes, options = {}) {
     const { liveChanges = [] } = options
     const { manifest, container } = await this.#manifest(snapshot)
-    const initial = this.get(manifest.projectId, manifest.owner)
+    const initial = this.requireEditor(
+      manifest.projectId,
+      manifest.actor || manifest.owner,
+    )
     const project = initial
     this.#ready(project)
     if (!Array.isArray(changes) || changes.length > 1000)
       fail('Invalid verification change set')
-    return this.#locked(project.id, async () => {
-      const currentProject = this.get(project.id, project.owner)
+    return (async () => {
+      const currentProject = this.requireEditor(
+        project.id,
+        manifest.actor || manifest.owner,
+      )
       this.#ready(currentProject)
       const previous = await this.#candidateChanges(
         manifest,
@@ -4698,9 +5395,79 @@ export class WorkspaceStore {
           proposed,
         )
       else await this.#assertCurrent(manifest, currentProject)
-      // Build from the saved project rather than copying anything controlled by
-      // the model. The new root also gets a separate runtime HOME and artifacts.
-      const verified = await this.#capture(currentProject, randomUUID())
+      // Live runs intentionally retain unrelated collaborator edits. Bind the
+      // copy to that current context; review-first runs stay bound to their
+      // original snapshot. Neither path can accept edits raced into the copy.
+      let expected = new Map(
+        manifest.files.map((file) => [file.path, file.hash]),
+      )
+      for (const change of previous) {
+        if (change.after === null) expected.delete(change.path)
+        else expected.set(change.path, sha(change.after))
+      }
+      if (Object.hasOwn(options, 'liveChanges')) {
+        const entries = await this.#walk(currentProject.root, {
+          includeLinks: true,
+          limit: Infinity,
+        })
+        const capturedContext = new Map()
+        for (const entry of entries) {
+          if (entry.link !== undefined) continue
+          capturedContext.set(
+            entry.path,
+            await fileHash(await guarded(currentProject.root, entry.path)),
+          )
+        }
+        const protectedPaths = new Set([
+          ...CONFIGURATION_FILES,
+          ...previous.map((change) => change.path),
+          ...proposed.map((change) => change.path),
+        ])
+        for (const filename of protectedPaths) {
+          if (
+            (capturedContext.get(filename) ?? null) !==
+            (expected.get(filename) ?? null)
+          )
+            fail(
+              `Project changed while preparing verification: ${filename}. Retry from the current project.`,
+              409,
+            )
+        }
+        expected = capturedContext
+      }
+      // The independent copy has its own worker HOME and build artifacts.
+      const verified = await this.#capture(
+        currentProject,
+        randomUUID(),
+        manifest.actor || manifest.owner,
+      )
+      const sameLinks =
+        JSON.stringify(
+          [...verified.links].sort((a, b) => a.path.localeCompare(b.path)),
+        ) ===
+        JSON.stringify(
+          [...(manifest.links || [])].sort((a, b) =>
+            a.path.localeCompare(b.path),
+          ),
+        )
+      if (
+        !sameLinks ||
+        verified.files.length !== expected.size ||
+        verified.files.some((file) => expected.get(file.path) !== file.hash)
+      ) {
+        await this.runtime.clearInheritedDependencies?.(verified.root, {
+          force: true,
+        })
+        await removeDisposableTree(path.dirname(verified.root))
+        throw Object.assign(
+          new WorkspaceError(
+            'Project context changed while preparing verification. Retry the check from the current project.',
+            409,
+          ),
+          { verificationCaptureChanged: true },
+        )
+      }
+      this.requireEditor(project.id, manifest.actor || manifest.owner)
       const transitions = this.#liveTransition(previous, proposed)
       for (const change of transitions) {
         const destination = await guarded(verified.root, change.path, {
@@ -4737,11 +5504,11 @@ export class WorkspaceStore {
         purpose: 'verification',
         sourceRunId: manifest.runId,
       }
-    })
+    })()
   }
 
   async writeFiles(id, owner, files, { assertConfigurationIdle } = {}) {
-    this.get(id, owner)
+    this.requireEditor(id, owner)
     if (!Array.isArray(files) || !files.length || files.length > 1000)
       fail('Save between 1 and 1000 files at once.')
     let bytes = 0
@@ -4766,28 +5533,40 @@ export class WorkspaceStore {
     return this.#locked(id, () => {
       if (this.jobs.has(id))
         fail('Wait for project preparation to finish before saving.', 409)
-      if (changes.some((change) => CONFIGURATION_FILES.has(change.path)))
+      if (changes.some((change) => CONFIGURATION_FILES.has(change.path))) {
         assertConfigurationIdle?.()
-      return this.#applyLocked(this.get(id, owner), changes, 'saved')
+        this.assertConfigurationIdle?.(id, owner)
+      }
+      return this.#applyLocked(
+        this.requireEditor(id, owner),
+        changes,
+        'saved',
+        () => this.requireEditor(id, owner),
+      )
     })
   }
 
   async applyChanges(id, owner, changes, { snapshot } = {}) {
-    const project = this.get(id, owner)
-    this.#ready(project)
+    this.requireEditor(id, owner)
     if (!Array.isArray(changes) || changes.length > 1000)
       fail('Invalid change set')
     return this.#locked(id, async () => {
+      const project = this.requireEditor(id, owner)
+      this.#ready(project)
       if (snapshot) {
         const { manifest } = await this.#manifest(snapshot)
         await this.#assertCurrent(manifest, project)
       }
-      return this.#applyLocked(project, changes)
+      return this.#applyLocked(project, changes, 'applied', () =>
+        this.requireEditor(id, owner),
+      )
     })
   }
 
-  async #applyLocked(project, changes, reason = 'applied') {
-    project = this.get(project.id, project.owner)
+  async #applyLocked(project, changes, reason = 'applied', authorize) {
+    authorize?.()
+    project = this.#record(project.id)
+    if (project.archivedAt) fail('Project not found', 404)
     this.#ready(project, reason === 'undo' || reason === 'saved')
     const { id, owner } = project
     const seen = new Set()
@@ -4885,12 +5664,14 @@ export class WorkspaceStore {
         const parent = await writeParent(project.root, change.path)
         const anchored = `${parent.anchor}/${parent.name}`
         try {
+          authorize?.()
           if (change.existed)
             await fs.rename(
               anchored,
               path.join(transaction, 'before', String(i)),
             )
           applied.push({ ...change, index: i, parent, anchored })
+          authorize?.()
           if (change.after !== null)
             await fs.rename(
               path.join(transaction, 'staged', String(i)),
@@ -4939,6 +5720,14 @@ export class WorkspaceStore {
       project,
       reason,
       `${action}. Backup: ${path.relative(this.dataDir, transaction)}\n`,
+    )
+    this.#changed(
+      id,
+      prepared.map((change) => change.path),
+      'files',
+      prepared
+        .filter((change) => change.after === null)
+        .map((change) => change.path),
     )
     return {
       applied: prepared.length,

@@ -12,6 +12,8 @@ export function AccountSetup({
   refreshError,
   refreshing,
   onRetry,
+  viewerProjects = [],
+  onOpenViewer,
 }: {
   session: Session
   onSaved: () => void
@@ -20,6 +22,8 @@ export function AccountSetup({
   refreshError: string
   refreshing: boolean
   onRetry: () => void
+  viewerProjects?: readonly { id: string; name: string }[]
+  onOpenViewer?: (id: string) => void
 }) {
   const [providerBusy, setProviderBusy] = useState(false)
   const [profileBusy, setProfileBusy] = useState(false)
@@ -55,6 +59,27 @@ export function AccountSetup({
           </>
         ) : (
           <>
+            {!!viewerProjects.length && onOpenViewer && (
+              <section
+                className="account-viewer-projects"
+                aria-label="Projects you can view"
+              >
+                <p>
+                  You can read these shared projects without adding an API key.
+                </p>
+                {viewerProjects.map((project) => (
+                  <button
+                    type="button"
+                    className="button secondary"
+                    key={project.id}
+                    disabled={providerBusy || refreshing || loggingOut}
+                    onClick={() => onOpenViewer(project.id)}
+                  >
+                    Open viewer project: {project.name}
+                  </button>
+                ))}
+              </section>
+            )}
             <p>
               Connect your account to Lemex to open your workspace. Click your
               account in the sidebar to update your profile, API key, or

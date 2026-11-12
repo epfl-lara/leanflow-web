@@ -78,6 +78,7 @@ export function AssistantPanel({
   dirty,
   dirtyFileCount = 1,
   readOnly,
+  canRun = true,
   focusRequest,
   bookRequest,
   onBookHandled,
@@ -102,6 +103,7 @@ export function AssistantPanel({
   dirty: boolean
   dirtyFileCount?: number
   readOnly?: boolean
+  canRun?: boolean
   focusRequest?: ProofFocusRequest | null
   bookRequest?: BookChatRequest | null
   onBookHandled?: (id: number) => void
@@ -622,7 +624,8 @@ export function AssistantPanel({
   })
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (!prompt.trim() || busy || (hasActive && !acceptingUpdate)) return
+    if (!canRun || !prompt.trim() || busy || (hasActive && !acceptingUpdate))
+      return
     // Sending is an explicit choice of this visible conversation. Startup
     // restoration must not redirect it while its first chat is being created.
     ++navigation.current
@@ -778,7 +781,7 @@ export function AssistantPanel({
     [updateRun],
   )
   async function apply() {
-    if (!dialogRun || applying || dirty) return
+    if (!canRun || !dialogRun || applying || dirty) return
     setApplying(true)
     setActionError('')
     try {
@@ -806,7 +809,7 @@ export function AssistantPanel({
     setDialogId(null)
   }
   async function undo(id: string) {
-    if (undoingId || dirty || hasActive) return
+    if (!canRun || undoingId || dirty || hasActive) return
     setUndoingId(id)
     setStreamError('')
     try {
@@ -853,6 +856,7 @@ export function AssistantPanel({
       ? statusRun.progress.detail
       : '')
   const canApply =
+    canRun &&
     !!dialogRun &&
     !dialogRun.liveEdits &&
     dialogRun.status === 'completed' &&
@@ -866,7 +870,10 @@ export function AssistantPanel({
         chats={chats}
         selectedId={chatId}
         onSelect={(id) => void openChat(id)}
-        onNew={() => void newChat()}
+        onNew={() => {
+          if (canRun) void newChat()
+        }}
+        newDisabled={!canRun}
         onDelete={onDeleteChat}
         onRenamed={(renamed) => {
           if (!mounted.current) return
@@ -1034,7 +1041,7 @@ export function AssistantPanel({
                 onReview={(id) => void review(id)}
                 onUndo={(id) => void undo(id)}
                 onInspect={inspect}
-                canUndo={!dirty && !hasActive && !undoingId}
+                canUndo={canRun && !dirty && !hasActive && !undoingId}
                 undoing={undoingId === item.id}
                 onOpenTarget={onOpenTarget}
               />
@@ -1080,158 +1087,166 @@ export function AssistantPanel({
           </button>
         )}
       </div>
-      <form className="assistant-composer" onSubmit={submit}>
-        {editorProof?.error && (
-          <p className="error-message proof-focus-error" role="alert">
-            {editorProof.error}
-          </p>
-        )}
-        {proofTarget && (
-          <div className="composer-proof-target" aria-label="Focused proof">
-            <button
-              type="button"
-              className="proof-target-link"
-              onClick={() => onOpenTarget?.(proofTarget)}
-              disabled={!onOpenTarget}
-              title={`Open ${proofTarget.path}:${proofTarget.startLine}`}
-            >
-              <Icon name="file" size={13} />
-              <span>
-                <span className="proof-target-caption">Focused on</span>
-                <strong>{proofTarget.name || 'Selected proof'}</strong>
-                <small>
-                  {proofTarget.path}:{proofTarget.startLine}
-                  {proofTarget.endLine !== proofTarget.startLine
-                    ? `–${proofTarget.endLine}`
-                    : ''}
-                </small>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={draft.clearTarget}
-              aria-label="Clear proof target"
-              title="Clear proof target"
-            >
-              <Icon name="close" size={14} />
-            </button>
-          </div>
-        )}
-        <div className="composer-context">
-          <Icon name="file" size={13} />
-          <span
-            title={
-              currentFile
-                ? `${currentFile} is included automatically. You can add other files below.`
-                : undefined
-            }
-            aria-label={
-              currentFile
-                ? `Current file included automatically: ${currentFile}`
-                : undefined
-            }
-          >
-            {currentFile
-              ? `Current file: ${currentFile} (included automatically)`
-              : target || 'Project context'}
-          </span>
-          {dirty && !hasActive && (
-            <span className="tag">Saves before sending</span>
+      {!canRun && (
+        <p className="field-help viewer-agent-note" role="status">
+          You have viewer access. Your chats stay private. Ask an admin for
+          editor access to start an assistant or apply changes.
+        </p>
+      )}
+      {canRun && (
+        <form className="assistant-composer" onSubmit={submit}>
+          {editorProof?.error && (
+            <p className="error-message proof-focus-error" role="alert">
+              {editorProof.error}
+            </p>
           )}
-        </div>
-        {mode === 'formalize' && (
+          {proofTarget && (
+            <div className="composer-proof-target" aria-label="Focused proof">
+              <button
+                type="button"
+                className="proof-target-link"
+                onClick={() => onOpenTarget?.(proofTarget)}
+                disabled={!onOpenTarget}
+                title={`Open ${proofTarget.path}:${proofTarget.startLine}`}
+              >
+                <Icon name="file" size={13} />
+                <span>
+                  <span className="proof-target-caption">Focused on</span>
+                  <strong>{proofTarget.name || 'Selected proof'}</strong>
+                  <small>
+                    {proofTarget.path}:{proofTarget.startLine}
+                    {proofTarget.endLine !== proofTarget.startLine
+                      ? `–${proofTarget.endLine}`
+                      : ''}
+                  </small>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={draft.clearTarget}
+                aria-label="Clear proof target"
+                title="Clear proof target"
+              >
+                <Icon name="close" size={14} />
+              </button>
+            </div>
+          )}
           <div className="composer-context">
             <Icon name="file" size={13} />
             <span
-              title={target}
-              aria-label={`Lean output: ${target || 'new file'}`}
+              title={
+                currentFile
+                  ? `${currentFile} is included automatically. You can add other files below.`
+                  : undefined
+              }
+              aria-label={
+                currentFile
+                  ? `Current file included automatically: ${currentFile}`
+                  : undefined
+              }
             >
-              Lean output: {target || 'new file'}
+              {currentFile
+                ? `Current file: ${currentFile} (included automatically)`
+                : target || 'Project context'}
             </span>
+            {dirty && !hasActive && (
+              <span className="tag">Saves before sending</span>
+            )}
           </div>
-        )}
-        <label className="sr-only" htmlFor="assistant-prompt">
-          Message Lemex
-        </label>
-        <FileMentionTextarea
-          scope={draft.key}
-          files={files}
-          selected={contextFiles}
-          onAddFile={(path) => {
-            if (contextFiles.includes(path)) return true
-            if (contextFiles.length >= 12) {
-              setErrors((previous) => ({
-                ...previous,
-                [draft.key]:
-                  'Attach up to 12 files. Remove one before adding another.',
-              }))
-              return false
-            }
-            draft.setFiles([...contextFiles, path])
-            return true
-          }}
-          placeholder={
-            acceptingUpdate
-              ? 'Share an observation or change of direction…'
-              : mode === 'search' && texLanguage(currentFile)
-                ? 'Ask about this document, edit LaTeX, or compile and check its PDF…'
-                : currentMode.placeholder
-          }
-          value={prompt}
-          onChange={draft.setText}
-        />
-        <div className="composer-attachments">
-          <FileContextPicker
+          {mode === 'formalize' && (
+            <div className="composer-context">
+              <Icon name="file" size={13} />
+              <span
+                title={target}
+                aria-label={`Lean output: ${target || 'new file'}`}
+              >
+                Lean output: {target || 'new file'}
+              </span>
+            </div>
+          )}
+          <label className="sr-only" htmlFor="assistant-prompt">
+            Message Lemex
+          </label>
+          <FileMentionTextarea
+            scope={draft.key}
             files={files}
             selected={contextFiles}
-            onChange={draft.setFiles}
-            disabled={false}
-          />
-          {onFocusEditor && (
-            <ChatFocusPicker editor={editorProof} onFocus={onFocusEditor} />
-          )}
-        </div>
-        {error && (
-          <p className="error-message" role="alert">
-            {error}
-          </p>
-        )}
-        <div className="composer-footer">
-          <span>
-            {hasActive
-              ? acceptingUpdate
-                ? 'Your update will be picked up after the current step.'
-                : activeHere
-                  ? 'Checking or stopping; your next draft is kept.'
-                  : 'Open the active chat to send an update.'
-              : requiresLeanTarget && !target
-                ? 'Select a writable Lean file to begin.'
-                : 'Ctrl / ⌘ + Enter to send'}
-          </span>
-          <button
-            type="submit"
-            className="button primary"
-            disabled={
-              chatBusy ||
-              !prompt.trim() ||
-              busy ||
-              (hasActive
-                ? !acceptingUpdate
-                : (requiresLeanTarget && !target) ||
-                  !selectedModel ||
-                  !effortAvailable)
+            onAddFile={(path) => {
+              if (contextFiles.includes(path)) return true
+              if (contextFiles.length >= 12) {
+                setErrors((previous) => ({
+                  ...previous,
+                  [draft.key]:
+                    'Attach up to 12 files. Remove one before adding another.',
+                }))
+                return false
+              }
+              draft.setFiles([...contextFiles, path])
+              return true
+            }}
+            placeholder={
+              acceptingUpdate
+                ? 'Share an observation or change of direction…'
+                : mode === 'search' && texLanguage(currentFile)
+                  ? 'Ask about this document, edit LaTeX, or compile and check its PDF…'
+                  : currentMode.placeholder
             }
-          >
-            {busy ? (
-              <span className="spinner" />
-            ) : (
-              <Icon name="arrow" size={14} />
+            value={prompt}
+            onChange={draft.setText}
+          />
+          <div className="composer-attachments">
+            <FileContextPicker
+              files={files}
+              selected={contextFiles}
+              onChange={draft.setFiles}
+              disabled={false}
+            />
+            {onFocusEditor && (
+              <ChatFocusPicker editor={editorProof} onFocus={onFocusEditor} />
             )}
-            {busy ? 'Sending…' : acceptingUpdate ? 'Send update' : 'Send'}
-          </button>
-        </div>
-      </form>
+          </div>
+          {error && (
+            <p className="error-message" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="composer-footer">
+            <span>
+              {hasActive
+                ? acceptingUpdate
+                  ? 'Your update will be picked up after the current step.'
+                  : activeHere
+                    ? 'Checking or stopping; your next draft is kept.'
+                    : 'Open the active chat to send an update.'
+                : requiresLeanTarget && !target
+                  ? 'Select a writable Lean file to begin.'
+                  : 'Ctrl / ⌘ + Enter to send'}
+            </span>
+            <button
+              type="submit"
+              className="button primary"
+              disabled={
+                chatBusy ||
+                !prompt.trim() ||
+                busy ||
+                (hasActive
+                  ? !acceptingUpdate
+                  : (requiresLeanTarget && !target) ||
+                    !selectedModel ||
+                    !effortAvailable)
+              }
+            >
+              {busy ? (
+                <span className="spinner" />
+              ) : (
+                <Icon name="arrow" size={14} />
+              )}
+              {busy ? 'Sending…' : acceptingUpdate ? 'Send update' : 'Send'}
+            </button>
+          </div>
+        </form>
+      )}
       {dialogRun && (
         <Dialog
           title={
@@ -1354,7 +1369,7 @@ export function AssistantPanel({
             >
               Close
             </button>
-            {!!dialogIssue && (
+            {canRun && !!dialogIssue && (
               <button
                 className="button primary"
                 disabled={applying || discarding}
@@ -1363,7 +1378,7 @@ export function AssistantPanel({
                 Continue in chat
               </button>
             )}
-            {!dialogRun.liveEdits && !dialogIssue && (
+            {canRun && !dialogRun.liveEdits && !dialogIssue && (
               <button
                 className="button primary"
                 disabled={!canApply || applying || dirty || discarding}

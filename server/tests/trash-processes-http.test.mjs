@@ -235,7 +235,7 @@ test('stop-and-trash cancels all checks together and blocks new work until real 
   assert(f.runtime.holds.every((hold) => hold.options.signal.aborted))
 })
 
-test('stop-and-trash removes queued Lemex work beyond visible history and preserves other owners', async (t) => {
+test('stop-and-trash removes queued Lemex work beyond visible history and preserves other projects', async (t) => {
   const f = await fixture(t),
     endpoint = `/api/projects/${f.project.id}`
   f.agents.maxConcurrent = 0
@@ -255,7 +255,7 @@ test('stop-and-trash removes queued Lemex work beyond visible history and preser
     f.events.updateMetadata(job.id, { status: 'completed' })
   }
   const other = f.events.create('bob', {
-    projectId: f.project.id,
+    projectId: 'another-members-project',
     kind: 'agent',
   })
   const trash = await f.request(endpoint + '/trash', { stopActive: true })

@@ -360,7 +360,16 @@ try {
     assert(await fileButton('Main.lean').isVisible())
     assert(await folderButton('Main').isVisible())
     assert((await page.locator('.file-tab').innerText()).includes('Main.lean'))
-    assert.equal(await page.locator('.workspace-alert').count(), 0)
+    const unexpectedAlerts = (
+      await page.locator('.workspace-alert').allTextContents()
+    )
+      .map((text) => text.trim())
+      .filter(
+        (text) =>
+          text !==
+          'Some files use normal saving while live editing capacity is full.',
+      )
+    assert.deepEqual(unexpectedAlerts, [])
     await create('file', `Available${status}.md`)
     await dialog('file').waitFor({ state: 'hidden' })
     assert.equal(sources[`Available${status}.md`], '')
@@ -411,9 +420,12 @@ try {
     await dialog(kind).waitFor({ state: 'hidden' })
     await until(
       async () =>
-        (await page.locator('.workspace-alert').innerText()).includes(
-          `Created ${kind} ${name}`,
-        ),
+        (
+          await page
+            .locator('.workspace-alert')
+            .filter({ hasText: `Created ${kind} ${name}` })
+            .innerText()
+        ).includes(`Created ${kind} ${name}`),
       'creation acknowledged after refresh failure',
     )
     assert(

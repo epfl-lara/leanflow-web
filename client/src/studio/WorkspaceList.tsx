@@ -53,6 +53,7 @@ export function WorkspaceList({
   onDelete,
   onRename,
   onDownload,
+  onShare,
   onCreateProject,
   playgroundActions,
 }: {
@@ -63,6 +64,7 @@ export function WorkspaceList({
   onDelete: (project: Project) => void
   onRename: (project: Project) => void
   onDownload: (project: Project) => void
+  onShare: (project: Project) => void
   onCreateProject: () => void
   playgroundActions: ReactNode
 }) {
@@ -139,6 +141,9 @@ export function WorkspaceList({
                                 'leanprover/lean4:',
                                 '',
                               ) || 'Lean project'}
+                      {item.accessRole &&
+                        item.accessRole !== 'admin' &&
+                        ` · Shared · ${item.accessRole === 'editor' ? 'Editor' : 'Viewer'}`}
                     </span>
                   </span>
                   {item.status === 'preparing' && <span className="spinner" />}
@@ -158,28 +163,30 @@ export function WorkspaceList({
                   >
                     <Icon name="more" size={15} />
                   </button>
-                  {item.kind === 'single-file' && (
-                    <button
-                      className="icon-button"
-                      aria-label={`Rename playground ${item.name}`}
-                      title="Rename playground"
-                      disabled={disabled || item.status === 'preparing'}
-                      onClick={() => onRename(item)}
-                    >
-                      <Icon name="edit" size={14} />
-                    </button>
-                  )}
-                  {!item.protected && (
-                    <button
-                      className="icon-button project-delete"
-                      aria-label={`Move ${item.kind === 'single-file' ? 'playground' : 'project'} ${item.name} to trash`}
-                      title={`Delete ${item.kind === 'single-file' ? 'playground' : 'project'} ${item.name}`}
-                      disabled={disabled || item.status === 'preparing'}
-                      onClick={() => onDelete(item)}
-                    >
-                      <Icon name="trash" size={14} />
-                    </button>
-                  )}
+                  {item.kind === 'single-file' &&
+                    (!item.accessRole || item.accessRole === 'admin') && (
+                      <button
+                        className="icon-button"
+                        aria-label={`Rename playground ${item.name}`}
+                        title="Rename playground"
+                        disabled={disabled || item.status === 'preparing'}
+                        onClick={() => onRename(item)}
+                      >
+                        <Icon name="edit" size={14} />
+                      </button>
+                    )}
+                  {!item.protected &&
+                    (!item.accessRole || item.accessRole === 'admin') && (
+                      <button
+                        className="icon-button project-delete"
+                        aria-label={`Move ${item.kind === 'single-file' ? 'playground' : 'project'} ${item.name} to trash`}
+                        title={`Delete ${item.kind === 'single-file' ? 'playground' : 'project'} ${item.name}`}
+                        disabled={disabled || item.status === 'preparing'}
+                        onClick={() => onDelete(item)}
+                      >
+                        <Icon name="trash" size={14} />
+                      </button>
+                    )}
                 </div>
               </div>
             ))}
@@ -210,7 +217,22 @@ export function WorkspaceList({
               disabled: disabled || context.menu.target.status === 'preparing',
               onSelect: () => context.menu && onDownload(context.menu.target),
             },
-            ...(context.menu.target.kind === 'single-file'
+            ...((!context.menu.target.accessRole ||
+              context.menu.target.accessRole === 'admin') &&
+            context.menu.target.kind !== 'single-file'
+              ? [
+                  {
+                    label: 'Share project',
+                    icon: <Icon name="external" size={15} />,
+                    disabled,
+                    onSelect: () =>
+                      context.menu && onShare(context.menu.target),
+                  },
+                ]
+              : []),
+            ...(context.menu.target.kind === 'single-file' &&
+            (!context.menu.target.accessRole ||
+              context.menu.target.accessRole === 'admin')
               ? [
                   {
                     label: 'Rename playground',
@@ -222,7 +244,9 @@ export function WorkspaceList({
                   },
                 ]
               : []),
-            ...(!context.menu.target.protected
+            ...(!context.menu.target.protected &&
+            (!context.menu.target.accessRole ||
+              context.menu.target.accessRole === 'admin')
               ? [
                   {
                     label: 'Move to trash',

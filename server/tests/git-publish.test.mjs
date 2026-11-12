@@ -805,14 +805,19 @@ test('only a confirmed push is recoverable after reopening, and its saved review
   await assert.rejects(reopened.metadata('another-owner', f.project.id), {
     status: 404,
   })
-  const otherProject = await f.workspaces.create('another-owner', {
+  const otherAccount = await f.auth.createUser(
+    { id: 'owner' },
+    { name: 'Separate publisher' },
+  )
+  const otherProject = await f.workspaces.create(otherAccount.user.id, {
     name: 'Separate owner',
     preset: 'lean',
     autoRepair: false,
   })
   await f.workspaces.jobs.get(otherProject.id)
   assert.equal(
-    (await reopened.metadata('another-owner', otherProject.id)).lastPublished,
+    (await reopened.metadata(otherAccount.user.id, otherProject.id))
+      .lastPublished,
     undefined,
   )
 

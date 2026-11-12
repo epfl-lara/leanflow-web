@@ -117,7 +117,10 @@ try {
     ['Lean docs', /local Lean books/],
     ['Goals', /local assumptions/],
     ['Lemex', /review its changes in chat/],
-    ['Terminal', /run commands and inspect their output/],
+    [
+      'Terminal',
+      /private working copy.*conflict checks.*Git history stays private/s,
+    ],
     ['Refresh setup', /reuse valid compiled caches/],
     ['Publish', /pull request or merge request/],
     ['Assistant modes', /helper lemmas while preserving existing statements/],

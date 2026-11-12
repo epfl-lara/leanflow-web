@@ -494,9 +494,22 @@ try {
   await append(
     '\\documentclass{article}\n\\begin{document}SCRATCH_ONLY NEW_TEX\\end{document}\n',
   )
+  assert.equal(
+    held.has(`write:${ids.b}`),
+    false,
+    'The earlier file creation has finished before saving source',
+  )
+  const writesBeforeManualSave = writes.length
   delayWrite = ids.b
   await save.click()
   await until(() => held.has(`write:${ids.b}`), 'pending TeX source save')
+  await page.keyboard.press('ControlOrMeta+s')
+  await sleep(100)
+  assert.equal(
+    writes.length,
+    writesBeforeManualSave + 1,
+    'A repeated Save joins the pending operation without sending another write',
+  )
   assert(
     await select('c').isDisabled(),
     'Project changes stay disabled while saving',

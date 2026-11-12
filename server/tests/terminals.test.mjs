@@ -7,6 +7,35 @@ import os from 'node:os'
 import path from 'node:path'
 import { Terminals } from '../terminals.mjs'
 
+test('terminal admission identifies another collaborator and still ignores its own publication', () => {
+  const terminals = new Terminals({ runtime: {}, capacity: {} })
+  try {
+    terminals.sessions.add({
+      projectId: 'shared',
+      actor: 'bob',
+      snapshot: { runId: 'bob-terminal' },
+    })
+    assert.throws(() => terminals.assertIdle('shared', { actor: 'alice' }), {
+      status: 409,
+      message: /Another collaborator.*terminal/,
+    })
+    assert.throws(() => terminals.assertIdle('shared', { actor: 'bob' }), {
+      status: 409,
+      message: /Close the project terminal/,
+    })
+    assert.doesNotThrow(() =>
+      terminals.assertIdle('shared', {
+        actor: 'bob',
+        ignoreRunId: 'bob-terminal',
+      }),
+    )
+    assert.doesNotThrow(() => terminals.assertIdle('unrelated'))
+  } finally {
+    terminals.sessions.clear()
+    terminals.wss.close()
+  }
+})
+
 test('terminal output and acknowledgements keep builds alive; a silent shell still expires', async (t) => {
   t.mock.timers.enable({ apis: ['Date', 'setInterval'] })
   const child = new EventEmitter()

@@ -137,3 +137,76 @@
 .terminal-screen .xterm {
   height: 100%;
 }
+.terminal-recoveries,
+.terminal-recovery-notice {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 12px;
+}
+.terminal-recoveries summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.terminal-recoveries p {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 8px 0;
+}
+.terminal-recoveries ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+}
+.terminal-recoveries li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 7px 0;
+}
+.terminal-recoveries li > div {
+  min-width: 0;
+  flex: 1 1 180px;
+}
+.terminal-recoveries li span {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-top: 3px;
+}
+.terminal-recovery-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.terminal-recoveries .terminal-recovery-confirmation {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.terminal-recovery-confirmation > span {
+  flex-basis: 100%;
+}
+.account-terminal-recoveries summary {
+  cursor: pointer;
+  padding: 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.terminal-recoveries-account {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+@media (max-width: 480px) {
+  .terminal-recoveries .button,
+  .terminal-recoveries > summary,
+  .account-terminal-recoveries > summary {
+    min-height: 44px;
+  }
+}

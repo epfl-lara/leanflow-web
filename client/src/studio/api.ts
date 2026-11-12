@@ -107,7 +107,16 @@ export interface ModelAccess {
   modelsUpdatedAt?: string | null
 }
 
+export type ProjectAccessRole = 'admin' | 'editor' | 'viewer'
+
+export interface ProjectSharing {
+  members: { userId: string; role: ProjectAccessRole; name?: string }[]
+  links: { id: string; role: 'editor' | 'viewer'; createdAt: string }[]
+}
+
 export interface Project {
+  accessRole?: ProjectAccessRole
+  ownerName?: string
   id: string
   kind?: 'project' | 'single-file'
   protected?: boolean

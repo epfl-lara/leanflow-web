@@ -264,6 +264,8 @@ test(
       await runtime.shutdown()
       await fs.rm(directory, { recursive: true, force: true })
     })
+    await runtime.init()
+    assert.equal(runtime.info().ready, true, runtime.info().error)
     const source = path.join(directory, 'source'),
       output = path.join(directory, 'output')
     await fs.mkdir(path.join(source, 'chapters'), { recursive: true })

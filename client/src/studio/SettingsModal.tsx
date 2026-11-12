@@ -6,6 +6,7 @@ import { ModelAccess } from './ModelAccess'
 import { Dialog } from './Dialog'
 import { Icon } from './Icons'
 import { ProfileForm } from './ProfileForm'
+import { TerminalRecoveries } from './TerminalRecoveries'
 
 interface Settings {
   extraInstructions: string
@@ -39,6 +40,7 @@ export function SettingsModal({
   const [providerBusy, setProviderBusy] = useState(false)
   const [accountBusy, setAccountBusy] = useState(false)
   const [profileBusy, setProfileBusy] = useState(false)
+  const [recoveriesOpen, setRecoveriesOpen] = useState(false)
   const pending = busy || providerBusy || accountBusy || profileBusy
   useEffect(() => {
     let cancelled = false
@@ -98,6 +100,22 @@ export function SettingsModal({
         onBusyChange={setProfileBusy}
         disabled={busy || providerBusy || accountBusy}
       />
+      <section aria-label="Private terminal files">
+        <h3 className="account-settings-heading">Private terminal files</h3>
+        <p className="field-help">
+          Recover your own terminal copies, including projects you can no longer
+          open.
+        </p>
+        <details
+          className="account-terminal-recoveries"
+          onToggle={(event) => setRecoveriesOpen(event.currentTarget.open)}
+        >
+          <summary>Recover terminal files</summary>
+          {recoveriesOpen && (
+            <TerminalRecoveries refreshKey={user.id} active={false} />
+          )}
+        </details>
+      </section>
       <h3 className="account-settings-heading">API connection</h3>
       {provider && (
         <ProviderKeyForm

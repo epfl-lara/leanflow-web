@@ -280,10 +280,12 @@ export async function chatBrowserFixture({
       if (endpoint === '/api/git-connections')
         return respond({ connections: [], identity: { name: '', email: '' } })
       if (endpoint === '/api/projects') return respond(state.projects)
+      if (endpoint === '/api/terminal-recoveries') return respond([])
       for (const project of state.projects) {
         const prefix = `/api/projects/${project.id}`
         const sources = state.files[project.id]
         if (endpoint === prefix) return respond(project)
+        if (endpoint === `${prefix}/terminal-recoveries`) return respond([])
         if (endpoint === `${prefix}/files`)
           return respond(
             Object.entries(sources).map(([path, content]) => ({
@@ -441,7 +443,34 @@ export async function chatBrowserFixture({
     return respond({ error: 'Blocked by isolated chat browser fixture.' }, 409)
   })
   const leanSockets = []
+  report.collaborationSockets = []
+  report.collaborationFallbacks = []
   await page.routeWebSocket('**/websocket/**', (socket) => {
+    const url = new URL(socket.url())
+    if (url.pathname.startsWith('/websocket/collaboration/')) {
+      report.collaborationSockets.push(socket.url())
+      // Closed UI fixtures exercise ordinary hash-checked HTTP saving. Use the
+      // real capacity-fallback protocol instead of an indefinitely admitting
+      // live socket, whose native-Undo guard would correctly stay active.
+      socket.onMessage((raw) => {
+        const message = JSON.parse(String(raw))
+        if (message.type !== 'open') return
+        report.collaborationFallbacks.push({
+          projectId: url.pathname.split('/').at(-1),
+          path: message.path,
+        })
+        socket.send(
+          JSON.stringify({
+            type: 'error',
+            path: message.path,
+            status: 429,
+            message: 'Live document capacity is full in this browser fixture.',
+          }),
+        )
+      })
+      socket.send(JSON.stringify({ type: 'ready' }))
+      return
+    }
     leanSockets.push(socket)
     report.sockets.push(socket.url())
     socket.onMessage((raw) => {
