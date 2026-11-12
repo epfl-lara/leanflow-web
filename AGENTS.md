@@ -75,3 +75,20 @@ link and command checks, not new tests. Report checks run and any failures.
   logs out of commits. Never print tokens or copy host credentials to workers.
 - Continue routine work already authorized by the user. Ask only when a
   necessary decision is missing or an action exceeds that authorization.
+
+## Cleanup after every task
+
+- Before the final response, remove disposable files created for the task:
+  temporary test projects, browser fixtures, downloaded installers, duplicate
+  dependency trees, unused build output, and package or build caches that are
+  no longer needed. Keep small reports when they provide useful evidence;
+  do not retain full project copies just to preserve a test result.
+- Check disk usage and clean up confirmed unused artifacts from earlier tasks
+  as part of finishing the work. Do not let `.runtime/` become permanent
+  storage for temporary projects or old deployment builds.
+- Check active processes, workers, and deployment paths before cleanup.
+  Preserve user projects, production data, credentials, pinned tools, required
+  runtime assets, and required rollback files. Never delete `.runtime/` or a
+  shared cache wholesale; it may contain assets still needed by the service.
+- Verify free disk space after cleanup and report any cleanup failures or
+  remaining space constraints.
