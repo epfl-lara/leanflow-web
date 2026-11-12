@@ -270,8 +270,66 @@ async function cluster(t, settings = {}) {
   const input = await snapshot(local, files)
   const ready = (count = nodes.length) =>
     until(() => controller.status().ready === count)
-  return { root, workers, transport, controller, make, input, ready }
+  return {
+    root,
+    workers,
+    transport,
+    controller,
+    make,
+    input,
+    ready,
+    blobs: local,
+  }
 }
+
+test('queued input validation is bounded and cannot reorder an account behind a faster read', async (t) => {
+  const { controller, workers, input, ready, blobs } = await cluster(t, {
+    nodes: [{ id: 'node-a', memoryBudget: '1g' }],
+    config: { maxQueue: 2 },
+  })
+  const { worker, runtime } = workers.get('node-a'),
+    gates = hold(runtime)
+  await ready()
+  const first = controller.run(input, options({ jobId: 'first' }))
+  await until(() => runtime.runs.length === 1)
+  const source = await blobs.manifest(input.sourceManifest)
+  const pin = source.entries.find(
+    (entry) => entry.path === 'lean-toolchain',
+  ).hash
+  const gate = Promise.withResolvers(),
+    read = blobs.read.bind(blobs)
+  let pinReads = 0,
+    laterRead = false
+  blobs.read = async (hash, ...args) => {
+    if (hash === pin) {
+      if (++pinReads === 1) await gate.promise
+      else laterRead = true
+    }
+    return read(hash, ...args)
+  }
+  const second = controller.run(input, options({ jobId: 'second' }))
+  const third = controller.run(input, options({ jobId: 'third' }))
+  assert.equal(controller.status().queued, 2)
+  await assert.rejects(
+    controller.run(input, options({ actor: 'bob', jobId: 'overflow' })),
+    { code: 'cluster_queue_full' },
+  )
+  await until(() => laterRead)
+  gates[0]()
+  await first
+  assert.equal(runtime.runs.length, 1)
+  gate.resolve()
+  await until(() => runtime.runs.length === 2)
+  gates[1]()
+  await second
+  await until(() => runtime.runs.length === 3)
+  gates[2]()
+  await third
+  assert.deepEqual(
+    runtime.runs.map((id) => worker.state.get(id).jobId),
+    ['first', 'second', 'third'],
+  )
+})
 
 const closeChannel = (transport, node, channel) => {
   for (const entry of transport.opened)
@@ -921,6 +979,10 @@ test('shutdown resolves queued checks and leaves unconfirmed attempts to the nex
   hold(runtime)
   await ready()
   const active = controller.run(input, options())
+  const interrupted = assert.rejects(active, {
+    code: 'worker_cleanup',
+    workerCleanup: true,
+  })
   await until(() => runtime.runs.length === 1)
   const queued = controller.run(
     input,
@@ -930,7 +992,7 @@ test('shutdown resolves queued checks and leaves unconfirmed attempts to the nex
   transport.hook = refuseCancel
   const summary = await controller.shutdown()
   assert.equal(await queued, null)
-  await assert.rejects(active, { code: 'worker_cleanup', workerCleanup: true })
+  await interrupted
   assert.deepEqual(summary, { cancelled: 1, unresolved: 1 })
   assert.equal(await controller.run(input, options({ jobId: 'job-3' })), null)
 

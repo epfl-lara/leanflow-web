@@ -3,7 +3,7 @@ import path from 'node:path'
 import { BlobStore } from './blobs.mjs'
 import { CheckInputs } from './check-inputs.mjs'
 import { ClusterChecks } from './checks.mjs'
-import { readControllerConfig, workerBundleDigest } from './config.mjs'
+import { readControllerConfig, resolveExecutionProfile } from './config.mjs'
 
 export async function loadClusterChecks({
   filename = process.env.STUDIO_CLUSTER_CONFIG,
@@ -28,12 +28,13 @@ export async function loadClusterChecks({
     reserveBytes: config.reserveBytes,
   })
   const { ClusterController } = await import('./controller.mjs')
+  const executionProfile = await resolveExecutionProfile(config, imageDigest)
   const controller = new ClusterController({
     config,
     dataDir: directory,
     blobs,
-    bundleDigest: await workerBundleDigest(),
-    imageDigest,
+    bundleDigest: executionProfile.bundleDigest,
+    imageDigest: executionProfile.imageDigest,
   })
   try {
     await controller.init()

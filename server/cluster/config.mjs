@@ -4,8 +4,9 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { memoryBytes } from '../worker-memory.mjs'
-import { clusterError, identifier } from './state.mjs'
+import { clusterError, identifier, digest } from './state.mjs'
 import { slicePath } from './boundary.mjs'
+import { PROTOCOL_VERSION } from './protocol.mjs'
 
 export const bundleRoot = fileURLToPath(new URL('../../', import.meta.url))
 
@@ -33,6 +34,40 @@ export async function workerBundleDigest(root = bundleRoot) {
   }
   for (const relative of ['server', 'shared', 'deploy']) await walk(relative)
   return hash.digest('hex')
+}
+
+function pinnedExecutionProfile(value) {
+  if (value === undefined) return undefined
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    value.version !== PROTOCOL_VERSION ||
+    typeof value.imageDigest !== 'string' ||
+    !/^sha256:[a-f0-9]{64}$/.test(value.imageDigest)
+  )
+    throw clusterError(
+      'An execution profile must pin a supported worker protocol, bundle and image.',
+    )
+  return {
+    version: PROTOCOL_VERSION,
+    bundleDigest: digest(value.bundleDigest),
+    imageDigest: value.imageDigest,
+  }
+}
+
+export async function resolveExecutionProfile(config, localImageDigest) {
+  const selected = pinnedExecutionProfile(config.executionProfile)
+  if (selected) return selected
+  if (!/^sha256:[a-f0-9]{64}$/.test(localImageDigest || ''))
+    throw clusterError(
+      'Initialize the pinned coordinator image before distributed execution.',
+    )
+  return {
+    version: PROTOCOL_VERSION,
+    bundleDigest: await workerBundleDigest(),
+    imageDigest: localImageDigest,
+  }
 }
 
 function positive(value, fallback, label, { integer = true } = {}) {
@@ -278,10 +313,12 @@ export function controllerConfig(value) {
   const mode = value.mode || 'off'
   if (!['off', 'shadow', 'serve'].includes(mode))
     throw clusterError('Invalid cluster execution mode.')
+  const executionProfile = pinnedExecutionProfile(value.executionProfile)
   return {
     version: 1,
     lineage: value.lineage,
     mode,
+    executionProfile,
     nodes,
     allowReserve: value.allowReserve === true,
     maxQueue: positive(value.maxQueue, 128, 'cluster queue limit'),

@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { BlobStore, captureTree } from './blobs.mjs'
 import { ClusterController } from './controller.mjs'
-import { readControllerConfig, workerBundleDigest } from './config.mjs'
+import { readControllerConfig, resolveExecutionProfile } from './config.mjs'
 import { clusterError, digest } from './state.mjs'
 
 const usage =
@@ -93,7 +93,19 @@ export async function controlMain(argv = process.argv.slice(2)) {
     maxFiles: config.maxStoreFiles,
     reserveBytes: config.reserveBytes,
   })
-  const bundleDigest = await workerBundleDigest()
+  const { bundleDigest } = await resolveExecutionProfile(
+    config,
+    flags.get('--image'),
+  )
+  if (
+    config.executionProfile &&
+    config.executionProfile.imageDigest !== flags.get('--image')
+  )
+    throw clusterError(
+      'The maintenance image must match the enrolled execution profile.',
+      'release_mismatch',
+      409,
+    )
   const nodeId = flags.get('--node')
   const selected = nodeId
     ? config.nodes.filter((node) => node.id === nodeId)
