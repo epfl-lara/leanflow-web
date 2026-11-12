@@ -139,9 +139,8 @@ export function ChatOptions({
         </label>
         <HelpTip label="Edit files live">
           When on, Lemex saves requested edits as it works; stop the run to undo
-          its edits. Turn this off to review changes before applying them. Ask &
-          Search starts with live edits off. This choice applies to the next
-          run.
+          its edits. Turn this off to review changes before applying them. Live
+          edits start on in every mode. This choice applies to the next run.
         </HelpTip>
       </div>
       <p className="field-help">

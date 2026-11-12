@@ -219,13 +219,16 @@ try {
         .evaluate((element) => element === document.activeElement),
     'keyboard menu focus',
   )
-  await page.keyboard.press('ArrowDown')
-  assert.equal(
-    await menu
-      .getByRole('menuitem', { name: 'Move to trash' })
-      .evaluate((element) => element === document.activeElement),
-    true,
-  )
+  for (const label of ['Rename', 'Move to folder…', 'Move to trash']) {
+    await page.keyboard.press('ArrowDown')
+    assert.equal(
+      await menu
+        .getByRole('menuitem', { name: label, exact: true })
+        .evaluate((element) => element === document.activeElement),
+      true,
+      `Arrow keys reach the ${label} action`,
+    )
+  }
   await page.keyboard.press('Escape')
   assert.equal(await menu.count(), 0)
   assert.equal(
@@ -245,10 +248,22 @@ try {
   await page.getByRole('button', { name: 'Projects', exact: true }).click()
   await project('Preparing project').focus()
   await page.keyboard.press('Shift+F10')
-  assert.equal(await menu.getByRole('menuitem').count(), 1)
-  assert.equal(await menu.getByRole('menuitem').isDisabled(), true)
+  assert.equal(await menu.getByRole('menuitem').count(), 2)
   assert.equal(
-    await menu.evaluate((element) => element === document.activeElement),
+    await menu
+      .getByRole('menuitem', { name: 'Download project ZIP', exact: true })
+      .isDisabled(),
+    true,
+  )
+  const preparingParticipants = menu.getByRole('menuitem', {
+    name: 'View project participants',
+    exact: true,
+  })
+  assert.equal(await preparingParticipants.isEnabled(), true)
+  assert.equal(
+    await preparingParticipants.evaluate(
+      (element) => element === document.activeElement,
+    ),
     true,
   )
   await page.keyboard.press('Escape')
@@ -284,7 +299,7 @@ try {
     true,
   )
   report.checks.push(
-    'Right-click preserves selection; saved Unicode and binary files download exactly; keyboard navigation, Escape focus restoration (including viewer disabled-only menus), and outside dismissal work. Preparing projects keep downloads disabled while Admin sharing remains available and receives menu focus.',
+    'Right-click preserves selection; saved Unicode and binary files download exactly; keyboard navigation, Escape focus restoration, and outside dismissal work. Preparing projects keep downloads disabled while viewer participant lists and Admin sharing remain available and receive menu focus.',
   )
 
   await tree.locator('.dependency-toggle').click()

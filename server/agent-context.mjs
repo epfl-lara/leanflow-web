@@ -1,5 +1,9 @@
 import { proofTargetContext, proofTargetReference } from './proof-target.mjs'
-import { isPdfFile } from '../shared/file-previews.mjs'
+import {
+  isPdfFile,
+  isImageFile,
+  isBinaryAssetFile,
+} from '../shared/file-previews.mjs'
 
 const MAX_HISTORY = 60_000
 
@@ -33,7 +37,7 @@ export function currentEditorFile(input, validatePath) {
   return validatePath(file)
 }
 
-// PDFs reach the isolated workspace as files, never through the text editor API.
+// Binary context reaches the isolated workspace as files, never through the text editor API.
 // Explicit attachments must exist; automatic editor context remains optional.
 export async function readSelectedContextFile(
   workspaces,
@@ -41,11 +45,12 @@ export async function readSelectedContextFile(
   owner,
   file,
 ) {
-  if (!isPdfFile(file)) return workspaces.readFile(projectId, owner, file)
+  if (!isBinaryAssetFile(file))
+    return workspaces.readFile(projectId, owner, file)
   if (!(await workspaces.validateEditorContextFile(projectId, owner, file)))
     throw Object.assign(
       new Error(
-        'A selected PDF is unavailable. Restore it or remove it from context.',
+        'A selected file is unavailable. Restore it or remove it from context.',
       ),
       { status: 404 },
     )
@@ -59,7 +64,9 @@ export function currentEditorContext(file) {
         '\nInspect the corresponding file in your working project when relevant. During an active run, the editor may contain newer saved or unsaved changes than your working copy.' +
         (isPdfFile(file)
           ? '\nThis PDF’s path is supplied as context; its contents are not attached. Use an available PDF reader, or explain if PDF reading is unavailable.'
-          : '')
+          : isImageFile(file)
+            ? '\nThis is an image. Use visual image input or view_image when available; reading binary bytes as text does not inspect its visual contents. Files selected in a follow-up may differ from the isolated working copy.'
+            : '')
     : ''
 }
 

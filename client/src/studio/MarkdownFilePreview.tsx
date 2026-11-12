@@ -6,11 +6,13 @@ import { markdownProjectPath, MAX_MARKDOWN_PREVIEW_BYTES } from './fileReading'
 
 export function MarkdownFilePreview({
   path,
+  projectId,
   content,
   files,
   onOpenFile,
 }: {
   path: string
+  projectId: string
   content: string
   files: FileEntry[]
   onOpenFile: (path: string) => void
@@ -53,7 +55,12 @@ export function MarkdownFilePreview({
           read and edit the source.
         </output>
       ) : (
-        <OutputText text={content} onOpenLocalLink={openLink} />
+        <OutputText
+          text={content}
+          onOpenLocalLink={openLink}
+          projectId={projectId}
+          currentPath={path}
+        />
       )}
     </section>
   )

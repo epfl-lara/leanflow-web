@@ -189,6 +189,36 @@ try {
   await page.route('**/api/accounts/search?*', (route) =>
     route.fulfill({ json: [{ id: 'collaborator', name: 'Collaborator' }] }),
   )
+  let participantRequests = 0
+  await page.route('**/api/projects/sharing-viewer/participants', (route) => {
+    assert.equal(route.request().method(), 'GET')
+    participantRequests++
+    if (participantRequests === 1)
+      return route.fulfill({
+        status: 503,
+        json: { error: 'Temporary participant interruption.' },
+      })
+    return route.fulfill({
+      json: {
+        members: [
+          { userId: 'project-admin', name: 'Project admin', role: 'admin' },
+          { userId: 'collaborator', name: 'Collaborator', role: 'editor' },
+          {
+            userId: 'fixture-admin',
+            name: 'Fixture admin',
+            role: state.projects.find(
+              (project) => project.id === 'sharing-viewer',
+            ).accessRole,
+          },
+          ...Array.from({ length: 10 }, (_, index) => ({
+            userId: `visual-participant-${index}`,
+            name: `${index + 1}. A collaborator with a very long display name — ${'LongDisplayNameWithoutSpaces'.repeat(3)}`,
+            role: index % 2 ? 'viewer' : 'editor',
+          })),
+        ],
+      },
+    })
+  })
   await page.route('**/api/projects/sharing-admin/sharing**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -462,6 +492,125 @@ try {
     await page.getByRole('button', { name: 'Share', exact: true }).count(),
     0,
   )
+  await page
+    .getByRole('button', { name: 'View project participants', exact: true })
+    .click()
+  const participantDialog = page.getByRole('dialog', {
+    name: 'Project participants',
+    exact: true,
+  })
+  await participantDialog.getByRole('alert').waitFor()
+  await participantDialog
+    .getByRole('button', { name: 'Retry participants', exact: true })
+    .click()
+  await participantDialog.getByText('Collaborator', { exact: true }).waitFor()
+  assert.equal(await participantDialog.locator('.sharing-person').count(), 13)
+  assert.equal(
+    await participantDialog
+      .locator('.sharing-person')
+      .filter({ hasText: 'Fixture admin' })
+      .locator('.tag')
+      .innerText(),
+    'Viewer',
+  )
+  assert.equal(await participantDialog.locator('input, select').count(), 0)
+  assert.equal(
+    await participantDialog
+      .getByRole('region', { name: 'Share links', exact: true })
+      .count(),
+    0,
+  )
+  for (const theme of ['dark', 'light']) {
+    if (theme === 'light') {
+      await participantDialog
+        .getByRole('button', { name: 'Done', exact: true })
+        .click()
+      await page
+        .getByRole('button', { name: 'Use light theme', exact: true })
+        .click()
+      await page
+        .getByRole('button', { name: 'View project participants', exact: true })
+        .click()
+      await participantDialog
+        .getByText('Collaborator', { exact: true })
+        .waitFor()
+    }
+    for (const width of [1600, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 })
+      await participantDialog.evaluate((element) => element.scrollTo(0, 0))
+      assert.equal(
+        await participantDialog.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth + 1,
+        ),
+        true,
+        'participant names wrap within the dialog',
+      )
+      const bounds = await participantDialog.boundingBox()
+      assert(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width + 1)
+      await page.screenshot({
+        path: path.join(output, `participants-${theme}-${width}.png`),
+        fullPage: true,
+      })
+      await participantDialog
+        .getByRole('button', { name: 'Done', exact: true })
+        .scrollIntoViewIfNeeded()
+      assert.equal(
+        await participantDialog
+          .getByRole('button', { name: 'Done', exact: true })
+          .isVisible(),
+        true,
+      )
+      for (let index = 0; index < 6; index++) {
+        await page.keyboard.press('Tab')
+        assert.equal(
+          await page.evaluate(
+            () =>
+              document.activeElement === document.body ||
+              !!document.activeElement?.closest('dialog'),
+          ),
+          true,
+          'keyboard focus stays within participant dialog',
+        )
+      }
+    }
+    await page.setViewportSize({ width: 1600, height: 1000 })
+  }
+  await page.keyboard.press('Escape')
+  await participantDialog.waitFor({ state: 'hidden' })
+  assert.equal(
+    await page
+      .getByRole('button', { name: 'View project participants', exact: true })
+      .evaluate((element) => element === document.activeElement),
+    true,
+  )
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  await page
+    .getByRole('button', { name: 'Use dark theme', exact: true })
+    .click()
+  await page
+    .getByRole('button', { name: 'View project participants', exact: true })
+    .click()
+  await participantDialog.getByText('Collaborator', { exact: true }).waitFor()
+  report.checks.push(
+    'Long participant lists remain readable and contained in light/dark themes at desktop and 390px widths, with scrolling, keyboard focus trapping, Escape and focus restoration.',
+  )
+  await participantDialog
+    .getByRole('button', { name: 'Done', exact: true })
+    .click()
+  await page
+    .locator('.project-item')
+    .filter({ hasText: 'Shared proof' })
+    .click({ button: 'right' })
+  await page
+    .getByRole('menuitem', { name: 'View project participants', exact: true })
+    .click()
+  await participantDialog.getByText('Project admin', { exact: true }).waitFor()
+  await participantDialog
+    .getByRole('button', { name: 'Done', exact: true })
+    .click()
+  report.checks.push(
+    'Viewers can open the read-only participant list from the header and project menu, see names and roles, and retry a failed load.',
+  )
   assert.equal(
     await page.getByRole('button', { name: 'Terminal', exact: true }).count(),
     0,
@@ -533,6 +682,26 @@ try {
     await page.getByRole('button', { name: 'Share', exact: true }).count(),
     0,
   )
+  await page
+    .getByRole('button', { name: 'View project participants', exact: true })
+    .click()
+  await participantDialog.getByText('Collaborator', { exact: true }).waitFor()
+  assert.equal(
+    await participantDialog
+      .locator('.sharing-person')
+      .filter({ hasText: 'Fixture admin' })
+      .locator('.tag')
+      .innerText(),
+    'Editor',
+  )
+  assert.equal(await participantDialog.locator('input, select').count(), 0)
+  assert.deepEqual(
+    await participantDialog.getByRole('button').allTextContents(),
+    ['', 'Done'],
+  )
+  await participantDialog
+    .getByRole('button', { name: 'Done', exact: true })
+    .click()
   assert.equal(
     await page
       .getByRole('button', {
@@ -543,7 +712,7 @@ try {
     0,
   )
   report.checks.push(
-    'Editors can use their own assistant, terminal and setup controls while sharing and project deletion remain admin actions.',
+    'Editors can view participant names and roles and use their own assistant, terminal and setup controls; sharing changes and project deletion remain admin actions.',
   )
   await page.route('**/api/projects/sharing-viewer/trash', (route) => {
     assert.equal(route.request().postDataJSON().path, 'DeleteMe.lean')

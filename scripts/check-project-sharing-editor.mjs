@@ -20,6 +20,8 @@ async function until(check, label, timeout = 20000) {
   throw new Error(`Timed out: ${label}`)
 }
 let fixture, browser
+const pages = {}
+const packets = []
 try {
   fixture = await createSharingLiveFixture()
   const initial = await fixture.studio.workspaces.readFile(
@@ -38,13 +40,35 @@ try {
     initial.hash,
   )
   browser = await chromium.launch({ headless: true })
-  const pages = {}
   const makePage = async (actor, queueFixture = false) => {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
     })
     const page = await context.newPage()
     page.on('pageerror', (error) => report.errors.push(error.message))
+    page.on('websocket', (socket) => {
+      if (!socket.url().includes('/websocket/collaboration/')) return
+      const note = (direction, event) => {
+        try {
+          const packet = JSON.parse(String(event.payload))
+          const {
+            update: _update,
+            content: _content,
+            peers,
+            ...metadata
+          } = packet
+          packets.push({
+            actor,
+            direction,
+            ...metadata,
+            ...(peers ? { peers: peers.length } : {}),
+          })
+          if (packets.length > 80) packets.shift()
+        } catch {}
+      }
+      socket.on('framesent', (event) => note('sent', event))
+      socket.on('framereceived', (event) => note('received', event))
+    })
     page.on('request', (request) => {
       if (request.url().startsWith('https://provider.example/'))
         report.providerCalls++
@@ -95,6 +119,21 @@ try {
       .click()
     await page.locator('.monaco-editor textarea').first().waitFor()
     await page.locator('.editor-loading').waitFor({ state: 'hidden' })
+    // The Lean editor can finish loading before live editing admits this file.
+    // Wait for both the real subscription and the visible input gate before
+    // deliberately holding unrelated lifecycle work and typing synthetic keys.
+    await until(
+      () =>
+        [...fixture.studio.projectDocuments.clients].some(
+          (client) =>
+            client.actor === fixture.accounts[actor].id &&
+            client.paths.has('Main.lean'),
+        ),
+      `${actor} has subscribed to Main.lean`,
+    )
+    await page
+      .getByText('Joining live editing…', { exact: true })
+      .waitFor({ state: 'hidden' })
     pages[actor] = page
     return page
   }
@@ -112,8 +151,11 @@ try {
     await page.keyboard.insertText(content)
   }
   await until(
-    () => fixture.studio.projectDocuments.clients.size === 2,
-    'two shared sessions',
+    () =>
+      [...fixture.studio.projectDocuments.documents.values()].some(
+        (record) => record.path === 'Main.lean' && record.clients.size === 2,
+      ),
+    'two admitted shared document sessions',
   )
   await b.evaluate(() => {
     window.__sharingQueueStarted = false
@@ -159,6 +201,14 @@ try {
   report.checks.push(
     'Remote text survives local typing while an unrelated Lean lifecycle task is deliberately held',
   )
+  await a
+    .locator('.collaborator-cursor-label')
+    .filter({ hasText: fixture.accounts.editorB.name })
+    .waitFor({ state: 'visible' })
+  assert((await a.locator('.collaborator-cursor').count()) > 0)
+  report.checks.push(
+    'The authenticated collaboration connection shows the other editor’s named, colored cursor',
+  )
   const beforePaste = (await source()).content
   const pasted =
     '-- replaced first line\n' +
@@ -195,6 +245,39 @@ try {
   report.passed = true
 } catch (error) {
   report.failure = error.stack || String(error)
+  report.packets = packets
+  report.browserState = {}
+  for (const [actor, page] of Object.entries(pages)) {
+    report.browserState[actor] = {
+      text: await page
+        .locator('.monaco-editor .view-lines')
+        .innerText()
+        .catch(() => ''),
+      alerts: await page
+        .locator('[role="alert"], .live-edit-alert')
+        .allTextContents()
+        .catch(() => []),
+      tab: await page
+        .locator('.file-tab')
+        .innerText()
+        .catch(() => ''),
+      joining: await page
+        .getByText('Joining live editing…', { exact: true })
+        .count(),
+    }
+    await page
+      .screenshot({
+        path: path.join(directory, `failure-${actor}.png`),
+        fullPage: true,
+      })
+      .catch(() => {})
+  }
+  if (fixture)
+    report.saved = (
+      await fixture.studio.workspaces
+        .readFile(fixture.project.id, fixture.accounts.admin.id, 'Main.lean')
+        .catch(() => ({}))
+    ).content
   throw error
 } finally {
   await browser?.close()

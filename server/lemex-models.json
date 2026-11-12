@@ -44,7 +44,7 @@
       "supports_image_detail_original": false,
       "context_window": 240000,
       "max_context_window": 240000,
-      "input_modalities": ["text"],
+      "input_modalities": ["text", "image"],
       "supports_search_tool": false,
       "use_responses_lite": false,
       "supports_reasoning_summary_parameter": false,

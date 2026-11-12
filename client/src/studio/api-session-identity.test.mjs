@@ -107,3 +107,65 @@ test('a changed-cookie 401 opens recovery without rebinding the tab', async (t) 
     'alpha',
   )
 })
+
+test('image and HTML previews reject responses from a replaced account, including delayed response bodies', async (t) => {
+  let currentFetch
+  withFetch(t, (...args) => currentFetch(...args))
+  for (const [method, mime, body] of [
+    ['apiImage', 'image/png', 'fixture image'],
+    ['apiHtml', 'text/html', '<p>Private preview</p>'],
+  ]) {
+    const client = clientApi()
+    client.bindSessionUser('alpha')
+    let stream
+    const response = new Response(
+      new ReadableStream({
+        start(controller) {
+          stream = controller
+        },
+      }),
+      {
+        headers: { 'Content-Type': mime },
+      },
+    )
+    currentFetch = async (_url, options) => {
+      assert.equal(options.headers.get('X-Leanflow-User'), 'alpha')
+      return response
+    }
+    const pending = client[method](
+      '/api/projects/private/file-preview?path=figure.png',
+      new AbortController().signal,
+    )
+    // Let request authentication finish while the resource body stays pending.
+    await new Promise((resolve) => setImmediate(resolve))
+    client.bindSessionUser('beta')
+    stream.enqueue(new TextEncoder().encode(body))
+    stream.close()
+    await assert.rejects(pending, (error) => error.status === 409)
+  }
+})
+
+test('media preview requests surface server errors and reject a mismatched content type', async (t) => {
+  const client = clientApi()
+  const signal = new AbortController().signal
+  let currentFetch = async () =>
+    new Response('<script>untrusted</script>', {
+      headers: { 'Content-Type': 'text/html' },
+    })
+  withFetch(t, (...args) => currentFetch(...args))
+  await assert.rejects(client.apiImage('/preview', signal), /supported image/)
+  currentFetch = async () =>
+    new Response('not HTML', { headers: { 'Content-Type': 'text/plain' } })
+  await assert.rejects(client.apiHtml('/preview', signal), /HTML document/)
+  currentFetch = async () =>
+    Response.json({ error: 'Project access changed.' }, { status: 403 })
+  await assert.rejects(
+    client.apiImage('/preview', signal),
+    (error) =>
+      error.status === 403 && error.message === 'Project access changed.',
+  )
+  await assert.rejects(
+    client.apiHtml('/preview', signal),
+    (error) => error.status === 403,
+  )
+})

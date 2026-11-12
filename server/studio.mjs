@@ -43,6 +43,8 @@ import { repairProjectSetup, withSetupRepairDeadline } from './setup-repair.mjs'
 import { GitPublisher } from './git-publish.mjs'
 import { validateGitBranch } from './git-branches.mjs'
 import { pdfDisposition } from './pdf-preview.mjs'
+import { isPdfFile } from '../shared/file-previews.mjs'
+import { readMediaPreview, sendMediaPreview } from './media-preview.mjs'
 import { installProjectDownloadRoutes } from './project-downloads.mjs'
 import { installProjectSharingRoutes } from './project-sharing.mjs'
 import { ProjectDocuments } from './project-documents.mjs'
@@ -342,7 +344,12 @@ export async function createStudio({
   }
   const isAuthenticated = (request, actor) =>
     auth.identify(request)?.id === actor
-  const projectDocuments = new ProjectDocuments({ workspaces, isAuthenticated })
+  const projectDocuments = new ProjectDocuments({
+    workspaces,
+    isAuthenticated,
+    displayName: (actor) =>
+      auth.users.find((user) => user.id === actor)?.name || actor,
+  })
   const events = new EventStore(dataDir),
     settings = new Settings(dataDir)
   const chats = new ChatStore({
@@ -1044,6 +1051,15 @@ export async function createStudio({
   )
   installProjectDownloadRoutes(app, workspaces)
   app.get('/api/projects/:id/file-preview', async (req, res) => {
+    if (!isPdfFile(req.query.path)) {
+      const preview = await readMediaPreview(
+        workspaces,
+        req.params.id,
+        req.user.id,
+        req.query.path,
+      )
+      return sendMediaPreview(res, preview)
+    }
     const preview = await workspaces.readPdfPreview(
       req.params.id,
       req.user.id,

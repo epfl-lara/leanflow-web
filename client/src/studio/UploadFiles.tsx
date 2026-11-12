@@ -70,7 +70,7 @@ export async function readSourceFiles(files: { file: File; path: string }[]) {
       }).decode(bytes)
     } catch {
       throw new Error(
-        `${item.path} is not a UTF-8 source, PDF, PNG, or JPEG file. Choose supported files.`,
+        `${item.path} is not a UTF-8 source, PDF, or supported image. Choose PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, or UTF-8 SVG.`,
       )
     }
     result.push({
@@ -218,9 +218,10 @@ export function UploadFiles({
           }}
         />
         <p>
-          UTF-8 sources up to 8 MiB per file, PDFs and PNG/JPEG images up to 16
-          MiB, and 32 MiB total. Git metadata, build caches, and private
-          settings stay on your computer.
+          UTF-8 sources, including SVG and HTML, up to 8 MiB per file; PDFs and
+          PNG, JPEG, GIF, WebP, AVIF, BMP, or ICO images up to 16 MiB; 32 MiB
+          total. Git metadata, build caches, and private settings stay on your
+          computer.
         </p>
       </div>
       {!!files.length && (

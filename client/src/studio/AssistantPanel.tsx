@@ -123,7 +123,7 @@ export function AssistantPanel({
   )
   const [efforts, setEfforts] = useState<Record<string, string | null>>({}),
     [liveEdits, setLiveEdits] = useState(true),
-    [searchLiveEdits, setSearchLiveEdits] = useState(false)
+    [searchLiveEdits, setSearchLiveEdits] = useState(true)
   const [errors, setErrors] = useState<Record<string, string>>({}),
     [streamError, setStreamError] = useState('')
   const [backgroundErrors, setBackgroundErrors] = useState<
@@ -536,7 +536,7 @@ export function AssistantPanel({
     setModel(session.defaultModel || session.models[0]?.id || '')
     setEfforts({})
     setLiveEdits(true)
-    setSearchLiveEdits(false)
+    setSearchLiveEdits(true)
     try {
       const preferences = JSON.parse(
         localStorage.getItem(preferenceKey) || 'null',
@@ -877,7 +877,7 @@ export function AssistantPanel({
     dialogRun.status === 'completed' &&
     !!dialogRun.changes?.length &&
     canApplyRequestedEdits(dialogRun) &&
-    !hasActive
+    !hasChatActive
   return (
     <div className="assistant-panel chat-workbench">
       <ChatPicker
@@ -1065,6 +1065,7 @@ export function AssistantPanel({
               <ConversationTurn
                 key={item.id}
                 run={item}
+                projectId={projectId}
                 onReview={(id) => void review(id)}
                 onUndo={(id) => void undo(id)}
                 onInspect={inspect}
@@ -1307,9 +1308,10 @@ export function AssistantPanel({
                     : 'Lemex has finished this run. These edits cannot be applied because the final Lean check did not pass. Continue in chat to request a correction.'}
               </p>
             )}
-            {hasActive && !dialogRun.liveEdits && (
+            {hasChatActive && !dialogRun.liveEdits && (
               <p className="review-note">
-                Wait for the running task to finish before applying changes.
+                Wait for the running task in this chat to finish before applying
+                changes.
               </p>
             )}
             {dialogRun.mode === 'formalize' && (

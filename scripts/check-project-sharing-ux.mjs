@@ -413,7 +413,43 @@ try {
   record(
     'Viewer state clearly shows read-only access without sharing, terminal or agent submission controls',
   )
+  const viewParticipants = async (page) => {
+    await page
+      .getByRole('button', { name: 'View project participants', exact: true })
+      .click()
+    const participants = page.getByRole('dialog', {
+      name: 'Project participants',
+      exact: true,
+    })
+    for (const [actor, role] of Object.entries({
+      admin: 'Admin',
+      editorA: 'Admin',
+      editorB: 'Editor',
+      viewer: 'Viewer',
+    })) {
+      const row = participants
+        .locator('.sharing-person')
+        .filter({ hasText: fixture.accounts[actor].name })
+      await row.waitFor()
+      await row.getByText(role, { exact: true }).waitFor()
+    }
+    assert.equal(await participants.locator('select').count(), 0)
+    assert.equal(
+      await participants
+        .getByRole('button', { name: 'Create share link', exact: true })
+        .count(),
+      0,
+    )
+    await participants
+      .getByRole('button', { name: 'Done', exact: true })
+      .click()
+  }
+  await viewParticipants(viewer)
   const editorB = await pageFor('editorB')
+  await viewParticipants(editorB)
+  record(
+    'Real editor and viewer accounts can read the project participants and roles without sharing controls',
+  )
   await editorB.context().setOffline(true)
   await editorB.locator('.monaco-editor textarea').first().focus()
   await editorB.keyboard.press('ControlOrMeta+End')

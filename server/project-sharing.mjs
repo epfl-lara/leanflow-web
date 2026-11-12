@@ -52,19 +52,19 @@ export function installProjectSharingRoutes(
         status: 401,
       })
   }
+  const withMemberNames = (result) => ({
+    ...result,
+    members: result.members.map((member) => ({
+      ...member,
+      name:
+        auth.users.find((user) => user.id === member.userId)?.name ||
+        'Unavailable account',
+    })),
+  })
   const sharing = async (id, actor, request) => {
     await auth.refreshUsers()
     authorize(request)
-    const result = workspaces.sharing(id, actor)
-    return {
-      ...result,
-      members: result.members.map((member) => ({
-        ...member,
-        name:
-          auth.users.find((user) => user.id === member.userId)?.name ||
-          'Unavailable account',
-      })),
-    }
+    return withMemberNames(workspaces.sharing(id, actor))
   }
   const afterMembershipChange = async (id, actor, request) => {
     try {
@@ -91,6 +91,13 @@ export function installProjectSharingRoutes(
   }
   app.get('/api/projects/:id/sharing', async (req, res) => {
     res.json(await sharing(req.params.id, req.user.id, req))
+  })
+  app.get('/api/projects/:id/participants', async (req, res) => {
+    await auth.refreshUsers()
+    authorize(req)
+    res.json(
+      withMemberNames(workspaces.participants(req.params.id, req.user.id)),
+    )
   })
   app.get('/api/accounts/search', async (req, res) => {
     const query = typeof req.query.q === 'string' ? req.query.q.trim() : ''

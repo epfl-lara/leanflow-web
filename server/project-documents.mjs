@@ -7,6 +7,7 @@ import * as Y from 'yjs'
 import { validateWorkspaceFilePath } from './workspaces.mjs'
 import { sourceFileByteLimit } from '../shared/source-limits.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
+import { ProjectPresence } from './project-presence.mjs'
 const CONFIGURATION_FILES = new Set(PROJECT_CONFIGURATION_FILES)
 
 const MAX_MESSAGE_BYTES = 12 * 1024 * 1024
@@ -49,6 +50,7 @@ export class ProjectDocuments {
   constructor({
     workspaces,
     isAuthenticated = () => true,
+    displayName = (actor) => actor,
     maxDocuments = 128,
     maxClients = 128,
     maxClientsPerActor = 12,
@@ -72,6 +74,15 @@ export class ProjectDocuments {
     })
     this.documents = new Map()
     this.clients = new Set()
+    this.presence = new ProjectPresence({
+      clients: this.clients,
+      workspaces,
+      authenticated: (client) => this.authenticated(client),
+      displayName,
+      record: (projectId, name) =>
+        this.documents.get(this.key(projectId, name)),
+      send: (client, message) => this.send(client, message),
+    })
     this.pendingPerActor = new Map()
     this.pendingBytes = 0
     this.closed = false
@@ -172,7 +183,7 @@ export class ProjectDocuments {
       void this.message(client, request)
         .catch((error) =>
           this.send(client, {
-            type: 'error',
+            type: request?.type === 'presence' ? 'presence-error' : 'error',
             path: typeof request?.path === 'string' ? request.path : undefined,
             requestId:
               typeof request?.requestId === 'number'
@@ -191,6 +202,7 @@ export class ProjectDocuments {
     ws.on('close', () => {
       clearInterval(heartbeat)
       this.clients.delete(client)
+      this.presence.clear(client)
       client.openRequests.clear()
       for (const name of client.paths) this.detach(client, name)
       if (![...this.clients].some((item) => item.projectId === projectId))
@@ -208,6 +220,7 @@ export class ProjectDocuments {
   }
   assertAuthenticated(client) {
     if (this.authenticated(client)) return
+    this.presence.clear(client)
     client.ws.close(1008, 'Account access changed. Sign in again.')
     fail('Account access changed. Sign in again.', 401)
   }
@@ -231,8 +244,11 @@ export class ProjectDocuments {
     return JSON.stringify([projectId, name])
   }
   detach(client, name) {
+    client.presenceRevision = (client.presenceRevision || 0) + 1
     client.paths.delete(name)
     client.vectors.delete(name)
+    if (client.presence?.path === name) this.presence.clear(client)
+    else this.presence.broadcast(client.projectId)
     const record = this.documents.get(this.key(client.projectId, name))
     if (!record) return
     record.clients.delete(client)
@@ -330,6 +346,7 @@ export class ProjectDocuments {
   invalidate(record, { moved = false } = {}) {
     if (record.invalidated) return
     record.invalidated = true
+    this.presence.clearDocument(record)
     if (moved) return
     for (const client of record.clients)
       this.send(client, {
@@ -350,6 +367,7 @@ export class ProjectDocuments {
       )
   }
   resetDocument(record) {
+    this.presence.clearDocument(record)
     record.doc.destroy()
     record.doc = new Y.Doc()
     record.id = randomUUID()
@@ -554,6 +572,7 @@ export class ProjectDocuments {
       )
       client.vectors.set(record.path, vector)
     }
+    this.presence.schedule(record.projectId)
   }
 
   assertCanSubscribe(client, name) {
@@ -618,6 +637,24 @@ export class ProjectDocuments {
       fail('Invalid shared document message.')
     this.assertAuthenticated(client)
     this.workspaces.get(client.projectId, client.actor)
+    if (request.type === 'presence') {
+      const revision = (client.presenceRevision || 0) + 1
+      client.presenceRevision = revision
+      if (request.path === null) {
+        this.presence.clear(client)
+        return
+      }
+      const name = sourcePath(request.path)
+      const record = this.documents.get(this.key(client.projectId, name))
+      if (!record || !client.paths.has(name))
+        fail('Open the shared file before sending its cursor.', 409)
+      await this.queue(record, () => {
+        if (revision !== client.presenceRevision) return
+        this.assertAuthenticated(client)
+        this.presence.set(client, request, record)
+      })
+      return
+    }
     if (request.type === 'close') {
       const name = sourcePath(request.path)
       client.openRequests?.delete(name)
@@ -656,6 +693,7 @@ export class ProjectDocuments {
               : { openRequestId: request.requestId }),
           })
           client.vectors.set(record.path, Y.encodeStateVector(record.doc))
+          this.presence.broadcast(client.projectId)
         })
       } finally {
         if (openings.get(name) === opening) openings.delete(name)
@@ -930,10 +968,12 @@ export class ProjectDocuments {
       }
       if (actor) client.ws.close(1008, 'Project access changed.')
     }
+    this.presence.broadcast(projectId)
   }
   close() {
     if (this.closePromise) return this.closePromise
     this.closed = true
+    this.presence.close()
     clearInterval(this.poll)
     this.clearWatchers()
     this.unsubscribe?.()

@@ -41,12 +41,20 @@ import { LeanWorkspace } from './LeanWorkspace'
 import { WorkspaceBuffers, type WorkspaceScope } from './workspaceBuffers'
 import { useAutosave } from './useAutosave'
 import { PdfFileViewer } from './PdfFileViewer'
+import { ImageFileViewer } from './ImageFileViewer'
+import { HtmlFileViewer } from './HtmlFileViewer'
 import { MarkdownFilePreview } from './MarkdownFilePreview'
 import { TexPanel } from './TexPanel'
 import { texLanguage } from './texBuilds'
 import { isMarkdownPath } from './fileReading'
 import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configuration.mjs'
-import { isPdfFile, isBinaryAssetFile } from '../../../shared/file-previews.mjs'
+import {
+  isPdfFile,
+  isImageFile,
+  isSvgFile,
+  isHtmlFile,
+  isBinaryAssetFile,
+} from '../../../shared/file-previews.mjs'
 import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
 import { ProjectFileRecovery } from './ProjectFileRecovery'
@@ -61,6 +69,7 @@ import { SingleFileActions } from './SingleFileActions'
 import { WorkspaceList } from './WorkspaceList'
 import { RenameWorkspaceDialog } from './RenameWorkspaceDialog'
 import { ProjectSharingDialog } from './ProjectSharingDialog'
+import { ProjectParticipantsDialog } from './ProjectParticipantsDialog'
 import { useProjectCollaboration } from './useProjectCollaboration'
 import { usePlaygroundPreparation } from './usePlaygroundPreparation'
 import { playgroundDownloadName } from './playgroundNames'
@@ -320,6 +329,8 @@ export function Studio() {
   } = useSyncExternalStore(bufferStore.subscribe, bufferStore.getSnapshot)
   const setFile = bufferStore.setFile
   const [markdownPreview, setMarkdownPreview] = useState(false)
+  const [markupPreview, setMarkupPreview] = useState(true)
+  const [previewBusy, setPreviewBusy] = useState(false)
   const [texWorkspaceElement, setTexWorkspaceElement] =
     useState<HTMLDivElement | null>(null)
   const texWorkspaceSize = useElementSize(texWorkspaceElement)
@@ -506,14 +517,7 @@ export function Studio() {
     (!!lastTrashProject &&
       (!lastTrashProject.accessRole || lastTrashProject.accessRole === 'admin'))
   useEffect(() => {
-    if (
-      sharingTarget &&
-      !projects.some(
-        (item) =>
-          item.id === sharingTarget.id &&
-          (!item.accessRole || item.accessRole === 'admin'),
-      )
-    )
+    if (sharingTarget && !projects.some((item) => item.id === sharingTarget.id))
       setSharingTarget(null)
   }, [projects, sharingTarget])
   const projectAdmin = !project?.accessRole || project.accessRole === 'admin'
@@ -593,6 +597,10 @@ export function Studio() {
   )
   const dirty = dirtyFiles.length > 0
   const pdfPreview = file?.preview === 'pdf'
+  const binaryPreview = !!file?.preview
+  const imagePreview =
+    file?.preview === 'image' || (isSvgFile(file?.path) && markupPreview)
+  const htmlPreview = isHtmlFile(file?.path) && markupPreview
   const texFiles = useMemo(
     () =>
       files
@@ -602,18 +610,26 @@ export function Studio() {
   )
   const texVisible = !!texLanguage(file?.path) && texFiles.length > 0
   const readingFile =
-    pdfPreview || (isMarkdownPath(file?.path) && markdownPreview)
+    binaryPreview ||
+    imagePreview ||
+    htmlPreview ||
+    (isMarkdownPath(file?.path) && markdownPreview)
   const assistantFiles = useMemo(
     () =>
       files.filter(
         (entry) =>
-          (isPdfFile(entry.path) || !isBinaryAssetFile(entry.path)) &&
+          (isPdfFile(entry.path) ||
+            isImageFile(entry.path) ||
+            !isBinaryAssetFile(entry.path)) &&
           (!singleFileMode || entry.path === 'Main.lean'),
       ),
     [files, singleFileMode],
   )
 
-  useEffect(() => setMarkdownPreview(false), [projectId, file?.path])
+  useEffect(() => {
+    setMarkdownPreview(false)
+    setMarkupPreview(true)
+  }, [projectId, file?.path])
 
   const setProjectId = useCallback(
     (id: string | null) => {
@@ -975,11 +991,12 @@ export function Studio() {
       setError('')
       try {
         const pdf = isPdfFile(path)
+        const binary = isBinaryAssetFile(path)
         const cached = bufferStore.getSnapshot().buffers.get(path)
         let value =
           cached && cached.content !== cached.savedContent
             ? cached
-            : pdf
+            : binary
               ? { content: '', hash: '', readOnly: true }
               : await api<{
                   content: string
@@ -1006,7 +1023,7 @@ export function Studio() {
           bufferStore.getSnapshot().file?.path === path &&
           value.content === latest.content &&
           value.hash === latest.hash &&
-          !pdf
+          !binary
         ) {
           revealCurrent()
           return
@@ -1027,7 +1044,7 @@ export function Studio() {
             filesRef.current.find((item) => item.path === path)?.readOnly,
           line,
           column,
-          preview: pdf ? 'pdf' : undefined,
+          preview: pdf ? 'pdf' : binary ? 'image' : undefined,
         })
         localStorage.setItem(`lemex-file-${id}`, path)
         setSidebarOpen(false)
@@ -2001,7 +2018,7 @@ export function Studio() {
         selected.generation !== current.generation
       )
         return
-      if (current.preview === 'pdf') {
+      if (current.preview) {
         // Terminal polling supplies no changed paths. Keep the reader's page
         // and scroll position until a reported edit or an explicit reload.
         if (paths.includes(current.path))
@@ -2924,12 +2941,16 @@ export function Studio() {
               )}
           </div>
           <div className="header-actions">
-            {project && !singleFileMode && projectAdmin && (
+            {project && !singleFileMode && (
               <ToolbarAction
-                label="Share"
+                label={projectAdmin ? 'Share' : 'View project participants'}
                 icon={<Icon name="external" size={15} />}
                 onClick={() => setSharingTarget(project)}
-                help="Invite editors or viewers to this project. Your chats and provider settings stay private."
+                help={
+                  projectAdmin
+                    ? 'Invite editors or viewers to this project. Your chats and provider settings stay private.'
+                    : 'See who has access to this project and their roles.'
+                }
               />
             )}
             {project?.accessRole && (
@@ -3408,6 +3429,40 @@ export function Studio() {
                     {markdownPreview ? 'Edit Markdown' : 'Preview Markdown'}
                   </button>
                 )}
+                {(isHtmlFile(file?.path) || isSvgFile(file?.path)) && (
+                  <button
+                    className="button small secondary"
+                    aria-pressed={markupPreview}
+                    disabled={previewBusy || opening}
+                    onClick={() => {
+                      if (markupPreview) {
+                        setMarkupPreview(false)
+                        return
+                      }
+                      const expected = bufferStore.getSnapshot().scope
+                      const path = file?.path
+                      setPreviewBusy(true)
+                      void (async () => {
+                        try {
+                          if (dirty) await saveWorkspace()
+                          if (
+                            bufferStore.isCurrent(expected) &&
+                            bufferStore.getSnapshot().file?.path === path
+                          )
+                            setMarkupPreview(true)
+                        } catch (error) {
+                          setError(errorText(error))
+                        } finally {
+                          setPreviewBusy(false)
+                        }
+                      })()
+                    }}
+                  >
+                    {previewBusy
+                      ? 'Saving…'
+                      : `${markupPreview ? (file?.readOnly ? 'View' : 'Edit') : 'Preview'} ${isHtmlFile(file?.path) ? 'HTML' : 'SVG'}${markupPreview && file?.readOnly ? ' source' : ''}`}
+                  </button>
+                )}
                 {singleFileMode && (
                   <>
                     {(!file || file.path === 'Main.lean') && (
@@ -3502,7 +3557,7 @@ export function Studio() {
                   key={`editor:${project.id}`}
                   projectId={project.id}
                   files={files}
-                  file={pdfPreview ? null : file}
+                  file={binaryPreview ? null : file}
                   joining={!!file && collaboration.joining(file.path)}
                   buffers={buffers}
                   bufferDiscardVersion={discardVersion}
@@ -3517,6 +3572,8 @@ export function Studio() {
                   }}
                   onCollaborativeUndo={collaboration.undo}
                   onCollaborativeRedo={collaboration.redo}
+                  collaborators={collaboration.peers}
+                  onCollaborativeSelection={collaboration.setSelection}
                   theme={theme}
                   showInfoview={showInfoview && !!file?.path.endsWith('.lean')}
                   goalsSize={goalsSize}
@@ -3621,9 +3678,24 @@ export function Studio() {
                   projectId={project.id}
                   path={file.path}
                 />
+              ) : imagePreview && file ? (
+                <ImageFileViewer
+                  key={`image:${project.id}:${file.path}:${file.generation}`}
+                  projectId={project.id}
+                  path={file.path}
+                  revision={file.hash}
+                />
+              ) : htmlPreview && file ? (
+                <HtmlFileViewer
+                  key={`html:${project.id}:${file.path}:${file.generation}`}
+                  projectId={project.id}
+                  path={file.path}
+                  revision={file.hash}
+                />
               ) : readingFile && file ? (
                 <MarkdownFilePreview
                   key={`markdown:${project.id}:${file.path}`}
+                  projectId={project.id}
                   path={file.path}
                   content={file.content}
                   files={files}
@@ -3800,7 +3872,9 @@ export function Studio() {
                 onOpenSettings={() => setSettingsModal(true)}
                 key={`${session.user.id}:${project.id}`}
                 projectId={project.id}
-                file={pdfPreview || file?.unavailable ? undefined : file?.path}
+                file={
+                  binaryPreview || file?.unavailable ? undefined : file?.path
+                }
                 currentFile={file?.unavailable ? undefined : file?.path}
                 files={assistantFiles}
                 focusRequest={proofFocus || undefined}
@@ -4013,7 +4087,9 @@ export function Studio() {
         />
       )}
       {sharingTarget &&
-        (!sharingTarget.accessRole || sharingTarget.accessRole === 'admin') && (
+        (!projects.find((item) => item.id === sharingTarget.id)?.accessRole ||
+        projects.find((item) => item.id === sharingTarget.id)?.accessRole ===
+          'admin' ? (
           <ProjectSharingDialog
             key={sharingTarget.id}
             project={sharingTarget}
@@ -4023,7 +4099,14 @@ export function Studio() {
             }}
             onClose={() => setSharingTarget(null)}
           />
-        )}
+        ) : (
+          <ProjectParticipantsDialog
+            key={sharingTarget.id}
+            project={sharingTarget}
+            currentUserId={session.user.id}
+            onClose={() => setSharingTarget(null)}
+          />
+        ))}
       {renameTarget && (
         <RenameWorkspaceDialog
           project={renameTarget}

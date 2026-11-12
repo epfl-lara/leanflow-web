@@ -147,6 +147,7 @@ function fixture(t, initial = 'base source\n', options = {}) {
       react,
       yjs: Y,
       './localDocumentHistory': { LocalDocumentHistory },
+      './projectPresence': transpile('./projectPresence.ts'),
       './projectPaths': transpile('./projectPaths.ts', {
         '../../../shared/source-limits.mjs': { MAX_PROJECT_FILES },
       }),
@@ -202,6 +203,97 @@ function fixture(t, initial = 'base source\n', options = {}) {
   })
   return { store, socket, server, hook, rerender }
 }
+
+test('cursor selection publishes separately from text and clears when editing loses focus', async (t) => {
+  const { hook, socket, store } = fixture(t)
+  hook.setSelection({ path: 'Main.lean', anchor: 2, head: 5 })
+  await new Promise((resolve) => setTimeout(resolve, 90))
+  assert.deepEqual(
+    socket.sent.filter((message) => message.type === 'presence').at(-1),
+    {
+      type: 'presence',
+      path: 'Main.lean',
+      documentId: 'document-1',
+      anchor: 2,
+      head: 5,
+    },
+  )
+  assert.equal(
+    socket.sent.filter((message) => message.type === 'update').length,
+    0,
+  )
+  assert.equal(store.getSnapshot().file.content, 'base source\n')
+  hook.setSelection(null)
+  await new Promise((resolve) => setTimeout(resolve, 90))
+  assert.deepEqual(
+    socket.sent.filter((message) => message.type === 'presence').at(-1),
+    {
+      type: 'presence',
+      path: null,
+    },
+  )
+})
+
+test('viewers receive named cursors without publishing and discard them on disconnection', async (t) => {
+  const { hook, socket, rerender } = fixture(t, undefined, { canEdit: false })
+  const peer = {
+    clientId: 'peer-session',
+    userId: 'peer',
+    name: 'Collaborator',
+    path: 'Main.lean',
+    documentId: 'document-1',
+    anchor: 2,
+    head: 5,
+  }
+  socket.receive({ type: 'presence', peers: [peer] })
+  assert.deepEqual(rerender().peers, [peer])
+  hook.setSelection({ path: 'Main.lean', anchor: 0, head: 0 })
+  await new Promise((resolve) => setTimeout(resolve, 90))
+  assert.equal(
+    socket.sent.filter((message) => message.type === 'presence').length,
+    0,
+  )
+  socket.receive({ type: 'presence', peers: [{ ...peer, head: -1 }] })
+  assert.deepEqual(rerender().peers, [peer])
+  socket.close()
+  assert.deepEqual(rerender().peers, [])
+})
+
+test('cursor errors leave saving and local history available', async (t) => {
+  const { socket, store, hook } = fixture(t)
+  socket.receive({
+    type: 'presence-error',
+    status: 409,
+    message: 'Stale cursor.',
+  })
+  store.change('Main.lean', 'base source\nlocal edit\n')
+  await new Promise((resolve) => setTimeout(resolve, 90))
+  assert(socket.sent.some((message) => message.type === 'update'))
+  assert.equal(hook.undo('Main.lean'), true)
+  assert.equal(store.getSnapshot().file.content, 'base source\n')
+})
+
+test('image previews never join shared text editing or expose a joining indicator', async (t) => {
+  const { socket, store, hook } = fixture(t)
+  store.setFile({
+    path: 'figure.png',
+    content: '',
+    savedContent: '',
+    hash: '',
+    generation: 2,
+    preview: 'image',
+    readOnly: true,
+  })
+  await new Promise((resolve) => setTimeout(resolve, 90))
+  assert.equal(hook.joining('figure.png'), false)
+  assert.equal(hook.manages('figure.png'), false)
+  assert.equal(
+    socket.sent.some(
+      (message) => message.type === 'open' && message.path === 'figure.png',
+    ),
+    false,
+  )
+})
 
 test('remote updates arriving before the send debounce preserve both local typing and remote text', async (t) => {
   const { store, socket, server, hook } = fixture(t)

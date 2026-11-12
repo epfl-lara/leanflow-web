@@ -5,8 +5,26 @@ import path from 'node:path'
 // Native Lemex enriches these profiles with the authenticated live RCP list.
 export const DEFAULT_MODEL = 'deepseek-ai/DeepSeek-V4.1-Flash-1017'
 
+// This published model accepts image inputs. Older native RCP discovery starts
+// from a text-only bundled profile, which blocks Lemex's view_image tool.
+// Keep this correction exact: unknown models retain provider capabilities.
+const RCP_VISION_MODELS = new Set([DEFAULT_MODEL])
+
 export function rcpModelCatalog(catalog) {
-  return Array.isArray(catalog) ? { models: catalog } : catalog
+  const value = Array.isArray(catalog) ? { models: catalog } : catalog
+  return {
+    ...value,
+    models: (value.models || []).map((model) =>
+      RCP_VISION_MODELS.has(model.slug || model.id)
+        ? {
+            ...model,
+            input_modalities: [
+              ...new Set([...(model.input_modalities || ['text']), 'image']),
+            ],
+          }
+        : model,
+    ),
+  }
 }
 
 export function modelContextConfig(catalog, selected) {

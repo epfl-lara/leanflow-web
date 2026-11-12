@@ -10,7 +10,7 @@ export const chatModes: {
   {
     id: 'search',
     name: 'Ask & Search',
-    hint: 'Ask questions, understand proofs and definitions, find lemmas, or work on project files. Review requested edits first, or enable live edits in Options.',
+    hint: 'Ask questions, understand proofs and definitions, find lemmas, or work on project files. Requested edits are saved as Lemex works. Turn off live edits in Options to review them first.',
     placeholder: 'Ask a question or describe a task for your project…',
     suggestions: [
       {
@@ -31,7 +31,7 @@ export const chatModes: {
       {
         label: 'Organize project notes',
         prompt:
-          'Organize the project notes into a clear Markdown summary. Preserve the information and prepare the file changes for review.',
+          'Organize the project notes into a clear Markdown summary. Preserve the information.',
       },
     ],
   },

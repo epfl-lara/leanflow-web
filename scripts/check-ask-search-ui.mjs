@@ -117,7 +117,8 @@ try {
   )
   assert.equal(
     await page.getByLabel('Edit files live', { exact: true }).isChecked(),
-    false,
+    true,
+    'Ask & Search starts with live editing enabled',
   )
   await page.getByRole('button', { name: 'Proofs', exact: true }).click()
   assert.equal(
@@ -131,12 +132,13 @@ try {
   await page
     .getByText('Here is a simple study schedule.', { exact: true })
     .waitFor()
-  assert.equal(state.runs[0].liveEdits, false)
+  assert.equal(state.runs[0].liveEdits, true)
   assert.equal(state.runs[0].mode, 'search')
   assert.equal(
     (await page.locator('.conversation-turn').innerText()).includes('Verified'),
     false,
   )
+  await page.getByLabel('Edit files live', { exact: true }).uncheck()
   await composer.fill('Create Notes.md with study notes.')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await page
@@ -158,6 +160,26 @@ try {
     (await dialog.innerText()).includes('Lean verification passed'),
     false,
   )
+  await page.screenshot({
+    path: path.join(reportDir, 'review-desktop.png'),
+    fullPage: true,
+  })
+  await page.setViewportSize({ width: 390, height: 844 })
+  assert.equal(
+    await dialog.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth + 1,
+    ),
+    true,
+    'Review fits a narrow screen without horizontal overflow',
+  )
+  await dialog
+    .getByRole('button', { name: 'Apply changes', exact: true })
+    .scrollIntoViewIfNeeded()
+  await page.screenshot({
+    path: path.join(reportDir, 'review-narrow.png'),
+    fullPage: true,
+  })
+  await page.setViewportSize({ width: 1600, height: 1000 })
   await page.route('**/api/runs/ask-run-1/apply', async (route) => {
     state.files[projectId]['Notes.md'] = '# Study notes\n'
     state.runs[1].status = 'applied'
@@ -202,7 +224,7 @@ try {
   assert.equal(
     await liveChoice.isChecked(),
     true,
-    'Explicit opt-in survives reload',
+    'The saved live-edit choice survives reload',
   )
   await composer.fill('Update Notes.md with more study notes.')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
@@ -234,6 +256,14 @@ try {
     'The other mode preference stays unchanged',
   )
   await page.getByRole('button', { name: 'Ask & Search', exact: true }).click()
+  await page.reload()
+  await composer.waitFor()
+  await page.locator('.chat-options summary').click()
+  assert.equal(
+    await liveChoice.isChecked(),
+    false,
+    'An explicit review choice survives reload despite the live-edit default',
+  )
   await page.setViewportSize({ width: 1280, height: 800 })
   for (const tab of await page.locator('.mode-tabs button').all()) {
     const box = await tab.boundingBox()
@@ -243,10 +273,23 @@ try {
     path: path.join(reportDir, 'ask-search.png'),
     fullPage: true,
   })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await composer.scrollIntoViewIfNeeded()
+  assert.equal(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    ),
+    true,
+    'Ask & Search controls fit a narrow screen',
+  )
+  await page.screenshot({
+    path: path.join(reportDir, 'ask-search-narrow.png'),
+    fullPage: true,
+  })
   fixture.assertClean()
   report.passed = true
   console.log(
-    'PASS: Ask & Search defaults to review, supports live-edit opt-in and undo, preserves separate mode preferences across reloads; all backends mocked',
+    'PASS: Ask & Search defaults to live edits, supports review/apply and live undo, and preserves separate mode preferences and explicit opt-out across reloads; all backends mocked',
   )
 } catch (error) {
   report.passed = false

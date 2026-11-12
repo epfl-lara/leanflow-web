@@ -1,0 +1,29 @@
+.monaco-host .collaborator-cursor {
+  border-left: 1px solid;
+  pointer-events: none;
+}
+
+.monaco-host .collaborator-cursor-label {
+  display: block;
+  box-sizing: border-box;
+  min-width: 0;
+  color: #fff;
+  border-radius: 2px 2px 2px 0;
+  padding: 0 3px;
+  max-width: 124px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font:
+    10px/12px system-ui,
+    sans-serif;
+  pointer-events: none;
+}
+
+.monaco-host .collaborator-cursor-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 2px;
+  max-width: 100%;
+}

@@ -82,6 +82,12 @@ Formatted previews support documents up to 512 KiB. Larger Markdown files stay a
 
 Choose a `.pdf` file to open a read-only PDF viewer. Use **Download PDF** or **Open PDF in new tab** if your browser cannot display it inline. Choose **Reload PDF** after changing a document through the terminal. PDFs can be uploaded alongside source files, up to 16 MiB per PDF and 32 MiB total per upload. PDF viewing does not compile LaTeX or attach PDF contents to Lemex chats.
 
+Choose a PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, or SVG file in **Files** to view it. **Actual size** and **Fit image** control its display; **Download image** saves the original. Raster previews support files up to 16 MiB, with a bound on decoded image size. SVG previews support up to 2 MiB. Choose **Edit SVG** to edit its source, then **Preview SVG** to save and view your changes.
+
+Choose an HTML file to view its static page, including inline styles and local project images and stylesheets. Scripts, forms, and external resources are disabled. **Edit HTML** opens the source; **Preview HTML** saves changes before displaying the page. HTML previews support documents up to 2 MiB. Use **Reload HTML** after changing a linked image or stylesheet.
+
+Project images also display inside Markdown documents and assistant replies, using links such as `![Diagram](figures/diagram.svg)`. Choose an image to open it in **Files**. Ask Lemex to save generated diagrams as SVG; uploaded raster images can be linked as well. New raster output in an assistant's private copy is not published as a project file. External images stay links until you choose to open them.
+
 Drag the scrollbar inside **Files** to scroll long lists. The separate strip to its right resizes the sidebar. You can also focus a separator and use the arrow keys.
 
 ## Edit and compile LaTeX
@@ -150,7 +156,7 @@ Compare optimization's token and heartbeat measurements: a shorter proof can tak
 
 To formalize a document, open its PDF, TeX, Markdown, plain text, or other readable source, choose **Formalize**, and describe the statement or argument to translate. Use **Select context** or **@** to add other sources. You do not need to select an existing Lean file: Lemex can create one for the formalization. Source documents stay unchanged, and Lean output still receives independent verification. The standard worker can extract PDF text. If extraction is unavailable on an older worker or loses essential mathematics, provide the relevant passage or TeX source. Scanned pages may need OCR.
 
-**Ask & Search** primarily helps with Lean, but also welcomes general questions, writing, planning, and open-ended tasks. Ask it to create or edit project text files and organize, rename, or delete non-Lean notes and documents. Ask Lemex to rename or delete Lean sources when needed, or use the file browser. Questions and explanations leave files unchanged. Live edits are off by default: inspect the diff, then choose **Apply changes**. To save requested edits as Lemex works, enable **Options → Edit files live** before sending. This choice is saved separately from the other modes. Stop the run before undoing its edits. Lemex can use the workspace shell, Python, and other installed command-line tools in either editing mode. Lean source edits still receive independent Lean verification; ordinary conversation and non-Lean file tasks do not.
+**Ask & Search** primarily helps with Lean, but also welcomes general questions, writing, planning, and open-ended tasks. Ask it to create or edit project text files and organize, rename, or delete non-Lean notes and documents. Ask Lemex to rename or delete Lean sources when needed, or use the file browser. Questions and explanations leave files unchanged. Live edits are on by default: Lemex saves requested edits as it works. To inspect the diff before saving, turn off **Options → Edit files live** before sending, then choose **Apply changes** after reviewing. This choice is saved separately from the other modes. Stop the run before undoing its edits. Lemex can use the workspace shell, Python, and other installed command-line tools in either editing mode. Lean source edits still receive independent Lean verification; ordinary conversation and non-Lean file tasks do not.
 
 Ask Lemex to fix project configuration when needed, including registering a new Lean module in `lakefile.toml`. Requested configuration edits are allowed in every mode and receive build checks. Existing Lean versions and dependency revisions are preserved unless you ask to change them. Installed dependency sources and credentials stay protected.
 
@@ -169,6 +175,8 @@ To refresh an existing broad name, open its pencil, choose **Suggest a name**,
 review the suggestion, then save it.
 
 Check **Current file** above your message. Its path is supplied automatically when available; you do not need to attach it to a task or update. Missing automatic context is skipped. Explicitly selected files and proof targets must be available. For PDFs, only the path is supplied. PDF contents are not attached.
+
+For models that support vision, the initial message can include up to four saved PNG, JPEG, GIF, or WebP images from the current file and selected context, up to 8 MiB total. Lemex can use its image viewer to inspect additional images, including pages rendered from a scanned PDF. SVG and other image formats need conversion to PNG for visual inspection. A model that does not support images keeps file paths as context and reports that limitation; your selected model and reasoning effort stay unchanged.
 
 Type **@** or use **Select context** to attach extra files. The same menu includes declarations and selected editor lines. Adding context does not save or send your message. **Options** controls model, reasoning effort, and live edits. Drafts and selections stay with their chats.
 

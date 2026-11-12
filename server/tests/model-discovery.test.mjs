@@ -78,6 +78,35 @@ test('fresh catalogs are account scoped, prefer the Lemex default only when avai
   assert.equal((await f.discovery.get('bob')).defaultModel, 'limited-model')
 })
 
+test('RCP live discovery repairs only the verified vision profile while custom capability metadata remains authoritative', async (t) => {
+  const f = await fixture(t, async () => ({
+    models: [
+      { ...profile(DEFAULT_MODEL, 'max', 1), input_modalities: ['text'] },
+      { ...profile('unverified/text-model'), input_modalities: ['text'] },
+    ],
+  }))
+  await f.providers.save(
+    'alice',
+    'rcp-fixture',
+    'https://inference.rcp.epfl.ch/v1',
+  )
+  const rcp = await f.discovery.get('alice')
+  assert.deepEqual(rcp.modelCatalog.models[0].input_modalities, [
+    'text',
+    'image',
+  ])
+  assert.deepEqual(rcp.modelCatalog.models[1].input_modalities, ['text'])
+  assert.equal(rcp.defaultModel, DEFAULT_MODEL)
+  assert.equal(rcp.models[0].defaultReasoningEffort, 'max')
+  await f.providers.save(
+    'alice',
+    'custom-fixture',
+    'https://provider.example/v1',
+  )
+  const custom = await f.discovery.get('alice')
+  assert.deepEqual(custom.modelCatalog.models[0].input_modalities, ['text'])
+})
+
 test('discovery coalesces same-account requests and fails closed after a refresh error or key race', async (t) => {
   let finish,
     fail = false

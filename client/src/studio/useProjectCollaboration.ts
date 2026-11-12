@@ -16,6 +16,11 @@ import type { WorkspaceBuffers, WorkspaceScope } from './workspaceBuffers'
 import { ApiError, sessionBoundUrl, type OpenFile } from './api'
 import { LocalDocumentHistory } from './localDocumentHistory'
 import { pathMoves, remapMovedPath, type PathMove } from './projectPaths'
+import {
+  projectPeers,
+  type ProjectPeer,
+  type ProjectSelection,
+} from './projectPresence'
 
 interface LiveDocument {
   doc: Y.Doc
@@ -34,6 +39,7 @@ interface LiveDocument {
   failedLocalContent?: string
 }
 interface CollaborationControl {
+  setSelection: (selection: ProjectSelection | null) => void
   flush: () => Promise<boolean>
   undo: (path: string) => boolean
   redo: (path: string) => boolean
@@ -107,8 +113,23 @@ export function useProjectCollaboration({
 }) {
   const [connected, setConnected] = useState(false)
   const [issue, setIssue] = useState<string | null>(null)
+  const [presence, setPresence] = useState<{
+    scope: WorkspaceScope
+    peers: ProjectPeer[]
+  }>({ scope, peers: [] })
+  const selection = useRef<{
+    scope: WorkspaceScope
+    value: ProjectSelection | null
+  }>({ scope, value: null })
   const [, refreshAdmission] = useState(0)
   const control = useRef<CollaborationControl | null>(null)
+  const setSelection = useCallback(
+    (value: ProjectSelection | null) => {
+      selection.current = { scope, value }
+      control.current?.setSelection(value)
+    },
+    [scope],
+  )
   // A permission/setup transition may recreate the live connection while
   // Monaco retains its model. Never expose an older native undo stack after
   // that model has imported shared edits during this workspace visit.
@@ -145,7 +166,7 @@ export function useProjectCollaboration({
       !file ||
       file.readOnly ||
       file.unavailable ||
-      file.preview === 'pdf' ||
+      !!file.preview ||
       !liveFile(path)
     )
       return false
@@ -186,6 +207,8 @@ export function useProjectCollaboration({
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined
     let listingTimer: ReturnType<typeof setTimeout> | undefined
     let sendTimer: ReturnType<typeof setTimeout> | undefined
+    let presenceTimer: ReturnType<typeof setTimeout> | undefined
+    let lastPresence = ''
     const waiters = new Set<() => void>()
     const current = () => !disposed && store.isCurrent(scope)
     const blockingFailure = () =>
@@ -226,6 +249,36 @@ export function useProjectCollaboration({
       }
       socket.send(JSON.stringify(message))
       return true
+    }
+
+    const publishPresence = () => {
+      if (!current() || !ready || !canEdit) return
+      // Publish text first so cursor offsets describe the same live document.
+      publishLocal()
+      const selected =
+        selection.current.scope === scope ? selection.current.value : null
+      const record = selected ? documents.get(selected.path) : undefined
+      const file = selected
+        ? store.getSnapshot().buffers.get(selected.path)
+        : undefined
+      const message =
+        selected &&
+        record?.id &&
+        record.opened &&
+        !record.blocked &&
+        !file?.readOnly &&
+        !file?.unavailable
+          ? { type: 'presence', ...selected, documentId: record.id }
+          : { type: 'presence', path: null }
+      const key = JSON.stringify(message)
+      if (key !== lastPresence && send(message)) lastPresence = key
+    }
+    const schedulePresence = () => {
+      if (presenceTimer !== undefined) return
+      presenceTimer = setTimeout(() => {
+        presenceTimer = undefined
+        publishPresence()
+      }, 50)
     }
 
     const destroyRecord = (record: LiveDocument) => {
@@ -335,7 +388,7 @@ export function useProjectCollaboration({
         !canEdit ||
         file.readOnly ||
         file.unavailable ||
-        file.preview === 'pdf' ||
+        !!file.preview ||
         !liveFile(path) ||
         fallbackPaths.has(path) ||
         managedHistory.has(path) ||
@@ -392,7 +445,7 @@ export function useProjectCollaboration({
       for (const file of store.dirty()) {
         if (
           !liveFile(file.path) ||
-          file.preview === 'pdf' ||
+          !!file.preview ||
           fallbackPaths.has(file.path)
         )
           continue
@@ -522,7 +575,7 @@ export function useProjectCollaboration({
         return (
           !!file &&
           !file.unavailable &&
-          file.preview !== 'pdf' &&
+          !file.preview &&
           liveFile(path) &&
           !fallbackPaths.has(path)
         )
@@ -719,10 +772,17 @@ export function useProjectCollaboration({
           open(path, record)
         }
         publishLocal()
+        schedulePresence()
         if (store.getSnapshot().buffers.size) filesChanged()
         notify()
         return
       }
+      if (message.type === 'presence') {
+        const peers = projectPeers(message)
+        if (peers) setPresence({ scope, peers })
+        return
+      }
+      if (message.type === 'presence-error') return
       if (message.type === 'files') {
         if ('moves' in message)
           for (const move of pathMoves(message.moves)) applyMove(move)
@@ -1009,6 +1069,7 @@ export function useProjectCollaboration({
       }
       notify()
       schedule()
+      schedulePresence()
     }
 
     function connect() {
@@ -1034,6 +1095,8 @@ export function useProjectCollaboration({
       socket.addEventListener('close', (event) => {
         ready = false
         if (!current()) return
+        lastPresence = ''
+        setPresence({ scope, peers: [] })
         setConnected(false)
         notify()
         if (event.code === 1008) {
@@ -1085,7 +1148,7 @@ export function useProjectCollaboration({
           )
         return (
           managedHistory.has(path) ||
-          (liveFile(path) && file.preview !== 'pdf' && !fallbackPaths.has(path))
+          (liveFile(path) && !file.preview && !fallbackPaths.has(path))
         )
       }
       if (!canEdit || file.readOnly) return true
@@ -1130,6 +1193,7 @@ export function useProjectCollaboration({
       return true
     }
     const controller: CollaborationControl = {
+      setSelection: () => schedulePresence(),
       manages: (path) => current() && documents.has(path),
       joining: (path) => {
         if (!current()) return true
@@ -1213,6 +1277,7 @@ export function useProjectCollaboration({
       },
     }
     control.current = controller
+    setPresence({ scope, peers: [] })
     setConnected(false)
     clearIssue()
     publishLocal()
@@ -1221,6 +1286,7 @@ export function useProjectCollaboration({
       disposed = true
       ready = false
       clearTimeout(sendTimer)
+      clearTimeout(presenceTimer)
       clearTimeout(reconnectTimer)
       clearTimeout(listingTimer)
       for (const { timer } of admissionTimers.values()) clearTimeout(timer)
@@ -1243,5 +1309,7 @@ export function useProjectCollaboration({
     redo,
     manages,
     joining,
+    setSelection,
+    peers: enabled && presence.scope === scope ? presence.peers : [],
   }
 }

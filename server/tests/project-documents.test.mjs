@@ -125,6 +125,219 @@ function update(entry, requestId, edit) {
   }
 }
 
+function cursor(entry, anchor, head = anchor, extra = {}) {
+  return {
+    type: 'presence',
+    path: 'Main.lean',
+    documentId: entry.id,
+    anchor,
+    head,
+    ...extra,
+  }
+}
+
+const latestPresence = (entry) =>
+  entry.ws.packets.filter((packet) => packet.type === 'presence').at(-1)?.peers
+
+async function untilPresence(entry, check) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const peers = latestPresence(entry)
+    if (peers && check(peers)) return peers
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  assert.fail('The expected collaborator cursor did not arrive.')
+}
+
+test('shared cursors expose trusted names and selections to same-file peers including viewers', async (t) => {
+  const f = fixture(t, { displayName: (actor) => `Account ${actor}` })
+  const alice = await f.client('alice')
+  const bob = await f.client('bob')
+  const viewer = await f.client('viewer')
+  const before = f.files.get('Main.lean')
+  await f.service.message(
+    alice.client,
+    cursor(alice, 2, 8, { name: 'Forged name', userId: 'bob' }),
+  )
+  const peers = await untilPresence(bob, (peers) => peers.length === 1)
+  assert.deepEqual(peers, [
+    {
+      clientId: alice.client.presenceId,
+      userId: 'alice',
+      name: 'Account alice',
+      path: 'Main.lean',
+      documentId: alice.id,
+      anchor: 2,
+      head: 8,
+    },
+  ])
+  assert.equal(typeof peers[0].clientId, 'string')
+  assert.deepEqual(
+    await untilPresence(viewer, (peers) => peers.length === 1),
+    peers,
+  )
+  assert.deepEqual(latestPresence(alice), [])
+  assert.equal(
+    f.files.get('Main.lean'),
+    before,
+    'Cursor movement never saves a file',
+  )
+})
+
+test('shared cursors reject viewers, stale document IDs, unopened files and invalid offsets', async (t) => {
+  const f = fixture(t)
+  const alice = await f.client('alice')
+  const viewer = await f.client('viewer')
+  await assert.rejects(f.service.message(viewer.client, cursor(viewer, 1)), {
+    status: 403,
+  })
+  for (const extra of [
+    { anchor: -1 },
+    { head: 1.5 },
+    { head: f.files.get('Main.lean').length + 1 },
+    { anchor: '2' },
+  ])
+    await assert.rejects(
+      f.service.message(alice.client, cursor(alice, 1, 1, extra)),
+      { status: 400 },
+    )
+  for (const extra of [{ documentId: 'expired' }, { path: 'Unopened.lean' }])
+    await assert.rejects(
+      f.service.message(alice.client, cursor(alice, 1, 1, extra)),
+      { status: 409 },
+    )
+  assert.deepEqual(latestPresence(viewer), [])
+})
+
+test('collaborator positions follow inserted text and disappear when cleared, closed or disconnected', async (t) => {
+  const f = fixture(t)
+  const alice = await f.client('alice')
+  const bob = await f.client('bob')
+  await f.service.message(alice.client, cursor(alice, 2, 8))
+  await untilPresence(bob, (peers) => peers[0]?.head === 8)
+  await f.service.message(
+    bob.client,
+    update(bob, 1, (text) => text.insert(0, '-- ')),
+  )
+  await untilPresence(
+    bob,
+    (peers) => peers[0]?.anchor === 5 && peers[0]?.head === 11,
+  )
+  await f.service.message(alice.client, { type: 'presence', path: null })
+  assert.deepEqual(latestPresence(bob), [])
+  await f.service.message(alice.client, cursor(alice, 1))
+  await untilPresence(bob, (peers) => peers.length === 1)
+  await f.service.message(alice.client, { type: 'close', path: 'Main.lean' })
+  assert.deepEqual(latestPresence(bob), [])
+  await f.service.message(alice.client, { type: 'open', path: 'Main.lean' })
+  await f.service.message(alice.client, cursor(alice, 1))
+  await untilPresence(bob, (peers) => peers.length === 1)
+  alice.ws.close(1000)
+  assert.deepEqual(latestPresence(bob), [])
+})
+
+test('cursor snapshots are scoped to subscribed files and disappear after access changes or file moves', async (t) => {
+  const f = fixture(t)
+  f.files.set('Other.lean', '-- other\n')
+  const alice = await f.client('alice')
+  const bob = await f.client('bob')
+  const viewer = await f.client('viewer')
+  await f.service.message(viewer.client, { type: 'close', path: 'Main.lean' })
+  await f.service.message(viewer.client, { type: 'open', path: 'Other.lean' })
+  await f.service.message(alice.client, cursor(alice, 1))
+  await untilPresence(bob, (peers) => peers.length === 1)
+  assert.deepEqual(latestPresence(viewer), [])
+  f.roles.set('alice', 'viewer')
+  f.emit([], 'access')
+  assert.deepEqual(latestPresence(bob), [])
+  f.roles.set('alice', 'owner')
+  await f.service.message(alice.client, cursor(alice, 1))
+  await untilPresence(bob, (peers) => peers.length === 1)
+  f.emit(['Main.lean', 'Moved.lean'], 'files', {
+    removedPaths: ['Main.lean'],
+    moves: [{ from: 'Main.lean', to: 'Moved.lean' }],
+  })
+  assert.deepEqual(latestPresence(bob), [])
+})
+
+test('clearing a cursor cancels an older cursor packet queued behind a file operation', async (t) => {
+  const f = fixture(t)
+  const alice = await f.client('alice')
+  const bob = await f.client('bob')
+  const record = f.service.documents.get(f.service.key('shared', 'Main.lean'))
+  let release
+  const hold = f.service.queue(
+    record,
+    () =>
+      new Promise((resolve) => {
+        release = resolve
+      }),
+  )
+  while (!release) await new Promise((resolve) => setTimeout(resolve, 0))
+  const publishing = f.service.message(alice.client, cursor(alice, 1))
+  await f.service.message(alice.client, { type: 'presence', path: null })
+  release()
+  await Promise.all([hold, publishing])
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.deepEqual(latestPresence(bob), [])
+})
+
+test('cursor updates cannot cross project boundaries or reach revoked members', async (t) => {
+  const f = fixture(t)
+  const alice = await f.client('alice')
+  const bob = await f.client('bob')
+  const get = f.store.get.bind(f.store)
+  f.store.get = (projectId, actor) =>
+    projectId === 'unrelated'
+      ? { id: projectId, accessRole: 'editor' }
+      : get(projectId, actor)
+  const otherSocket = new Socket()
+  f.service.connect(otherSocket, 'unrelated', 'bob')
+  const other = [...f.service.clients].find((entry) => entry.ws === otherSocket)
+  await f.service.message(other, { type: 'open', path: 'Main.lean' })
+  await f.service.message(alice.client, cursor(alice, 1))
+  await untilPresence(bob, (peers) => peers.length === 1)
+  assert.deepEqual(latestPresence({ ws: otherSocket }), [])
+  const count = bob.ws.packets.length
+  f.roles.delete('bob')
+  f.emit([], 'access')
+  assert.equal(bob.ws.code, 1008)
+  await f.service.message(alice.client, cursor(alice, 3))
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(bob.ws.packets.length, count)
+  assert.deepEqual(latestPresence({ ws: otherSocket }), [])
+})
+
+test('expired authentication removes a published cursor and presence errors cannot become document errors', async (t) => {
+  const active = new Set(['alice', 'bob'])
+  const f = fixture(t, {
+    isAuthenticated: (_request, actor) => active.has(actor),
+  })
+  const alice = await f.client('alice')
+  const bob = await f.client('bob')
+  await f.service.message(alice.client, cursor(alice, 1))
+  await untilPresence(bob, (peers) => peers.length === 1)
+  alice.ws.emit('message', Buffer.from(JSON.stringify(cursor(alice, -1))))
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (alice.ws.packets.some((packet) => packet.type === 'presence-error'))
+      break
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  assert.equal(
+    alice.ws.packets.filter((packet) => packet.type === 'presence-error')
+      .length,
+    1,
+  )
+  assert.equal(
+    alice.ws.packets.filter((packet) => packet.type === 'error').length,
+    0,
+  )
+  active.delete('alice')
+  await assert.rejects(f.service.message(alice.client, cursor(alice, 2)), {
+    status: 401,
+  })
+  assert.deepEqual(latestPresence(bob), [])
+})
+
 test('concurrent clients merge same-file edits and publish only durable canonical states', async (t) => {
   const { service, client, files } = fixture(t)
   const alice = await client('alice'),

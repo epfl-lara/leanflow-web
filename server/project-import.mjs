@@ -205,7 +205,7 @@ export function uploadedFiles(input, validatePath) {
         typeof file.path !== 'string' ||
         typeof file.content !== 'string'
       )
-        fail('Upload text, PDF, PNG, or JPEG files with relative paths.')
+        fail('Upload text, PDF, or supported image files with relative paths.')
       const name = validatePath(file.path)
       if (seen.has(name)) fail(`The upload contains duplicate paths: ${name}`)
       let content

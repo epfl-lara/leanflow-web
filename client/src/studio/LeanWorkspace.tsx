@@ -35,6 +35,8 @@ import { DefinitionPreviewFiles } from './definitionPreviewFiles'
 import { WorkspaceEditor } from './workspaceEditor'
 import { installLeanClientLifecycle } from './leanClientLifecycle'
 import { installCollaborativeEditorUndo } from './collaborativeEditorUndo'
+import { CollaboratorCursors } from './collaboratorCursors'
+import type { ProjectPeer, ProjectSelection } from './projectPresence'
 import { LeanModelCache } from './leanModelCache'
 import type { RenameSource } from './workspaceBuffers'
 import { installLeanRenameMiddleware } from './leanRenameMiddleware'
@@ -204,6 +206,7 @@ interface Runtime {
   disabledRenameAction?: { dispose(): void }
   clientLifecycle?: ReturnType<typeof installLeanClientLifecycle>
   collaborativeUndo?: ReturnType<typeof installCollaborativeEditorUndo>
+  collaboratorCursors?: CollaboratorCursors
   definitionPreviewFiles?: DefinitionPreviewFiles
 }
 interface ConnectionClient {
@@ -227,6 +230,8 @@ export function LeanWorkspace({
   onRenameSources,
   onCollaborativeUndo,
   onCollaborativeRedo,
+  collaborators,
+  onCollaborativeSelection,
   theme,
   onChange,
   onState,
@@ -256,6 +261,8 @@ export function LeanWorkspace({
   onRenameSources: (sources: RenameSource[]) => void
   onCollaborativeUndo?: (path: string) => boolean
   onCollaborativeRedo?: (path: string) => boolean
+  collaborators?: readonly ProjectPeer[]
+  onCollaborativeSelection?: (selection: ProjectSelection | null) => void
   theme: 'light' | 'dark'
   onChange: (path: string, content: string) => void
   onState: (state: string) => void
@@ -294,6 +301,10 @@ export function LeanWorkspace({
     undo: onCollaborativeUndo,
     redo: onCollaborativeRedo,
   })
+  const collaboratorsRef = useRef(collaborators)
+  collaboratorsRef.current = collaborators
+  const onCollaborativeSelectionRef = useRef(onCollaborativeSelection)
+  onCollaborativeSelectionRef.current = onCollaborativeSelection
   collaborativeCommands.current = {
     undo: onCollaborativeUndo,
     redo: onCollaborativeRedo,
@@ -554,6 +565,7 @@ export function LeanWorkspace({
         own?.restoreOpenEditor?.()
         own?.disabledRenameAction?.dispose()
         own?.collaborativeUndo?.dispose()
+        own?.collaboratorCursors?.dispose()
         const closingFile = own?.editor?.modelRef?.object
         if (closingFile) {
           // Virtual file changes can still be reloading this managed model.
@@ -709,6 +721,8 @@ export function LeanWorkspace({
       active.disabledRenameAction = undefined
       active.collaborativeUndo?.dispose()
       active.collaborativeUndo = undefined
+      active.collaboratorCursors?.dispose()
+      active.collaboratorCursors = undefined
       active.visibleReadyPath = undefined
       await active.lean.closeHiddenDocuments()
       if (cancelled || runtime.current !== active || active.lean.disposed)
@@ -864,6 +878,12 @@ export function LeanWorkspace({
           const content = editor.getValue()
           onChangeRef.current(snapshot.path, content)
         })
+        active.collaboratorCursors = new CollaboratorCursors(
+          editor,
+          snapshot.path,
+          (selection) => onCollaborativeSelectionRef.current?.(selection),
+        )
+        active.collaboratorCursors.update(collaboratorsRef.current || [])
         await active.lean.showVisibleDocument()
         if (cancelled) return
         // Document symbols and proof selections belong to Lean files. Reading
@@ -994,6 +1014,8 @@ export function LeanWorkspace({
       void serialize(() => {
         if (runtime.current?.editor === ownEditor) {
           runtime.current.subscription?.dispose()
+          runtime.current.collaboratorCursors?.dispose()
+          runtime.current.collaboratorCursors = undefined
           runtime.current.outlineCleanup?.()
           runtime.current.outlineCleanup = undefined
           runtime.current.restoreOpenEditor?.()
@@ -1102,6 +1124,12 @@ export function LeanWorkspace({
       )
     }
   }, [projectId, file?.path, file?.generation, file?.content])
+
+  // Presence offsets must be applied after a batched source update reaches
+  // Monaco; applying them first would shift the same cursor twice.
+  useLayoutEffect(() => {
+    runtime.current?.collaboratorCursors?.update(collaborators || [])
+  }, [collaborators])
 
   useEffect(() => {
     void serialize(() =>

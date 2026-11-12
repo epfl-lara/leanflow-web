@@ -265,7 +265,7 @@ test('final flush mirrors the latest completed candidate after the timer is stop
   assert.equal(mirror.liveChanges[0].after, 'checked')
 })
 
-test('Ask & Search defaults to review first and allows an explicit live-edit choice', async (t) => {
+test('Ask & Search defaults to live edits and preserves an explicit review choice', async (t) => {
   const { manager } = await fixture(t)
   const input = { mode: 'prove', prompt: 'Prove the theorem.' }
   assert.equal((await manager.start('alice', 'p1', input)).liveEdits, true)
@@ -297,7 +297,7 @@ test('Ask & Search defaults to review first and allows an explicit live-edit cho
   assert.equal(
     (await manager.start('alice', 'p3', { ...input, mode: 'search' }))
       .liveEdits,
-    false,
+    true,
   )
   for (const liveEdits of [null, 1, 'true'])
     await assert.rejects(
@@ -573,6 +573,99 @@ async function workspaceFixture(t) {
   await store.jobs.get(project.id)
   return { store, events, project, runtime }
 }
+
+test('reviewed Ask & Search edits apply beside another queued chat and reject later saved-context conflicts', async (t) => {
+  const { store, events, project, runtime } = await workspaceFixture(t)
+  const original = '# Original notes\n'
+  const accepted = '# Accepted notes\n'
+  await store.writeFile(project.id, 'alice', 'Notes.md', original, null)
+  const manager = new AgentManager({
+    events,
+    workspaces: store,
+    runtime,
+    settings: {},
+    config: { redact: String },
+  })
+  const reviewed = await store.snapshot(
+    project.id,
+    'alice',
+    'review-with-other-chat',
+  )
+  await fs.writeFile(path.join(reviewed.root, 'Notes.md'), accepted)
+  const job = events.create('alice', {
+    kind: 'agent',
+    projectId: project.id,
+    chatId: 'review-chat',
+    mode: 'search',
+    snapshot: reviewed,
+    liveEdits: false,
+  })
+  events.update(job.id, {
+    status: 'completed',
+    changes: await store.changes(reviewed),
+    verification: { kind: 'search', complete: true, editsAllowed: true },
+  })
+  const unrelated = events.create('alice', {
+    kind: 'agent',
+    projectId: project.id,
+    chatId: 'other-chat',
+  })
+  assert.equal((await manager.apply('alice', job.id)).status, 'applied')
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Notes.md')).content,
+    accepted,
+  )
+  assert.equal(events.get(unrelated.id).status, 'queued')
+  assert.equal(
+    (await manager.apply('alice', job.id)).status,
+    'applied',
+    'an accepted response can be retried',
+  )
+
+  const staleSnapshot = await store.snapshot(
+    project.id,
+    'alice',
+    'review-stale-context',
+  )
+  await fs.writeFile(
+    path.join(staleSnapshot.root, 'Notes.md'),
+    '# Stale candidate\n',
+  )
+  const staleJob = events.create('alice', {
+    kind: 'agent',
+    projectId: project.id,
+    chatId: 'review-chat',
+    mode: 'search',
+    snapshot: staleSnapshot,
+    liveEdits: false,
+  })
+  events.update(staleJob.id, {
+    status: 'completed',
+    changes: await store.changes(staleSnapshot),
+    verification: { kind: 'search', complete: true, editsAllowed: true },
+  })
+  const main = await store.readFile(project.id, 'alice', 'Main.lean')
+  const peerEdit = main.content + '-- Another chat saved this context.\n'
+  await store.writeFile(project.id, 'alice', 'Main.lean', peerEdit, main.hash)
+  await assert.rejects(manager.apply('alice', staleJob.id), (error) => {
+    assert.equal(error.status, 409)
+    assert.match(error.message, /Main\.lean/)
+    return true
+  })
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Notes.md')).content,
+    accepted,
+  )
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Main.lean')).content,
+    peerEdit,
+  )
+  assert.equal(events.get(staleJob.id).status, 'completed')
+  assert.equal(
+    await fs.readFile(path.join(staleSnapshot.root, 'Notes.md'), 'utf8'),
+    '# Stale candidate\n',
+  )
+})
 
 test('the controller and real workspace store preserve the original baseline across live updates and Undo', async (t) => {
   const { store, events, project, runtime } = await workspaceFixture(t)

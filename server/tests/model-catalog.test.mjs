@@ -23,6 +23,24 @@ const nativeModel = (slug) => ({
   ...(profiles.find((model) => model.slug === slug) || {}),
 })
 
+test('known RCP vision capability repairs legacy metadata without changing model or reasoning choices', () => {
+  const known = { ...nativeModel(DEFAULT_MODEL), input_modalities: ['text'] }
+  const unknown = {
+    ...nativeModel('custom/text-model'),
+    input_modalities: ['text'],
+  }
+  const input = { models: [known, unknown], providerMetadata: 'preserved' }
+  const original = structuredClone(input)
+  const result = rcpModelCatalog(input)
+  assert.deepEqual(input, original)
+  assert.deepEqual(result.models[0].input_modalities, ['text', 'image'])
+  assert.deepEqual(result.models[1], unknown)
+  assert.equal(result.providerMetadata, 'preserved')
+  const { input_modalities: _modalities, ...other } = result.models[0]
+  const { input_modalities: _old, ...previous } = known
+  assert.deepEqual(other, previous)
+})
+
 test('RCP selections match model encoders and preserve unrelated native metadata', () => {
   const expected = profiles.map((model) => [
     model.slug,

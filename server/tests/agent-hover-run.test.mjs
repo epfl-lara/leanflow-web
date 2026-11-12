@@ -161,6 +161,7 @@ test('hover recovery keeps answering, while a persistent loop stops without veri
         mode: 'search',
         prompt: 'Explain size',
         file: 'Main.lean',
+        liveEdits: false,
       })
       await new Promise((resolve) =>
         events.on(job.id, (event) => {

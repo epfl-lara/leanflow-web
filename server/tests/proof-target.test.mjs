@@ -433,7 +433,7 @@ test('Ask & Search proof focus stays reference context and permits requested fil
     prompt: 'Find relevant lemmas.',
     proofTarget: target,
   })
-  assert.equal(job.liveEdits, false)
+  assert.equal(job.liveEdits, true)
   const initial = agentConversationContext(job)
   assert.match(initial, /Proof focus does not authorize edits/)
   assert.match(

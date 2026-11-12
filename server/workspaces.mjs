@@ -1427,6 +1427,11 @@ export class WorkspaceStore {
     }
   }
 
+  participants(id, actor) {
+    this.get(id, actor)
+    return { members: this.memberships.members(id) }
+  }
+
   sharing(id, actor) {
     this.requireAdmin(id, actor)
     return this.memberships.list(id)

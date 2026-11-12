@@ -81,13 +81,17 @@ export class ProjectMemberships {
       .get(projectId, userId)?.role
   }
 
+  members(projectId) {
+    return this.db
+      .prepare(
+        'SELECT user AS userId,role FROM project_members WHERE project=? ORDER BY user',
+      )
+      .all(projectId)
+  }
+
   list(projectId) {
     return {
-      members: this.db
-        .prepare(
-          'SELECT user AS userId,role FROM project_members WHERE project=? ORDER BY user',
-        )
-        .all(projectId),
+      members: this.members(projectId),
       links: this.db
         .prepare(
           'SELECT id,role,created_at AS createdAt FROM project_share_links WHERE project=? ORDER BY created_at',

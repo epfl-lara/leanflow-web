@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { AgentRpc } from './rpc.mjs'
 import { catalogModels } from './config.mjs'
+import { rcpModelCatalog } from './model-catalog.mjs'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import {
@@ -235,12 +236,14 @@ export class ModelDiscovery {
     const timer = setTimeout(() => controller.abort(), 35000)
     const task = (async () => {
       await fs.mkdir(this.directory, { recursive: true, mode: 0o700 })
-      const modelCatalog = await this.discover({
+      const discovered = await this.discover({
         config: this.config,
         provider,
         directory: this.directory,
         signal: controller.signal,
       })
+      const rcp = isRcpEndpoint(provider.LEMEX_BASE_URL || RCP_BASE_URL)
+      const modelCatalog = rcp ? rcpModelCatalog(discovered) : discovered
       controller.signal.throwIfAborted()
       if (
         this.providers.provider(owner).LEMEX_API_KEY !==
@@ -265,7 +268,6 @@ export class ModelDiscovery {
           'This API key has no available Responses-compatible text models. Check its permissions with your provider.',
           403,
         )
-      const rcp = isRcpEndpoint(provider.LEMEX_BASE_URL || RCP_BASE_URL)
       const preferred = rcp ? this.config.defaultModel : null
       const defaultModel = models.some((model) => model.id === preferred)
         ? preferred

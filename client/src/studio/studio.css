@@ -12,12 +12,12 @@
   --canvas: #f6f7fa;
   --sidebar: #f7f8fb;
   --surface: #f2f4f8;
-  --surface-hover: #eaf0f9;
-  --border: #e2e6ee;
+  --surface-hover: #eef2f7;
+  --border: #e6e9ef;
   --text: #222b3d;
   --muted: #6f7a8b;
   --accent: #335cce;
-  --accent-soft: #eaf0ff;
+  --accent-soft: #eef3fc;
   --success: #20865c;
   --danger: #ba3645;
   --danger-soft: #fff1f2;
@@ -33,12 +33,12 @@
   --canvas: #121720;
   --sidebar: #151b26;
   --surface: #202735;
-  --surface-hover: #283248;
-  --border: #2d3545;
+  --surface-hover: #252f40;
+  --border: #293141;
   --text: #e2e7f2;
   --muted: #97a3b8;
   --accent: #8bafff;
-  --accent-soft: #243350;
+  --accent-soft: #202d43;
   --success: #72d1a3;
   --danger: #f59aa1;
   --danger-soft: #3e242d;
@@ -722,6 +722,21 @@ textarea {
   flex-wrap: wrap;
   gap: 6px;
   max-width: 100%;
+}
+.workbench-header .toolbar-action {
+  border-color: transparent;
+  border-radius: 5px;
+}
+.workbench-header .toolbar-action:hover,
+.workbench-header .toolbar-action:focus-within {
+  border-color: var(--border);
+}
+.workbench-header .toolbar-action > .help-tip {
+  border-left-color: transparent;
+}
+.header-actions > .tag {
+  background: transparent;
+  border-color: transparent;
 }
 .workspace-alert {
   background: var(--danger-soft);
@@ -2066,6 +2081,78 @@ textarea {
 .startup-screen p {
   font-size: 13px;
   color: var(--muted);
+}
+/* Keep the editor chrome compact with a mouse, without shrinking touch targets. */
+@media (min-width: 721px) and (pointer: fine) {
+  .sidebar-brand {
+    min-height: 68px;
+    padding-block: 10px;
+  }
+  .brand-mark {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    box-shadow: none;
+  }
+  .brand strong {
+    font-size: 16px;
+  }
+  .sidebar-section-title {
+    padding-top: 8px;
+    padding-bottom: 6px;
+    letter-spacing: 0.8px;
+  }
+  .project-item {
+    padding-block: 8px;
+    border-radius: 5px;
+  }
+  .project-label > span {
+    margin-top: 3px;
+  }
+  .file-item,
+  .folder-toggle {
+    min-height: 29px;
+    padding-block: 6px;
+  }
+  .workbench-header {
+    min-height: 80px;
+    padding: 8px 14px;
+    gap: 7px;
+  }
+  .header-actions {
+    gap: 4px;
+  }
+  .header-actions .button {
+    padding: 5px 7px;
+  }
+  .workbench-header .toolbar-action > .help-tip {
+    width: 24px;
+    height: 26px;
+  }
+  .workbench-header .workspace-search-form,
+  .workbench-header .workspace-docs-action {
+    height: 32px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--surface) 65%, var(--bg));
+  }
+  .workbench-header .workspace-search-form input,
+  .workbench-header .workspace-search-form select {
+    padding-block: 6px;
+  }
+  .file-toolbar {
+    min-height: 39px;
+    padding: 4px 12px;
+  }
+  .file-toolbar .button {
+    padding-block: 5px;
+  }
+  .tools-header {
+    height: 44px;
+    padding-block: 6px;
+  }
+  .tools-header .button {
+    padding-block: 5px;
+  }
 }
 @media (min-width: 1700px) {
   .studio {

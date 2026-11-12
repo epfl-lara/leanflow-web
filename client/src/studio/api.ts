@@ -122,8 +122,11 @@ export interface ModelAccess {
 
 export type ProjectAccessRole = 'admin' | 'editor' | 'viewer'
 
-export interface ProjectSharing {
+export interface ProjectParticipants {
   members: { userId: string; role: ProjectAccessRole; name?: string }[]
+}
+
+export interface ProjectSharing extends ProjectParticipants {
   links: { id: string; role: 'editor' | 'viewer'; createdAt: string }[]
 }
 
@@ -289,7 +292,7 @@ export interface OpenFile {
   unavailable?: boolean
   line?: number
   column?: number
-  preview?: 'pdf'
+  preview?: 'pdf' | 'image'
 }
 export interface TexDiagnostic {
   severity: 'error' | 'warning' | 'info'
@@ -548,6 +551,46 @@ export async function apiPdf(path: string, signal: AbortSignal): Promise<Blob> {
   const blob = await response.blob()
   requireCurrentSession(requestUserId)
   return blob
+}
+
+export async function apiImage(
+  path: string,
+  signal: AbortSignal,
+): Promise<Blob> {
+  const requestUserId = sessionUserId
+  const response = await request(path, { signal })
+  if (!response.ok) await responseData(response)
+  const mime = response.headers.get('content-type')?.split(';')[0].trim()
+  if (
+    !mime ||
+    !/^image\/(?:png|jpeg|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon|svg\+xml)$/i.test(
+      mime,
+    )
+  )
+    throw new Error(
+      'This file could not be opened as an image. Choose a supported image file.',
+    )
+  const blob = await response.blob()
+  requireCurrentSession(requestUserId)
+  return blob
+}
+
+export async function apiHtml(
+  path: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const requestUserId = sessionUserId
+  const response = await request(path, { signal })
+  if (!response.ok) await responseData(response)
+  if (
+    response.headers.get('content-type')?.split(';')[0].trim() !== 'text/html'
+  )
+    throw new Error(
+      'This file could not be opened as HTML. Choose an HTML document.',
+    )
+  const html = await response.text()
+  requireCurrentSession(requestUserId)
+  return html
 }
 
 export async function apiDownload(

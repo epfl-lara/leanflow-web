@@ -21,7 +21,13 @@ const auditEnv = {
 async function fixture(
   t,
   edit = async () => {},
-  { buildFails = false, onRun, onVerificationCopy, documentsOnly = false } = {},
+  {
+    buildFails = false,
+    onRun,
+    onVerificationCopy,
+    documentsOnly = false,
+    reply = 'Here is the requested answer or file work.',
+  } = {},
 ) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-ask-search-'))
   const calls = [],
@@ -98,7 +104,7 @@ async function fixture(
                       method: 'item/agentMessage/delta',
                       params: {
                         itemId: 'answer',
-                        delta: 'Here is the requested answer or file work.',
+                        delta: reply,
                       },
                     })
                     send({
@@ -176,6 +182,7 @@ async function fixture(
     const job = await manager.start('alice', project.id, {
       mode: 'search',
       prompt,
+      liveEdits: false,
       ...selected,
     })
     await new Promise((resolve) =>
@@ -201,6 +208,38 @@ async function fixture(
     runtime,
   }
 }
+
+test('a requested SVG diagram is saved as editable project text and can be shown in chat with a project image reference', async (t) => {
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80"><circle cx="50" cy="40" r="25" fill="blue"/></svg>\n'
+  const reply = '![Requested diagram](figures/Diagram.svg)'
+  const { execute, workspaces, project, calls } = await fixture(
+    t,
+    async (workspace) => {
+      await fs.mkdir(path.join(workspace, 'figures'))
+      await fs.writeFile(path.join(workspace, 'figures/Diagram.svg'), svg)
+    },
+    { reply },
+  )
+  const result = await execute(
+    'Create a simple SVG diagram and show it in this chat.',
+    { liveEdits: true },
+  )
+  assert.equal(result.status, 'completed', result.error)
+  assert.equal(result.message, reply)
+  assert.equal(
+    (await workspaces.readFile(project.id, 'alice', 'figures/Diagram.svg'))
+      .content,
+    svg,
+  )
+  assert.equal(result.verification.kind, 'workspace')
+  assert.equal(result.verification.complete, true)
+  assert.equal(
+    calls.length,
+    0,
+    'An SVG diagram does not start Lean proof verification.',
+  )
+})
 
 test('finishing live Lean edits rebuilds the saved workspace before publishing the final editor refresh', async (t) => {
   const { execute, project, calls, workspaces, events } = await fixture(
@@ -345,6 +384,77 @@ test('explicit user requests override Formalize document-editing defaults', asyn
   assert.equal(calls.length, 3)
   assert.equal((await manager.apply('alice', result.id)).status, 'applied')
 })
+
+test(
+  'Ask & Search saves and can undo requested edits when live editing is omitted',
+  { timeout: 15000 },
+  async (t) => {
+    const f = await fixture(t, async (workspace) => {
+      await fs.writeFile(path.join(workspace, 'Notes.md'), '# Updated notes\n')
+      const deadline = Date.now() + 5000
+      while (true) {
+        try {
+          const saved = await f.workspaces.readFile(
+            f.project.id,
+            'alice',
+            'Notes.md',
+          )
+          if (saved.content === '# Updated notes\n') break
+        } catch (error) {
+          if (
+            error.status !== 409 ||
+            error.message !== 'File path changed during access'
+          )
+            throw error
+        }
+        assert(
+          Date.now() < deadline,
+          'Default live edits must save while the turn is still running',
+        )
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      assert.equal(f.events.list('alice', f.project.id)[0].status, 'running')
+    })
+    await f.workspaces.writeFile(
+      f.project.id,
+      'alice',
+      'Notes.md',
+      '# Original notes\n',
+      null,
+    )
+    const job = await f.manager.start('alice', f.project.id, {
+      mode: 'search',
+      prompt: 'Update Notes.md.',
+    })
+    await new Promise((resolve) =>
+      f.events.on(job.id, (event) => {
+        if (
+          event.type === 'status' &&
+          ['completed', 'failed'].includes(event.data.status)
+        )
+          resolve()
+      }),
+    )
+    await Promise.all([...f.manager.tasks])
+    const result = f.events.get(job.id)
+    assert.equal(result.status, 'completed', result.error)
+    assert.equal(result.liveEdits, true)
+    assert.equal(
+      (await f.workspaces.readFile(f.project.id, 'alice', 'Notes.md')).content,
+      '# Updated notes\n',
+    )
+    assert.equal(
+      f.calls.length,
+      0,
+      'Text-only edits do not need Lean verification',
+    )
+    await f.manager.undo('alice', result.id)
+    assert.equal(
+      (await f.workspaces.readFile(f.project.id, 'alice', 'Notes.md')).content,
+      '# Original notes\n',
+    )
+  },
+)
 
 test(
   'explicit live editing saves text changes during the turn and can undo creations, renames, and deletions',

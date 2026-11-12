@@ -217,12 +217,14 @@ export function WorkspaceList({
               disabled: disabled || context.menu.target.status === 'preparing',
               onSelect: () => context.menu && onDownload(context.menu.target),
             },
-            ...((!context.menu.target.accessRole ||
-              context.menu.target.accessRole === 'admin') &&
-            context.menu.target.kind !== 'single-file'
+            ...(context.menu.target.kind !== 'single-file'
               ? [
                   {
-                    label: 'Share project',
+                    label:
+                      !context.menu.target.accessRole ||
+                      context.menu.target.accessRole === 'admin'
+                        ? 'Share project'
+                        : 'View project participants',
                     icon: <Icon name="external" size={15} />,
                     disabled,
                     onSelect: () =>

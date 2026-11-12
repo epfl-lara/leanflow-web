@@ -449,6 +449,99 @@ test('sharing grants project roles, bounds account discovery, and keeps private 
   )
 })
 
+test('project participants are visible to every member without granting sharing access', async (t) => {
+  const f = await fixture(t)
+  const created = await f.request(`${f.base}/sharing/links`, {
+    method: 'POST',
+    body: { role: 'editor' },
+  })
+  assert.equal(created.status, 201)
+  const link = await created.json()
+  const expected = {
+    members: [f.owner, f.editor, f.viewer]
+      .map(({ id }) => ({
+        userId: id,
+        role:
+          id === f.owner.id
+            ? 'admin'
+            : id === f.editor.id
+              ? 'editor'
+              : 'viewer',
+        name: f.auth.users.find((user) => user.id === id).name,
+      }))
+      .sort((a, b) => a.userId.localeCompare(b.userId)),
+  }
+  for (const actor of [f.owner, f.editor, f.viewer]) {
+    const response = await f.request(`${f.base}/participants`, { actor })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), expected)
+  }
+  for (const actor of [f.editor, f.viewer]) {
+    assert.equal((await f.request(`${f.base}/sharing`, { actor })).status, 403)
+    assert.equal(
+      (
+        await f.request(`${f.base}/sharing/members/${f.outsider.id}`, {
+          actor,
+          method: 'PUT',
+          body: { role: 'viewer' },
+        })
+      ).status,
+      403,
+    )
+    assert.equal(
+      (
+        await f.request(`${f.base}/sharing/members/${f.owner.id}`, {
+          actor,
+          method: 'DELETE',
+          body: {},
+        })
+      ).status,
+      403,
+    )
+    assert.equal(
+      (
+        await f.request(`${f.base}/sharing/links`, {
+          actor,
+          method: 'POST',
+          body: { role: 'viewer' },
+        })
+      ).status,
+      403,
+    )
+    assert.equal(
+      (
+        await f.request(`${f.base}/sharing/links/${link.id}`, {
+          actor,
+          method: 'DELETE',
+          body: {},
+        })
+      ).status,
+      403,
+    )
+  }
+  assert.equal(
+    (await f.request(`${f.base}/participants`, { actor: null })).status,
+    401,
+  )
+  assert.equal(
+    (await f.request(`${f.base}/participants`, { actor: f.outsider })).status,
+    404,
+  )
+  assert.equal(
+    (
+      await f.request(`${f.base}/sharing/members/${f.viewer.id}`, {
+        method: 'DELETE',
+        body: {},
+      })
+    ).status,
+    200,
+  )
+  assert.equal(
+    (await f.request(`${f.base}/participants`, { actor: f.viewer })).status,
+    404,
+  )
+})
+
 test('sharing links require sign-in, store role-specific grants, and revoke future joins', async (t) => {
   const f = await fixture(t)
   const created = await f.request(`${f.base}/sharing/links`, {

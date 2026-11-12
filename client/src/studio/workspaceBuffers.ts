@@ -248,7 +248,7 @@ export class WorkspaceBuffers {
         readOnly ||
         file.unavailable ||
         path.startsWith('.lake/') ||
-        file.preview === 'pdf'
+        !!file.preview
       if (!!file.readOnly !== restricted) {
         buffers.set(path, { ...file, readOnly: restricted })
         changed = true

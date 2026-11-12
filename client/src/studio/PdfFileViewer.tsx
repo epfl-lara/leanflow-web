@@ -1,10 +1,5 @@
-import { useEffect, useState } from 'react'
-import {
-  apiPdf,
-  errorText,
-  sessionBoundUrl,
-  SESSION_RESTORED_EVENT,
-} from './api'
+import { sessionBoundUrl } from './api'
+import { useFilePreview } from './useFilePreview'
 
 export function PdfFileViewer({
   projectId,
@@ -21,56 +16,21 @@ export function PdfFileViewer({
   showActions?: boolean
   fitWidth?: boolean
 }) {
-  const [loaded, setLoaded] = useState<{
-    key: string
-    url?: string
-    error?: string
-  } | null>(null)
-  const [attempt, setAttempt] = useState(0)
   const previewPath =
     previewUrl ||
     `/api/projects/${encodeURIComponent(projectId)}/file-preview?path=${encodeURIComponent(path)}`
-  const requestKey = JSON.stringify([projectId, previewPath, revision, attempt])
-  // Effects run after rendering. A new project or build must never render the
-  // previous request's document while its replacement begins loading.
-  const url = loaded?.key === requestKey ? loaded.url : undefined
-  const error = loaded?.key === requestKey ? loaded.error : undefined
-
-  useEffect(() => {
-    const retry = () => setAttempt((current) => current + 1)
-    window.addEventListener(SESSION_RESTORED_EVENT, retry)
-    return () => window.removeEventListener(SESSION_RESTORED_EVENT, retry)
-  }, [])
-
-  useEffect(() => {
-    const controller = new AbortController()
-    let objectUrl = ''
-    setLoaded(null)
-    void apiPdf(previewPath, controller.signal)
-      .then((blob) => {
-        if (controller.signal.aborted) return
-        objectUrl = URL.createObjectURL(blob)
-        setLoaded({ key: requestKey, url: objectUrl })
-      })
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted)
-          setLoaded({ key: requestKey, error: errorText(error) })
-      })
-    return () => {
-      controller.abort()
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
-    }
-  }, [previewPath, requestKey])
+  const {
+    content: url,
+    error,
+    retry,
+  } = useFilePreview(previewPath, 'pdf', revision, projectId)
 
   return (
     <section className="pdf-file-viewer" aria-label="PDF document">
       {url ? (
         <>
           <div className="pdf-file-actions" hidden={!showActions}>
-            <button
-              className="button small secondary"
-              onClick={() => setAttempt((current) => current + 1)}
-            >
+            <button className="button small secondary" onClick={retry}>
               Reload PDF
             </button>
             <a
@@ -99,10 +59,7 @@ export function PdfFileViewer({
           <p className="error-message" role="alert">
             {error}
           </p>
-          <button
-            className="button secondary"
-            onClick={() => setAttempt((current) => current + 1)}
-          >
+          <button className="button secondary" onClick={retry}>
             Retry PDF
           </button>
         </div>

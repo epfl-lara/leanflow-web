@@ -46,6 +46,18 @@ test('read-only permission changes preserve draft discovery while excluding thos
   assert.deepEqual(store.drafts(), [])
 })
 
+test('binary previews remain excluded from saving after project permission refreshes', () => {
+  const store = new WorkspaceBuffers()
+  store.selectProject('shared')
+  store.setFile({ ...file('figure.png', ''), preview: 'image', readOnly: true })
+  store.permissions(true)
+  store.permissions(false)
+  assert.equal(store.getSnapshot().file.readOnly, true)
+  store.change('figure.png', 'never save binary bytes as editor text')
+  assert.deepEqual(store.dirty(), [])
+  assert.equal(store.getSnapshot().file.readOnly, true)
+})
+
 test('removed paths retain drafts without recreating files or accepting late save results', () => {
   const store = new WorkspaceBuffers()
   store.setFile(file('Main.lean', 'saved'))

@@ -578,7 +578,10 @@ test('artifact retention is bounded and retains the latest successful project PD
 
 test('PNG and JPEG imports preserve bytes, are excluded from text mutation, and are retained unchanged in snapshots', async (t) => {
   const f = await fixture(t)
-  const jpg = Buffer.from([255, 216, 255, 217])
+  const jpg = Buffer.from([
+    255, 216, 255, 192, 0, 17, 8, 0, 1, 0, 1, 3, 1, 17, 0, 2, 17, 0, 3, 17, 0,
+    255, 217,
+  ])
   const uploads = [
     { path: 'image.png', content: png.toString('base64'), encoding: 'base64' },
     { path: 'image.jpg', content: jpg.toString('base64'), encoding: 'base64' },

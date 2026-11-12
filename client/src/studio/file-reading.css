@@ -75,3 +75,67 @@
 .file-preview-loading {
   padding: 16px;
 }
+
+.image-file-viewer,
+.html-file-viewer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: var(--canvas);
+}
+.media-file-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.image-file-canvas {
+  --image-grid-color: color-mix(in srgb, var(--border) 55%, var(--canvas));
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background-image: conic-gradient(
+    var(--image-grid-color) 25%,
+    transparent 0 50%,
+    var(--image-grid-color) 0 75%,
+    transparent 0
+  );
+  background-size: 20px 20px;
+}
+.image-file-canvas img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.image-file-canvas.actual-size {
+  display: block;
+}
+.image-file-canvas.actual-size img {
+  max-width: none;
+  max-height: none;
+}
+.html-file-viewer iframe {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+@media (min-width: 721px) and (pointer: fine) {
+  .markdown-file-preview {
+    padding: 20px clamp(16px, 3vw, 36px);
+  }
+  .pdf-file-actions,
+  .media-file-actions {
+    gap: 6px;
+    padding: 6px 10px;
+  }
+}

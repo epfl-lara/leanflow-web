@@ -8,7 +8,7 @@
   container-type: size;
 }
 .chat-workbench > .chat-picker {
-  padding: 10px 12px 8px;
+  padding: 8px 12px 6px;
   align-items: center;
 }
 .chat-workbench .chat-picker-field > span {
@@ -27,7 +27,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  margin: 0 12px 7px;
+  margin: 0 12px 6px;
   flex-shrink: 0;
 }
 .assistant-mode-picker > .mode-tabs {
@@ -176,7 +176,7 @@
   flex-shrink: 0;
   padding: 8px 85px 8px 13px;
   border-bottom: 1px solid var(--border);
-  background: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent-soft) 65%, var(--bg));
 }
 .chat-current-work > div {
   display: flex;
@@ -236,15 +236,27 @@
   flex-shrink: 0;
 }
 .chat-workbench .assistant-conversation {
-  padding: 14px 13px 20px;
+  padding: 12px 12px 16px;
 }
 .conversation-turn {
-  margin-bottom: 22px;
+  margin-bottom: 18px;
   min-width: 0;
 }
 .chat-workbench .user-message {
-  padding: 10px 12px;
-  margin-bottom: 13px;
+  padding: 8px 11px;
+  margin-bottom: 11px;
+  border-color: transparent;
+  background: color-mix(in srgb, var(--canvas) 65%, var(--bg));
+  border-radius: 6px;
+}
+.chat-workbench .user-message .message-label {
+  margin-bottom: 6px;
+}
+.chat-workbench
+  .assistant-conversation
+  > .conversation-turn
+  + .conversation-turn {
+  padding-top: 16px;
 }
 .chat-workbench .message-label {
   font-size: 11px;
@@ -297,7 +309,7 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 9px;
-  margin: 10px 0 5px;
+  margin: 8px 0 5px;
 }
 .turn-saved-edits {
   display: flex;
@@ -424,7 +436,7 @@
   color: var(--danger);
 }
 .chat-empty {
-  padding: 16px 0;
+  padding: 12px 0;
   color: var(--muted);
 }
 .chat-empty > p {
@@ -836,6 +848,27 @@
 .file-mention-popover .field-help {
   padding: 3px 6px;
   font-size: 11px;
+}
+@media (min-width: 721px) and (pointer: fine) {
+  .chat-workbench .chat-picker-field select,
+  .chat-workbench .chat-control-button {
+    height: 30px;
+  }
+  .assistant-mode-picker > .mode-tabs {
+    padding: 2px;
+    border-radius: 5px;
+    background: transparent;
+  }
+  .assistant-mode-picker > .mode-tabs button {
+    padding-block: 6px;
+  }
+  .assistant-mode-picker > .mode-tabs button.selected {
+    background: var(--accent-soft);
+    box-shadow: none;
+  }
+  .chat-workbench .assistant-composer textarea {
+    min-height: 68px;
+  }
 }
 @media (max-width: 450px) {
   .chat-options-fields {

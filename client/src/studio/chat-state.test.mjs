@@ -996,6 +996,87 @@ theorem useful : True := by trivial
   assert.doesNotMatch(html, /<img|<script/)
 })
 
+test('project reply images use account-bound media URLs and preserve an open-file action', (t) => {
+  const { bindSessionUser } = load('./api.ts')
+  bindSessionUser('image-owner')
+  t.after(() => bindSessionUser(null))
+  const html = renderToStaticMarkup(
+    React.createElement(OutputText, {
+      text: '![A project diagram](plots/Some%20Diagram.png)',
+      projectId: 'image-project',
+      onOpenLocalLink: () => {},
+    }),
+  )
+  assert.match(html, /<img[^>]+loading="lazy"/)
+  const source = /<img[^>]+src="([^"]+)"/
+    .exec(html)?.[1]
+    .replaceAll('&amp;', '&')
+  const url = new URL(source, 'https://fixture.invalid')
+  assert.equal(url.pathname, '/api/projects/image-project/file-preview')
+  assert.equal(url.searchParams.get('path'), 'plots/Some Diagram.png')
+  assert.equal(url.searchParams.get('expectedUserId'), 'image-owner')
+  assert.match(html, /aria-label="Open image plots\/Some Diagram\.png"/)
+  assert.match(html, /alt="A project diagram"/)
+})
+
+test('Markdown document image references resolve relative to that document', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(OutputText, {
+      text: '![Plot](../figures/plot.svg)',
+      projectId: 'image-project',
+      currentPath: 'notes/README.md',
+      onOpenLocalLink: () => {},
+    }),
+  )
+  assert.match(
+    html,
+    /src="\/api\/projects\/image-project\/file-preview\?path=figures%2Fplot\.svg"/,
+  )
+  assert.match(html, /aria-label="Open image figures\/plot\.svg"/)
+})
+
+test('Markdown images inside links retain one keyboard link without nested controls', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(OutputText, {
+      text: '[![Plot](plot.png)](plot.png)',
+      projectId: 'image-project',
+      onOpenLocalLink: () => {},
+    }),
+  )
+  assert.match(
+    html,
+    /<img[^>]+src="\/api\/projects\/image-project\/file-preview\?path=plot\.png"/,
+  )
+  assert.equal((html.match(/<a\b/g) || []).length, 1)
+  assert.doesNotMatch(html, /<button\b/)
+})
+
+test('project image rendering never fetches external, escaping, or unsafe sources', () => {
+  for (const source of [
+    'https://example.com/diagram.png',
+    '//example.com/diagram.svg',
+    'data:image/svg+xml,unsafe.svg',
+    'javascript:alert(1)',
+    'file:///etc/secret.png',
+    '../../secret.png',
+    '%2e%2e/secret.png',
+    'image.png%00',
+  ]) {
+    const html = renderToStaticMarkup(
+      React.createElement(OutputText, {
+        text: `![Diagram](${source})`,
+        projectId: 'image-project',
+      }),
+    )
+    assert.doesNotMatch(html, /<img\b/, source)
+    assert.doesNotMatch(html, /src="/, source)
+  }
+  const unscoped = renderToStaticMarkup(
+    React.createElement(OutputText, { text: '![Plot](plot.png)' }),
+  )
+  assert.doesNotMatch(unscoped, /<img\b/)
+})
+
 test('live output renders Markdown and completed formulas while incomplete math stays readable', () => {
   const html = renderToStaticMarkup(
     React.createElement(OutputText, {

@@ -45,6 +45,7 @@ function TargetLabel({
 
 export const ConversationTurn = memo(function ConversationTurn({
   run,
+  projectId,
   onReview,
   onUndo,
   onInspect,
@@ -53,6 +54,7 @@ export const ConversationTurn = memo(function ConversationTurn({
   onOpenTarget,
 }: {
   run: Run
+  projectId?: string
   onReview: (id: string) => void
   onUndo: (id: string) => void
   onInspect: (id: string) => Promise<void>
@@ -138,6 +140,7 @@ export const ConversationTurn = memo(function ConversationTurn({
                 text={segment.text}
                 streaming={active && segment.key === segments.at(-1)?.key}
                 onOpenLocalLink={openLocalLink}
+                projectId={projectId || run.projectId}
               />
             </div>
           </div>

@@ -9,6 +9,11 @@ import {
 } from './provider-requests.mjs'
 import { modelConfigFor } from './model-discovery.mjs'
 import { modelContextConfig } from './model-catalog.mjs'
+import {
+  modelSupportsImages,
+  agentImageInstructions,
+  capturedImageInputs,
+} from './agent-images.mjs'
 import { modeReasoningEffort } from '../shared/mode-reasoning.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
 import { promises as fs } from 'node:fs'
@@ -335,10 +340,7 @@ export class AgentManager {
           : {}),
         effort,
         maxSeconds,
-        liveEdits:
-          input.mode === 'search'
-            ? input.liveEdits === true
-            : input.liveEdits !== false,
+        liveEdits: input.liveEdits !== false,
         liveRevision: 0,
         followups: [],
         progress: { label: 'Queued', updatedAt: new Date().toISOString() },
@@ -463,7 +465,7 @@ export class AgentManager {
         saved.push({
           path: file,
           referenceOnly: true,
-          note: 'PDF path only. Contents are not attached or refreshed in the isolated working copy.',
+          note: 'Binary file path only. Contents are not attached or refreshed in the isolated working copy.',
         })
         continue
       }
@@ -790,6 +792,22 @@ export class AgentManager {
         }
       }
       if (active.controller.signal.aborted) return
+      const supportsImages = modelSupportsImages(
+        modelConfig.modelCatalog,
+        job.model,
+      )
+      const imageInput = await capturedImageInputs(
+        job,
+        snapshot,
+        supportsImages,
+      )
+      if (imageInput.length)
+        contextSections.push(
+          'Images visually attached from the captured saved project (other images remain workspace paths):\n' +
+            JSON.stringify(
+              imageInput.map((item) => item.path.slice('/workspace/'.length)),
+            ),
+        )
       if (job.mode === 'optimize' && optimizationPaths(job).length) {
         this.#progress(
           id,
@@ -1118,6 +1136,7 @@ export class AgentManager {
         sandbox: 'danger-full-access',
         developerInstructions:
           instructions +
+          agentImageInstructions(supportsImages) +
           bookInstructions +
           (withTex ? texAgentInstructions : '') +
           (optimizationInstructions ? '\n\n' + optimizationInstructions : '') +
@@ -1172,6 +1191,7 @@ export class AgentManager {
               }),
               textElements: [],
             },
+            ...imageInput,
           ],
         })
         .catch((error) => {
