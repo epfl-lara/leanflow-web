@@ -1,4 +1,11 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import type { FileEntry } from './api'
 import { Icon } from './Icons'
 import {
@@ -26,6 +33,11 @@ export function FileMentionTextarea({
 }) {
   const field = useRef<HTMLTextAreaElement>(null),
     list = useRef<HTMLDivElement>(null),
+    pendingSelection = useRef<{
+      text: string
+      caret: number
+      scope: string
+    } | null>(null),
     id = useId()
   const [caret, setCaret] = useState(value.length),
     [active, setActive] = useState(0),
@@ -37,6 +49,14 @@ export function FileMentionTextarea({
   )
   const open = !!query && !dismissed
   const choice = Math.min(active, Math.max(0, matches.length - 1))
+  useLayoutEffect(() => {
+    const selection = pendingSelection.current
+    pendingSelection.current = null
+    if (selection?.scope === scope && field.current?.value === selection.text) {
+      field.current.focus()
+      field.current.setSelectionRange(selection.caret, selection.caret)
+    }
+  }, [scope, value])
   useEffect(() => {
     setCaret(value.length)
     setActive(0)
@@ -62,15 +82,10 @@ export function FileMentionTextarea({
   function select(path: string) {
     if (!query || !onAddFile(path)) return
     const inserted = insertFileMention(value, query, path)
+    pendingSelection.current = { ...inserted, scope }
     onChange(inserted.text)
     setCaret(inserted.caret)
     setDismissed(true)
-    requestAnimationFrame(() => {
-      if (field.current?.value === inserted.text) {
-        field.current.focus()
-        field.current.setSelectionRange(inserted.caret, inserted.caret)
-      }
-    })
   }
   return (
     <div className="file-mention-field">

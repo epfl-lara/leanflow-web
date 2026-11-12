@@ -10,6 +10,7 @@ import { createStudio } from '../studio.mjs'
 import {
   createProjectDownload,
   downloadDisposition,
+  listProjectDownloadFiles,
 } from '../project-downloads.mjs'
 
 const toolchain = 'leanprover/lean4:v4.34.1'
@@ -249,6 +250,21 @@ test('project exports stop at byte, entry, scan and cancellation boundaries', as
   const controller = new AbortController()
   controller.abort()
   await assert.rejects(exportWith({}, controller.signal), { status: 408 })
+  const listWith = (limits, signal) =>
+    listProjectDownloadFiles(f.workspaces, f.project.id, 'owner', {
+      limits,
+      signal,
+    })
+  await assert.rejects(listWith({ entries: 1 }), { status: 413 })
+  await assert.rejects(listWith({ scanEntries: 1 }), { status: 413 })
+  await assert.rejects(listWith({}, controller.signal), { status: 408 })
+  const listing = await listWith({ fileBytes: 1 })
+  assert.equal(listing.fileByteLimit, 1)
+  assert(
+    listing.files.some(
+      (file) => file.path === 'Main.lean' && !file.downloadable,
+    ),
+  )
   const original = f.workspaces.readDownloadFile.bind(f.workspaces)
   const duringRead = new AbortController()
   f.workspaces.readDownloadFile = async (...args) => {

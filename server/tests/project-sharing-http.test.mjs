@@ -3,6 +3,7 @@ import { EventEmitter, once } from 'node:events'
 import fs from 'node:fs/promises'
 import { mkdirSync } from 'node:fs'
 import net from 'node:net'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -12,8 +13,9 @@ import { createStudio } from '../studio.mjs'
 import { fixtureModelDiscovery } from './fixtures/model-discovery.mjs'
 import JSZip from 'jszip'
 import { frame } from '../rpc.mjs'
+import { loadCapacity } from '../capacity.mjs'
 
-async function fixture(t) {
+async function fixture(t, { capacity } = {}) {
   const dataDir = await fs.mkdtemp(
     path.join(os.tmpdir(), 'project-sharing-http-'),
   )
@@ -65,6 +67,7 @@ async function fixture(t) {
     dataDir,
     runtime,
     modelDiscoverer: fixtureModelDiscovery,
+    ...(capacity ? { capacity } : {}),
     config: {
       models: [{ id: 'fixture-model' }],
       defaultModel: 'fixture-model',
@@ -358,6 +361,362 @@ test('editor terminals use the initiating account’s private Git credentials an
     body: {},
   })
   assert.equal(response.status, 200)
+})
+
+test('a delayed terminal close stops only its opening and preserves a newly opened shell', async (t) => {
+  const f = await fixture(t)
+  const oldId = 'ef18e241-1427-4d3d-a164-452ddc8ef51d'
+  const newId = '1b7e35cf-0965-414e-a564-b43b19e8e292'
+  const open = async (openingId, count) => {
+    const ws = new WebSocket(
+      f.origin.replace('http:', 'ws:') +
+        `/websocket/terminal/${f.project.id}?openingId=${openingId}`,
+      { headers: { Authorization: `Bearer ${f.editor.token}` } },
+    )
+    t.after(() => ws.terminate())
+    await once(ws, 'open')
+    for (let attempt = 0; f.spawned.length < count && attempt < 100; attempt++)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    assert.equal(f.spawned.length, count)
+    return ws
+  }
+  const old = await open(oldId, 1)
+  const delayed = http.request(f.origin + `${f.base}/terminal/stop`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${f.editor.token}`,
+      'Content-Type': 'application/json',
+    },
+  })
+  t.after(() => delayed.destroy())
+  const stopped = new Promise((resolve, reject) => {
+    delayed.once('response', (response) => {
+      response.resume()
+      resolve(response.statusCode)
+    })
+    delayed.once('error', reject)
+  })
+  // Authenticate the original close request, but let its JSON arrive only
+  // after the old socket has closed and a different opening has started.
+  delayed.write('{"openingId":')
+  const closed = once(old, 'close')
+  old.close()
+  await closed
+  for (
+    let attempt = 0;
+    f.workspaces.terminalCopies.size && attempt < 100;
+    attempt++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(f.workspaces.terminalCopies.size, 0)
+  const current = await open(newId, 2)
+  const worker = f.spawned.at(-1).child
+  delayed.end(JSON.stringify(oldId) + '}')
+  assert.equal(await stopped, 200)
+  assert.equal(current.readyState, WebSocket.OPEN)
+  assert.notEqual(worker.killed, true)
+  for (const [actor, body, status] of [
+    [f.owner, { openingId: newId }, 200],
+    [f.editor, { openingId: 'invalid' }, 400],
+    [f.editor, { openingId: newId, extra: true }, 400],
+  ]) {
+    assert.equal(
+      (
+        await f.request(`${f.base}/terminal/stop`, {
+          actor,
+          method: 'POST',
+          body,
+        })
+      ).status,
+      status,
+    )
+    assert.notEqual(worker.killed, true)
+  }
+  let input = ''
+  worker.stdin.on('data', (chunk) => (input += chunk))
+  current.send(JSON.stringify({ type: 'input', data: 'still running\n' }))
+  for (
+    let attempt = 0;
+    !input.includes('still running') && attempt < 100;
+    attempt++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.match(input, /still running/)
+  const currentClosed = once(current, 'close')
+  assert.equal(
+    (
+      await f.request(`${f.base}/terminal/stop`, {
+        actor: f.editor,
+        method: 'POST',
+        body: { openingId: newId },
+      })
+    ).status,
+    200,
+  )
+  await currentClosed
+  assert.equal(worker.killed, true)
+})
+
+test('scoped terminal close cancels its pending private capture before a worker starts', async (t) => {
+  const f = await fixture(t)
+  const openingId = '9cefb82d-cc9b-4820-8bbe-c7e433ee6b5e'
+  let entered, release
+  const started = new Promise((resolve) => (entered = resolve))
+  const waiting = new Promise((resolve) => (release = resolve))
+  const original = f.workspaces.terminalSnapshot.bind(f.workspaces)
+  f.workspaces.terminalSnapshot = async (...args) => {
+    entered()
+    await waiting
+    return original(...args)
+  }
+  t.after(() => release())
+  const ws = new WebSocket(
+    f.origin.replace('http:', 'ws:') +
+      `/websocket/terminal/${f.project.id}?openingId=${openingId}`,
+    { headers: { Authorization: `Bearer ${f.editor.token}` } },
+  )
+  t.after(() => ws.terminate())
+  await once(ws, 'open')
+  await started
+  const closed = once(ws, 'close')
+  const stop = f.request(`${f.base}/terminal/stop`, {
+    actor: f.editor,
+    method: 'POST',
+    body: { openingId },
+  })
+  await closed
+  release()
+  assert.equal((await stop).status, 200)
+  assert.equal(f.spawned.length, 0)
+  assert.deepEqual(
+    await f.workspaces.personalTerminalRecoveries(f.editor.id),
+    [],
+  )
+})
+
+for (const failure of ['worker cleanup', 'recovery publication']) {
+  test(
+    `scoped terminal close retries a disconnected opening after repeated ${failure} failures`,
+    { timeout: 10000 },
+    async (t) => {
+      const f = await fixture(t)
+      const oldId = '7732e63c-ee1a-4e4a-a397-477f96f2adb6'
+      const refusedId = '64b64493-0fd6-4bcf-a050-f11ee2fac197'
+      let attempts = 0
+      const unavailable = () =>
+        Object.assign(new Error('Terminal cleanup unavailable; retry.'), {
+          status: 503,
+        })
+      if (failure === 'worker cleanup') {
+        const spawn = f.runtime.spawn.bind(f.runtime)
+        t.mock.method(f.runtime, 'spawn', (...args) => {
+          const child = spawn(...args)
+          child.cleanupWorker = async () => {
+            if (++attempts <= 2) throw unavailable()
+          }
+          child.workerStopped = new Promise((resolve) =>
+            child.once('close', resolve),
+          ).then(() => child.cleanupWorker())
+          child.workerStopped.catch(() => {})
+          return child
+        })
+      } else {
+        const retain = f.workspaces.retainTerminalSnapshot.bind(f.workspaces)
+        t.mock.method(
+          f.workspaces,
+          'retainTerminalSnapshot',
+          async (...args) => {
+            if (!args[2]?.active && ++attempts <= 2) throw unavailable()
+            return retain(...args)
+          },
+        )
+        const spawn = f.runtime.spawn.bind(f.runtime)
+        t.mock.method(f.runtime, 'spawn', (...args) => {
+          const child = spawn(...args)
+          child.cleanupWorker = async () => {}
+          return child
+        })
+      }
+      try {
+        const ws = new WebSocket(
+          f.origin.replace('http:', 'ws:') +
+            `/websocket/terminal/${f.project.id}?openingId=${oldId}`,
+          { headers: { Authorization: `Bearer ${f.editor.token}` } },
+        )
+        t.after(() => ws.terminate())
+        await once(ws, 'open')
+        for (
+          let attempt = 0;
+          (!f.spawned.length || !f.spawned[0].child.stdin.readableLength) &&
+          attempt < 100;
+          attempt++
+        )
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        assert.equal(f.spawned.length, 1)
+        if (failure === 'recovery publication')
+          await fs.writeFile(
+            path.join(f.spawned[0].root, 'private-generated.bin'),
+            Buffer.from([0, 1, 2, 3]),
+          )
+        const closed = once(ws, 'close')
+        const firstStop = await f.request(`${f.base}/terminal/stop`, {
+          actor: f.editor,
+          method: 'POST',
+          body: { openingId: oldId },
+        })
+        assert.equal(firstStop.status, 503, await firstStop.clone().text())
+        await firstStop.text()
+        await closed
+        assert.equal(attempts, 2)
+        const refused = await new Promise((resolve, reject) => {
+          const socket = new WebSocket(
+            f.origin.replace('http:', 'ws:') +
+              `/websocket/terminal/${f.project.id}?openingId=${refusedId}`,
+            { headers: { Authorization: `Bearer ${f.editor.token}` } },
+          )
+          socket.on('error', reject)
+          socket.once('unexpected-response', (_request, response) => {
+            response.resume()
+            resolve(response.statusCode)
+          })
+        })
+        assert.equal(refused, 429)
+        assert.equal(
+          (await f.request(`${f.base}/prepare`, { method: 'POST', body: {} }))
+            .status,
+          409,
+        )
+        const retry = await f.request(`${f.base}/terminal/stop`, {
+          actor: f.editor,
+          method: 'POST',
+          body: { openingId: refusedId },
+        })
+        assert.equal(retry.status, 200, await retry.clone().text())
+        assert.equal(attempts, 3)
+        assert.equal(
+          (await f.request(`${f.base}/prepare`, { method: 'POST', body: {} }))
+            .status,
+          200,
+        )
+        await f.workspaces.jobs.get(f.project.id)
+        if (failure === 'recovery publication') {
+          const copies = await (
+            await f.request('/api/terminal-recoveries', { actor: f.editor })
+          ).json()
+          assert.equal(copies.length, 1)
+          assert.equal(
+            (
+              await f.request(
+                `${f.base}/terminal-recoveries/${copies[0].runId}/download`,
+                { actor: f.editor },
+              )
+            ).status,
+            200,
+          )
+        }
+      } finally {
+        // A failed assertion must also release the fixture's private Git
+        // broker when the deliberately failed finalizer retained its session.
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const stopped = await f.request(`${f.base}/terminal/stop`, {
+            actor: f.editor,
+            method: 'POST',
+            body: {},
+          })
+          await stopped.text()
+          if (stopped.ok) break
+        }
+      }
+    },
+  )
+}
+
+test('scoped terminal close preserves other live tabs for the same account and other members', async (t) => {
+  const f = await fixture(t, {
+    capacity: loadCapacity({
+      STUDIO_MAX_TERMINALS: '4',
+      STUDIO_MAX_TERMINALS_PER_PROJECT: '4',
+    }),
+  })
+  const ids = [
+    '6048ae8e-e1e0-4c2c-ae6c-70b72f8b2069',
+    '83e43fb8-9f3d-49dd-903e-e5e5b2d31bcc',
+    '00127dfc-6088-4535-b031-b94ec26250c8',
+  ]
+  const sockets = []
+  for (const [index, actor] of [f.editor, f.editor, f.owner].entries()) {
+    const ws = new WebSocket(
+      f.origin.replace('http:', 'ws:') +
+        `/websocket/terminal/${f.project.id}?openingId=${ids[index]}`,
+      { headers: { Authorization: `Bearer ${actor.token}` } },
+    )
+    t.after(() => ws.terminate())
+    await once(ws, 'open')
+    for (let attempt = 0; f.spawned.length <= index && attempt < 100; attempt++)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    assert.equal(f.spawned.length, index + 1)
+    sockets.push(ws)
+  }
+  const stale = await f.request(`${f.base}/terminal/stop`, {
+    actor: f.editor,
+    method: 'POST',
+    body: { openingId: '335330e8-f3b2-4a3c-b59a-5dd33527850b' },
+  })
+  assert.equal(stale.status, 200)
+  assert(f.spawned.every(({ child }) => !child.killed))
+  const firstClosed = once(sockets[0], 'close')
+  assert.equal(
+    (
+      await f.request(`${f.base}/terminal/stop`, {
+        actor: f.editor,
+        method: 'POST',
+        body: { openingId: ids[0] },
+      })
+    ).status,
+    200,
+  )
+  await firstClosed
+  for (const index of [1, 2]) {
+    assert.equal(sockets[index].readyState, WebSocket.OPEN)
+    assert.notEqual(f.spawned[index].child.killed, true)
+    let input = ''
+    f.spawned[index].child.stdin.on('data', (chunk) => (input += chunk))
+    sockets[index].send(
+      JSON.stringify({ type: 'input', data: 'other live tab\n' }),
+    )
+    for (
+      let attempt = 0;
+      !input.includes('other live tab') && attempt < 100;
+      attempt++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    assert.match(input, /other live tab/)
+  }
+})
+
+test('terminal opening query identifiers reject malformed or ambiguous scope', async (t) => {
+  const f = await fixture(t)
+  const valid = 'e892208a-9174-413d-aa60-9a08f581ce8d'
+  for (const query of [
+    '?openingId=invalid',
+    `?openingId=${valid}&openingId=${valid}`,
+    `?openingId=${valid}&extra=true`,
+  ]) {
+    const status = await new Promise((resolve, reject) => {
+      const ws = new WebSocket(
+        f.origin.replace('http:', 'ws:') +
+          `/websocket/terminal/${f.project.id}${query}`,
+        { headers: { Authorization: `Bearer ${f.editor.token}` } },
+      )
+      ws.on('error', reject)
+      ws.once('unexpected-response', (_request, response) => {
+        response.resume()
+        resolve(response.statusCode)
+      })
+    })
+    assert.equal(status, 400)
+  }
+  assert.equal(f.spawned.length, 0)
 })
 
 test('project lifecycle refuses another member’s work without cancelling it', async (t) => {
@@ -1253,6 +1612,150 @@ test('recovery HTTP hides active copies and keeps named private downloads after 
       .status,
     200,
   )
+})
+
+test('individual recovery downloads preserve small edits when an oversized file prevents a ZIP', async (t) => {
+  const f = await fixture(t)
+  const oversized = await fs.open(path.join(f.project.root, 'large.bin'), 'w')
+  await oversized.truncate(33 * 1024 * 1024)
+  await oversized.close()
+  const copy = await f.workspaces.terminalSnapshot(
+    f.project.id,
+    f.editor.id,
+    'large-recovery',
+  )
+  const endpoint = `${f.base}/terminal-recoveries/${copy.runId}`
+  assert.equal(
+    (await f.request(`${endpoint}/files`, { actor: f.editor })).status,
+    409,
+  )
+  assert.equal(
+    (
+      await f.request(`${endpoint}/download?path=Main.lean`, {
+        actor: f.editor,
+      })
+    ).status,
+    409,
+  )
+  const content =
+    '-- small private edit preserved despite large unchanged file\n'
+  await fs.writeFile(path.join(copy.root, 'Main.lean'), content)
+  for (const directory of [
+    '.cache',
+    '.runtime',
+    '.data',
+    '.venv',
+    '__pycache__',
+    '.lake',
+    'node_modules',
+  ]) {
+    await fs.mkdir(path.join(copy.root, directory), { recursive: true })
+    await fs.writeFile(
+      path.join(copy.root, directory, 'omitted.txt'),
+      'private generated content',
+    )
+  }
+  await fs.writeFile(path.join(copy.root, '.env'), 'private secret')
+  await fs.symlink(
+    path.join(copy.root, 'Main.lean'),
+    path.join(copy.root, 'linked.lean'),
+  )
+  await f.workspaces.retainTerminalSnapshot(copy, 'Recover individual files.')
+  const zip = await f.request(`${endpoint}/download`, { actor: f.editor })
+  assert.equal(zip.status, 413)
+  const zipError = (await zip.json()).error
+  assert.match(zipError, /individual files/)
+  assert.doesNotMatch(zipError, /Git repository/)
+  await f.workspaces.removeMember(f.project.id, f.owner.id, f.editor.id)
+  const listingResponse = await f.request(`${endpoint}/files`, {
+    actor: f.editor,
+  })
+  assert.equal(listingResponse.status, 200)
+  const listing = await listingResponse.json()
+  assert.equal(listing.fileByteLimit, 32 * 1024 * 1024)
+  assert.deepEqual(
+    listing.files.find((file) => file.path === 'large.bin'),
+    {
+      path: 'large.bin',
+      size: 33 * 1024 * 1024,
+      downloadable: false,
+    },
+  )
+  assert.deepEqual(
+    listing.files.find((file) => file.path === 'Main.lean'),
+    {
+      path: 'Main.lean',
+      size: Buffer.byteLength(content),
+      downloadable: true,
+    },
+  )
+  assert.equal(
+    listing.files.some(
+      (file) =>
+        ['.env', 'linked.lean'].includes(file.path) ||
+        ['.cache', '.runtime', '.data', '.venv', '__pycache__', '.lake'].some(
+          (directory) => file.path.startsWith(directory + '/'),
+        ) ||
+        file.path.startsWith('node_modules/'),
+    ),
+    false,
+  )
+  let entered, release
+  const started = new Promise((resolve) => (entered = resolve))
+  const waiting = new Promise((resolve) => (release = resolve))
+  const originalRead = f.workspaces.readTerminalRecoveryFile.bind(f.workspaces)
+  t.mock.method(f.workspaces, 'readTerminalRecoveryFile', async (...args) => {
+    entered()
+    await waiting
+    return originalRead(...args)
+  })
+  const downloading = f.request(`${endpoint}/download?path=Main.lean`, {
+    actor: f.editor,
+  })
+  await started
+  try {
+    const busy = await f.request(`${endpoint}/files`, { actor: f.editor })
+    assert.equal(busy.status, 429)
+    assert.equal(busy.headers.get('retry-after'), '1')
+    await busy.text()
+  } finally {
+    release()
+  }
+  const small = await downloading
+  assert.equal(small.status, 200)
+  assert.match(small.headers.get('content-disposition'), /Main\.lean/)
+  assert.equal(await small.text(), content)
+  t.mock.restoreAll()
+  assert.equal(
+    (await f.request(`${endpoint}/files`, { actor: f.editor })).status,
+    200,
+  )
+  const large = await f.request(`${endpoint}/download?path=large.bin`, {
+    actor: f.editor,
+  })
+  assert.equal(large.status, 413)
+  assert.match((await large.json()).error, /32 MiB.*administrator/)
+  for (const filename of [
+    '../Main.lean',
+    '.env',
+    '.cache/omitted.txt',
+    'linked.lean',
+  ]) {
+    const response = await f.request(
+      `${endpoint}/download?path=${encodeURIComponent(filename)}`,
+      { actor: f.editor },
+    )
+    assert([400, 403].includes(response.status))
+    await response.text()
+  }
+  for (const actor of [f.owner, f.viewer, f.outsider]) {
+    assert.equal((await f.request(`${endpoint}/files`, { actor })).status, 404)
+    assert.equal(
+      (await f.request(`${endpoint}/download?path=Main.lean`, { actor }))
+        .status,
+      404,
+    )
+  }
 })
 
 test(

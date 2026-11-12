@@ -116,6 +116,7 @@ export class ProjectDocuments {
       actor,
       request,
       paths: new Set(),
+      openRequests: new Map(),
       vectors: new Map(),
       alive: true,
       pending: 0,
@@ -189,6 +190,7 @@ export class ProjectDocuments {
     ws.on('close', () => {
       clearInterval(heartbeat)
       this.clients.delete(client)
+      client.openRequests.clear()
       for (const name of client.paths) this.detach(client, name)
       if (![...this.clients].some((item) => item.projectId === projectId))
         this.clearWatchers(projectId)
@@ -602,26 +604,47 @@ export class ProjectDocuments {
     this.assertAuthenticated(client)
     this.workspaces.get(client.projectId, client.actor)
     if (request.type === 'close') {
-      this.detach(client, sourcePath(request.path))
+      const name = sourcePath(request.path)
+      client.openRequests?.delete(name)
+      this.detach(client, name)
       return
     }
     if (!['open', 'update'].includes(request.type))
       fail('Unknown shared document message.')
     const name = sourcePath(request.path)
     if (request.type === 'open') {
-      this.assertCanSubscribe(client, name)
-      const record = await this.document(client.projectId, client.actor, name)
-      await this.queue(record, async () => {
-        if (record.invalidated) this.resetDocument(record)
-        await this.refresh(record, client.actor)
-        if (client.ws.readyState !== 1) return
+      if (
+        request.requestId !== undefined &&
+        (!Number.isSafeInteger(request.requestId) || request.requestId < 1)
+      )
+        fail('Invalid document request identifier.')
+      const opening = Symbol('document subscription')
+      const openings = (client.openRequests ??= new Map())
+      openings.set(name, opening)
+      try {
         this.assertCanSubscribe(client, name)
-        clearTimeout(record.idle)
-        record.clients.add(client)
-        client.paths.add(name)
-        this.send(client, this.packet(record))
-        client.vectors.set(record.path, Y.encodeStateVector(record.doc))
-      })
+        const record = await this.document(client.projectId, client.actor, name)
+        await this.queue(record, async () => {
+          if (openings.get(name) !== opening) return
+          if (record.invalidated) this.resetDocument(record)
+          await this.refresh(record, client.actor)
+          if (client.ws.readyState !== 1 || openings.get(name) !== opening)
+            return
+          this.assertCanSubscribe(client, name)
+          clearTimeout(record.idle)
+          record.clients.add(client)
+          client.paths.add(name)
+          this.send(client, {
+            ...this.packet(record),
+            ...(request.requestId === undefined
+              ? {}
+              : { openRequestId: request.requestId }),
+          })
+          client.vectors.set(record.path, Y.encodeStateVector(record.doc))
+        })
+      } finally {
+        if (openings.get(name) === opening) openings.delete(name)
+      }
       return
     }
     this.workspaces.requireEditor(client.projectId, client.actor)

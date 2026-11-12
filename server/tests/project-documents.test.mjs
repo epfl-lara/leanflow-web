@@ -540,3 +540,115 @@ test('an authoritative complex replacement rotates document identity without los
     { status: 409 },
   )
 })
+
+test('a close cancels an awaiting open before it can reattach or send a stale baseline', async (t) => {
+  const value = fixture(t)
+  const read = value.store.readFile.bind(value.store)
+  let release, started
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const reading = new Promise((resolve) => {
+    started = resolve
+  })
+  value.store.readFile = async (...args) => {
+    started()
+    await gate
+    return read(...args)
+  }
+  const ws = new Socket()
+  value.service.connect(ws, 'shared', 'alice')
+  const client = [...value.service.clients].find((entry) => entry.ws === ws)
+  const opening = value.service.message(client, {
+    type: 'open',
+    path: 'Main.lean',
+    requestId: 1,
+  })
+  await reading
+  await value.service.message(client, { type: 'close', path: 'Main.lean' })
+  release()
+  await opening
+  assert.equal(client.paths.has('Main.lean'), false)
+  assert.equal(
+    [...value.service.documents.values()][0].clients.has(client),
+    false,
+  )
+  assert.deepEqual(
+    ws.packets.filter((packet) => packet.type === 'document'),
+    [],
+  )
+  assert.equal(client.openRequests.size, 0)
+})
+
+test('close followed by a newer open admits only the newest requested baseline', async (t) => {
+  const value = fixture(t)
+  const read = value.store.readFile.bind(value.store)
+  let release, started
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const reading = new Promise((resolve) => {
+    started = resolve
+  })
+  value.store.readFile = async (...args) => {
+    started()
+    await gate
+    return read(...args)
+  }
+  const ws = new Socket()
+  value.service.connect(ws, 'shared', 'alice')
+  const client = [...value.service.clients].find((entry) => entry.ws === ws)
+  const oldOpen = value.service.message(client, {
+    type: 'open',
+    path: 'Main.lean',
+    requestId: 1,
+  })
+  await reading
+  await value.service.message(client, { type: 'close', path: 'Main.lean' })
+  const newOpen = value.service.message(client, {
+    type: 'open',
+    path: 'Main.lean',
+    requestId: 2,
+  })
+  release()
+  await Promise.all([oldOpen, newOpen])
+  const packets = ws.packets.filter((packet) => packet.type === 'document')
+  assert.equal(packets.length, 1)
+  assert.equal(packets[0].openRequestId, 2)
+  assert.equal(packets[0].content, value.files.get('Main.lean'))
+  assert.equal(client.paths.has('Main.lean'), true)
+  assert.equal(client.openRequests.size, 0)
+})
+
+test('an older client without an open request identifier can still cancel its pending subscription', async (t) => {
+  const value = fixture(t)
+  const read = value.store.readFile.bind(value.store)
+  let release, started
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const reading = new Promise((resolve) => {
+    started = resolve
+  })
+  value.store.readFile = async (...args) => {
+    started()
+    await gate
+    return read(...args)
+  }
+  const ws = new Socket()
+  value.service.connect(ws, 'shared', 'alice')
+  const client = [...value.service.clients].find((entry) => entry.ws === ws)
+  const opening = value.service.message(client, {
+    type: 'open',
+    path: 'Main.lean',
+  })
+  await reading
+  await value.service.message(client, { type: 'close', path: 'Main.lean' })
+  release()
+  await opening
+  assert.equal(client.paths.has('Main.lean'), false)
+  assert.deepEqual(
+    ws.packets.filter((packet) => packet.type === 'document'),
+    [],
+  )
+})

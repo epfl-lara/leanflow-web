@@ -17,12 +17,23 @@ test('nested project commits preserve pre-staged sibling and private files outsi
     templateRoot: () => null,
     async prepareToolchain() {},
     async shutdown() {},
-    async run(root, args) {
+    async run(root, args, options = {}) {
       if (args[0] !== 'git') return { code: 0, stdout: '', stderr: '' }
       try {
+        const command = execute(args[0], args.slice(1), {
+          cwd: root,
+          env: { ...process.env, ...options.env },
+          timeout: Math.min(options.timeoutMs || 5000, 5000),
+          signal: options.signal,
+          maxBuffer: options.maxOutputBytes || 16 * 1024 * 1024,
+        })
+        command.child.stdin.on('error', (error) => {
+          if (error.code !== 'EPIPE') command.child.kill()
+        })
+        command.child.stdin.end(options.input)
         return {
           code: 0,
-          ...(await execute(args[0], args.slice(1), { cwd: root })),
+          ...(await command),
         }
       } catch (error) {
         return { code: error.code, stdout: error.stdout, stderr: error.stderr }
@@ -80,6 +91,7 @@ test('nested project commits preserve pre-staged sibling and private files outsi
       `http://127.0.0.1:${studio.server.address().port}/api/projects/${project.id}/git`,
       {
         method: 'POST',
+        signal: AbortSignal.timeout(10000),
         headers: {
           Authorization: 'Bearer ' + token,
           'Content-Type': 'application/json',

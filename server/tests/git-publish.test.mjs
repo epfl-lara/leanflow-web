@@ -169,12 +169,16 @@ async function fixture(t) {
   const token = (
     await fs.readFile(path.join(dataDir, 'auth/owner.token'), 'utf8')
   ).trim()
-  const request = (body, method = 'POST') =>
+  const request = (
+    body,
+    method = 'POST',
+    { signal = AbortSignal.timeout(10000) } = {},
+  ) =>
     fetch(
       `http://127.0.0.1:${studio.server.address().port}/api/projects/${project.id}/git`,
       {
         method,
-        signal: AbortSignal.timeout(10000),
+        signal,
         headers: {
           Authorization: 'Bearer ' + token,
           ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
@@ -215,6 +219,7 @@ const source = (destination) => mounts.find((mount) => mount.includes('dst=' + d
 const root = source('/workspace'), home = source('/home/worker')
 const command = args.slice(image + 1).map((value) => value.replaceAll('/workspace', root).replaceAll('/home/worker', home))
 if (${failExport} && command.includes('bundle')) process.exit(17)
+if (command[0] === 'hold-fixture') { console.log('worker held'); setInterval(() => {}, 1000) } else {
 const env = { PATH: process.env.PATH, HOME: home }
 for (let i = 0; i < image; i++) if (args[i] === '--env') {
   const value = args[++i], split = value.indexOf('=')
@@ -224,6 +229,7 @@ for (let i = 0; i < image; i++) if (args[i] === '--env') {
 const result = spawnSync(command[0], command.slice(1), { cwd: root, env, stdio: 'inherit' })
 if (result.error) throw result.error
 process.exit(result.status ?? 1)
+}
 `,
     { mode: 0o700 },
   )
@@ -1262,5 +1268,98 @@ test('truncated rejected pushes cannot expose a saved token prefix', async (t) =
       assert.equal(error.message.includes(shared.slice(0, 17)), false)
       return true
     },
+  )
+})
+
+async function holdWorker(runtime, root, run = runtime.run.bind(runtime)) {
+  let started
+  const ready = new Promise((resolve) => {
+    started = resolve
+  })
+  const task = run(root, ['hold-fixture'], { onOutput: () => started() })
+  await ready
+  return { task }
+}
+
+async function assertEditableAfterBusyGit(f, runtime, body) {
+  const response = await f.request(body, 'POST', {
+    signal: AbortSignal.timeout(5000),
+  })
+  assert.equal(response.status, 503, await response.clone().text())
+  assert.match((await response.json()).error, /busy|available|retry/i)
+  assert.equal(f.publisher.busy.has(f.project.id), false)
+  assert.equal(f.workspaces.locks.has(f.project.id), false)
+  const source = await f.workspaces.readFile(f.project.id, 'owner', 'Main.lean')
+  const written = await f.workspaces.writeFile(
+    f.project.id,
+    'owner',
+    'Main.lean',
+    source.content + '-- responsive after busy Git\n',
+    source.hash,
+  )
+  assert.equal(typeof written.hash, 'string')
+  assert.equal(runtime.children.size, 1)
+  assert.equal([...runtime.children][0].cancelled, undefined)
+  assert.equal(runtime.queue.length, 0)
+}
+
+test('busy local Git admission releases the shared file lock without stopping the active worker', async (t) => {
+  const f = await fixture(t)
+  const runtime = await useRuntimeCleanup(f)
+  runtime.maxConcurrent = 1
+  f.runtime.run = runtime.run.bind(runtime)
+  f.runtime.spawn = runtime.spawn.bind(runtime)
+  const held = await holdWorker(runtime, f.root)
+  void held.task.catch(() => {})
+  for (const body of [
+    { action: 'branch', name: 'busy-branch' },
+    { action: 'commit', message: 'Busy commit' },
+  ])
+    await assertEditableAfterBusyGit(f, runtime, body)
+})
+
+test('review metadata cannot queue for a worker while a local commit holds the shared file lock', async (t) => {
+  for (const command of ['status', 'log', 'symbolic-ref'])
+    await t.test(command, async (t) => {
+      const f = await fixture(t)
+      const reviewed = await (await f.request(undefined, 'GET')).json()
+      const runtime = await useRuntimeCleanup(f)
+      runtime.maxConcurrent = 1
+      const run = runtime.run.bind(runtime)
+      let holding = false
+      runtime.run = async (root, args, options) => {
+        if (!holding && args.includes(command)) {
+          holding = true
+          const held = await holdWorker(runtime, f.root, run)
+          void held.task.catch(() => {})
+        }
+        return run(root, args, options)
+      }
+      f.runtime.run = runtime.run.bind(runtime)
+      f.runtime.spawn = runtime.spawn.bind(runtime)
+      await assertEditableAfterBusyGit(f, runtime, {
+        action: 'commit',
+        message: 'Reviewed busy commit',
+        reviewToken: reviewed.reviewToken,
+      })
+      assert.equal(holding, true)
+    })
+})
+
+test('a one-worker local commit waits for staging cleanup before starting its next Git command', async (t) => {
+  const f = await fixture(t)
+  const runtime = await useRuntimeCleanup(f)
+  runtime.maxConcurrent = 1
+  f.runtime.run = runtime.run.bind(runtime)
+  f.runtime.spawn = runtime.spawn.bind(runtime)
+  await fs.appendFile(path.join(f.root, 'Main.lean'), '-- commit this edit\n')
+  const response = await f.request({
+    action: 'commit',
+    message: 'Wait for worker cleanup',
+  })
+  assert.equal(response.status, 200, await response.clone().text())
+  assert.equal(
+    (await f.git('log', '-1', '--format=%s')).stdout.trim(),
+    'Wait for worker cleanup',
   )
 })

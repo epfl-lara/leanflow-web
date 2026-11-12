@@ -12,6 +12,8 @@ Open **Share project** beside a project to give another account access. Search f
 
 Grant Admin only to a named account you trust. The sharing dialog requires acknowledging that the account can change access and delete the project. Admin invitation links are unavailable. A project must keep at least one Admin; add another before removing or demoting the last one. The original creator has no special project permission after delegation.
 
+The API also permits Viewers to run read-only Lean checks and TeX compilation in their own isolated jobs. These jobs cannot publish source changes, but they share worker capacity and can temporarily block project preparation. The interface currently shows these controls only to Editors and Admins.
+
 A link grants ongoing account membership when redeemed. Revoking the link stops future joins. To remove an account that already joined, remove its membership as well. Downgrading a role or removing access closes that account's project connections and stops its active work. Promotions preserve ongoing sessions. Unsaved editor drafts stay in its tab and can be downloaded.
 
 ## Personal conversations and credentials
@@ -30,21 +32,27 @@ Agent and terminal changes enter through checked file transactions and then upda
 
 Configuration files use the normal save path and its active-work checks. They do not use the live text connection. Changing Lean or Lake configuration requires preparing the shared environment again. The selected Lean release and dependency pins are preserved.
 
-If the connection fails, keep the tab open until saving succeeds. Unacknowledged edits remain local. If both the saved file and a local draft changed while a document was disconnected, download the draft before reloading. The interface does not silently replace it.
+If the connection fails, keep the tab open until saving succeeds. Files that switch to normal version-checked saving stay in that mode until you switch to another project and back, or reload the page, which prevents the same edit from being saved twice during reconnection. Unacknowledged edits remain local. If both the saved file and a local draft changed while a document was disconnected, download the draft before reloading. The interface does not silently replace it.
 
 ## Private terminals and recovery
 
 Each terminal opens a private working copy. Its text file changes publish to the project with version checks. A conflict pauses publication and preserves the private copy. Close the terminal and choose **Recover terminal files** to download it. Recovery downloads belong to the account that opened the terminal, including after project access is removed or the shared project is deleted. Open your account settings and choose **Private terminal files** to find copies from projects you can no longer access. Keep at most eight copies per account; download what you need, then use **Discard recovery copy** to free a slot. Copies that are open or still publishing their final changes cannot be downloaded or discarded. They appear in recovery only after closing; interrupted copies remain available after a server restart.
 
+Choose **Choose individual files** if the ZIP is too large. Downloads allow up to 32 MiB per file and 64 MiB per ZIP. A larger file does not prevent downloading smaller files individually. Ask the server administrator to recover files above the individual limit before discarding the copy. Listing and ZIP downloads also stop at 12,000 permitted entries or 50,000 scanned entries. If a copy exceeds those limits, ask the server administrator to recover it; repeatedly retrying the listing will not help.
+
 Terminal Git metadata is local to the private copy. Use **Source control** for the saved project's history and publication. Terminal Git requests use the current account's saved Git connection. Build output, secret paths, dependency caches, and Git metadata are not copied into shared source files. Generated binary or oversized files stay in the private copy for recovery and explicit upload. Other text files continue publishing. A temporarily invalid text file keeps its last published version until it becomes editable again.
 
 ## Concurrency and hosting
 
-The file-write queue covers short filesystem commits. Project copies, worker admission, setup, network operations, and worker shutdown do not wait for the document queue while holding that file queue. Document queues call the existing version-checked writer and retry bounded filesystem races. Cancellation stops workers before final terminal publication; queued writes recheck current membership.
+Document updates and private-copy publication share a version-checked file-write queue. Git commands inside that queue report busy worker capacity immediately instead of waiting for a slot. Cancellation stops workers before final terminal publication; queued writes recheck current membership.
+
+Scanning saved project inputs stops after 30 seconds. A timed-out scan releases the file-write queue and reports an error. Retry the check, or move large generated files out of the project before retrying.
 
 Preparation temporarily pauses live saves. Other members see the setup status; preserved drafts resume saving when setup finishes. Preparation, Git history changes, and project deletion check activity across every member. They report active collaborator work instead of stopping it. Each Lean editor still uses its own worker. Before increasing team size, review the editor, worker, agent, and queue limits in [Configuration](Configuration.md) and follow the capacity guidance in [Hosting](Hosting.md).
 
 Live editing initially allows 128 connections across the server, 12 per account, 16 live files per tab, 32 per account, and 128 retained documents with 64 MiB of encoded document state. Worker limits separately control active Lean sessions. Review these limits and measure memory, save traffic, and retained history before expanding to larger teams.
+
+Crash recovery for multi-file transactions remains limited. If the server stops between file replacements, publication can be partly applied or a file can be missing. The server does not automatically repair an interrupted transaction on startup. Stop further edits and ask the server administrator to inspect the retained file history and private working copy before recovering the project. This limitation also affects private projects.
 
 ## Validate sharing before deployment
 
@@ -58,6 +66,9 @@ npm run build
 node scripts/check-project-sharing-live.mjs
 node scripts/check-project-sharing-ux.mjs
 node scripts/check-project-sharing-editor.mjs
+node scripts/check-session-project-drafts-ui.mjs
+node scripts/check-terminal-opening-ui.mjs
+node scripts/check-editor-startup-ui.mjs
 node scripts/check-project-sharing-runtime.mjs
 ```
 

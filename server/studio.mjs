@@ -8,7 +8,7 @@ import { WebSocketServer } from 'ws'
 import { Auth, sameOrigin } from './auth.mjs'
 import { authRequestJson, isPublicAuthRequest } from './auth-request-limits.mjs'
 import { Runtime } from './runtime.mjs'
-import { Terminals } from './terminals.mjs'
+import { Terminals, validateTerminalOpeningId } from './terminals.mjs'
 import { WorkspaceStore, validateRepository } from './workspaces.mjs'
 import { GitConnections } from './git-connections.mjs'
 import { loadConfig } from './config.mjs'
@@ -801,7 +801,21 @@ export async function createStudio({
   )
   app.post('/api/projects/:id/terminal/stop', async (req, res) => {
     workspaces.get(req.params.id, req.user.id)
-    await terminals.closeProject(req.params.id, req.user.id)
+    const input = req.body === undefined ? {} : req.body
+    if (
+      !input ||
+      typeof input !== 'object' ||
+      Array.isArray(input) ||
+      Object.keys(input).some((key) => key !== 'openingId')
+    )
+      throw Object.assign(
+        new Error(
+          'This terminal request is invalid. Reopen the terminal and retry.',
+        ),
+        { status: 400 },
+      )
+    const openingId = validateTerminalOpeningId(input.openingId)
+    await terminals.closeProject(req.params.id, req.user.id, { openingId })
     res.json({ stopped: true })
   })
   app.post('/api/projects/:id/convert', async (req, res) =>
@@ -1093,9 +1107,9 @@ export async function createStudio({
       return res.json(await gitInfo(req.params.id, req.user))
     }
     await publisher.withProject(req.user.id, req.params.id, async (project) => {
-      const options = { network: 'none', timeoutMs: 60_000 }
+      const options = { network: 'none', timeoutMs: 60_000, queue: false }
       const gitRoot = workspaces.repositoryRoot(project)
-      const command = async (args) => {
+      const command = async (args, input) => {
         const result = await runtime.run(
           gitRoot,
           [
@@ -1106,7 +1120,7 @@ export async function createStudio({
             'credential.helper=',
             ...args,
           ],
-          options,
+          { ...options, input },
         )
         if (result.code !== 0)
           throw new Error(
@@ -1154,8 +1168,11 @@ export async function createStudio({
           if (
             typeof reviewToken !== 'string' ||
             !/^[a-f0-9]{64}$/.test(reviewToken) ||
-            (await publisher.metadata(req.user.id, project.id)).reviewToken !==
-              reviewToken
+            (
+              await publisher.metadata(req.user.id, project.id, undefined, {
+                queue: false,
+              })
+            ).reviewToken !== reviewToken
           )
             throw Object.assign(
               new Error(
@@ -1186,34 +1203,15 @@ export async function createStudio({
             status: 400,
           })
         const withPaths = (args) =>
-          new Promise((resolve, reject) => {
-            const child = runtime.spawn(
-              gitRoot,
-              [
-                'git',
-                '--literal-pathspecs',
-                '-c',
-                'core.hooksPath=/dev/null',
-                ...args,
-                '--pathspec-from-file=-',
-                '--pathspec-file-nul',
-              ],
-              options,
-            )
-            let output = ''
-            child.stdout.on('data', () => {})
-            child.stderr.on('data', (data) => {
-              output += data.toString()
-            })
-            child.on('error', reject)
-            child.stdin.on('error', reject)
-            child.on('close', (code) =>
-              code === 0
-                ? resolve()
-                : reject(new Error(output || 'Git operation failed.')),
-            )
-            child.stdin.end(files.map((filename) => filename + '\0').join(''))
-          })
+          command(
+            [
+              '--literal-pathspecs',
+              ...args,
+              '--pathspec-from-file=-',
+              '--pathspec-file-nul',
+            ],
+            files.map((filename) => filename + '\0').join(''),
+          )
         await withPaths(['add', '-A'])
         const identity = await gitIdentity(req.user.id)
         // A checkout may already have staged sibling or private files. Commit only
@@ -1437,9 +1435,8 @@ export async function createStudio({
   server.on('upgrade', (req, socket, head) => {
     const user = auth.identify(req)
     const match = /^\/websocket\/([a-zA-Z0-9_-]+)$/.exec(req.url || '')
-    const terminalMatch = /^\/websocket\/terminal\/([a-zA-Z0-9_-]+)$/.exec(
-      req.url || '',
-    )
+    const terminalMatch =
+      /^\/websocket\/terminal\/([a-zA-Z0-9_-]+)(\?[^#]*)?$/.exec(req.url || '')
     const collaborationMatch =
       /^\/websocket\/collaboration\/([a-zA-Z0-9_-]+)$/.exec(req.url || '')
     const reject = (status) => {
@@ -1468,20 +1465,34 @@ export async function createStudio({
       })
     if (project.status !== 'ready') return reject('409 Conflict')
     if (terminalMatch) {
+      let openingId
       try {
+        const query = new URLSearchParams(terminalMatch[2] || '')
+        if (
+          [...query.keys()].some((key) => key !== 'openingId') ||
+          query.getAll('openingId').length > 1
+        )
+          return reject('400 Bad Request')
+        openingId = validateTerminalOpeningId(
+          query.get('openingId') ?? undefined,
+        )
         workspaces.requireEditor(project.id, user.id)
         requireNoGit(project.id, user.id)
         terminals.assertCapacity(project.id)
       } catch (error) {
         return reject(
-          error.status === 429
-            ? '429 Too Many Requests'
-            : error.status === 403
-              ? '403 Forbidden'
-              : '409 Conflict',
+          error.status === 400
+            ? '400 Bad Request'
+            : error.status === 429
+              ? '429 Too Many Requests'
+              : error.status === 403
+                ? '403 Forbidden'
+                : '409 Conflict',
         )
       }
-      return terminals.upgrade(req, socket, head, project, user.id)
+      return terminals.upgrade(req, socket, head, project, user.id, {
+        openingId,
+      })
     }
     if (
       sockets.size >= capacity.editors ||

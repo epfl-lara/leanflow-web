@@ -371,20 +371,22 @@ export class GitPublisher {
   async #cleanupHome(child) {
     await cleanupGitWorkerHome(child, this.dataDir)
   }
-  async #head(root) {
+  async #head(root, { queue = true } = {}) {
     const result = await this.#run(
       root,
       ['rev-parse', '--verify', 'HEAD^{commit}'],
-      { readOnlyWorkspace: true, readOnlyHome: true },
+      { readOnlyWorkspace: true, readOnlyHome: true, queue },
     )
     const head = result.stdout.trim()
     if (!HASH.test(head)) fail('Create a commit before previewing a push.', 409)
     return head
   }
-  async #defaultBranch(root, head) {
+  async #defaultBranch(root, head, options = {}) {
+    // A lock holder must not join a background lookup waiting in the queue.
+    if (options.queue === false) return this.#readDefaultBranch(root, options)
     const previous = this.defaultBranches.get(root)
     if (previous?.head === head) return previous.result
-    const result = this.#readDefaultBranch(root)
+    const result = this.#readDefaultBranch(root, options)
     const entry = { head, result }
     this.defaultBranches.delete(root)
     this.defaultBranches.set(root, entry)
@@ -398,12 +400,12 @@ export class GitPublisher {
       throw error
     }
   }
-  async #readDefaultBranch(root) {
+  async #readDefaultBranch(root, { queue = true } = {}) {
     try {
       const result = await this.#run(
         root,
         ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'],
-        { readOnlyWorkspace: true, readOnlyHome: true },
+        { readOnlyWorkspace: true, readOnlyHome: true, queue },
       )
       const reference = result.stdout.trim()
       return reference.startsWith('origin/')
@@ -437,12 +439,12 @@ export class GitPublisher {
       fail('The exported shallow history could not be verified.', 409)
     })
   }
-  async #history(root, bare = false) {
+  async #history(root, bare = false, { queue = true } = {}) {
     const prefix = bare ? ['--git-dir=/workspace/repository.git'] : []
     const commits = await this.#run(
       root,
       [...prefix, 'log', '-20', '--format=%H%x00%s%x00', 'HEAD'],
-      { readOnlyWorkspace: true, readOnlyHome: true },
+      { readOnlyWorkspace: true, readOnlyHome: true, queue },
     )
     const fields = commits.stdout.split('\0'),
       rows = []
@@ -457,7 +459,7 @@ export class GitPublisher {
     const count = await this.#run(
       root,
       [...prefix, 'rev-list', '--count', 'HEAD'],
-      { readOnlyWorkspace: true, readOnlyHome: true },
+      { readOnlyWorkspace: true, readOnlyHome: true, queue },
     )
     return {
       commits: rows,
@@ -496,9 +498,9 @@ export class GitPublisher {
       resolveHost: this.resolveHost,
     })
   }
-  async metadata(owner, projectId, status) {
+  async metadata(owner, projectId, status, options = {}) {
     const project = this.requireProjectAccess(owner, projectId)
-    status ||= await this.workspaces.gitStatus(projectId, owner)
+    status ||= await this.workspaces.gitStatus(projectId, owner, options)
     const blockedReason = this.blocked(owner, projectId)
     const remembered = await this.#remembered(owner, projectId)
     let remoteUrl =
@@ -507,12 +509,17 @@ export class GitPublisher {
       defaultBranch = null
     if (status.repository) {
       const root = await this.#source(project)
-      if (status.revision) commits = (await this.#history(root)).commits
+      if (status.revision)
+        commits = (await this.#history(root, false, options)).commits
       if (
         !Object.hasOwn(remembered || {}, 'baseBranch') &&
         !namedBranch(project.publishingBaseBranch)
       )
-        defaultBranch = await this.#defaultBranch(root, status.revision)
+        defaultBranch = await this.#defaultBranch(
+          root,
+          status.revision,
+          options,
+        )
     }
     const review = createHash('sha256').update(
       JSON.stringify({
@@ -645,6 +652,7 @@ export class GitPublisher {
                   freshHome: true,
                   cleanHome: true,
                   timeoutMs: 300_000,
+                  queue: false,
                 },
                 { keepHome: true },
               )
@@ -694,7 +702,7 @@ export class GitPublisher {
                     409,
                   )
               }
-              if ((await this.#head(source)) !== head)
+              if ((await this.#head(source, { queue: false })) !== head)
                 fail(
                   'The branch changed while exporting its history. Preview again.',
                   409,
@@ -817,7 +825,7 @@ export class GitPublisher {
             this.#assertIdle(projectId, owner)
             if (
               bareHead.stdout.trim() !== head ||
-              (await this.#head(source)) !== head
+              (await this.#head(source, { queue: false })) !== head
             )
               fail(
                 'The branch changed while preparing its preview. Preview again.',
@@ -904,7 +912,7 @@ export class GitPublisher {
           const source = await this.#source(project)
           await this.#locked(projectId, async () => {
             this.#assertIdle(projectId, owner)
-            if ((await this.#head(source)) !== preview.head)
+            if ((await this.#head(source, { queue: false })) !== preview.head)
               fail(
                 'The branch HEAD changed after this preview. Preview the new commits before publishing.',
                 409,

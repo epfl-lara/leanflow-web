@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Icon } from './Icons'
 import { ResizeHandle } from './ResizeHandle'
 import { useStoredSize } from './layout'
+import { messageId } from './messageId'
 import '@xterm/xterm/css/xterm.css'
 import './terminal.css'
 
@@ -18,17 +19,21 @@ export function TerminalPanel({
   theme,
   onClose,
   onStateChange,
+  onOpeningChange,
 }: {
   projectId: string
   projectName: string
   theme: 'light' | 'dark'
   onClose: () => void
   onStateChange?: (active: boolean) => void
+  onOpeningChange?: (openingId: string) => void
 }) {
   const host = useRef<HTMLDivElement>(null)
   const terminal = useRef<Terminal | null>(null)
   const stateChange = useRef(onStateChange)
   stateChange.current = onStateChange
+  const openingChange = useRef(onOpeningChange)
+  openingChange.current = onOpeningChange
   const themeRef = useRef(theme)
   themeRef.current = theme
   const [attempt, setAttempt] = useState(0)
@@ -63,6 +68,9 @@ export function TerminalPanel({
       `/websocket/terminal/${encodeURIComponent(projectId)}`,
       location.href,
     )
+    const openingId = messageId()
+    url.searchParams.set('openingId', openingId)
+    openingChange.current?.(openingId)
     url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const socket = new WebSocket(url)
     socket.binaryType = 'arraybuffer'

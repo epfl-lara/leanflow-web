@@ -38,7 +38,7 @@ export function DraftNavigationDialog({
             ? `Save all changed files before opening ${destination}, or discard these edits.`
             : 'Save all changed files before continuing, or discard these edits.'}
       </p>
-      {readOnly && <DraftDownloads files={files} />}
+      <DraftDownloads files={files} />
       {error && (
         <p className="error-message" role="alert">
           {error} Your drafts are kept in this tab. Cancel to keep them.

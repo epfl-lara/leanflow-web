@@ -194,6 +194,21 @@ try {
 
   await fileButton('Fresh.lean').click()
   await unsaved().waitFor()
+  const conflictedDraft = page.waitForEvent('download')
+  await unsaved()
+    .getByRole('button', { name: 'Download draft: Other.lean', exact: true })
+    .click()
+  assert(
+    (await fs.readFile(await (await conflictedDraft).path(), 'utf8')).includes(
+      'KEEP_OTHER_DRAFT',
+    ),
+  )
+  assert(
+    await unsaved()
+      .getByRole('button', { name: 'Save & continue', exact: true })
+      .isEnabled(),
+  )
+  assert.equal(state.files[projectId]['Other.lean'], sources['Other.lean'])
   await unsaved().getByRole('button', { name: 'Cancel', exact: true }).click()
   assert((await editorText()).includes('KEEP_OTHER_DRAFT'))
   await fileButton('Fresh.lean').click()
@@ -206,7 +221,7 @@ try {
   assert(!(await editorText()).includes('KEEP_OTHER_DRAFT'))
   assert.equal(state.files[projectId]['Other.lean'], sources['Other.lean'])
   report.checks.push(
-    'Failed-save navigation Cancel keeps the current draft; Discard opens the requested file and restores the discarded buffer without a write.',
+    'A failed-save navigation offers an exact draft download while retaining Save; Cancel keeps the current draft and Discard opens the requested file without a write.',
   )
 
   await append('-- SAVE_BEFORE_LEAVING\n')

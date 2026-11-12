@@ -4,9 +4,12 @@ import { replaceDocumentText } from '../../../shared/document-text.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configuration.mjs'
 const CONFIGURATION_FILES = new Set(PROJECT_CONFIGURATION_FILES)
 const MAX_LIVE_DOCUMENTS = 16
+const LIVE_EDITING_RECOVERY =
+  'Switch to another project and back, or reload this page to retry live editing.'
 const liveFile = (path: string) =>
   !path.startsWith('.lake/') && !CONFIGURATION_FILES.has(path)
 import type { WorkspaceBuffers, WorkspaceScope } from './workspaceBuffers'
+import type { OpenFile } from './api'
 import { LocalDocumentHistory } from './localDocumentHistory'
 
 interface LiveDocument {
@@ -17,6 +20,9 @@ interface LiveDocument {
   opened: boolean
   blocked: boolean
   generation: number
+  // Agent/terminal HTTP refreshes can replace this baseline without a reload.
+  bufferHash: string
+  openRequestId: number
   pending: Set<number>
   failedLocalContent?: string
 }
@@ -43,6 +49,7 @@ function documentMessage(value: unknown): value is {
   content?: string
   hash: string
   ack?: number
+  openRequestId?: number
 } {
   return (
     !!value &&
@@ -62,7 +69,11 @@ function documentMessage(value: unknown): value is {
     (!('ack' in value) ||
       (typeof value.ack === 'number' &&
         Number.isSafeInteger(value.ack) &&
-        value.ack > 0))
+        value.ack > 0)) &&
+    (!('openRequestId' in value) ||
+      (typeof value.openRequestId === 'number' &&
+        Number.isSafeInteger(value.openRequestId) &&
+        value.openRequestId > 0))
   )
 }
 
@@ -86,6 +97,14 @@ export function useProjectCollaboration({
   const [connected, setConnected] = useState(false)
   const [issue, setIssue] = useState<string | null>(null)
   const control = useRef<CollaborationControl | null>(null)
+  // A permission/setup transition may recreate the live connection while
+  // Monaco retains its model. Never expose an older native undo stack after
+  // that model has imported shared edits during this workspace visit.
+  const historyVisit = useRef({
+    scope,
+    paths: new Set<string>(),
+    restPaths: new Set<string>(),
+  })
   const callbacks = useRef({ onFilesChanged, onAccessChanged })
   useEffect(() => {
     callbacks.current = { onFilesChanged, onAccessChanged }
@@ -105,10 +124,16 @@ export function useProjectCollaboration({
 
   useEffect(() => {
     if (!enabled || !scope.projectId) return
+    if (historyVisit.current.scope !== scope)
+      historyVisit.current = {
+        scope,
+        paths: new Set<string>(),
+        restPaths: new Set<string>(),
+      }
     const documents = new Map<string, LiveDocument>()
-    const fallbackPaths = new Set<string>()
+    const fallbackPaths = historyVisit.current.restPaths
     const fallbackHistories = new Map<string, LocalDocumentHistory>()
-    const managedHistory = new Set<string>()
+    const managedHistory = historyVisit.current.paths
     const localOrigin = Symbol('local document edit')
     let socket: WebSocket | null = null
     let disposed = false,
@@ -123,6 +148,12 @@ export function useProjectCollaboration({
     let sendTimer: ReturnType<typeof setTimeout> | undefined
     const waiters = new Set<() => void>()
     const current = () => !disposed && store.isCurrent(scope)
+    const clearIssue = () =>
+      setIssue(
+        fallbackPaths.size
+          ? `Some files use normal version-checked saving for this visit. ${LIVE_EDITING_RECOVERY}`
+          : null,
+      )
     const notify = () => {
       for (const done of [...waiters]) done()
     }
@@ -156,6 +187,31 @@ export function useProjectCollaboration({
       record.doc.destroy()
       record.canonical.destroy()
     }
+    const retainHistory = (
+      path: string,
+      doc: Y.Doc,
+      undo: Y.UndoManager,
+      file: OpenFile,
+    ) => {
+      if (fallbackHistories.size >= MAX_LIVE_DOCUMENTS) {
+        const oldest = fallbackHistories.keys().next().value
+        if (oldest !== undefined) {
+          fallbackHistories.get(oldest)?.dispose()
+          fallbackHistories.delete(oldest)
+        }
+      }
+      fallbackHistories.set(
+        path,
+        new LocalDocumentHistory(
+          doc,
+          undo,
+          file,
+          store.getSnapshot().discardVersion,
+          localOrigin,
+        ),
+      )
+      managedHistory.add(path)
+    }
     const diffLimitFallback = (
       path: string,
       record: LiveDocument,
@@ -173,30 +229,14 @@ export function useProjectCollaboration({
       send({ type: 'close', path })
       const file = store.getSnapshot().buffers.get(path)
       if (file) {
-        if (fallbackHistories.size >= MAX_LIVE_DOCUMENTS) {
-          const oldest = fallbackHistories.keys().next().value
-          if (oldest !== undefined) {
-            fallbackHistories.get(oldest)?.dispose()
-            fallbackHistories.delete(oldest)
-          }
-        }
-        fallbackHistories.set(
-          path,
-          new LocalDocumentHistory(
-            record.doc,
-            record.undo,
-            file,
-            store.getSnapshot().discardVersion,
-            localOrigin,
-          ),
-        )
+        retainHistory(path, record.doc, record.undo, file)
         record.canonical.destroy()
       } else destroyRecord(record)
       documents.delete(path)
       fallbackPaths.add(path)
       if (![...documents.values()].some((item) => item.blocked)) failure = null
       setIssue(
-        `${path} uses normal version-checked saving because this edit is too complex to merge live.`,
+        `${path} uses normal version-checked saving because this edit is too complex to merge live. ${LIVE_EDITING_RECOVERY}`,
       )
       notify()
       return true
@@ -208,6 +248,54 @@ export function useProjectCollaboration({
         undo: new Y.UndoManager(doc.getText('source'), {
           trackedOrigins: new Set([localOrigin]),
         }),
+      }
+    }
+    const open = (path: string, record: LiveDocument) => {
+      record.opened = false
+      record.openRequestId = ++requestId
+      send({ type: 'open', path, requestId: record.openRequestId })
+    }
+    const restHandoff = () => {
+      // Once flush hands a draft to the HTTP caller, that request can still
+      // commit after live admission. Keep its path on version-checked saves for
+      // the rest of this visit so the same insertion cannot enter both systems.
+      for (const file of store.dirty()) {
+        if (
+          !liveFile(file.path) ||
+          file.preview === 'pdf' ||
+          fallbackPaths.has(file.path)
+        )
+          continue
+        const record = documents.get(file.path)
+        if (record?.id || record?.pending.size) continue
+        if (record) {
+          send({ type: 'close', path: file.path })
+          destroyRecord(record)
+          documents.delete(file.path)
+        }
+        fallbackPaths.add(file.path)
+        const local = localDocument()
+        local.doc.getText('source').insert(0, file.savedContent)
+        retainHistory(file.path, local.doc, local.undo, file)
+        setIssue(
+          `Some files use normal version-checked saving for this visit. ${LIVE_EDITING_RECOVERY}`,
+        )
+      }
+      for (const history of fallbackHistories.values()) history.markSubmitted()
+      return !store.dirty().length
+    }
+    const replayUpdate = (record: LiveDocument) => {
+      // Local undo keeps deleted source alive. A wire-only clone can collect
+      // that payload without losing its causal IDs or changing local history.
+      const wire = new Y.Doc()
+      try {
+        Y.applyUpdate(wire, Y.encodeStateAsUpdate(record.doc))
+        return Y.encodeStateAsUpdate(
+          wire,
+          Y.encodeStateVector(record.canonical),
+        )
+      } finally {
+        wire.destroy()
       }
     }
     const sendDelta = (
@@ -308,14 +396,14 @@ export function useProjectCollaboration({
           record.failedLocalContent = undefined
           if (![...documents.values()].some((item) => item.blocked)) {
             failure = null
-            setIssue(null)
+            clearIssue()
           }
         }
         if (
           record &&
           (record.generation !== file.generation ||
-            discarded ||
-            (record.blocked && file.content === file.savedContent))
+            record.bufferHash !== file.hash ||
+            discarded)
         ) {
           send({ type: 'close', path })
           destroyRecord(record)
@@ -323,7 +411,7 @@ export function useProjectCollaboration({
           record = undefined
           if (![...documents.values()].some((item) => item.blocked)) {
             failure = null
-            setIssue(null)
+            clearIssue()
           }
         }
         if (!record) {
@@ -335,10 +423,12 @@ export function useProjectCollaboration({
             opened: false,
             blocked: false,
             generation: file.generation,
+            bufferHash: file.hash,
+            openRequestId: 0,
             pending: new Set(),
           }
           documents.set(path, record)
-          send({ type: 'open', path })
+          open(path, record)
           continue
         }
         if (!record.opened || record.blocked || !canEdit || file.readOnly)
@@ -383,11 +473,10 @@ export function useProjectCollaboration({
         )
         if (!store.dirty().length) {
           failure = null
-          setIssue(null)
-        }
+          clearIssue()
+        } else if (fallbackPaths.size && !failure) clearIssue()
         for (const [path, record] of documents) {
-          record.opened = false
-          send({ type: 'open', path })
+          open(path, record)
         }
         publishLocal()
         notify()
@@ -427,7 +516,7 @@ export function useProjectCollaboration({
           destroyRecord(record)
           documents.delete(path)
           setIssue(
-            'Some files use normal saving while live editing capacity is full.',
+            `Some files use normal saving for this visit because live editing capacity is full. ${LIVE_EDITING_RECOVERY}`,
           )
           notify()
           schedule()
@@ -440,7 +529,7 @@ export function useProjectCollaboration({
             : 'A shared edit could not be saved. Your draft remains in this tab. Copy it, then reload the saved file before retrying.',
         )
         if (transient) socket?.close(1013, 'Live editing is busy.')
-        if (status === 403 || status === 404)
+        if (status === 403 || (status === 404 && !path))
           void Promise.resolve(callbacks.current.onAccessChanged?.()).catch(
             () => {},
           )
@@ -450,6 +539,27 @@ export function useProjectCollaboration({
       const record = documents.get(message.path)
       const file = store.getSnapshot().buffers.get(message.path)
       if (!record || !file) return
+      if (
+        record.generation !== file.generation ||
+        record.bufferHash !== file.hash ||
+        discardVersion !== store.getSnapshot().discardVersion
+      ) {
+        publishLocal()
+        return
+      }
+      // An old subscription can still have packets in flight after a reload.
+      // Only the full reply to this record's own open initializes its baseline.
+      if (
+        message.openRequestId !== undefined &&
+        message.openRequestId !== record.openRequestId
+      )
+        return
+      if (
+        !record.opened &&
+        (message.openRequestId !== record.openRequestId ||
+          message.content === undefined)
+      )
+        return
       const dirty = file.content !== file.savedContent
       const sameIdentity = record.id === message.documentId
       if (!sameIdentity) {
@@ -562,7 +672,7 @@ export function useProjectCollaboration({
           type: 'update',
           path: message.path,
           documentId: record.id,
-          update: encode(Y.encodeStateAsUpdate(record.doc)),
+          update: encode(replayUpdate(record)),
           requestId: id,
         })
       }
@@ -572,6 +682,7 @@ export function useProjectCollaboration({
       }
       applying = true
       try {
+        record.bufferHash = message.hash
         store.collaborated(
           message.path,
           record.doc.getText('source').toString(),
@@ -583,7 +694,7 @@ export function useProjectCollaboration({
       }
       if (![...documents.values()].some((item) => item.blocked)) {
         failure = null
-        setIssue(null)
+        clearIssue()
       }
       notify()
       schedule()
@@ -713,14 +824,20 @@ export function useProjectCollaboration({
           // twice. Keep these drafts local until the live connection returns.
           if (
             [...documents.values()].some((record) => record.pending.size) ||
-            store.dirty().some((file) => documents.get(file.path)?.id)
+            store
+              .dirty()
+              .some(
+                (file) =>
+                  documents.get(file.path)?.id ||
+                  (managedHistory.has(file.path) &&
+                    !fallbackPaths.has(file.path)),
+              )
           )
             throw new Error(
               'Wait for the live connection to return before saving. Your edits remain in this tab.',
             )
           publishLocal()
-          for (const history of fallbackHistories.values())
-            history.markSubmitted()
+          restHandoff()
           return false
         }
         publishLocal()
@@ -729,9 +846,7 @@ export function useProjectCollaboration({
           !managedDirty() &&
           ![...documents.values()].some((record) => record.pending.size)
         ) {
-          for (const history of fallbackHistories.values())
-            history.markSubmitted()
-          return !store.dirty().length
+          return restHandoff()
         }
         await new Promise<void>((resolve, reject) => {
           const timeout = setTimeout(() => {
@@ -764,14 +879,12 @@ export function useProjectCollaboration({
           waiters.add(check)
           check()
         })
-        for (const history of fallbackHistories.values())
-          history.markSubmitted()
-        return !store.dirty().length
+        return restHandoff()
       },
     }
     control.current = controller
     setConnected(false)
-    setIssue(null)
+    clearIssue()
     connect()
     return () => {
       disposed = true

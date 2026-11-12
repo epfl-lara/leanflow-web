@@ -4,7 +4,10 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { WorkspaceStore } from '../workspaces.mjs'
+import { Runtime } from '../runtime.mjs'
+import { createProjectDownload } from '../project-downloads.mjs'
 import { syncBuiltinESMExports } from 'node:module'
+import JSZip from 'jszip'
 
 const TOOLCHAIN = 'leanprover/lean4:v4.34.1'
 async function fixture(t) {
@@ -575,6 +578,300 @@ test('permanent project deletion preserves caller-private terminal recovery whil
     '-- personal recovery after deletion\n',
   )
   await store.deleteTerminalRecovery(project.id, 'bob', terminal.runId)
+})
+
+async function localTerminalDependencies(f) {
+  const actual = new Runtime({ dataDir: f.dataDir })
+  await fs.mkdir(actual.runtimeDir, { recursive: true })
+  await fs.mkdir(path.join(f.project.root, '.lake/packages/local-dependency'), {
+    recursive: true,
+  })
+  for (const method of [
+    'inheritDependencies',
+    'clearInheritedDependencies',
+    'dependencyRoot',
+  ])
+    f.runtime[method] = actual[method].bind(actual)
+  Object.defineProperty(f.runtime, 'dependencies', {
+    get: () => actual.dependencies,
+  })
+  return actual
+}
+
+test('terminal recovery releases real dependency bindings only after its worker stops', async (t) => {
+  const f = await fixture(t)
+  const actual = await localTerminalDependencies(f)
+  const copy = await f.store.terminalSnapshot(
+    f.project.id,
+    'alice',
+    'stopped-dependency-recovery',
+  )
+  assert.equal(actual.dependencyRoot(copy.root), f.project.root)
+  const worker = { workspaceRoot: copy.root }
+  f.runtime.children = new Set([worker])
+  f.store.markTerminalFinalizing(copy)
+  await assert.rejects(f.store.retainTerminalSnapshot(copy, 'Keep my files.'), {
+    status: 409,
+  })
+  assert.equal(actual.dependencyRoot(copy.root), f.project.root)
+  await assert.rejects(
+    f.store.terminalRecovery(f.project.id, 'alice', copy.runId),
+    { status: 409 },
+  )
+  f.runtime.children.delete(worker)
+  const originalRelease = f.runtime.clearInheritedDependencies
+  t.mock.method(f.runtime, 'clearInheritedDependencies', async () => {
+    throw new Error('Registry update failed')
+  })
+  try {
+    await assert.rejects(
+      f.store.retainTerminalSnapshot(copy, 'Keep my files.'),
+      {
+        status: 503,
+        message: /Retry.*administrator/,
+      },
+    )
+    assert.equal(actual.dependencyRoot(copy.root), f.project.root)
+    await assert.rejects(
+      f.store.terminalRecovery(f.project.id, 'alice', copy.runId),
+      { status: 409 },
+    )
+  } finally {
+    t.mock.restoreAll()
+  }
+  assert.equal(f.runtime.clearInheritedDependencies, originalRelease)
+  await f.store.retainTerminalSnapshot(copy, 'Keep my files.')
+  assert.equal(actual.dependencyRoot(copy.root), null)
+  assert.equal(
+    (await f.store.terminalRecovery(f.project.id, 'alice', copy.runId)).runId,
+    copy.runId,
+  )
+})
+
+test('interrupted recovery releases its persisted project cache binding during purge and preserves its ZIP', async (t) => {
+  const f = await fixture(t)
+  const actual = await localTerminalDependencies(f)
+  await f.store.setMember(f.project.id, 'alice', 'bob', 'editor')
+  const copy = await f.store.terminalSnapshot(
+    f.project.id,
+    'bob',
+    'persisted-dependency-recovery',
+  )
+  const content = '-- caller-private terminal files survive project purge\n'
+  await fs.writeFile(path.join(copy.root, 'Main.lean'), content)
+  assert.equal(actual.dependencyRoot(copy.root), f.project.root)
+  const store = await f.reopen()
+  assert.equal(
+    (await store.personalTerminalRecoveries('bob'))[0].status,
+    'interrupted',
+  )
+  await store.removeMember(f.project.id, 'alice', 'bob')
+  const receipt = await store.trash(f.project.id, 'alice')
+  await store.deleteForever(receipt.trashId, 'alice')
+  assert.equal(actual.dependencyRoot(copy.root), null)
+  const recovery = await store.terminalRecovery(f.project.id, 'bob', copy.runId)
+  const download = await createProjectDownload(
+    {
+      get: () => recovery,
+      readDownloadFile: (_id, _actor, filename, options) =>
+        store.readTerminalRecoveryFile(
+          f.project.id,
+          'bob',
+          copy.runId,
+          filename,
+          options,
+        ),
+    },
+    f.project.id,
+    'bob',
+  )
+  const zip = await JSZip.loadAsync(download.content)
+  const main = Object.keys(zip.files).find(
+    (filename) => filename === 'Main.lean' || filename.endsWith('/Main.lean'),
+  )
+  assert.ok(main)
+  assert.equal(await zip.file(main).async('string'), content)
+})
+
+test('failed terminal captures release admission even when no ownership marker could be written', async (t) => {
+  const { store, project } = await fixture(t)
+  const originalMkdir = fs.mkdir
+  t.mock.method(fs, 'mkdir', async (target, options) => {
+    if (path.dirname(target) === store.snapshotsDir)
+      throw Object.assign(new Error('Disk is full'), { code: 'ENOSPC' })
+    return originalMkdir(target, options)
+  })
+  syncBuiltinESMExports()
+  try {
+    for (let index = 0; index < 8; index++)
+      await assert.rejects(
+        store.terminalSnapshot(project.id, 'alice', `failed-capture-${index}`),
+        { code: 'ENOSPC' },
+      )
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+  assert.deepEqual(await store.personalTerminalRecoveries('alice'), [])
+  const copy = await store.terminalSnapshot(
+    project.id,
+    'alice',
+    'capture-after-repair',
+  )
+  await store.retainTerminalSnapshot(copy, 'Recovered startup admission.')
+  assert.equal((await store.personalTerminalRecoveries('alice')).length, 1)
+})
+
+test('failed terminal ownership writes remove their own empty containers and free admission', async (t) => {
+  const { store, project } = await fixture(t)
+  const originalWrite = fs.writeFile
+  let attempts = 0
+  t.mock.method(fs, 'writeFile', async (target, content, options) => {
+    if (
+      path.basename(target) === 'ownership.json' &&
+      path.dirname(path.dirname(target)) === store.snapshotsDir
+    ) {
+      if (attempts++ % 2) await originalWrite(target, '{"partial":', options)
+      throw Object.assign(new Error('Disk is full'), { code: 'ENOSPC' })
+    }
+    return originalWrite(target, content, options)
+  })
+  syncBuiltinESMExports()
+  try {
+    for (let index = 0; index < 8; index++) {
+      await assert.rejects(
+        store.terminalSnapshot(
+          project.id,
+          'alice',
+          `failed-ownership-${index}`,
+        ),
+        { code: 'ENOSPC' },
+      )
+      assert.deepEqual(await fs.readdir(store.snapshotsDir), [])
+    }
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+  assert.deepEqual(await store.personalTerminalRecoveries('alice'), [])
+  const copy = await store.terminalSnapshot(
+    project.id,
+    'alice',
+    'ownership-after-repair',
+  )
+  await store.cleanupTerminalSnapshot(copy, { finalize: true })
+})
+
+test('failed terminal ownership writes preserve a replacement container with another inode', async (t) => {
+  const { store, project } = await fixture(t)
+  const container = path.join(store.snapshotsDir, 'replaced-before-ownership')
+  const displaced = container + '-displaced'
+  const originalWrite = fs.writeFile
+  t.mock.method(fs, 'writeFile', async (target, content, options) => {
+    if (target === path.join(container, 'ownership.json')) {
+      await fs.rename(container, displaced)
+      await fs.mkdir(container)
+      await originalWrite(path.join(container, 'keep.txt'), 'replacement data')
+      throw Object.assign(new Error('Ownership write failed'), {
+        code: 'ENOSPC',
+      })
+    }
+    return originalWrite(target, content, options)
+  })
+  syncBuiltinESMExports()
+  try {
+    await assert.rejects(
+      store.terminalSnapshot(project.id, 'alice', 'replaced-before-ownership'),
+      { code: 'ENOSPC' },
+    )
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+  assert.equal(
+    await fs.readFile(path.join(container, 'keep.txt'), 'utf8'),
+    'replacement data',
+  )
+  assert.deepEqual(await fs.readdir(displaced), [])
+  const copy = await store.terminalSnapshot(
+    project.id,
+    'alice',
+    'after-replaced-ownership',
+  )
+  await store.cleanupTerminalSnapshot(copy, { finalize: true })
+})
+
+test('a failed terminal capture drops only its own files and real dependency binding', async (t) => {
+  const f = await fixture(t)
+  const actual = await localTerminalDependencies(f)
+  const original = f.runtime.inheritDependencies
+  t.mock.method(f.runtime, 'inheritDependencies', async (...args) => {
+    await original(...args)
+    throw Object.assign(
+      new Error('Capture interrupted after dependency binding'),
+      {
+        code: 'EIO',
+      },
+    )
+  })
+  try {
+    await assert.rejects(
+      f.store.terminalSnapshot(f.project.id, 'alice', 'partial-bound-copy'),
+      { code: 'EIO' },
+    )
+  } finally {
+    t.mock.restoreAll()
+  }
+  await assert.rejects(
+    fs.stat(path.join(f.store.snapshotsDir, 'partial-bound-copy')),
+    {
+      code: 'ENOENT',
+    },
+  )
+  assert.equal(actual.dependencies.size, 0)
+  assert.equal(actual.dependencyRoot(f.project.root), f.project.root)
+  const copy = await f.store.terminalSnapshot(
+    f.project.id,
+    'alice',
+    'healthy-bound-copy',
+  )
+  await f.store.cleanupTerminalSnapshot(copy, { finalize: true })
+})
+
+test('a terminal capture collision preserves an existing recovery and does not occupy admission', async (t) => {
+  const { store, project } = await fixture(t)
+  const copy = await store.terminalSnapshot(
+    project.id,
+    'alice',
+    'existing-recovery',
+  )
+  const content = '-- original private recovery must be preserved\n'
+  await fs.writeFile(path.join(copy.root, 'Main.lean'), content)
+  await store.retainTerminalSnapshot(copy, 'Original recovery.')
+  for (let index = 0; index < 8; index++)
+    await assert.rejects(
+      store.terminalSnapshot(project.id, 'alice', copy.runId),
+      {
+        status: 409,
+      },
+    )
+  assert.equal(
+    (
+      await store.readTerminalRecoveryFile(
+        project.id,
+        'alice',
+        copy.runId,
+        'Main.lean',
+      )
+    ).content.toString(),
+    content,
+  )
+  const next = await store.terminalSnapshot(
+    project.id,
+    'alice',
+    'new-after-collision',
+  )
+  await store.cleanupTerminalSnapshot(next, { finalize: true })
 })
 
 test('terminal copies allow setup edits and reject publication after permission revocation', async (t) => {

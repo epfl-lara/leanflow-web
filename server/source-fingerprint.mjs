@@ -45,17 +45,43 @@ print(hashlib.sha256(json.dumps(files,separators=(',',':')).encode()).hexdigest(
 // Include auxiliary files and link targets, excluding generated Git/Lake state.
 export async function sourceFingerprint(root, options = {}) {
   options.signal?.throwIfAborted()
+  const timeoutMs = options.timeoutMs ?? 30_000
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000)
+    throw new RangeError(
+      'Project input scan timeout must be between 1 and 30000 milliseconds.',
+    )
+  const execution = execute('python3', ['-I', '-c', script, root], {
+    maxBuffer: 64 * 1024,
+    signal: options.signal,
+    killSignal: 'SIGKILL',
+  })
+  const child = execution.child
+  const closed = new Promise((resolve) => child.once('close', resolve))
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    child.kill('SIGKILL')
+  }, timeoutMs)
   try {
-    const { stdout } = await execute('python3', ['-I', '-c', script, root], {
-      maxBuffer: 64 * 1024,
-      signal: options.signal,
-    })
+    const { stdout } = await execution
     const fingerprint = stdout.trim()
     if (/^[a-f0-9]{64}$/.test(fingerprint)) return fingerprint
   } catch {
+    // Cancellation can reject execFile before close. Keep the file queue until
+    // this read-only helper has actually stopped, including after a deadline.
+    await closed
     options.signal?.throwIfAborted()
+    if (timedOut)
+      throw Object.assign(
+        new Error(
+          'Reading project inputs took too long. Retry the check, or remove large generated files from the project.',
+        ),
+        { status: 408 },
+      )
     // Filesystem races and permission failures must fail the check without
     // exposing host paths or Python diagnostics in the interface.
+  } finally {
+    clearTimeout(timer)
   }
   throw new Error(
     'Project inputs changed or could not be read during checking. Save your files and retry.',

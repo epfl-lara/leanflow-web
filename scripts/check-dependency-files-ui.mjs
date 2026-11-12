@@ -204,7 +204,19 @@ try {
     .locator('.editor-failure')
     .getByText(/Fixture editor initialization failed once\./)
     .waitFor()
+  assert.equal(
+    await page
+      .getByRole('button', { name: 'Restart Lean', exact: true })
+      .isDisabled(),
+    true,
+  )
   await open('Main.lean', 'projectValue')
+  assert.equal(
+    await page
+      .getByRole('button', { name: 'Restart Lean', exact: true })
+      .isEnabled(),
+    true,
+  )
   await readonly(dependency, 'CLI_LIBRARY_SOURCE')
   report.checks.push(
     'After a file fails to open, both project files and other dependencies remain usable without reloading the page.',

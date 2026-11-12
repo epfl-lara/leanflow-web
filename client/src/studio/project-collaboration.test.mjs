@@ -4,6 +4,7 @@ import test from 'node:test'
 import ts from 'typescript'
 import * as Y from 'yjs'
 import { createHash } from 'node:crypto'
+import { ProjectDocuments } from '../../../server/project-documents.mjs'
 import {
   replaceDocumentText,
   documentTextEdit,
@@ -57,6 +58,14 @@ function deltaWire(doc, vector, extra = {}) {
   return message
 }
 
+function openedWire(doc, socket = Socket.instances.at(-1)) {
+  return wire(doc, undefined, {
+    openRequestId: socket.sent
+      .filter((message) => message.type === 'open')
+      .at(-1)?.requestId,
+  })
+}
+
 class Socket extends EventTarget {
   static OPEN = 1
   static instances = []
@@ -91,12 +100,40 @@ function fixture(t, initial = 'base source\n', options = {}) {
   globalThis.location = { protocol: 'http:', host: 'fixture.test' }
   Socket.instances = []
   const cleanups = []
+  const refs = []
+  const effects = []
+  const states = []
+  let refIndex = 0,
+    effectIndex = 0,
+    stateIndex = 0
   const react = {
     useCallback: (fn) => fn,
-    useRef: (value) => ({ current: value }),
-    useState: (value) => [value, () => {}],
-    useEffect: (fn) => {
-      cleanups.push(fn())
+    useRef: (value) => {
+      const index = refIndex++
+      return (refs[index] ??= { current: value })
+    },
+    useState: (value) => {
+      const index = stateIndex++
+      if (!(index in states)) states[index] = value
+      return [
+        states[index],
+        (update) => {
+          states[index] =
+            typeof update === 'function' ? update(states[index]) : update
+        },
+      ]
+    },
+    useEffect: (fn, dependencies) => {
+      const index = effectIndex++
+      const previous = effects[index]
+      if (
+        previous &&
+        dependencies.every((value, i) => Object.is(value, previous[i]))
+      )
+        return
+      cleanups[index]?.()
+      effects[index] = dependencies
+      cleanups[index] = fn()
     },
   }
   const { useProjectCollaboration } = transpile(
@@ -122,26 +159,37 @@ function fixture(t, initial = 'base source\n', options = {}) {
     hash: hash(initial),
     generation: 1,
   })
-  const scope = store.getSnapshot().scope
-  const hook = useProjectCollaboration({
-    store,
-    scope,
-    enabled: true,
-    canEdit: options.canEdit ?? true,
-    onAccessChanged: options.onAccessChanged,
-  })
+  let lastCanEdit = options.canEdit ?? true,
+    lastEnabled = true
+  const rerender = (canEdit = lastCanEdit, enabled = lastEnabled) => {
+    lastCanEdit = canEdit
+    lastEnabled = enabled
+    refIndex = 0
+    effectIndex = 0
+    stateIndex = 0
+    return useProjectCollaboration({
+      store,
+      scope: store.getSnapshot().scope,
+      enabled,
+      canEdit,
+      onAccessChanged: options.onAccessChanged,
+    })
+  }
+  const hook = rerender()
   const socket = Socket.instances.at(-1)
   const server = new Y.Doc()
   server.getText('source').insert(0, initial)
-  socket.receive({ type: 'ready' })
-  socket.receive(wire(server))
+  if (!options.deferReady) {
+    socket.receive({ type: 'ready' })
+    socket.receive(openedWire(server, socket))
+  }
   t.after(() => {
     for (const cleanup of cleanups.reverse()) cleanup?.()
     server.destroy()
     globalThis.WebSocket = previous.WebSocket
     globalThis.location = previous.location
   })
-  return { store, socket, server, hook }
+  return { store, socket, server, hook, rerender }
 }
 
 test('remote updates arriving before the send debounce preserve both local typing and remote text', async (t) => {
@@ -262,7 +310,7 @@ test('rejected persistence preserves its draft and allows an explicit reload to 
         generation: 2,
       })
       const recovered = hook.flush()
-      socket.receive(wire(server))
+      socket.receive(openedWire(server, socket))
       assert.equal(await recovered, true)
       assert.deepEqual(store.dirty(), [])
     })
@@ -288,7 +336,7 @@ test('temporary capacity errors reconnect and replay unacknowledged edits', asyn
   const reopened = Socket.instances.at(-1)
   assert.notEqual(reopened, socket)
   reopened.receive({ type: 'ready' })
-  reopened.receive(wire(server))
+  reopened.receive(openedWire(server, reopened))
   const replayed = reopened.sent
     .filter((message) => message.type === 'update')
     .at(-1)
@@ -330,7 +378,7 @@ test('offline typing in an initialized live file cannot fall back to a REST save
   const reconnect = Socket.instances.at(-1)
   assert.notEqual(reconnect, socket)
   reconnect.receive({ type: 'ready' })
-  reconnect.receive(wire(server))
+  reconnect.receive(openedWire(server, reconnect))
   const updates = reconnect.sent.filter((message) => message.type === 'update')
   assert.equal(updates.length, 1)
   Y.applyUpdate(
@@ -406,7 +454,7 @@ test('a policy close refreshes membership then reconnects an account that still 
   const reconnect = Socket.instances.at(-1)
   assert.notEqual(reconnect, socket)
   reconnect.receive({ type: 'ready' })
-  reconnect.receive(wire(server))
+  reconnect.receive(openedWire(server, reconnect))
   store.change('Main.lean', 'promoted editor\nbase source\n')
   const flushing = hook.flush()
   const request = reconnect.sent
@@ -572,4 +620,601 @@ test('selective undo captures raw offline typing before applying earlier local h
   assert.equal(hook.redo('Main.lean'), true)
   assert.equal(store.getSnapshot().file.content, 'LOCAL_OFFLINE\nbase source\n')
   await assert.rejects(hook.flush(), /connection to return/)
+})
+
+function serviceFixture(t, initial) {
+  let content = initial
+  const packets = []
+  const workspaces = {
+    get() {
+      return { id: 'project', accessRole: 'editor' }
+    },
+    requireEditor() {
+      return this.get()
+    },
+    subscribeChanges() {
+      return () => {}
+    },
+    async readFile() {
+      return { content, hash: hash(content) }
+    },
+    async writeFile(_id, _actor, _path, value, expectedHash, options) {
+      options?.assertAuthorized?.()
+      assert.equal(hash(content), expectedHash)
+      content = value
+      return { content, hash: hash(content) }
+    },
+  }
+  const service = new ProjectDocuments({ workspaces })
+  t.after(() => service.close())
+  const client = {
+    projectId: 'project',
+    actor: 'account',
+    paths: new Set(),
+    vectors: new Map(),
+    ws: {
+      readyState: 1,
+      bufferedAmount: 0,
+      send(raw) {
+        packets.push(JSON.parse(raw))
+      },
+    },
+  }
+  return {
+    service,
+    client,
+    packets,
+    source: () => content,
+    restSave(value) {
+      content = value
+    },
+    deliver(socket) {
+      for (const packet of packets.splice(0)) socket.receive(packet)
+    },
+  }
+}
+
+test('reload generations ignore queued deltas and stale full opens before accepting their own full baseline', async (t) => {
+  const { store, socket, server, hook } = fixture(t)
+  const staleOpen = openedWire(server, socket)
+  const vector = Y.encodeStateVector(server)
+  server
+    .getText('source')
+    .insert(server.getText('source').length, '-- remote\n')
+  const canonical = server.getText('source').toString()
+  store.setFile({
+    ...store.getSnapshot().file,
+    content: canonical,
+    savedContent: canonical,
+    hash: hash(canonical),
+    generation: 2,
+  })
+  socket.receive(deltaWire(server, vector))
+  socket.receive(deltaWire(server, vector))
+  socket.receive(staleOpen)
+  assert.equal(store.getSnapshot().file.content, canonical)
+  assert.equal(
+    socket.sent.filter((message) => message.type === 'update').length,
+    0,
+  )
+  assert.notEqual(
+    openedWire(server, socket).openRequestId,
+    staleOpen.openRequestId,
+  )
+  socket.receive(openedWire(server, socket))
+  socket.receive(staleOpen)
+  assert.equal(store.getSnapshot().file.content, canonical)
+  assert.equal(await hook.flush(), true)
+  assert.equal(
+    socket.sent.filter((message) => message.type === 'update').length,
+    0,
+  )
+})
+
+test('a pending initial HTTP save retires its path before live admission and keeps private undo', async (t) => {
+  const baseline = 'line 1\nline 2\nline 3\nline 4\nline 5\nline 6\n'
+  const draft = 'LOCAL\n' + baseline
+  const { store, socket, hook, rerender } = fixture(t, baseline, {
+    deferReady: true,
+  })
+  const backend = serviceFixture(t, baseline)
+  store.change('Main.lean', draft)
+  assert.equal(await hook.flush(), false)
+  const snapshots = store.dirty()
+  socket.receive({ type: 'ready' })
+  const opening = socket.sent.find((message) => message.type === 'open')
+  if (opening) {
+    await backend.service.message(backend.client, opening)
+    backend.deliver(socket)
+  }
+  backend.restSave(draft)
+  store.saved(snapshots, [{ path: 'Main.lean', hash: hash(draft) }])
+  for (const update of socket.sent.filter(
+    (message) => message.type === 'update',
+  ))
+    await backend.service.message(backend.client, update)
+  assert.equal(backend.source(), draft)
+  assert.equal(hook.undo('Main.lean'), true)
+  assert.equal(store.getSnapshot().file.content, baseline)
+  assert.equal(hook.redo('Main.lean'), true)
+  assert.equal(store.getSnapshot().file.content, draft)
+  store.change('Main.lean', draft + 'later local\n')
+  assert.equal(await hook.flush(), false)
+  assert.equal(
+    socket.sent.filter((message) => message.type === 'open').length,
+    0,
+  )
+  rerender(false)
+  const reader = Socket.instances.at(-1)
+  reader.receive({ type: 'ready' })
+  const editing = rerender(true)
+  const editor = Socket.instances.at(-1)
+  editor.receive({ type: 'ready' })
+  assert.equal(
+    editor.sent.filter((message) => message.type === 'open').length,
+    0,
+  )
+  assert.equal(await editing.flush(), false)
+  assert.equal(
+    editing.undo('Main.lean'),
+    true,
+    'never expose a retired model native undo stack after reinitialization',
+  )
+})
+
+test('over-capacity ordinary drafts stay on HTTP saving while a saved live slot becomes free', async (t) => {
+  const { store, socket, hook } = fixture(t)
+  store.register(
+    Array.from({ length: 16 }, (_, index) => ({
+      path: `File${index}.lean`,
+      content: '-- saved\n',
+      hash: hash('-- saved\n'),
+      unsaved: false,
+    })),
+  )
+  assert.equal(await hook.flush(), true)
+  const opened = new Set(
+    socket.sent
+      .filter((message) => message.type === 'open')
+      .map((message) => message.path),
+  )
+  const ordinary = [...store.getSnapshot().buffers.keys()].find(
+    (path) => !opened.has(path),
+  )
+  assert.ok(ordinary)
+  store.change(ordinary, '-- ordinary pending save\n')
+  assert.equal(await hook.flush(), false)
+  const snapshots = store.dirty()
+  store.remove('Main.lean')
+  assert.equal(await hook.flush(), false)
+  assert.ok(
+    !socket.sent.some(
+      (message) => message.type === 'open' && message.path === ordinary,
+    ),
+  )
+  store.saved(snapshots, [{ path: ordinary, hash: hash(snapshots[0].content) }])
+  assert.equal(hook.undo(ordinary), true)
+  assert.equal(store.getSnapshot().buffers.get(ordinary).content, '-- saved\n')
+})
+
+test('a permission-triggered new hook cannot expose native shared undo after initial capacity rejection', async (t) => {
+  const { store, socket, server, rerender } = fixture(t)
+  const vector = Y.encodeStateVector(server)
+  server.getText('source').insert(server.getText('source').length, 'REMOTE\n')
+  socket.receive(deltaWire(server, vector))
+  rerender(false)
+  const readOnlySocket = Socket.instances.at(-1)
+  readOnlySocket.receive({ type: 'ready' })
+  readOnlySocket.receive(openedWire(server, readOnlySocket))
+  const editing = rerender(true)
+  const editingSocket = Socket.instances.at(-1)
+  editingSocket.receive({ type: 'ready' })
+  editingSocket.receive({
+    type: 'error',
+    path: 'Main.lean',
+    status: 429,
+    message: 'Live capacity full.',
+  })
+  const before = store.getSnapshot().file.content
+  assert.equal(
+    editing.undo('Main.lean'),
+    true,
+    'consume undo instead of falling through to Monaco imported edits',
+  )
+  assert.equal(store.getSnapshot().file.content, before)
+})
+
+test('lost-ack replay fits the envelope even when private undo retains a large deleted baseline', async (t) => {
+  const previous = 'a'.repeat(6 * 1024 * 1024)
+  const next = 'b'.repeat(6 * 1024 * 1024)
+  const { store, socket, server, hook } = fixture(t, previous)
+  store.change('Main.lean', '')
+  const deleting = hook.flush()
+  const deletion = socket.sent
+    .filter((message) => message.type === 'update')
+    .at(-1)
+  Y.applyUpdate(server, new Uint8Array(Buffer.from(deletion.update, 'base64')))
+  socket.receive(wire(server, undefined, { ack: deletion.requestId }))
+  await deleting
+  store.change('Main.lean', next)
+  const inserting = hook.flush()
+  const insertion = socket.sent
+    .filter((message) => message.type === 'update')
+    .at(-1)
+  assert.ok(insertion.update.length < 12 * 1024 * 1024)
+  Y.applyUpdate(server, new Uint8Array(Buffer.from(insertion.update, 'base64')))
+  socket.close(1006)
+  await assert.rejects(inserting, /interrupted/)
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reopened = Socket.instances.at(-1)
+  reopened.receive({ type: 'ready' })
+  reopened.receive(openedWire(server, reopened))
+  const replay = reopened.sent
+    .filter((message) => message.type === 'update')
+    .at(-1)
+  assert.ok(replay)
+  assert.ok(
+    replay.update.length < 12 * 1024 * 1024,
+    `replay has ${replay.update.length} bytes`,
+  )
+  Y.applyUpdate(server, new Uint8Array(Buffer.from(replay.update, 'base64')))
+  reopened.receive(wire(server, undefined, { ack: replay.requestId }))
+  assert.equal(await hook.flush(), true)
+  assert.equal(hash(server.getText('source').toString()), hash(next))
+})
+
+test('garbage-collected offline replay preserves causal ranges and local undo across several unacknowledged large replacements', async (t) => {
+  const previous = 'a'.repeat(6 * 1024 * 1024)
+  const sources = ['b', 'c', 'd'].map((letter) =>
+    letter.repeat(6 * 1024 * 1024),
+  )
+  const { store, socket, hook } = fixture(t, previous, { deferReady: true })
+  const backend = serviceFixture(t, previous)
+  socket.receive({ type: 'ready' })
+  await backend.service.message(
+    backend.client,
+    socket.sent.find((message) => message.type === 'open'),
+  )
+  backend.deliver(socket)
+  socket.close(1006)
+  for (const source of sources) {
+    store.change('Main.lean', '')
+    hook.undo('Main.lean')
+    hook.redo('Main.lean')
+    store.change('Main.lean', source)
+    hook.undo('Main.lean')
+    hook.redo('Main.lean')
+    assert.equal(hash(store.getSnapshot().file.content), hash(source))
+  }
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reopened = Socket.instances.at(-1)
+  reopened.receive({ type: 'ready' })
+  await backend.service.message(
+    backend.client,
+    reopened.sent.find((message) => message.type === 'open'),
+  )
+  backend.deliver(reopened)
+  const replay = reopened.sent
+    .filter((message) => message.type === 'update')
+    .at(-1)
+  assert.ok(replay)
+  assert.ok(
+    replay.update.length < 12 * 1024 * 1024,
+    `replay has ${replay.update.length} bytes`,
+  )
+  await backend.service.message(backend.client, replay)
+  backend.deliver(reopened)
+  assert.equal(await hook.flush(), true)
+  assert.equal(hash(backend.source()), hash(sources.at(-1)))
+  assert.equal(hook.undo('Main.lean'), true)
+  assert.equal(store.getSnapshot().file.content, '')
+  const undo = reopened.sent
+    .filter((message) => message.type === 'update')
+    .at(-1)
+  await backend.service.message(backend.client, undo)
+  backend.deliver(reopened)
+  assert.equal(await hook.flush(), true)
+  assert.equal(backend.source(), '')
+  assert.equal(hook.undo('Main.lean'), true)
+  assert.equal(hash(store.getSnapshot().file.content), hash(sources.at(-2)))
+})
+
+test('a previously live draft waits for setup-recreated socket admission and keeps receiving concurrent edits', async (t) => {
+  const { store, socket, server, rerender } = fixture(t)
+  socket.close(1006)
+  store.change('Main.lean', 'SETUP_DRAFT\nbase source\n')
+  rerender(true, false)
+  const resumed = rerender(true, true)
+  const warming = Socket.instances.at(-1)
+  await assert.rejects(resumed.flush(), /connection to return/)
+  warming.receive({ type: 'ready' })
+  warming.receive(openedWire(server, warming))
+  const draft = warming.sent
+    .filter((message) => message.type === 'update')
+    .at(-1)
+  assert.ok(draft)
+  Y.applyUpdate(server, new Uint8Array(Buffer.from(draft.update, 'base64')))
+  warming.receive(wire(server, undefined, { ack: draft.requestId }))
+  assert.equal(await resumed.flush(), true)
+  const vector = Y.encodeStateVector(server)
+  server.getText('source').insert(0, 'OTHER_EDITOR\n')
+  warming.receive(deltaWire(server, vector))
+  assert.match(store.getSnapshot().file.content, /OTHER_EDITOR/)
+  store.change('Main.lean', store.getSnapshot().file.content + 'AFTER_SETUP\n')
+  const flushing = resumed.flush()
+  const later = warming.sent
+    .filter((message) => message.type === 'update')
+    .at(-1)
+  assert.notEqual(later.requestId, draft.requestId)
+  Y.applyUpdate(server, new Uint8Array(Buffer.from(later.update, 'base64')))
+  warming.receive(wire(server, undefined, { ack: later.requestId }))
+  assert.equal(await flushing, true)
+  assert.match(server.getText('source').toString(), /OTHER_EDITOR/)
+  assert.match(server.getText('source').toString(), /SETUP_DRAFT/)
+  assert.match(server.getText('source').toString(), /AFTER_SETUP/)
+})
+
+test('same-generation authoritative HTTP refreshes do not become duplicate local live edits', async (t) => {
+  for (const order of ['delta-first', 'publish-first'])
+    await t.test(order, async (t) => {
+      const { store, socket, server, hook } = fixture(t)
+      const originalGeneration = store.getSnapshot().file.generation
+      const vector = Y.encodeStateVector(server)
+      server
+        .getText('source')
+        .insert(server.getText('source').length, 'TERMINAL_EDIT\n')
+      const canonical = server.getText('source').toString()
+      store.setFile((previous) => ({
+        ...previous,
+        content: canonical,
+        savedContent: canonical,
+        hash: hash(canonical),
+      }))
+      if (order === 'publish-first') void hook.flush().catch(() => {})
+      socket.receive(deltaWire(server, vector))
+      assert.equal(store.getSnapshot().file.generation, originalGeneration)
+      assert.equal(store.getSnapshot().file.content, canonical)
+      assert.equal(
+        socket.sent.filter((message) => message.type === 'update').length,
+        0,
+      )
+      socket.receive(openedWire(server, socket))
+      assert.equal(await hook.flush(), true)
+      assert.equal(store.getSnapshot().file.content, canonical)
+      assert.equal(
+        socket.sent.filter((message) => message.type === 'update').length,
+        0,
+      )
+    })
+})
+
+test('a removed clean file stays blocked until an explicit reload and file 404 does not refresh project access', async (t) => {
+  let accessRefreshes = 0
+  const { store, socket, server, hook } = fixture(t, 'base source\n', {
+    onAccessChanged() {
+      accessRefreshes++
+    },
+  })
+  const removal = {
+    type: 'error',
+    path: 'Main.lean',
+    status: 409,
+    message: 'Shared file removed.',
+  }
+  socket.receive(removal)
+  for (let index = 0; index < 5; index++) {
+    store.register([
+      {
+        path: `Other${index}.lean`,
+        content: '-- saved\n',
+        hash: hash('-- saved\n'),
+        unsaved: false,
+      },
+    ])
+    await hook.flush().catch(() => {})
+    socket.receive({ ...removal, status: 404 })
+  }
+  const opens = () =>
+    socket.sent.filter(
+      (message) => message.type === 'open' && message.path === 'Main.lean',
+    )
+  assert.equal(opens().length, 1)
+  assert.equal(
+    accessRefreshes,
+    1,
+    'only initial admission refreshes access for a file-level 404',
+  )
+  store.setFile({ ...store.getSnapshot().file, generation: 2 })
+  assert.equal(await hook.flush(), true)
+  assert.equal(opens().length, 2)
+  socket.receive(openedWire(server, socket))
+  store.change('Main.lean', 'RESTORED_FILE_EDIT\nbase source\n')
+  const flushing = hook.flush()
+  const update = socket.sent
+    .filter((message) => message.type === 'update')
+    .at(-1)
+  assert.ok(update)
+  Y.applyUpdate(server, new Uint8Array(Buffer.from(update.update, 'base64')))
+  socket.receive(wire(server, undefined, { ack: update.requestId }))
+  assert.equal(await flushing, true)
+  assert.match(server.getText('source').toString(), /RESTORED_FILE_EDIT/)
+})
+
+test('ordinary-saving mode remains visible through successful live packets and reconnect until a new workspace visit', async (t) => {
+  const { store, socket, server, hook, rerender } = fixture(
+    t,
+    'base source\n',
+    { deferReady: true },
+  )
+  const draft = 'LOCAL_HTTP_SAVE\nbase source\n'
+  store.change('Main.lean', draft)
+  assert.equal(await hook.flush(), false)
+  const saved = store.getSnapshot().file
+  store.saved([saved], [{ path: saved.path, hash: hash(draft) }])
+  replaceDocumentText(server.getText('source'), draft)
+  assert.match(rerender().issue, /normal.*saving/)
+  socket.receive({ type: 'ready' })
+  assert.match(rerender().issue, /normal.*saving/)
+  assert.match(
+    rerender().issue,
+    /Switch to another project and back, or reload this page/,
+  )
+  store.setFile({
+    path: 'Other.lean',
+    content: '-- other\n',
+    savedContent: '-- other\n',
+    hash: hash('-- other\n'),
+    generation: 2,
+  })
+  assert.equal(await hook.flush(), true)
+  const other = new Y.Doc()
+  t.after(() => other.destroy())
+  other.getText('source').insert(0, '-- other\n')
+  const openOther = (connection) =>
+    wire(other, undefined, {
+      path: 'Other.lean',
+      openRequestId: connection.sent
+        .filter(
+          (message) => message.type === 'open' && message.path === 'Other.lean',
+        )
+        .at(-1)?.requestId,
+    })
+  socket.receive(openOther(socket))
+  const vector = Y.encodeStateVector(other)
+  other
+    .getText('source')
+    .insert(other.getText('source').length, '-- remote other\n')
+  socket.receive(deltaWire(other, vector, { path: 'Other.lean' }))
+  assert.match(rerender().issue, /normal.*saving/)
+  socket.close(1006)
+  assert.match(rerender().issue, /interrupted/)
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reconnect = Socket.instances.at(-1)
+  reconnect.receive({ type: 'ready' })
+  reconnect.receive(openOther(reconnect))
+  assert.match(rerender().issue, /normal.*saving/)
+  store.setFile({
+    ...saved,
+    savedContent: draft,
+    hash: hash(draft),
+    generation: 3,
+  })
+  assert.equal(await hook.flush(), true)
+  assert.match(rerender().issue, /normal.*saving/)
+  assert.equal(
+    reconnect.sent.filter(
+      (message) => message.type === 'open' && message.path === 'Main.lean',
+    ).length,
+    0,
+    'reloading the file does not silently rejoin live editing',
+  )
+  store.selectProject('other-project')
+  rerender()
+  assert.equal(rerender().issue, null)
+  store.selectProject('project')
+  store.setFile({
+    ...saved,
+    savedContent: draft,
+    hash: hash(draft),
+    generation: 4,
+  })
+  const nextVisit = rerender()
+  const fresh = Socket.instances.at(-1)
+  fresh.receive({ type: 'ready' })
+  assert.equal(
+    fresh.sent.filter(
+      (message) => message.type === 'open' && message.path === 'Main.lean',
+    ).length,
+    1,
+  )
+  fresh.receive(openedWire(server, fresh))
+  assert.equal(await nextVisit.flush(), true)
+  assert.equal(rerender().issue, null)
+})
+
+test('dirty fallback-only reconnect restores ordinary-saving guidance before and after its next HTTP save', async (t) => {
+  const { store, socket, hook, rerender } = fixture(t, 'base source\n', {
+    deferReady: true,
+  })
+  store.change('Main.lean', 'FIRST_HTTP_EDIT\nbase source\n')
+  assert.equal(await hook.flush(), false)
+  let snapshot = store.getSnapshot().file
+  store.saved(
+    [snapshot],
+    [{ path: snapshot.path, hash: hash(snapshot.content) }],
+  )
+  socket.receive({ type: 'ready' })
+  assert.match(rerender().issue, /normal.*saving/)
+  socket.close(1006)
+  store.change(
+    'Main.lean',
+    store.getSnapshot().file.content + 'SECOND_HTTP_EDIT\n',
+  )
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reconnect = Socket.instances.at(-1)
+  reconnect.receive({ type: 'ready' })
+  assert.equal(rerender().connected, true)
+  assert.match(rerender().issue, /normal.*saving/)
+  assert.match(
+    rerender().issue,
+    /Switch to another project and back, or reload this page/,
+  )
+  assert.equal(await hook.flush(), false)
+  snapshot = store.getSnapshot().file
+  store.saved(
+    [snapshot],
+    [{ path: snapshot.path, hash: hash(snapshot.content) }],
+  )
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.match(rerender().issue, /normal.*saving/)
+  assert.doesNotMatch(rerender().issue, /interrupted|reconnecting/)
+  assert.equal(
+    reconnect.sent.filter((message) => message.type === 'open').length,
+    0,
+  )
+})
+
+test('ordinary-saving reconnect guidance does not replace a blocking shared-file failure', async (t) => {
+  const { store, socket, server, hook, rerender } = fixture(t)
+  store.register([
+    {
+      path: 'Main.lean',
+      content: 'base source\n',
+      hash: hash('base source\n'),
+      unsaved: false,
+    },
+  ])
+  store.setFile({
+    path: 'Overflow.lean',
+    content: '-- ordinary\n',
+    savedContent: '-- ordinary\n',
+    hash: hash('-- ordinary\n'),
+    generation: 2,
+  })
+  assert.equal(await hook.flush(), true)
+  socket.receive({
+    type: 'error',
+    path: 'Overflow.lean',
+    status: 429,
+    message: 'Live capacity full.',
+  })
+  store.change('Overflow.lean', '-- dirty ordinary draft\n')
+  store.change('Main.lean', 'BLOCKED_LOCAL_DRAFT\nbase source\n')
+  socket.receive({
+    type: 'error',
+    path: 'Main.lean',
+    status: 409,
+    message: 'Conflict retained across reconnect.',
+  })
+  socket.close(1006)
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reconnect = Socket.instances.at(-1)
+  reconnect.receive({ type: 'ready' })
+  reconnect.receive(openedWire(server, reconnect))
+  assert.doesNotMatch(rerender().issue, /normal.*saving/)
+  await assert.rejects(hook.flush(), /Conflict retained across reconnect/)
+  assert.match(
+    store.getSnapshot().buffers.get('Main.lean').content,
+    /BLOCKED_LOCAL_DRAFT/,
+  )
 })

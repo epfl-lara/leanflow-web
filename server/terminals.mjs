@@ -15,6 +15,23 @@ const workerScript = readFileSync(
 const maxInput = 16 * 1024
 const outputWindow = 256 * 1024
 
+export function validateTerminalOpeningId(value) {
+  if (value === undefined) return undefined
+  if (
+    typeof value !== 'string' ||
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(
+      value,
+    )
+  )
+    throw Object.assign(
+      new Error(
+        'This terminal request is invalid. Reopen the terminal and retry.',
+      ),
+      { status: 400 },
+    )
+  return value.toLowerCase()
+}
+
 export class Terminals {
   constructor({
     runtime,
@@ -69,14 +86,14 @@ export class Terminals {
       )
   }
 
-  upgrade(req, socket, head, project, actor = project.owner) {
+  upgrade(req, socket, head, project, actor = project.owner, options = {}) {
     this.wss.handleUpgrade(req, socket, head, (ws) =>
-      this.connect(ws, project, actor, req),
+      this.connect(ws, project, actor, req, options),
     )
   }
 
-  connect(ws, project, actor = project.owner, request) {
-    const session = { ws, projectId: project.id, actor }
+  connect(ws, project, actor = project.owner, request, { openingId } = {}) {
+    const session = { ws, projectId: project.id, actor, openingId }
     this.sessions.add(session)
     let child
     const assertAuthenticated = () => {
@@ -418,13 +435,19 @@ export class Terminals {
     session.startup.catch(() => {})
   }
 
-  async closeProject(projectId, actor) {
+  async closeProject(projectId, actor, { openingId } = {}) {
     await Promise.all(
       [...this.sessions]
         .filter(
           (session) =>
             session.projectId === projectId &&
-            (actor === undefined || session.actor === actor),
+            (actor === undefined || session.actor === actor) &&
+            (openingId === undefined ||
+              session.openingId === openingId ||
+              // Reconnects have a new ID, but a closed predecessor may still
+              // need its failed worker cleanup or final publication retried.
+              // Other tabs with an open socket retain their own live shells.
+              session.ws.readyState !== 1),
         )
         .map(async (session) => {
           session.ws.close(1000, 'Terminal closed')

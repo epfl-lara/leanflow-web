@@ -1369,7 +1369,14 @@ export class WorkspaceStore {
           )
       // Terminal recovery belongs to its initiating account, independently of
       // project membership and the shared project's lifetime.
-      if (manifest?.purpose === 'terminal') continue
+      if (manifest?.purpose === 'terminal') {
+        // Older recoveries may still have a binding to this project's cache.
+        // Retained files no longer need it, but an open copy still does.
+        if (!this.terminalCopies.has(name) && (await exists(manifest.root))) {
+          await this.#releaseTerminalDependencies(manifest.root)
+        }
+        continue
+      }
       snapshots.push(name)
     }
     return snapshots
@@ -3079,7 +3086,7 @@ export class WorkspaceStore {
     timeoutMs = 900000,
     network = 'none',
     env = {},
-    { emptyRepositoryClone = false } = {},
+    { emptyRepositoryClone = false, queue = true } = {},
   ) {
     const label = setupCommandLabel(args, { gitCommand: args[GIT_ARGS.length] })
     const onOutput = (output) =>
@@ -3101,6 +3108,7 @@ export class WorkspaceStore {
             timeoutMs,
             network,
             emptyRepositoryClone,
+            queue,
             signal: this.preparationControllers.get(project.id)?.signal,
             ...(args[0] !== 'git' && project.repairedConfiguration
               ? { readOnlyWorkspace: true, writeLakeCache: true }
@@ -4322,7 +4330,7 @@ export class WorkspaceStore {
     })
   }
 
-  async gitStatus(id, owner) {
+  async gitStatus(id, owner, { queue = true } = {}) {
     const project = this.get(id, owner)
     this.#ready(project)
     if (!(await exists(path.join(this.repositoryRoot(project), '.git'))))
@@ -4344,6 +4352,9 @@ export class WorkspaceStore {
         '-z',
       ],
       30000,
+      'none',
+      {},
+      { queue },
     )
     const records = status.stdout.split('\0').filter(Boolean)
     const branchLine = records[0]?.startsWith('## ')
@@ -4383,7 +4394,7 @@ export class WorkspaceStore {
     const head = await this.runtime.run(
       this.repositoryRoot(project),
       [...GIT_ARGS, 'rev-parse', '--verify', 'HEAD'],
-      { network: 'none', timeoutMs: 30000 },
+      { network: 'none', timeoutMs: 30000, queue },
     )
     const revision =
       head.code === 0 && /^[a-f0-9]{40,64}$/.test(head.stdout.trim())
@@ -4403,6 +4414,9 @@ export class WorkspaceStore {
               ...visible,
             ],
             30000,
+            'none',
+            {},
+            { queue },
           )
         ).stdout
       : ''
@@ -4477,7 +4491,7 @@ export class WorkspaceStore {
     this.#ready(project)
     validateId(runId, 'terminal')
     signal?.throwIfAborted()
-    let snapshot
+    let snapshot, reservation, createdContainer
     await this.#locked(`\0terminal-admission\0${actor}`, async () => {
       const retained = await this.#terminalRecoveryReceipts(actor, undefined, {
         includeActive: true,
@@ -4499,16 +4513,20 @@ export class WorkspaceStore {
         fail('A private terminal already exists for this run.', 409)
       starting.add(runId)
       this.terminalStarts.set(actor, starting)
-      this.terminalCopies.set(runId, {
+      reservation = {
         actor,
         projectId: id,
         phase: 'starting',
-      })
+      }
+      this.terminalCopies.set(runId, reservation)
     })
     try {
       snapshot = await this.#capture(project, runId, actor, {
         purpose: 'terminal',
         signal,
+        onClaimed: (identity) => {
+          createdContainer = identity
+        },
       })
       signal?.throwIfAborted()
       this.requireEditor(id, actor)
@@ -4538,23 +4556,53 @@ export class WorkspaceStore {
       )
       return snapshot
     } catch (error) {
-      if (snapshot)
-        await this.cleanupTerminalSnapshot(snapshot, { finalize: true }).catch(
-          () => {},
-        )
-      else {
-        // #capture writes ownership before copying; do not retain an aborted,
-        // incomplete copy that was never handed to a worker.
-        const container = path.join(this.snapshotsDir, runId)
-        const claim = await storedManifest(
-          this.snapshotsDir,
-          runId,
-          'ownership.json',
-        )
-        if (claim?.projectId === id && claim.actor === actor) {
-          await removeDisposableTree(container)
-          this.terminalCopies.delete(runId)
+      try {
+        if (snapshot)
+          await this.cleanupTerminalSnapshot(snapshot, {
+            finalize: true,
+          }).catch(() => {})
+        else if (createdContainer) {
+          // Exclusive mkdir identifies our container even if its first marker
+          // write failed. Never clean an existing run or a replaced directory.
+          const container = path.join(this.snapshotsDir, runId)
+          const root = path.join(container, 'workspace')
+          const current = await exists(container)
+          if (
+            current?.isDirectory() &&
+            !current.isSymbolicLink() &&
+            current.dev === createdContainer.dev &&
+            current.ino === createdContainer.ino &&
+            (await fs.realpath(container)) === container
+          ) {
+            const claim = await storedManifest(
+              this.snapshotsDir,
+              runId,
+              'ownership.json',
+            )
+            if (
+              claim?.projectId === id &&
+              claim.owner === project.owner &&
+              claim.actor === actor &&
+              claim.runId === runId &&
+              claim.root === root
+            ) {
+              if (await exists(root))
+                await this.#releaseTerminalDependencies(root)
+              await removeDisposableTree(container)
+            } else if (!claim && !(await exists(root))) {
+              // A failed marker write precedes all workspace content. Remove
+              // only its partial file, then require the container to be empty.
+              await fs.rm(path.join(container, 'ownership.json'), {
+                force: true,
+              })
+              await fs.rmdir(container)
+            }
+          }
         }
+      } finally {
+        // Reservations are ours even when mkdir/ownership creation failed.
+        if (this.terminalCopies.get(runId) === reservation)
+          this.terminalCopies.delete(runId)
       }
       throw error
     } finally {
@@ -4680,6 +4728,11 @@ export class WorkspaceStore {
     const { manifest, container } = await this.#manifest(snapshot)
     if (manifest.purpose !== 'terminal')
       fail('Invalid private terminal copy.', 403)
+    if (!active) {
+      // Recovery ZIPs contain project files, not dependency mounts. Once the
+      // worker has stopped, retaining a copy must not retain the shared project.
+      await this.#releaseTerminalDependencies(manifest.root)
+    }
     const receipt = {
       runId: manifest.runId,
       projectId: manifest.projectId,
@@ -4748,6 +4801,7 @@ export class WorkspaceStore {
     validateId(id)
     validateId(runId, 'terminal')
     validateOwner(actor)
+    this.assertActorActive?.(actor)
     const root = path.join(this.snapshotsDir, runId, 'workspace')
     let manifest
     try {
@@ -4766,6 +4820,8 @@ export class WorkspaceStore {
         'This terminal is open or finishing its file updates. Wait for it to close before recovering or discarding its private copy.',
         409,
       )
+    this.#assertTerminalStopped(root)
+    this.assertActorActive?.(actor)
     return {
       ...manifest,
       id,
@@ -4784,6 +4840,8 @@ export class WorkspaceStore {
   async readTerminalRecoveryFile(id, actor, runId, filename, options = {}) {
     const snapshot = await this.terminalRecovery(id, actor, runId)
     return workspaceFileBytes(await guarded(snapshot.root, filename), {
+      tooLargeMessage:
+        'This recovery file exceeds the 32 MiB download limit. Ask the server administrator to recover it from this private copy.',
       ...options,
       requireUnchanged: true,
     })
@@ -4805,16 +4863,7 @@ export class WorkspaceStore {
         'This terminal is open or finishing its file updates. Wait for it to close before discarding its private copy.',
         409,
       )
-    if (
-      this.runtime.isActive?.(manifest.root) ||
-      [...(this.runtime.children || [])].some(
-        (child) => child.workspaceRoot === manifest.root,
-      )
-    )
-      fail('The terminal worker is still stopping. Try again shortly.', 409)
-    await this.runtime.clearInheritedDependencies?.(manifest.root, {
-      force: true,
-    })
+    await this.#releaseTerminalDependencies(manifest.root)
     // Remove the public recovery name atomically before walking/deleting files.
     // A scan can never mistake a partially removed copy for intended deletions.
     const discarded = path.join(
@@ -4831,6 +4880,31 @@ export class WorkspaceStore {
     this.terminalCopies.delete(manifest.runId)
   }
 
+  #assertTerminalStopped(root) {
+    if (
+      this.runtime.isActive?.(root) ||
+      [...(this.runtime.children || [])].some(
+        (child) => child.workspaceRoot === root,
+      )
+    )
+      fail('The terminal worker is still stopping. Try again shortly.', 409)
+  }
+
+  async #releaseTerminalDependencies(root) {
+    this.#assertTerminalStopped(root)
+    try {
+      await this.runtime.clearInheritedDependencies?.(root, { force: true })
+    } catch (error) {
+      throw Object.assign(
+        new WorkspaceError(
+          'The private terminal copy could not release its dependency cache. Retry, or ask the server administrator to check terminal storage.',
+          503,
+        ),
+        { cause: error },
+      )
+    }
+  }
+
   checkFingerprint(id, owner, options) {
     return this.#locked(id, () =>
       sourceFingerprint(this.get(id, owner).root, options),
@@ -4841,7 +4915,7 @@ export class WorkspaceStore {
     project,
     runId,
     actor = project.owner,
-    { purpose, signal } = {},
+    { purpose, signal, onClaimed } = {},
   ) {
     const { id, owner } = project
     const container = path.join(this.snapshotsDir, runId)
@@ -4852,6 +4926,7 @@ export class WorkspaceStore {
           fail('A candidate workspace already exists for this run', 409)
         throw error
       })
+    if (onClaimed) onClaimed(await fs.lstat(container))
     const root = path.join(container, 'workspace')
     // This server-owned marker precedes every source copy and dependency bind.
     // An interrupted capture remains attributable even without its manifest.

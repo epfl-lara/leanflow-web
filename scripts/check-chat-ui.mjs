@@ -351,15 +351,53 @@ try {
   assert.deepEqual(await selectedFiles(), ['Notes.lean'])
   await composer.fill('Also inspect @Ma')
   await mentions.waitFor()
+  // Select-all can precede a delayed frame from the mention selection. Typing
+  // must still replace the selected draft instead of appending its old text.
+  await page.evaluate(() => {
+    const frame = window.requestAnimationFrame.bind(window)
+    const cancel = window.cancelAnimationFrame.bind(window)
+    const pending = new Map()
+    window.requestAnimationFrame = (callback) => {
+      const handle = frame(() => {})
+      pending.set(handle, callback)
+      return handle
+    }
+    window.cancelAnimationFrame = (handle) => {
+      pending.delete(handle)
+      cancel(handle)
+    }
+    window.__releaseMentionFrames = () => {
+      window.requestAnimationFrame = frame
+      window.cancelAnimationFrame = cancel
+      for (const callback of pending.values()) callback(performance.now())
+      pending.clear()
+    }
+  })
   await composer.press('Enter')
   assert.equal(await composer.inputValue(), 'Also inspect @Main.lean ')
   assert.deepEqual(await selectedFiles(), ['Main.lean', 'Notes.lean'])
-  await composer.fill('No other project @PrivateOnly')
+  await composer.evaluate((field) => field.select())
+  await page.evaluate(() => window.__releaseMentionFrames())
+  await page.keyboard.insertText('No other project @PrivateOnly')
   await page.getByText('No project files match.', { exact: true }).waitFor()
   assert.equal(await mentions.getByRole('option').count(), 0)
   await composer.press('Escape')
   await mentions.waitFor({ state: 'hidden' })
   assert.equal(await composer.inputValue(), 'No other project @PrivateOnly')
+  await composer.fill('Inspect @Ma then explain.')
+  await composer.press('Home')
+  for (let column = 0; column < 11; column++) await composer.press('ArrowRight')
+  await mentions.waitFor()
+  await composer.press('Enter')
+  await until(
+    () => composer.evaluate((field) => field.selectionStart === 19),
+    'caret immediately after a mention inserted before existing text',
+  )
+  await page.keyboard.insertText('CARET')
+  assert.equal(
+    await composer.inputValue(),
+    'Inspect @Main.lean CARET then explain.',
+  )
   assert.equal(
     messageRequests().length,
     0,

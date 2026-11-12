@@ -10,9 +10,23 @@ const root = path.resolve(new URL('../', import.meta.url).pathname)
 const output = path.join(root, '.runtime/project-sharing-ui')
 await fs.mkdir(output, { recursive: true })
 const app = express()
+const individualPath = 'notes/Proof α.lean'
+const individualRequests = []
 app.get(
   '/api/projects/sharing-viewer/terminal-recoveries/private-copy/download',
-  (_request, response) => {
+  (request, response) => {
+    if (request.query.path !== undefined) {
+      individualRequests.push(request.query.path)
+      assert.equal(request.query.path, individualPath)
+      response.setHeader(
+        'Content-Disposition',
+        'attachment; filename="Proof.lean"',
+      )
+      response
+        .type('application/octet-stream')
+        .send(Buffer.from('PRIVATE_INDIVIDUAL_RECOVERY'))
+      return
+    }
     response.setHeader(
       'Content-Disposition',
       'attachment; filename="private-terminal.zip"',
@@ -69,7 +83,10 @@ try {
     files: Object.fromEntries(
       projects.map((project) => [
         project.id,
-        { 'Main.lean': `-- ${project.id}\nexample : True := by trivial\n` },
+        {
+          'Main.lean': `-- ${project.id}\nexample : True := by trivial\n`,
+          'DeleteMe.lean': '-- disposable fixture file\n',
+        },
       ]),
     ),
     chats: projects.map((project) => ({
@@ -97,6 +114,33 @@ try {
     ],
   })
   const { page, state, report } = fixture
+  const revokedHistoryRequests = []
+  report.revokedHistoryRequests = revokedHistoryRequests
+  await page.route(
+    (url) =>
+      [
+        '/api/projects/sharing-viewer/runs',
+        '/api/projects/sharing-viewer/chats',
+      ].includes(url.pathname),
+    (route) => {
+      const request = route.request()
+      if (
+        request.method() !== 'GET' ||
+        state.projects.some((project) => project.id === 'sharing-viewer')
+      )
+        return route.fallback()
+      const endpoint = new URL(request.url()).pathname
+      // A private-history poll can reach the server as access is revoked.
+      // Reject and record it; never serve the retained chat fixture through
+      // an inaccessible project's list endpoints.
+      report.requests.push({ method: 'GET', endpoint })
+      revokedHistoryRequests.push({ method: 'GET', endpoint, status: 404 })
+      return route.fulfill({
+        status: 404,
+        json: { error: 'Project not found.' },
+      })
+    },
+  )
   const terminalRecoveries = []
   await page.route('**/api/projects/*/terminal-recoveries', (route) =>
     route.fulfill({
@@ -129,7 +173,9 @@ try {
     route.fulfill({ json: { stopped: true } }),
   )
   await page.route(
-    '**/api/projects/sharing-viewer/terminal-recoveries/private-copy/download',
+    (url) =>
+      url.pathname ===
+      '/api/projects/sharing-viewer/terminal-recoveries/private-copy/download',
     (route) => route.continue(),
   )
   const liveSockets = new Map()
@@ -496,6 +542,55 @@ try {
   report.checks.push(
     'Editors can use their own assistant, terminal and setup controls while sharing and project deletion remain admin actions.',
   )
+  await page.route('**/api/projects/sharing-viewer/trash', (route) => {
+    assert.equal(route.request().postDataJSON().path, 'DeleteMe.lean')
+    delete state.files['sharing-viewer']['DeleteMe.lean']
+    return route.fulfill({
+      json: {
+        trashId: 'editor-file-deletion',
+        projectId: 'sharing-viewer',
+        kind: 'file',
+        path: 'DeleteMe.lean',
+        createdAt: new Date().toISOString(),
+      },
+    })
+  })
+  await page
+    .getByRole('button', {
+      name: 'Move file DeleteMe.lean to trash',
+      exact: true,
+    })
+    .click()
+  const deletion = page.getByRole('dialog', {
+    name: 'Delete file?',
+    exact: true,
+  })
+  await deletion
+    .getByRole('button', { name: 'Move to Trash', exact: true })
+    .click()
+  await page
+    .locator('.trash-notice')
+    .getByText('Ask a project Admin to restore this item from Trash.', {
+      exact: true,
+    })
+    .waitFor()
+  assert.equal(
+    await page
+      .locator('.trash-notice')
+      .getByRole('button', { name: 'Undo', exact: true })
+      .count(),
+    0,
+  )
+  assert.equal(
+    await page
+      .locator('.trash-notice')
+      .getByRole('button', { name: 'Open Trash', exact: true })
+      .count(),
+    0,
+  )
+  report.checks.push(
+    'An Editor file deletion explains that a project Admin can restore it instead of offering an unavailable Undo action.',
+  )
 
   await page.getByRole('button', { name: 'Terminal', exact: true }).click()
   const terminalPanel = page.getByRole('region', {
@@ -556,6 +651,18 @@ try {
     exact: true,
   })
   await exportDraft.waitFor()
+  const deniedHistory = await page.evaluate(async () =>
+    Promise.all(
+      ['runs', 'chats'].map(async (kind) => {
+        const response = await fetch(`/api/projects/sharing-viewer/${kind}`)
+        return { status: response.status, body: await response.json() }
+      }),
+    ),
+  )
+  assert.deepEqual(deniedHistory, [
+    { status: 404, body: { error: 'Project not found.' } },
+    { status: 404, body: { error: 'Project not found.' } },
+  ])
   const downloaded = page.waitForEvent('download')
   await exportDraft.click()
   const download = await downloaded
@@ -570,7 +677,7 @@ try {
     0,
   )
   report.checks.push(
-    'Live permission changes update the editor and assistant immediately. Revocation preserves unsaved source and offers a local draft download.',
+    'Live permission changes update the editor and assistant immediately. Revocation rejects private-history list requests, preserves unsaved source and offers a local draft download.',
   )
   await page.getByText('Recover terminal files', { exact: false }).waitFor()
   const terminalDownload = page.waitForEvent('download')
@@ -604,10 +711,126 @@ try {
     await privateRecovery.getAttribute('href'),
     '/api/projects/sharing-viewer/terminal-recoveries/private-copy/download',
   )
+  let listingAttempts = 0
+  await page.route(
+    '**/api/projects/sharing-viewer/terminal-recoveries/private-copy/files',
+    (route) => {
+      listingAttempts++
+      return listingAttempts === 1
+        ? route.fulfill({
+            status: 503,
+            json: { error: 'Temporary recovery listing failure.' },
+          })
+        : route.fulfill({
+            json: {
+              files: [
+                { path: individualPath, size: 27, downloadable: true },
+                {
+                  path: 'huge-output.bin',
+                  size: 33 * 1024 * 1024,
+                  downloadable: false,
+                },
+              ],
+              fileByteLimit: 32 * 1024 * 1024,
+            },
+          })
+    },
+  )
+  await page.setViewportSize({ width: 390, height: 844 })
+  const individualFiles = settingsDialog.locator('.terminal-recovery-files')
+  await individualFiles.locator('summary').click()
+  await individualFiles
+    .getByRole('alert')
+    .filter({ hasText: 'Temporary recovery listing failure.' })
+    .waitFor()
+  await individualFiles
+    .getByRole('button', { name: 'Retry recovery files', exact: true })
+    .click()
+  const individualDownload = individualFiles.getByRole('link', {
+    name: `Download ${individualPath}`,
+    exact: true,
+  })
+  await individualDownload.waitFor()
+  assert.equal(
+    new URL(
+      await individualDownload.getAttribute('href'),
+      base,
+    ).searchParams.get('path'),
+    individualPath,
+  )
+  assert.equal(
+    await individualFiles
+      .getByRole('link', { name: 'Download huge-output.bin', exact: true })
+      .count(),
+    0,
+  )
+  await individualFiles
+    .getByText('Ask the server administrator to recover it.', { exact: false })
+    .waitFor()
+  const recoveredFile = page.waitForEvent('download')
+  await individualDownload.click()
+  assert.equal(
+    await fs.readFile(await (await recoveredFile).path(), 'utf8'),
+    'PRIVATE_INDIVIDUAL_RECOVERY',
+  )
+  assert.deepEqual(individualRequests, [individualPath])
+  assert.equal(
+    await settingsDialog.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth + 1,
+    ),
+    true,
+  )
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  report.checks.push(
+    'After revocation, private recovery files can be listed with Retry and downloaded individually; oversized files explain administrator recovery and narrow layouts remain usable.',
+  )
   await page.keyboard.press('Escape')
   await settingsDialog.waitFor({ state: 'hidden' })
   report.checks.push(
     'Private terminal copies remain discoverable in Account settings after reloading away from a project whose membership ended.',
+  )
+  terminalRecoveries.push({
+    runId: 'too-many-files',
+    createdAt: new Date().toISOString(),
+    message: 'Private copy with too many entries',
+  })
+  let boundedListingRequests = 0
+  await page.route(
+    '**/api/projects/sharing-viewer/terminal-recoveries/too-many-files/files',
+    (route) => {
+      boundedListingRequests++
+      return route.fulfill({
+        status: 413,
+        json: {
+          error:
+            'This private copy has too many entries to list or download safely. Ask the server administrator to recover its files.',
+        },
+      })
+    },
+  )
+  await page
+    .getByRole('button', { name: 'Account settings', exact: true })
+    .click()
+  await settingsDialog.locator('.account-terminal-recoveries > summary').click()
+  const boundedRecovery = settingsDialog
+    .locator('.terminal-recoveries > ul > li')
+    .filter({ hasText: 'Private copy with too many entries' })
+  await boundedRecovery.locator('.terminal-recovery-files > summary').click()
+  await boundedRecovery
+    .getByRole('alert')
+    .filter({ hasText: 'Ask the server administrator to recover its files.' })
+    .waitFor()
+  assert.equal(
+    await boundedRecovery
+      .getByRole('button', { name: 'Retry recovery files', exact: true })
+      .count(),
+    0,
+  )
+  assert.equal(boundedListingRequests, 1)
+  await page.keyboard.press('Escape')
+  await settingsDialog.waitFor({ state: 'hidden' })
+  report.checks.push(
+    'A private copy exceeding enumeration limits gives administrator recovery guidance and does not offer an ineffective Retry.',
   )
 
   state.projects.push({

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, errorText } from './api'
+import { TerminalRecoveryFiles } from './TerminalRecoveryFiles'
 import './terminal.css'
 
 interface TerminalRecovery {
@@ -191,6 +192,10 @@ export function TerminalRecoveries({
                 Discard recovery copy
               </button>
             )}
+            <TerminalRecoveryFiles
+              projectId={recovery.projectId}
+              runId={recovery.runId}
+            />
           </li>
         ))}
       </ul>

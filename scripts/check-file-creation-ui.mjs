@@ -366,8 +366,10 @@ try {
       .map((text) => text.trim())
       .filter(
         (text) =>
-          text !==
-          'Some files use normal saving while live editing capacity is full.',
+          ![
+            'Some files use normal saving for this visit because live editing capacity is full. Switch to another project and back, or reload this page to retry live editing.',
+            'Some files use normal version-checked saving for this visit. Switch to another project and back, or reload this page to retry live editing.',
+          ].includes(text),
       )
     assert.deepEqual(unexpectedAlerts, [])
     await create('file', `Available${status}.md`)

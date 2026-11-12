@@ -343,6 +343,8 @@ export function LeanWorkspace({
     setMarkdownIssue('')
     setConnectionIssue('')
     setRequestIssue('')
+    setRestartIssue('')
+    setRestarting(false)
     setRenameIssue('')
     setLoading(true)
     onStateRef.current('Connecting to Lean')
@@ -1283,26 +1285,39 @@ export function LeanWorkspace({
   ])
 
   async function restartLean() {
-    const clients = runtime.current?.lean.clientProvider?.getClients() || []
-    if (!clients.length || restarting) return
+    const active = runtime.current
+    const provider = active?.lean.clientProvider
+    if (!active?.clientLifecycle || !provider || restarting || failure) return
     setRestarting(true)
     setRestartIssue('')
     try {
-      await Promise.all(clients.map((client) => client.restart()))
-      if (clients.some((client) => !client.isRunning()))
+      let clients = provider.getClients()
+      if (clients.length) {
+        await Promise.all(clients.map((client) => client.restart()))
+      } else {
+        // A failed initial connection is removed from the provider. Retry its
+        // normal startup path instead of treating an empty client list as done.
+        const [, client] = await provider.ensureClient(
+          new FileUri('/workspace/__lemex_client__.lean'),
+        )
+        clients = client ? [client] : []
+      }
+      if (runtime.current !== active) return
+      if (!clients.length || clients.some((client) => !client.isRunning()))
         throw new Error(
           'Lean could not reconnect. Try Restart Lean again or reopen the project.',
         )
       setRequestIssue('')
       setRestartIssue('')
     } catch (error) {
+      if (runtime.current !== active) return
       setRestartIssue(
         error instanceof Error
           ? error.message
           : 'Lean could not restart. Try reopening the project.',
       )
     } finally {
-      setRestarting(false)
+      if (runtime.current === active) setRestarting(false)
     }
   }
 
@@ -1411,7 +1426,7 @@ export function LeanWorkspace({
           <button
             className="button small subtle"
             onClick={() => void restartLean()}
-            disabled={loading || restarting || !!connectionIssue}
+            disabled={loading || restarting || !!connectionIssue || !!failure}
             title="Restart this editor's Lean connection. Your unsaved edits stay in the editor."
           >
             {restarting ? 'Restarting…' : 'Restart Lean'}

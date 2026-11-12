@@ -177,3 +177,47 @@ test('project stop removes its queued workers and preserves an unrelated worker 
   assert.equal((await task).cancelled, true)
   assert.equal(targetStarted, false)
 })
+
+test('worker admission can fail immediately without queuing or interrupting active work', async (t) => {
+  const f = await fixture(t),
+    running = deferred()
+  const active = f.runtime.run(f.root, ['fixture'], {
+    onOutput: () => running.resolve(),
+  })
+  await running.promise
+  await assert.rejects(
+    f.runtime.run(f.root, ['do-not-queue'], {
+      queue: false,
+      signal: AbortSignal.timeout(300),
+    }),
+    { status: 503 },
+  )
+  assert.equal(f.runtime.queue.length, 0)
+  assert.equal(f.runtime.children.size, 1)
+  assert.equal([...f.runtime.children][0].cancelled, undefined)
+  const controller = new AbortController()
+  const queued = f.runtime.run(f.root, ['queue-by-default'], {
+    signal: controller.signal,
+  })
+  assert.equal(f.runtime.queue.length, 1)
+  controller.abort(new Error('Default admission still queues.'))
+  await assert.rejects(queued, /Default admission still queues/)
+  await fs.writeFile(f.released, 'release active cleanup')
+  await f.runtime.stopProject(f.root)
+  assert.equal((await active).cancelled, true)
+})
+
+test('worker admission opt-out still starts immediately when capacity is available', async (t) => {
+  const f = await fixture(t),
+    running = deferred()
+  const active = f.runtime.run(f.root, ['fixture'], {
+    queue: false,
+    onOutput: () => running.resolve(),
+  })
+  await running.promise
+  assert.equal(f.runtime.children.size, 1)
+  assert.equal(f.runtime.queue.length, 0)
+  await fs.writeFile(f.released, 'release active cleanup')
+  await f.runtime.stopProject(f.root)
+  assert.equal((await active).cancelled, true)
+})

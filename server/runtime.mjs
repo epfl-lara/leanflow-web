@@ -1686,6 +1686,13 @@ export class Runtime {
       return spawnOnly
         ? Promise.resolve(this.#spawnScheduled(root, args, options, worker))
         : this.#run(root, args, options, worker)
+    if (options.queue === false)
+      return Promise.reject(
+        Object.assign(
+          new Error('All workspace workers are busy. Try again shortly.'),
+          { status: 503 },
+        ),
+      )
     if (this.queue.length >= this.maxQueue)
       return Promise.reject(
         Object.assign(new Error('Workspace job queue is full'), {

@@ -381,6 +381,10 @@ export function Studio() {
   const [terminalProjectId, setTerminalProjectId] = useState<string | null>(
     null,
   )
+  const terminalOpening = useRef<{
+    projectId: string
+    openingId: string
+  } | null>(null)
   const [leanState, setLeanState] = useState('')
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('lemex-theme')
@@ -443,6 +447,14 @@ export function Studio() {
   filesRef.current = files
   projectIdRef.current = projectId
   const project = projects.find((item) => item.id === projectId)
+  const lastTrashProject = projects.find(
+    (item) => item.id === lastTrash?.projectId,
+  )
+  const canRestoreLastTrash =
+    lastTrash?.kind === 'chat' ||
+    lastTrash?.kind === 'project' ||
+    (!!lastTrashProject &&
+      (!lastTrashProject.accessRole || lastTrashProject.accessRole === 'admin'))
   useEffect(() => {
     if (
       sharingTarget &&
@@ -576,6 +588,7 @@ export function Studio() {
       setGit(null)
       setGitOpen(null)
       setTerminalProjectId(null)
+      terminalOpening.current = null
       setTerminalActive(false)
       setJob(null)
       setFileFilter('')
@@ -760,6 +773,9 @@ export function Studio() {
       .then((value) => {
         if (cancelled) return
         setProjects(value)
+        // Refreshing the account must keep the current visit, including drafts
+        // retained after project access ends. Explicit navigation owns leaving it.
+        if (bufferStore.getSnapshot().scope.projectId) return
         const savedId = localStorage.getItem('lemex-project')
         setProjectId(
           value.some((item) => item.id === savedId)
@@ -773,7 +789,7 @@ export function Studio() {
     return () => {
       cancelled = true
     }
-  }, [session, setProjectId, invitationToken])
+  }, [session, setProjectId, invitationToken, bufferStore])
 
   const preparing = projects.some((item) => item.status === 'preparing')
   useEffect(() => {
@@ -1676,12 +1692,16 @@ export function Studio() {
   ])
 
   async function closeTerminal() {
+    const opening = terminalOpening.current
+    terminalOpening.current = null
     setTerminalProjectId(null)
     setTerminalActive(false)
     const id = terminalProjectId
-    if (!id) return
+    if (!id || opening?.projectId !== id) return
     try {
-      await post(`/api/projects/${encodeURIComponent(id)}/terminal/stop`)
+      await post(`/api/projects/${encodeURIComponent(id)}/terminal/stop`, {
+        openingId: opening.openingId,
+      })
       await loadProjects()
       if (projectIdRef.current !== id) return
       await refreshLiveFiles([], 'terminal', scope)
@@ -2591,19 +2611,25 @@ export function Studio() {
               </strong>{' '}
               moved to Trash.
             </span>
-            <button
-              className="button small secondary"
-              onClick={() => void restoreItem(lastTrash)}
-              disabled={!!restoring}
-            >
-              Undo
-            </button>
-            <button
-              className="button small subtle"
-              onClick={() => void showTrash()}
-            >
-              Open Trash
-            </button>
+            {canRestoreLastTrash ? (
+              <>
+                <button
+                  className="button small secondary"
+                  onClick={() => void restoreItem(lastTrash)}
+                  disabled={!!restoring}
+                >
+                  Undo
+                </button>
+                <button
+                  className="button small subtle"
+                  onClick={() => void showTrash()}
+                >
+                  Open Trash
+                </button>
+              </>
+            ) : (
+              <span>Ask a project Admin to restore this item from Trash.</span>
+            )}
             <button
               className="icon-button"
               aria-label="Dismiss deletion notice"
@@ -3139,6 +3165,10 @@ export function Studio() {
             projectName={project.name}
             theme={theme}
             onClose={closeTerminal}
+            onOpeningChange={(openingId) => {
+              if (bufferStore.isCurrent(scope))
+                terminalOpening.current = { projectId: project.id, openingId }
+            }}
             onStateChange={(active) => {
               if (!bufferStore.isCurrent(scope)) return
               setTerminalActive(active)

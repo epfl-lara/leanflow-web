@@ -169,7 +169,7 @@ try {
   await b.keyboard.insertText(pasted)
   await b
     .getByText(
-      'Main.lean uses normal version-checked saving because this edit is too complex to merge live.',
+      'Main.lean uses normal version-checked saving because this edit is too complex to merge live. Switch to another project and back, or reload this page to retry live editing.',
       { exact: true },
     )
     .waitFor()

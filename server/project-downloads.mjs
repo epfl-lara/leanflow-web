@@ -21,8 +21,8 @@ const omittedDirectories = new Set([
   '__pycache__',
   'node_modules',
 ])
-const fail = (message, status = 400) => {
-  throw Object.assign(new Error(message), { status })
+const fail = (message, status = 400, code) => {
+  throw Object.assign(new Error(message), { status, ...(code ? { code } : {}) })
 }
 const cancelledDownload = () =>
   Object.assign(
@@ -30,10 +30,15 @@ const cancelledDownload = () =>
     { status: 408 },
   )
 
-function permittedPath(relative) {
+export function isProjectDownloadPath(relative) {
   try {
     validateWorkspaceFilePath(relative)
-    return true
+    return !relative
+      .split('/')
+      .some(
+        (part) =>
+          omittedDirectories.has(part.toLowerCase()) || part === '.ready.json',
+      )
   } catch (error) {
     if (error.status === 400) return false
     throw error
@@ -67,7 +72,8 @@ async function* directoryEntries(directory) {
     )
       fail('A project folder changed during download. Try again.', 409)
     const entries = await fs.opendir(`/proc/self/fd/${handle.fd}`)
-    yield* entries
+    for await (const entry of entries)
+      yield { entry, anchored: `/proc/self/fd/${handle.fd}/${entry.name}` }
   } catch (error) {
     if (['ENOENT', 'ENOTDIR', 'ELOOP'].includes(error.code))
       fail('A project folder changed during download. Try again.', 409)
@@ -124,11 +130,10 @@ function zipBytes(zip, signal) {
   })
 }
 
-export async function createProjectDownload(
+function downloadContext(
   workspaces,
   id,
   owner,
-  filename,
   { signal, limits: overrides } = {},
 ) {
   const project = workspaces.get(id, owner)
@@ -142,6 +147,86 @@ export async function createProjectDownload(
     workspaces.get(id, owner)
   }
   check()
+  return { project, limits, signal, check }
+}
+
+async function* downloadEntries(project, limits, check, listing = false) {
+  let entries = 0,
+    scanned = 0
+  const visit = async function* (relative = '') {
+    check()
+    const directory = path.join(project.root, relative)
+    for await (const { entry, anchored } of directoryEntries(directory)) {
+      check()
+      if (++scanned > limits.scanEntries)
+        fail(
+          listing
+            ? 'This project has too many entries to list for download.'
+            : 'This project has too many entries to download as a ZIP.',
+          413,
+          'DOWNLOAD_SCAN_LIMIT',
+        )
+      const child = relative ? `${relative}/${entry.name}` : entry.name
+      if (
+        !isProjectDownloadPath(child) ||
+        entry.isSymbolicLink() ||
+        (!entry.isDirectory() && !entry.isFile())
+      )
+        continue
+      if (++entries > limits.entries)
+        fail(
+          listing
+            ? 'This project has too many files to list for download.'
+            : 'This project has too many files to download as a ZIP.',
+          413,
+          'DOWNLOAD_ENTRY_LIMIT',
+        )
+      if (entry.isDirectory()) {
+        yield { path: child, directory: true }
+        yield* visit(child)
+      } else {
+        const stat = await fs.lstat(anchored)
+        if (!stat.isFile())
+          fail('A project file changed during download. Try again.', 409)
+        yield { path: child, directory: false, size: stat.size }
+      }
+    }
+  }
+  yield* visit()
+}
+
+export async function listProjectDownloadFiles(workspaces, id, owner, options) {
+  const { project, limits, check } = downloadContext(
+    workspaces,
+    id,
+    owner,
+    options,
+  )
+  const files = []
+  for await (const entry of downloadEntries(project, limits, check, true))
+    if (!entry.directory)
+      files.push({
+        path: entry.path,
+        size: entry.size,
+        downloadable: entry.size <= limits.fileBytes,
+      })
+  check()
+  return { files, fileByteLimit: limits.fileBytes }
+}
+
+export async function createProjectDownload(
+  workspaces,
+  id,
+  owner,
+  filename,
+  options,
+) {
+  const { project, limits, signal, check } = downloadContext(
+    workspaces,
+    id,
+    owner,
+    options,
+  )
   if (filename !== undefined) {
     validateWorkspaceFilePath(filename)
     const file = await workspaces
@@ -161,55 +246,35 @@ export async function createProjectDownload(
     }
   }
   const zip = new JSZip()
-  let bytes = 0,
-    entries = 0,
-    scanned = 0
-  const visit = async (relative = '') => {
-    check()
-    const directory = path.join(project.root, relative)
-    for await (const entry of directoryEntries(directory)) {
-      check()
-      if (++scanned > limits.scanEntries)
-        fail('This project has too many entries to download as a ZIP.', 413)
-      const child = relative ? `${relative}/${entry.name}` : entry.name
-      if (
-        omittedDirectories.has(entry.name.toLowerCase()) ||
-        entry.name === '.ready.json' ||
-        !permittedPath(child) ||
-        entry.isSymbolicLink() ||
-        (!entry.isDirectory() && !entry.isFile())
-      )
-        continue
-      if (++entries > limits.entries)
-        fail('This project has too many files to download as a ZIP.', 413)
-      if (entry.isDirectory()) {
-        zip.folder(child)
-        await visit(child)
-        continue
-      }
-      let file
-      try {
-        file = await workspaces.readDownloadFile(id, owner, child, {
-          byteLimit: Math.min(limits.fileBytes, limits.archiveBytes - bytes),
-          signal,
-        })
-      } catch (error) {
-        check()
-        if (error.status === 413)
-          fail(
-            'This ZIP exceeds the download limit (64 MiB total, 32 MiB per file). Download smaller files individually or use the project’s Git repository.',
-            413,
-          )
-        throw error
-      }
-      bytes += file.content.length
-      zip.file(child, file.content, {
-        createFolders: false,
-        unixPermissions: file.mode,
-      })
+  let bytes = 0
+  for await (const entry of downloadEntries(project, limits, check)) {
+    const child = entry.path
+    if (entry.directory) {
+      zip.folder(child)
+      continue
     }
+    let file
+    try {
+      file = await workspaces.readDownloadFile(id, owner, child, {
+        byteLimit: Math.min(limits.fileBytes, limits.archiveBytes - bytes),
+        signal,
+      })
+    } catch (error) {
+      check()
+      if (error.status === 413)
+        fail(
+          'This ZIP exceeds the download limit (64 MiB total, 32 MiB per file). Download smaller files individually or use the project’s Git repository.',
+          413,
+          'DOWNLOAD_BYTE_LIMIT',
+        )
+      throw error
+    }
+    bytes += file.content.length
+    zip.file(child, file.content, {
+      createFolders: false,
+      unixPermissions: file.mode,
+    })
   }
-  await visit()
   check()
   // STORE bounds CPU time and output size while retaining exact source bytes.
   const content = await zipBytes(zip, signal)
