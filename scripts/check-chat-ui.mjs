@@ -698,10 +698,34 @@ try {
     'Draft text and attachments isolated by user/project/chat through switching, reload, remount, and New chat',
   )
 
+  const beforeKeyboardDraft = messageRequests().length
+  await composer.fill('First line of guidance.')
+  await composer.press('Shift+Enter')
+  await page.keyboard.insertText('Second line of guidance.')
+  assert.equal(
+    await composer.inputValue(),
+    'First line of guidance.\nSecond line of guidance.',
+  )
+  for (const event of [
+    { key: 'Enter', code: 'Enter', isComposing: true },
+    { key: 'Enter', code: 'Enter', keyCode: 229 },
+    { key: 'Enter', code: 'Enter', repeat: true },
+  ])
+    await composer.dispatchEvent('keydown', event)
+  assert.equal(
+    messageRequests().length,
+    beforeKeyboardDraft,
+    'New lines, IME confirmation and repeated keys must not send a message',
+  )
+  assert.equal(runRequests().length, 0)
+  report.checks.push(
+    'Shift+Enter adds a new line; IME confirmation and repeated Enter keys preserve the draft without sending.',
+  )
+
   const firstPending = await holdUpdate()
   await composer.fill('First guidance: use the existing local lemma.')
   const beforeFirst = messageRequests().length
-  await sendUpdate.click()
+  await composer.press('Enter')
   const first = await firstPending()
   assert.equal(messageRequests().length, beforeFirst + 1)
   assert.equal(runRequests().length, 0, 'Sending guidance started another run')
@@ -710,6 +734,17 @@ try {
     'A pending acknowledgement locked the draft',
   )
   await composer.fill(
+    'NEWER_DRAFT: typed while the first update was being sent.',
+  )
+  await composer.press('Enter')
+  await composer.press('Control+Enter')
+  assert.equal(
+    messageRequests().length,
+    beforeFirst + 1,
+    'Keyboard submission must honor the disabled send button while an update is pending',
+  )
+  assert.equal(
+    await composer.inputValue(),
     'NEWER_DRAFT: typed while the first update was being sent.',
   )
   assert.deepEqual(first.body.files, ['Notes.lean'])
@@ -741,7 +776,7 @@ try {
     'Guidance should be interleaved at its actual response offset',
   )
   report.checks.push(
-    'Send update targets the active run exactly once and preserves newer typing; guidance appears in conversation order',
+    'Enter sends an update to the active run exactly once, respects pending delivery, and preserves newer typing; guidance appears in conversation order',
   )
 
   const secondPending = await holdUpdate()
@@ -1150,7 +1185,7 @@ try {
   await composer.fill(
     'Continue after the interruption, using our earlier discussion.',
   )
-  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await composer.press('Enter')
   await until(
     async () => (await conversation.innerText()).includes('CONTINUED_ANSWER'),
     'continued chat turn',
@@ -1166,7 +1201,7 @@ try {
   )
   assert.equal(await composer.inputValue(), '')
   report.checks.push(
-    'After interrupt, Send starts exactly one later turn in the same continuous chat with earlier turns still visible',
+    'After interrupt, Enter starts exactly one later turn in the same continuous chat with earlier turns still visible',
   )
   await page.screenshot({
     path: path.join(reportDir, 'continuous-conversation.png'),

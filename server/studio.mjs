@@ -486,7 +486,11 @@ export async function createStudio({
   const requireNoActiveWork = (
     projectId,
     owner,
-    { ignoreStopping = false, ignoreTerminalRunId } = {},
+    {
+      ignoreStopping = false,
+      ignoreTerminalRunId,
+      action = 'deleting or restoring project data',
+    } = {},
   ) => {
     requireNoGit(projectId, owner, { includeArchived: true, ignoreStopping })
     terminals.assertIdle(projectId, {
@@ -505,7 +509,7 @@ export async function createStudio({
             (workspaces.jobs.has(projectId) &&
               workspaces.preparationActors.get(projectId) !== owner)
             ? 'Another collaborator has active work in this project. Wait for it to finish before moving project data.'
-            : 'Stop active Lean checks, TeX builds, and Lemex runs, and wait for project preparation, before deleting or restoring project data.',
+            : `Stop active Lean checks, TeX builds, and Lemex runs, and wait for project preparation, before ${action}.`,
         ),
         { status: 409 },
       )
@@ -812,7 +816,9 @@ export async function createStudio({
         '/git',
       ].includes(req.path) ||
       (!['GET', 'HEAD'].includes(req.method) &&
-        ['/file', '/files', '/folders', '/upload', '/trash'].includes(req.path))
+        ['/file', '/files', '/folders', '/move', '/upload', '/trash'].includes(
+          req.path,
+        ))
     )
       workspaces.requireEditor(req.params.id, req.user.id)
     next()
@@ -1000,6 +1006,14 @@ export async function createStudio({
         ),
     ),
   )
+  app.post('/api/projects/:id/move', async (req, res) => {
+    const { id } = req.params
+    const actor = req.user.id
+    const assertIdle = () =>
+      requireNoActiveWork(id, actor, { action: 'renaming or moving files' })
+    assertIdle()
+    res.json(await workspaces.moveEntry(id, actor, req.body, { assertIdle }))
+  })
   app.get('/api/projects/:id/file', async (req, res) =>
     res.json(
       await workspaces.readFile(req.params.id, req.user.id, req.query.path),

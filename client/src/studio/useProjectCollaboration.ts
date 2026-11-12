@@ -12,6 +12,7 @@ const liveFile = (path: string) =>
 import type { WorkspaceBuffers, WorkspaceScope } from './workspaceBuffers'
 import { sessionBoundUrl, type OpenFile } from './api'
 import { LocalDocumentHistory } from './localDocumentHistory'
+import { pathMoves, remapMovedPath, type PathMove } from './projectPaths'
 
 interface LiveDocument {
   doc: Y.Doc
@@ -87,6 +88,7 @@ export function useProjectCollaboration({
   enabled,
   canEdit,
   onFilesChanged,
+  onFilesMoved,
   onAccessChanged,
 }: {
   store: WorkspaceBuffers
@@ -94,6 +96,7 @@ export function useProjectCollaboration({
   enabled: boolean
   canEdit: boolean
   onFilesChanged?: () => void | Promise<void>
+  onFilesMoved?: (move: PathMove) => void
   onAccessChanged?: () => void | Promise<void>
 }) {
   const [connected, setConnected] = useState(false)
@@ -107,10 +110,10 @@ export function useProjectCollaboration({
     paths: new Set<string>(),
     restPaths: new Set<string>(),
   })
-  const callbacks = useRef({ onFilesChanged, onAccessChanged })
+  const callbacks = useRef({ onFilesChanged, onFilesMoved, onAccessChanged })
   useEffect(() => {
-    callbacks.current = { onFilesChanged, onAccessChanged }
-  }, [onFilesChanged, onAccessChanged])
+    callbacks.current = { onFilesChanged, onFilesMoved, onAccessChanged }
+  }, [onFilesChanged, onFilesMoved, onAccessChanged])
   const flush = useCallback(
     () => control.current?.flush() ?? Promise.resolve(false),
     [],
@@ -177,6 +180,9 @@ export function useProjectCollaboration({
           )
       }, 350)
     }
+    // Paths whose live documents were retired by a move. Late errors for them
+    // must not become a visit-wide failure; reopening a path clears the entry.
+    const movedAway = new Set<string>()
     const send = (message: object) => {
       if (!ready || socket?.readyState !== WebSocket.OPEN) return false
       if (socket.bufferedAmount > 12 * 1024 * 1024) {
@@ -415,6 +421,9 @@ export function useProjectCollaboration({
         send({ type: 'close', path })
         destroyRecord(record)
         documents.delete(path)
+        // A buffer re-keyed by this tab's own move leaves late acknowledgements
+        // for the old path; they must not fail the destination.
+        if (!buffers.has(path)) movedAway.add(path)
       }
       for (const path of selected) {
         const file = buffers.get(path)
@@ -460,6 +469,7 @@ export function useProjectCollaboration({
             pending: new Set(),
           }
           documents.set(path, record)
+          movedAway.delete(path)
           open(path, record)
           continue
         }
@@ -495,6 +505,53 @@ export function useProjectCollaboration({
     }
     const unsubscribe = store.subscribe(schedule)
 
+    // The file's bytes did not change, so buffers (including unacknowledged
+    // typing) move to the destination and publish there as a new live document.
+    // Calling this twice for the same move, as the mover does when its HTTP
+    // receipt follows the broadcast, finds nothing left to move.
+    function applyMove({ from, to }: PathMove) {
+      // Validate destination drafts before releasing any live document state.
+      try {
+        store.move(from, to)
+      } catch (error) {
+        for (const [path, record] of documents)
+          if (
+            remapMovedPath(path, from, to) !== null ||
+            remapMovedPath(path, to, from) !== null
+          )
+            record.blocked = true
+        fail(
+          error instanceof Error
+            ? error.message
+            : 'The moved file conflicts with a local draft. Your drafts are preserved; download or discard them, then reopen the moved file.',
+        )
+        return
+      }
+      for (const [path, record] of [...documents]) {
+        if (remapMovedPath(path, from, to) === null) continue
+        send({ type: 'close', path })
+        destroyRecord(record)
+        documents.delete(path)
+        movedAway.add(path)
+        if (!hasDocumentFailure()) {
+          failure = null
+          clearIssue()
+        }
+      }
+      for (const path of [...fallbackPaths])
+        if (remapMovedPath(path, from, to) !== null) fallbackPaths.delete(path)
+      for (const [path, history] of [...fallbackHistories])
+        if (remapMovedPath(path, from, to) !== null) {
+          history.dispose()
+          fallbackHistories.delete(path)
+          managedHistory.delete(path)
+        }
+      for (const path of [...managedHistory])
+        if (remapMovedPath(path, from, to) !== null) managedHistory.delete(path)
+      callbacks.current.onFilesMoved?.({ from, to })
+      schedule()
+    }
+
     function receive(raw: string) {
       if (!current()) return
       const message: unknown = JSON.parse(raw)
@@ -522,6 +579,8 @@ export function useProjectCollaboration({
         return
       }
       if (message.type === 'files') {
+        if ('moves' in message)
+          for (const move of pathMoves(message.moves)) applyMove(move)
         filesChanged()
         return
       }
@@ -538,6 +597,7 @@ export function useProjectCollaboration({
             ? message.path
             : undefined
         const record = path ? documents.get(path) : undefined
+        if (path && !record && movedAway.has(path)) return
         const status =
           'status' in message && typeof message.status === 'number'
             ? message.status

@@ -1221,11 +1221,13 @@ export function AssistantPanel({
                     : 'Open the active chat to send an update.'
                 : requiresLeanTarget && !target
                   ? 'Select a writable Lean file to begin.'
-                  : 'Ctrl / ⌘ + Enter to send'}
+                  : 'Enter to send · Shift+Enter for a new line'}
             </span>
             <button
               type="submit"
               className="button primary"
+              title={acceptingUpdate ? 'Send update (Enter)' : 'Send (Enter)'}
+              aria-keyshortcuts="Enter"
               disabled={
                 chatBusy ||
                 !prompt.trim() ||

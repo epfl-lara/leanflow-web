@@ -271,6 +271,64 @@ export class WorkspaceBuffers {
       buffers,
     )
   }
+  // A server-side rename keeps file bytes and hashes. Re-key every buffer under
+  // the old path, including unsaved text typed while the request was running,
+  // and report the old paths as removed so stale editor models are released.
+  move = (from: string, to: string, generation?: number) => {
+    const matches = (name: string) =>
+      name === from || name.startsWith(from + '/')
+    const target = (name: string) => to + name.slice(from.length)
+    const moving = [...this.state.buffers].filter(([name]) => matches(name))
+    if (!moving.length) return
+    const destinations = new Set(moving.map(([name]) => target(name)))
+    for (const destination of destinations) {
+      const existing = this.state.buffers.get(destination)
+      if (
+        existing &&
+        !matches(destination) &&
+        existing.content !== existing.savedContent
+      )
+        throw new Error(
+          `A draft already uses ${destination}. Your drafts are preserved. Download or discard them, then reopen the moved file.`,
+        )
+    }
+    const previous = this.state.file
+    const activePath = previous
+      ? matches(previous.path)
+        ? target(previous.path)
+        : previous.path
+      : null
+    const removedPaths = new Set(moving.map(([name]) => name))
+    const buffers = new Map<string, OpenFile>()
+    for (const [name, file] of this.state.buffers) {
+      if (matches(name)) continue
+      if (destinations.has(name)) removedPaths.add(name)
+      else buffers.set(name, file)
+    }
+    for (const [name, file] of moving) {
+      const renamed = target(name)
+      buffers.set(renamed, {
+        ...file,
+        path: renamed,
+        // A new generation makes live editors and models bind to the new path.
+        generation:
+          renamed === activePath
+            ? Math.max(
+                generation ?? 0,
+                (previous?.generation ?? 0) + 1,
+                file.generation + 1,
+              )
+            : file.generation + 1,
+      })
+      if (this.retained.delete(name)) this.retained.add(renamed)
+    }
+    this.state = {
+      ...this.state,
+      removeVersion: this.state.removeVersion + 1,
+      removedPaths: [...removedPaths],
+    }
+    this.publish(activePath ? (buffers.get(activePath) ?? null) : null, buffers)
+  }
   discard = (generation: number) => {
     const buffers = new Map(
       [...this.state.buffers].map(([path, file]) => [

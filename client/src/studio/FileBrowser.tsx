@@ -3,6 +3,7 @@ import type { FileEntry } from './api'
 import { Icon } from './Icons'
 import { parentFolders } from './projectPaths'
 import { ContextMenu, useContextMenu } from './ContextMenu'
+import { moveBlockedReason } from './moveEntryPaths'
 
 const MAX_VISIBLE = 200
 const TREE_INDENT = 16
@@ -68,6 +69,9 @@ export const FileBrowser = memo(function FileBrowser({
   writable = true,
   onSelect,
   onDelete,
+  onRename,
+  onMove,
+  playground,
   onDownload,
   onDownloadProject,
 }: {
@@ -84,13 +88,25 @@ export const FileBrowser = memo(function FileBrowser({
   writable?: boolean
   onSelect: (path: string) => void
   onDelete: (path: string, kind: 'file' | 'folder') => void
+  onRename: (path: string, kind: 'file' | 'folder') => void
+  onMove: (path: string, kind: 'file' | 'folder') => void
+  /** A playground cannot rename or move files until it becomes a project. */
+  playground?: boolean
   onDownload: (path: string) => void
   onDownloadProject?: () => void
 }) {
+  // Why Rename and Move are unavailable for a path; '' when they are offered.
+  const moveReason = (path: string) => moveBlockedReason(path, !!playground)
+  const moveHint = (path: string) => {
+    const reason = moveReason(path)
+    return reason ? { title: reason, description: reason } : {}
+  }
   const [librariesOpen, setLibrariesOpen] = useState(false)
   const [openFolders, setOpenFolders] = useState<Set<string>>(new Set())
   const context = useContextMenu<
-    { kind: 'file'; file: FileEntry } | { kind: 'project' }
+    | { kind: 'file'; file: FileEntry }
+    | { kind: 'folder'; path: string }
+    | { kind: 'project' }
   >()
   useEffect(() => {
     if (disabled) context.close()
@@ -260,6 +276,12 @@ export const FileBrowser = memo(function FileBrowser({
               <div
                 className="folder-row"
                 style={depth ? { paddingLeft: depth * TREE_INDENT } : undefined}
+                {...(writable
+                  ? context.triggerProps(
+                      { kind: 'folder', path: folder.path },
+                      disabled,
+                    )
+                  : {})}
               >
                 <button
                   className="folder-toggle"
@@ -276,6 +298,28 @@ export const FileBrowser = memo(function FileBrowser({
                   <Icon name="folder" size={15} />
                   <span>{folder.name}</span>
                 </button>
+                {writable && (
+                  <button
+                    className="icon-button row-menu-button"
+                    type="button"
+                    title={`Actions for folder ${folder.path}`}
+                    aria-label={`Actions for folder ${folder.path}`}
+                    aria-haspopup="menu"
+                    aria-expanded={
+                      context.menu?.target.kind === 'folder' &&
+                      context.menu.target.path === folder.path
+                    }
+                    disabled={disabled}
+                    onClick={(event) =>
+                      context.open(
+                        { kind: 'folder', path: folder.path },
+                        event.currentTarget,
+                      )
+                    }
+                  >
+                    <Icon name="more" size={15} />
+                  </button>
+                )}
                 {writable && (
                   <button
                     className="icon-button file-delete"
@@ -399,7 +443,9 @@ export const FileBrowser = memo(function FileBrowser({
           label={
             context.menu.target.kind === 'project'
               ? `Actions for ${projectName}`
-              : `Actions for ${context.menu.target.file.path}`
+              : context.menu.target.kind === 'folder'
+                ? `Actions for ${context.menu.target.path}`
+                : `Actions for ${context.menu.target.file.path}`
           }
           onClose={context.close}
           items={
@@ -413,30 +459,75 @@ export const FileBrowser = memo(function FileBrowser({
                     onSelect: () => onDownloadProject?.(),
                   },
                 ]
-              : (() => {
-                  const file = context.menu.target.file
-                  return [
-                    {
-                      label: 'Download file',
-                      icon: <Icon name="download" size={15} />,
-                      disabled,
-                      onSelect: () => onDownload(file.path),
-                    },
-                    ...(writable &&
-                    !file.readOnly &&
-                    !file.path.startsWith('.lake/')
-                      ? [
-                          {
-                            label: 'Move to trash',
-                            icon: <Icon name="trash" size={15} />,
-                            danger: true,
-                            disabled: disabled || !ready,
-                            onSelect: () => onDelete(file.path, 'file'),
-                          },
-                        ]
-                      : []),
-                  ]
-                })()
+              : context.menu.target.kind === 'folder'
+                ? (() => {
+                    const folderPath = context.menu.target.path
+                    return [
+                      {
+                        label: 'Rename',
+                        icon: <Icon name="edit" size={15} />,
+                        disabled:
+                          disabled || !ready || !!moveReason(folderPath),
+                        ...moveHint(folderPath),
+                        onSelect: () => onRename(folderPath, 'folder'),
+                      },
+                      {
+                        label: 'Move to folder…',
+                        icon: <Icon name="folder" size={15} />,
+                        disabled:
+                          disabled || !ready || !!moveReason(folderPath),
+                        ...moveHint(folderPath),
+                        onSelect: () => onMove(folderPath, 'folder'),
+                      },
+                      {
+                        label: 'Move to trash',
+                        icon: <Icon name="trash" size={15} />,
+                        danger: true,
+                        disabled: disabled || !ready,
+                        onSelect: () => onDelete(folderPath, 'folder'),
+                      },
+                    ]
+                  })()
+                : (() => {
+                    const file = context.menu.target.file
+                    return [
+                      {
+                        label: 'Download file',
+                        icon: <Icon name="download" size={15} />,
+                        disabled,
+                        onSelect: () => onDownload(file.path),
+                      },
+                      ...(writable &&
+                      !file.readOnly &&
+                      !file.path.startsWith('.lake/')
+                        ? [
+                            {
+                              label: 'Rename',
+                              icon: <Icon name="edit" size={15} />,
+                              disabled:
+                                disabled || !ready || !!moveReason(file.path),
+                              ...moveHint(file.path),
+                              onSelect: () => onRename(file.path, 'file'),
+                            },
+                            {
+                              label: 'Move to folder…',
+                              icon: <Icon name="folder" size={15} />,
+                              disabled:
+                                disabled || !ready || !!moveReason(file.path),
+                              ...moveHint(file.path),
+                              onSelect: () => onMove(file.path, 'file'),
+                            },
+                            {
+                              label: 'Move to trash',
+                              icon: <Icon name="trash" size={15} />,
+                              danger: true,
+                              disabled: disabled || !ready,
+                              onSelect: () => onDelete(file.path, 'file'),
+                            },
+                          ]
+                        : []),
+                    ]
+                  })()
           }
         />
       )}

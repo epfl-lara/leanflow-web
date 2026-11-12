@@ -323,16 +323,20 @@ export class ProjectDocuments {
     }
   }
 
-  invalidate(record) {
+  // A moved file keeps its content, so peers are told through the structured
+  // `files` message and carry their drafts to the destination. The old
+  // document is still invalidated so no stale write can recreate its path.
+  invalidate(record, { moved = false } = {}) {
     if (record.invalidated) return
     record.invalidated = true
+    if (moved) return
     for (const client of record.clients)
       this.send(client, {
         type: 'error',
         path: record.path,
         status: 409,
         message:
-          'This shared file was removed. Your draft remains in this tab. Reopen the saved file before continuing.',
+          'This shared file was removed or moved. Your draft remains in this tab. Reopen the saved file before continuing.',
       })
   }
   assertDocumentCurrent(record, documentId = record.id) {
@@ -807,6 +811,9 @@ export class ProjectDocuments {
                   ? 'project'
                   : 'files',
             paths: event.paths,
+            ...(event.moves?.length && event.kind === 'files'
+              ? { moves: event.moves }
+              : {}),
           })
         } catch {
           client.ws.close(1008, 'Project access changed.')
@@ -819,7 +826,13 @@ export class ProjectDocuments {
           (name) => name === record.path || record.path.startsWith(name + '/'),
         )
       )
-        this.invalidate(record)
+        this.invalidate(record, {
+          moved: !!event.moves?.some(
+            (move) =>
+              record.path === move.from ||
+              record.path.startsWith(move.from + '/'),
+          ),
+        })
       if (
         record.projectId !== event.projectId ||
         (event.paths?.length &&

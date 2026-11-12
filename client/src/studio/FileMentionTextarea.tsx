@@ -117,10 +117,20 @@ export function FileMentionTextarea({
         }
         onClick={() => setDismissed(false)}
         onKeyDown={(event) => {
-          if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+          if (event.nativeEvent.isComposing || event.keyCode === 229) return
+          if (event.key === 'Enter' && !event.shiftKey && !event.altKey) {
             event.preventDefault()
+            if (event.repeat) return
+            if (open && matches.length && !event.ctrlKey && !event.metaKey) {
+              select(matches[choice].path)
+              return
+            }
             setDismissed(true)
-            event.currentTarget.form?.requestSubmit()
+            const form = event.currentTarget.form
+            const submit = form?.querySelector<HTMLButtonElement>(
+              'button[type="submit"]',
+            )
+            if (submit && !submit.disabled) form?.requestSubmit(submit)
             return
           }
           if (!open) return
@@ -140,13 +150,6 @@ export function FileMentionTextarea({
                   matches.length) %
                 matches.length,
             )
-          } else if (
-            matches.length &&
-            event.key === 'Enter' &&
-            !event.shiftKey
-          ) {
-            event.preventDefault()
-            select(matches[choice].path)
           }
         }}
       />
