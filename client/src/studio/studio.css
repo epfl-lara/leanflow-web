@@ -720,6 +720,17 @@ textarea {
 .workspace-alert > .icon-button {
   color: var(--danger);
 }
+.legacy-recovery-notice {
+  flex-shrink: 0;
+  max-height: 50vh;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.legacy-recovery-notice > summary {
+  cursor: pointer;
+}
 .draft-protection-alert {
   flex-wrap: wrap;
 }

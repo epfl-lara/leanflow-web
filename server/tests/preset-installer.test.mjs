@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { Runtime } from '../runtime.mjs'
+import { StorageCapacity } from '../storage-capacity.mjs'
 
 async function fixture(t, id) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-preset-'))
@@ -166,4 +167,97 @@ test('a dependency pin changed by a later preset build is restored and not publi
     await fs.readFile(path.join(f.root, 'lake-manifest.json'), 'utf8'),
   )
   assert.equal(manifest.packages[0].rev, f.preset.revision)
+})
+
+test('refused preset replay allocation removes only its empty candidate and preserves another stage and claim', async (t) => {
+  const f = await fixture(t, 'mathlib')
+  const parent = path.join(f.runtime.runtimeDir, 'template-check')
+  const retained = path.join(parent, 'another-stage')
+  await fs.mkdir(retained, { recursive: true })
+  await fs.writeFile(
+    path.join(retained, 'keep.txt'),
+    'another retained candidate',
+  )
+  await f.runtime.claimTemporaryWorkspace(retained)
+  const claims = await fs.readdir(f.runtime.temporaryWorkspaces.directory)
+  let released = false
+  const release = f.runtime.releaseTemporaryWorkspace.bind(f.runtime)
+  f.runtime.releaseTemporaryWorkspace = async (...args) => {
+    released = true
+    return release(...args)
+  }
+  f.runtime.storage = new StorageCapacity({
+    dataDir: f.runtime.dataDir,
+    minimumFreeBytes: 100,
+    warningFreeBytes: 200,
+    allocationBytes: 200,
+    sample: async () => ({ bavail: 150n, bsize: 1n }),
+  })
+  await assert.rejects(f.install(), { status: 503, code: 'STORAGE_PRESSURE' })
+  assert.equal(
+    released,
+    false,
+    'A refused allocation has no stage claim to release',
+  )
+  assert.deepEqual(await fs.readdir(parent), ['another-stage'])
+  assert.deepEqual(
+    await fs.readdir(f.runtime.temporaryWorkspaces.directory),
+    claims,
+  )
+  assert.equal(
+    await fs.readFile(path.join(retained, 'keep.txt'), 'utf8'),
+    'another retained candidate',
+  )
+  assert.equal(f.runtime.temporaryStorageReservations.size, 0)
+  assert.equal((await f.runtime.storage.status()).reservedBytes, 0)
+  assert.equal(f.runtime.templateRoot('mathlib'), null)
+})
+
+test('a replaced unclaimed preset candidate is preserved when claim allocation fails', async (t) => {
+  const f = await fixture(t, 'mathlib')
+  let replacement
+  f.runtime.claimTemporaryWorkspace = async (candidate) => {
+    replacement = candidate
+    await fs.rename(candidate, candidate + '-original')
+    await fs.mkdir(candidate)
+    await fs.writeFile(
+      path.join(candidate, 'keep.txt'),
+      'replacement belongs to another operation',
+    )
+    throw Object.assign(new Error('Storage allocation refused.'), {
+      status: 503,
+    })
+  }
+  f.runtime.releaseTemporaryWorkspace = () =>
+    assert.fail('An unclaimed replacement must never be released.')
+  await assert.rejects(f.install(), { status: 503 })
+  assert.equal(
+    await fs.readFile(path.join(replacement, 'keep.txt'), 'utf8'),
+    'replacement belongs to another operation',
+  )
+  assert((await fs.stat(replacement + '-original')).isDirectory())
+  assert.equal(f.runtime.templateRoot('mathlib'), null)
+})
+
+test('a conflicting claim preserves the unchanged candidate for the operation that claimed it', async (t) => {
+  const f = await fixture(t, 'mathlib')
+  const claim = f.runtime.claimTemporaryWorkspace.bind(f.runtime)
+  let candidate
+  f.runtime.claimTemporaryWorkspace = async (root) => {
+    candidate = root
+    await claim(root)
+    throw Object.assign(
+      new Error('Another operation claimed this candidate.'),
+      { code: 'EEXIST' },
+    )
+  }
+  f.runtime.releaseTemporaryWorkspace = () =>
+    assert.fail('A conflicting claim belongs to another operation.')
+  await assert.rejects(f.install(), { code: 'EEXIST' })
+  assert((await fs.stat(candidate)).isDirectory())
+  assert.equal(
+    (await fs.readdir(f.runtime.temporaryWorkspaces.directory)).length,
+    1,
+  )
+  assert.equal(f.runtime.templateRoot('mathlib'), null)
 })

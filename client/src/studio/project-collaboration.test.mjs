@@ -1427,3 +1427,103 @@ test('ordinary-saving reconnect guidance does not replace a blocking shared-file
     /BLOCKED_LOCAL_DRAFT/,
   )
 })
+
+test('post-commit durability errors reconnect without duplicating accepted Yjs edits and keep private Undo separate from remote changes', async (t) => {
+  const baseline = 'base source\n'
+  const { store, socket, hook } = fixture(t, baseline, { deferReady: true })
+  const backend = serviceFixture(t, baseline)
+  await admitServiceDocument(backend, socket)
+  const write = backend.service.workspaces.writeFile.bind(
+    backend.service.workspaces,
+  )
+  let uncertain = true
+  backend.service.workspaces.writeFile = async (...args) => {
+    const saved = await write(...args)
+    if (uncertain)
+      throw Object.assign(
+        new Error(
+          'The updated file is visible, but storage could not confirm a durable save. Keep or download your draft, then retry.',
+        ),
+        { status: 503, sourceCommitted: true },
+      )
+    return saved
+  }
+  store.change('Main.lean', 'ALICE_LOCAL\n' + baseline)
+  const flushing = hook.flush()
+  const failed = assert.rejects(flushing, /could not confirm a durable save/)
+  const request = lastDocumentUpdate(socket)
+  const error = await rejectedDocumentUpdate(backend, request)
+  assert.equal(
+    backend.packets.some((packet) => packet.ack === request.requestId),
+    false,
+  )
+  backend.deliver(socket)
+  socket.receive(error)
+  await failed
+  assert.equal(store.getSnapshot().file.content, 'ALICE_LOCAL\n' + baseline)
+  assert.equal(backend.source(), 'ALICE_LOCAL\n' + baseline)
+  await assert.rejects(hook.flush(), /live connection to return/)
+  const record = [...backend.service.documents.values()][0]
+  await backend.service.queue(record, () =>
+    backend.service.refresh(record, 'account'),
+  )
+  uncertain = false
+  const remotePackets = []
+  const remote = {
+    projectId: 'project',
+    actor: 'remote-account',
+    paths: new Set(),
+    vectors: new Map(),
+    ws: {
+      readyState: 1,
+      bufferedAmount: 0,
+      send(raw) {
+        remotePackets.push(JSON.parse(raw))
+      },
+    },
+  }
+  await backend.service.message(remote, { type: 'open', path: 'Main.lean' })
+  const remoteDoc = new Y.Doc()
+  t.after(() => remoteDoc.destroy())
+  const remoteOpen = remotePackets.find((packet) => packet.type === 'document')
+  Y.applyUpdate(
+    remoteDoc,
+    new Uint8Array(Buffer.from(remoteOpen.update, 'base64')),
+  )
+  const remoteVector = Y.encodeStateVector(remoteDoc)
+  remoteDoc
+    .getText('source')
+    .insert(remoteDoc.getText('source').length, 'BOB_REMOTE\n')
+  await backend.service.message(remote, {
+    type: 'update',
+    path: 'Main.lean',
+    documentId: remoteOpen.documentId,
+    requestId: 1,
+    update: Buffer.from(
+      Y.encodeStateAsUpdate(remoteDoc, remoteVector),
+    ).toString('base64'),
+  })
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reopened = Socket.instances.at(-1)
+  assert.notEqual(reopened, socket)
+  await admitServiceDocument(backend, reopened)
+  const replay = lastDocumentUpdate(reopened)
+  assert(
+    replay,
+    'The unacknowledged request is replayed even when its bytes are already visible',
+  )
+  await backend.service.message(backend.client, replay)
+  backend.deliver(reopened)
+  assert.equal(await hook.flush(), true)
+  assert.equal(
+    store.getSnapshot().file.content,
+    'ALICE_LOCAL\n' + baseline + 'BOB_REMOTE\n',
+  )
+  assert.equal(backend.source(), 'ALICE_LOCAL\n' + baseline + 'BOB_REMOTE\n')
+  assert.equal(hook.undo('Main.lean'), true)
+  assert.equal(store.getSnapshot().file.content, baseline + 'BOB_REMOTE\n')
+  await backend.service.message(backend.client, lastDocumentUpdate(reopened))
+  backend.deliver(reopened)
+  assert.equal(await hook.flush(), true)
+  assert.equal(backend.source(), baseline + 'BOB_REMOTE\n')
+})

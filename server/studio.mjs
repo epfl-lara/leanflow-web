@@ -45,9 +45,14 @@ import { installProjectDownloadRoutes } from './project-downloads.mjs'
 import { installProjectSharingRoutes } from './project-sharing.mjs'
 import { ProjectDocuments } from './project-documents.mjs'
 import { installTerminalRecoveryRoutes } from './terminal-recovery.mjs'
+import {
+  installLegacyRecoveryRoutes,
+  recoveryIdleCheck,
+} from './legacy-project-recovery-routes.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
 import { proofTargetReference } from './proof-target.mjs'
 import { loadCapacity } from './capacity.mjs'
+import { StorageCapacity, loadStorageCapacity } from './storage-capacity.mjs'
 import { LeanBooks, installBookRoutes } from './lean-books.mjs'
 import {
   sourceBodyKind,
@@ -171,6 +176,7 @@ const chatTranscript = (job, eventCursor, reasoningBlocks) => ({
 export async function createStudio({
   dataDir = process.env.STUDIO_DATA_DIR || path.join(projectDir, '.data'),
   runtime: suppliedRuntime,
+  storage: suppliedStorage,
   config: suppliedConfig,
   gitConnections: suppliedGitConnections,
   titleGenerator: suppliedTitleGenerator,
@@ -182,6 +188,9 @@ export async function createStudio({
   const workspaceDataDir = dataDir
   await fs.mkdir(dataDir, { recursive: true, mode: 0o700 })
   dataDir = await fs.realpath(dataDir)
+  const storage =
+    suppliedStorage ||
+    new StorageCapacity({ dataDir, ...loadStorageCapacity() })
   const auth = new Auth(dataDir)
   await auth.init()
   const config = suppliedConfig || (await loadConfig(dataDir))
@@ -207,18 +216,21 @@ export async function createStudio({
       dataDir,
       scope: 'server',
       maxConcurrent: capacity.workers,
+      interactiveReserved: capacity.interactiveWorkers,
+      batchReserved: capacity.batchWorkers,
       maxQueue: capacity.workerQueue,
       cpus: capacity.workerCpus,
       memory: capacity.workerMemory,
       memoryBudget: capacity.workerMemoryBudget,
       kernelExportMaxBytes: capacity.kernelExportMaxBytes,
+      storage,
     })
   await runtime.init()
   let playgroundPreparation = Promise.resolve()
   const preparePlayground = () => {
     if (runtime.preparePresetEnvironment && runtime.templateRoot('mathlib'))
-      playgroundPreparation = runtime
-        .preparePresetEnvironment('mathlib')
+      playgroundPreparation = storage
+        .withReservation({}, () => runtime.preparePresetEnvironment('mathlib'))
         .catch((error) => {
           console.warn(
             'Mathlib Playground preparation failed:',
@@ -250,13 +262,17 @@ export async function createStudio({
         }
         if (runtime.stopping || process.env.STUDIO_AUTO_PREPARE_PRESETS === '0')
           return
-        await runtime.presetInstaller.prepareAll({
-          onProgress: (id, message) =>
-            console.info(`Preset ${id}:`, config.redact(message)),
-          onReady: (id) => {
-            if (id === 'mathlib') preparePlayground()
-          },
-        })
+        await storage.withReservation(
+          { signal: runtime.presetInstaller.controller.signal },
+          () =>
+            runtime.presetInstaller.prepareAll({
+              onProgress: (id, message) =>
+                console.info(`Preset ${id}:`, config.redact(message)),
+              onReady: (id) => {
+                if (id === 'mathlib') preparePlayground()
+              },
+            }),
+        )
       })().catch((error) =>
         console.warn(
           'Preset preparation failed:',
@@ -280,6 +296,7 @@ export async function createStudio({
     dataDir: workspaceDataDir,
     runtime,
     setupBuildTimeoutMs: capacity.setupBuildTimeoutMs,
+    storage,
     gitCredentials: (owner, repository) =>
       gitConnections.credentials(owner, repository),
   })
@@ -602,6 +619,9 @@ export async function createStudio({
     res.json(await auth.updateProfile(req.user, req.body)),
   )
   app.get('/api/templates', (_req, res) => res.json(runtime.templates()))
+  app.get('/api/storage', async (_req, res) =>
+    res.json(await storage.status({ refresh: true })),
+  )
   app.get('/api/session', async (req, res) => {
     let modelAccess
     try {
@@ -619,6 +639,7 @@ export async function createStudio({
         process.env.STUDIO_EVENT_TRANSPORT === 'poll' ? 'poll' : 'sse',
       capacity,
       runtime: runtime.info(),
+      storage: await storage.status(),
       models: modelAccess.models,
       savedModels: await modelPreferences.get(req.user.id, modelAccess),
       defaultModel: modelAccess.defaultModel,
@@ -826,26 +847,23 @@ export async function createStudio({
           status: 400,
         },
       )
-    const assertIdle = () => {
-      requireNoActiveWork(id, actor)
-      const finishing = [jobs, agents, texBuilds].some((manager) =>
-        [...(manager?.active?.keys() || [])].some(
-          (runId) => events.getMetadata(runId).projectId === id,
-        ),
-      )
-      if (finishing)
-        throw Object.assign(
-          new Error(
-            'Project work is still finishing. Wait before retrying file recovery.',
-          ),
-          { status: 409 },
-        )
-    }
+    const assertIdle = recoveryIdleCheck(id, actor, {
+      requireNoActiveWork,
+      managers: [jobs, agents, texBuilds],
+      events,
+    })
     assertIdle()
     const project = await workspaces.retryFileRecovery(id, actor, {
       assertIdle,
     })
     res.json(publicProject(project))
+  })
+  installLegacyRecoveryRoutes(app, {
+    workspaces,
+    requireNoActiveWork,
+    managers: [jobs, agents, texBuilds],
+    events,
+    publicProject,
   })
   app.post('/api/projects/:id/terminal/stop', async (req, res) => {
     workspaces.get(req.params.id, req.user.id)
@@ -1584,6 +1602,7 @@ export async function createStudio({
     let requests, progress, editPolicy, widgetPolicy
     try {
       child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
+        workload: 'interactive',
         network: 'none',
         readOnlyWorkspace: true,
         writeLakeCache: true,
@@ -1725,6 +1744,7 @@ export async function createStudio({
     server,
     auth,
     runtime,
+    storage,
     workspaces,
     projectDocuments,
     events,

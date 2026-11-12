@@ -7,6 +7,7 @@ import net from 'node:net'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { WebSocket } from 'ws'
@@ -131,6 +132,150 @@ async function fixture(t, { capacity } = {}) {
     origin,
   }
 }
+
+test('older update recovery HTTP requires an idle Admin and preserves later edits', async (t) => {
+  const f = await fixture(t)
+  const original = await f.workspaces.readFile(
+    f.project.id,
+    f.owner.id,
+    'Main.lean',
+  )
+  await f.workspaces.writeFile(
+    f.project.id,
+    f.owner.id,
+    'Main.lean',
+    '-- interrupted update\n',
+    original.hash,
+  )
+  const id = `${Date.now()}-${randomUUID()}`
+  const directory = path.join(f.workspaces.historyDir, f.project.id, id)
+  await fs.mkdir(path.join(directory, 'before'), { recursive: true })
+  await fs.writeFile(path.join(directory, 'before/0'), original.content)
+  await fs.writeFile(
+    path.join(directory, 'manifest.json'),
+    JSON.stringify({
+      projectId: f.project.id,
+      owner: f.owner.id,
+      createdAt: new Date().toISOString(),
+      changes: [
+        {
+          path: 'Main.lean',
+          beforeHash: original.hash,
+          afterHash: createHash('sha256')
+            .update('-- interrupted update\n')
+            .digest('hex'),
+        },
+      ],
+    }),
+  )
+  await f.workspaces.legacyRecovery.init([f.project])
+  const base = `${f.base}/file-recovery/legacy`
+  const endpoint = `${base}/${id}`
+  const download = `${endpoint}/original?path=Main.lean`
+  assert.equal(
+    (await (await f.request(f.base)).json()).legacyFileRecoveryRequired,
+    true,
+  )
+  for (const actor of [f.editor, f.viewer, f.outsider, null]) {
+    const expected = actor === null ? 401 : actor === f.outsider ? 404 : 403
+    assert.equal((await f.request(base, { actor })).status, expected)
+    assert.equal((await f.request(download, { actor })).status, expected)
+    assert.equal(
+      (
+        await f.request(endpoint, {
+          actor,
+          method: 'POST',
+          body: { revision: 'a'.repeat(64), decision: 'keep-current' },
+        })
+      ).status,
+      expected,
+    )
+  }
+  const initial = await f.request(base)
+  assert.equal(initial.status, 200)
+  assert.equal(initial.headers.get('cache-control'), 'no-store')
+  const {
+    reviews: [review],
+  } = await initial.json()
+  for (const query of [
+    'cursor=../secret',
+    'recordId=../secret',
+    'fileOffset=1.5',
+    'fileOffset=12001',
+    'fileOffset=1',
+    'cursor=x&cursor=y',
+    'unknown=1',
+  ])
+    assert.equal((await f.request(`${base}?${query}`)).status, 400)
+  const originalDownload = await f.request(download)
+  assert.equal(originalDownload.status, 200)
+  assert.equal(await originalDownload.text(), original.content)
+  assert.match(originalDownload.headers.get('content-disposition'), /Main.lean/)
+  assert.equal(
+    (await f.request(`${endpoint}/original?path=../secret`)).status,
+    400,
+  )
+  for (const body of [
+    null,
+    [],
+    { revision: review.revision, decision: 'restore', force: true },
+    { revision: 'wrong', decision: 'restore' },
+  ])
+    assert.equal(
+      (await f.request(endpoint, { method: 'POST', body })).status,
+      400,
+    )
+  const active = f.events.create(f.editor.id, {
+    kind: 'agent',
+    projectId: f.project.id,
+  })
+  f.events.updateMetadata(active.id, { status: 'running' })
+  assert.equal(
+    (
+      await f.request(endpoint, {
+        method: 'POST',
+        body: { revision: review.revision, decision: 'restore' },
+      })
+    ).status,
+    409,
+  )
+  assert.equal(f.events.getMetadata(active.id).status, 'running')
+  f.events.updateMetadata(active.id, { status: 'completed' })
+  await fs.writeFile(
+    path.join(f.project.root, 'Main.lean'),
+    '-- later user edit\n',
+  )
+  assert.equal(
+    (
+      await f.request(endpoint, {
+        method: 'POST',
+        body: { revision: review.revision, decision: 'restore' },
+      })
+    ).status,
+    409,
+  )
+  const {
+    reviews: [fresh],
+  } = await (await f.request(base)).json()
+  assert.equal(fresh.canRestore, false)
+  const kept = await f.request(endpoint, {
+    method: 'POST',
+    body: { revision: fresh.revision, decision: 'keep-current' },
+  })
+  assert.equal(kept.status, 200)
+  const result = await kept.json()
+  assert.equal(result.root, undefined)
+  assert.equal(result.fileRecoveryRequired, undefined)
+  assert.equal(result.status, 'ready')
+  assert.equal(
+    await fs.readFile(path.join(f.project.root, 'Main.lean'), 'utf8'),
+    '-- later user edit\n',
+  )
+  assert.equal(
+    await fs.readFile(path.join(directory, 'before/0'), 'utf8'),
+    original.content,
+  )
+})
 
 test('sharing grants project roles, bounds account discovery, and keeps private data private', async (t) => {
   const f = await fixture(t)

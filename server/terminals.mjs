@@ -247,10 +247,23 @@ export class Terminals {
           !session.snapshot && actor === project.owner
             ? this.workspaces?.repositoryRoot?.(project)
             : null
-        child = this.runtime.spawn(
+        const spawn = this.runtime.spawnWhenAvailable || this.runtime.spawn
+        child = await spawn.call(
+          this.runtime,
           session.snapshot?.root || project.root,
           ['python3', '-u', '-c', workerScript],
           {
+            workload: 'interactive',
+            signal: startupController.signal,
+            onSpawn: (spawned) => {
+              child = spawned
+              session.child = spawned
+            },
+            beforeSpawn: () => {
+              startupController.signal.throwIfAborted()
+              assertAuthenticated()
+              this.workspaces?.requireEditor?.(project.id, actor)
+            },
             network: 'bridge',
             freshHome: true,
             cleanHome: true,

@@ -196,7 +196,7 @@ test('full checks share weighted worker capacity and serialize exports while sma
   }
   const pending = runtime.spawnWhenAvailable(root, ['lake', 'check'], options)
   assert.equal(runtime.info().queued, 1)
-  const editor = runtime.spawn(root, ['hold'])
+  const editor = runtime.spawn(root, ['hold'], { workload: 'interactive' })
   first.kill()
   await first.workerStopped
   assert.equal(runtime.info().queued, 1)
@@ -210,7 +210,10 @@ test('full checks share weighted worker capacity and serialize exports while sma
   editor.kill()
   await editor.workerStopped
   assert.equal(runtime.info().queued, 1, 'Only one export may run at a time')
-  assert.equal((await runtime.run(root, ['quick'])).code, 0)
+  assert.equal(
+    (await runtime.run(root, ['quick'], { workload: 'interactive' })).code,
+    0,
+  )
   kernel.kill()
   await kernel.workerStopped
   const resumed = await next

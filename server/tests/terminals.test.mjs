@@ -67,6 +67,7 @@ test('terminal output and acknowledgements keep builds alive; a silent shell sti
   })
   t.after(() => terminals.close())
   terminals.connect(ws, { id: 'fixture', root: '/unused' })
+  await [...terminals.sessions][0].startup
   for (let interval = 0; interval < 5; interval++) {
     t.mock.timers.tick(10 * 60_000)
     child.stdout.write(Buffer.from('build output'))

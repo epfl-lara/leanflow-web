@@ -2,6 +2,7 @@ import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
 import { removeDisposableTree } from './temporary-workspaces.mjs'
 import { MAX_PROJECT_FILES } from '../shared/source-limits.mjs'
 
@@ -113,7 +114,13 @@ async function targetState(
   project,
   change,
   parent,
-  { sync = false, singleLink = false } = {},
+  {
+    sync = false,
+    singleLink = false,
+    size = null,
+    mode = null,
+    ownedAlias = null,
+  } = {},
 ) {
   if (
     (await fs.realpath(parent.anchor)) !==
@@ -136,9 +143,22 @@ async function targetState(
     if (
       !before.isFile() ||
       before.size > MAX_BYTES ||
-      (singleLink && before.nlink !== 1)
+      (size !== null && before.size !== size) ||
+      (mode !== null && (before.mode & 0o777) !== mode)
     )
       throw new Error('Transaction target is not a bounded regular file.')
+    if (singleLink && before.nlink !== 1) {
+      const alias = ownedAlias ? await fs.lstat(ownedAlias) : null
+      if (
+        before.nlink !== 2 ||
+        !alias?.isFile() ||
+        alias.isSymbolicLink() ||
+        alias.nlink !== 2 ||
+        alias.dev !== before.dev ||
+        alias.ino !== before.ino
+      )
+        throw new Error('Transaction backup contains an unexpected hardlink.')
+    }
     const hash = createHash('sha256')
     let bytes = 0
     for await (const chunk of handle.createReadStream({ autoClose: false })) {
@@ -179,15 +199,19 @@ export class ProjectTransactions {
     if (this.errors.has(projectId)) throw recoveryError()
   }
 
-  #validate(row, project) {
+  async #validate(row, project) {
     if (
       typeof row.payload !== 'string' ||
       Buffer.byteLength(row.payload) > MAX_INTENT_BYTES
     )
       throw new Error('Invalid transaction size.')
+    // Loading a legacy inline SQLite row and parsing its JSON must not share
+    // one uninterrupted turn with base64 decoding the first original file.
+    await yieldToEventLoop()
     const intent = JSON.parse(row.payload)
+    await yieldToEventLoop()
     if (
-      intent.version !== 1 ||
+      ![1, 2].includes(intent.version) ||
       intent.id !== row.id ||
       !transactionPattern.test(intent.id) ||
       intent.projectId !== row.project ||
@@ -199,7 +223,9 @@ export class ProjectTransactions {
       intent.changes.length > MAX_CHANGES
     )
       throw new Error('Invalid transaction identity or version.')
-    let bytes = 0
+    let bytes = 0,
+      afterBytes = 0,
+      index = 0
     const seen = new Set()
     for (const change of intent.changes) {
       if (
@@ -218,7 +244,31 @@ export class ProjectTransactions {
       )
         throw new Error('Invalid transaction change.')
       seen.add(change.path)
-      if (change.before === null) {
+      if (intent.version === 2) {
+        if (
+          (change.beforeHash === null && change.beforeMode !== null) ||
+          (change.beforeHash !== null &&
+            (!Number.isInteger(change.beforeMode) ||
+              change.beforeMode < 0 ||
+              change.beforeMode > 0o777))
+        )
+          throw new Error('Invalid original transaction permissions.')
+        if (Object.hasOwn(change, 'before'))
+          throw new Error('Unexpected inline original transaction bytes.')
+        for (const side of ['before', 'after']) {
+          const size = change[`${side}Size`]
+          if (
+            (change[`${side}Hash`] === null && size !== null) ||
+            (change[`${side}Hash`] !== null &&
+              (!Number.isSafeInteger(size) || size < 0 || size > MAX_BYTES))
+          )
+            throw new Error('Invalid transaction byte count.')
+        }
+        bytes += change.beforeSize ?? 0
+        afterBytes += change.afterSize ?? 0
+        if (bytes > MAX_BYTES || afterBytes > MAX_BYTES)
+          throw new Error('Transaction source bytes exceed the recovery limit.')
+      } else if (change.before === null) {
         if (change.beforeHash !== null)
           throw new Error('Missing original transaction bytes.')
       } else {
@@ -233,6 +283,9 @@ export class ProjectTransactions {
         )
           throw new Error('Original transaction bytes failed verification.')
       }
+      // Legacy inline intents can contain a full batch of base64 data. Yield
+      // between files so retrying one project leaves other requests responsive.
+      if (++index % 32 === 0 || intent.version === 1) await yieldToEventLoop()
     }
     assertTransactionPaths(seen)
     return intent
@@ -240,6 +293,97 @@ export class ProjectTransactions {
 
   #directory(intent) {
     return path.join(this.historyDir, intent.projectId, intent.id)
+  }
+
+  async #checkOriginals(intent) {
+    if (intent.version === 1) return
+    const directory = path.join(this.#directory(intent), 'originals')
+    const parent = await openDirectory(directory)
+    try {
+      for (const [index, change] of intent.changes.entries()) {
+        if (change.beforeHash === null) continue
+        const original = await targetState(
+          { root: directory },
+          { path: String(index) },
+          { anchor: `/proc/self/fd/${parent.fd}`, name: String(index) },
+          {
+            singleLink: true,
+            size: change.beforeSize,
+            mode: change.beforeMode,
+          },
+        )
+        if (original !== change.beforeHash)
+          throw new Error('Original transaction bytes failed verification.')
+      }
+    } finally {
+      await parent.close()
+    }
+  }
+
+  async #originalBytes(intent, index, change) {
+    if (intent.version === 1) return Buffer.from(change.before, 'base64')
+    const directory = path.join(this.#directory(intent), 'originals')
+    const parent = await openDirectory(directory)
+    let handle
+    try {
+      const filename = `/proc/self/fd/${parent.fd}/${index}`
+      handle = await fs.open(
+        filename,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      )
+      const before = await handle.stat()
+      if (
+        !before.isFile() ||
+        before.nlink !== 1 ||
+        before.size !== change.beforeSize ||
+        (before.mode & 0o777) !== change.beforeMode
+      )
+        throw new Error('Original transaction bytes are not safe.')
+      const chunks = []
+      const hash = createHash('sha256')
+      let bytes = 0
+      for await (const chunk of handle.createReadStream({ autoClose: false })) {
+        bytes += chunk.length
+        if (bytes > change.beforeSize)
+          throw new Error('Original transaction bytes grew during recovery.')
+        chunks.push(chunk)
+        hash.update(chunk)
+      }
+      const after = await handle.stat()
+      const current = await fs.lstat(filename)
+      if (
+        bytes !== before.size ||
+        hash.digest('hex') !== change.beforeHash ||
+        after.size !== before.size ||
+        after.mtimeMs !== before.mtimeMs ||
+        after.ctimeMs !== before.ctimeMs ||
+        current.dev !== before.dev ||
+        current.ino !== before.ino ||
+        current.isSymbolicLink()
+      )
+        throw new Error('Original transaction bytes changed during recovery.')
+      return Buffer.concat(chunks, bytes)
+    } finally {
+      await handle?.close()
+      await parent.close()
+    }
+  }
+
+  async #releaseOriginals(intent) {
+    if (intent.version === 1) return
+    // The SQLite deletion is durable before removing the independent recovery
+    // bytes. The retained before/ directory remains the user's file history.
+    try {
+      await removeDisposableTree(
+        path.join(this.#directory(intent), 'originals'),
+      )
+    } catch (error) {
+      logFailure(
+        { id: intent.id, project: intent.projectId },
+        error,
+        'released originals cleanup',
+      )
+    }
   }
 
   async #committed(intent, payload) {
@@ -291,8 +435,28 @@ export class ProjectTransactions {
       await syncDirectory(directory)
   }
 
+  async #backupState(intent, index, change, parent, backups, current) {
+    if (!backups) return null
+    return targetState(
+      { root: path.join(this.#directory(intent), 'before') },
+      { path: String(index) },
+      { anchor: `/proc/self/fd/${backups.fd}`, name: String(index) },
+      {
+        singleLink: true,
+        mode: intent.version === 1 ? change.mode : change.beforeMode,
+        // A crash immediately after link() can retain exactly this one owned
+        // alias of the unchanged source. No unrelated hardlinks are accepted.
+        ownedAlias:
+          current === change.beforeHash
+            ? `${parent.anchor}/${parent.name}`
+            : null,
+      },
+    )
+  }
+
   async #recover(row, project, onCommitted) {
-    const intent = this.#validate(row, project)
+    const intent = await this.#validate(row, project)
+    await this.#checkOriginals(intent)
     const committed = await this.#committed(intent, row.payload)
     if (committed) {
       await onCommitted?.(project, intent.changes)
@@ -301,13 +465,29 @@ export class ProjectTransactions {
       const directory = this.#directory(intent)
       const beforeDirectory = path.join(directory, 'before')
       try {
-        for (const change of intent.changes) {
+        originals = await openDirectory(beforeDirectory).catch((error) => {
+          if (error.code === 'ENOENT') return null
+          throw error
+        })
+        for (const [index, change] of intent.changes.entries()) {
           currentPath = change.path
           const parent = await this.openParent(project.root, change.path)
           try {
             const current = await targetState(project, change, parent)
             if (![null, change.beforeHash, change.afterHash].includes(current))
               throw new Error('Transaction target contains an unexpected edit.')
+            const backup = await this.#backupState(
+              intent,
+              index,
+              change,
+              parent,
+              originals,
+              current,
+            )
+            if (backup !== null && backup !== change.beforeHash)
+              throw new Error(
+                'Original transaction backup failed verification.',
+              )
           } finally {
             await parent.handle.close()
           }
@@ -319,35 +499,38 @@ export class ProjectTransactions {
             const current = await targetState(project, change, parent)
             if (![null, change.beforeHash, change.afterHash].includes(current))
               throw new Error('Transaction target changed before recovery.')
+            const original = await this.#backupState(
+              intent,
+              index,
+              change,
+              parent,
+              originals,
+              current,
+            )
+            if (original !== null && original !== change.beforeHash)
+              throw new Error(
+                'Original transaction backup failed verification.',
+              )
+            const destination = `${parent.anchor}/${parent.name}`
+            if (current === change.beforeHash && original !== null) {
+              const backupPath = `/proc/self/fd/${originals.fd}/${index}`
+              const backupStat = await fs.lstat(backupPath)
+              const sourceStat = await fs.lstat(destination)
+              if (
+                backupStat.dev === sourceStat.dev &&
+                backupStat.ino === sourceStat.ino
+              ) {
+                // The verified duplicate was made by this interrupted update;
+                // retain the source and remove only its private history alias.
+                await fs.unlink(backupPath)
+              }
+            }
             if (current !== change.beforeHash) {
-              const destination = `${parent.anchor}/${parent.name}`
-              if (change.before === null) {
+              if (change.beforeHash === null) {
                 // Preflight proved this is exactly the newly-created file.
                 if (current !== null) await fs.unlink(destination)
               } else {
-                if (!originals)
-                  originals = await openDirectory(beforeDirectory).catch(
-                    (error) => {
-                      if (error.code === 'ENOENT') return null
-                      throw error
-                    },
-                  )
-                const original = originals
-                  ? await targetState(
-                      { root: beforeDirectory },
-                      { path: String(index) },
-                      {
-                        anchor: `/proc/self/fd/${originals.fd}`,
-                        name: String(index),
-                      },
-                      { singleLink: true },
-                    )
-                  : null
                 if (original !== null) {
-                  if (original !== change.beforeHash)
-                    throw new Error(
-                      'Original transaction backup failed verification.',
-                    )
                   await fs.rename(
                     `/proc/self/fd/${originals.fd}/${index}`,
                     destination,
@@ -377,8 +560,8 @@ export class ProjectTransactions {
                     }
                     await durableFile(
                       temporary,
-                      Buffer.from(change.before, 'base64'),
-                      change.mode,
+                      await this.#originalBytes(intent, index, change),
+                      intent.version === 1 ? change.mode : change.beforeMode,
                     )
                     await fs.rename(temporary, destination)
                   } finally {
@@ -412,6 +595,7 @@ export class ProjectTransactions {
       .prepare('DELETE FROM pending_project_transactions WHERE id=?')
       .run(row.id)
     this.errors.delete(row.project)
+    await this.#releaseOriginals(intent)
     return committed
   }
 
@@ -458,21 +642,30 @@ export class ProjectTransactions {
   async apply(project, prepared, { authorize, onCommitted } = {}) {
     this.assertWritable(project.id)
     const id = `${Date.now()}-${randomUUID()}`
+    // Recovery bytes live in private, fsynced files rather than a base64 JSON
+    // value. SQLite only commits the bounded metadata and hashes, avoiding a
+    // source-sized serialization/validation/write pause on the request loop.
     const intent = {
-      version: 1,
+      version: 2,
       id,
       projectId: project.id,
       owner: project.owner,
-      changes: prepared.map((change) => ({
+      changes: [],
+    }
+    for (const change of prepared) {
+      intent.changes.push({
         path: change.path,
         mode: change.mode,
-        before:
-          change.before === null
-            ? null
-            : Buffer.from(change.before).toString('base64'),
+        beforeMode:
+          change.before === null ? null : (change.beforeMode ?? change.mode),
         beforeHash: change.beforeHash,
         afterHash: change.after === null ? null : digest(change.after),
-      })),
+        beforeSize:
+          change.before === null ? null : Buffer.byteLength(change.before),
+        afterSize:
+          change.after === null ? null : Buffer.byteLength(change.after),
+      })
+      await yieldToEventLoop()
     }
     const row = {
       id,
@@ -481,7 +674,7 @@ export class ProjectTransactions {
       payload: JSON.stringify(intent),
     }
     try {
-      this.#validate(row, project)
+      await this.#validate(row, project)
     } catch (cause) {
       throw Object.assign(
         new Error(
@@ -500,6 +693,7 @@ export class ProjectTransactions {
     try {
       await fs.mkdir(path.join(directory, 'staged'), { mode: 0o700 })
       await fs.mkdir(path.join(directory, 'before'), { mode: 0o700 })
+      await fs.mkdir(path.join(directory, 'originals'), { mode: 0o700 })
       await durableFile(
         path.join(directory, 'manifest.json'),
         JSON.stringify({
@@ -521,7 +715,15 @@ export class ProjectTransactions {
             change.after,
             change.mode,
           )
-      for (const target of ['staged', 'before'])
+      for (const [index, change] of prepared.entries())
+        if (change.before !== null)
+          await durableFile(
+            path.join(directory, 'originals', String(index)),
+            change.before,
+            change.beforeMode ?? change.mode,
+          )
+      await this.#checkOriginals(intent)
+      for (const target of ['staged', 'before', 'originals'])
         await syncDirectory(path.join(directory, target))
       await syncDirectory(directory)
       await syncDirectory(projectHistory)
@@ -541,15 +743,19 @@ export class ProjectTransactions {
       throw unappliedError(error)
     }
     let mutationStarted = false
-    let currentPath
+    let currentPath, backups
     try {
+      backups = await openDirectory(path.join(directory, 'before'))
       for (const change of intent.changes) {
         currentPath = change.path
         const parent = await this.openParent(project.root, change.path)
         try {
           if (
-            (await targetState(project, change, parent, { sync: true })) !==
-            change.beforeHash
+            (await targetState(project, change, parent, {
+              sync: true,
+              singleLink: true,
+              mode: change.beforeMode,
+            })) !== change.beforeHash
           )
             throw Object.assign(
               new Error(`Cannot apply: ${change.path} changed before saving.`),
@@ -565,19 +771,37 @@ export class ProjectTransactions {
         try {
           authorize?.()
           if (
-            (await targetState(project, change, parent)) !== change.beforeHash
+            (await targetState(project, change, parent, {
+              mode: change.beforeMode,
+              singleLink: true,
+            })) !== change.beforeHash
           )
             throw Object.assign(
               new Error(`Cannot apply: ${change.path} changed before saving.`),
               { status: 409 },
             )
           const destination = `${parent.anchor}/${parent.name}`
-          if (change.before !== null) {
+          if (change.beforeHash !== null) {
             mutationStarted = true
-            await fs.rename(
-              destination,
-              path.join(directory, 'before', String(index)),
-            )
+            const backup = `/proc/self/fd/${backups.fd}/${index}`
+            if (change.afterHash === null) await fs.rename(destination, backup)
+            else {
+              // Keep the old name readable until rename atomically replaces it.
+              await fs.link(destination, backup)
+              if (
+                (await this.#backupState(
+                  intent,
+                  index,
+                  change,
+                  parent,
+                  backups,
+                  change.beforeHash,
+                )) !== change.beforeHash
+              )
+                throw new Error(
+                  'Original transaction backup failed verification.',
+                )
+            }
           }
           authorize?.()
           if (change.afterHash !== null) {
@@ -593,7 +817,7 @@ export class ProjectTransactions {
           await parent.handle.close()
         }
       }
-      await syncDirectory(path.join(directory, 'before'))
+      await backups.sync()
       await syncDirectory(path.join(directory, 'staged'))
       await this.#syncParents(project, intent)
       const marker = path.join(directory, `.applied-${randomUUID()}`)
@@ -614,6 +838,7 @@ export class ProjectTransactions {
       this.db
         .prepare('DELETE FROM pending_project_transactions WHERE id=?')
         .run(id)
+      await this.#releaseOriginals(intent)
       return directory
     } catch (error) {
       try {
@@ -633,6 +858,8 @@ export class ProjectTransactions {
       }
       logFailure(row, error, 'save rolled back', currentPath)
       throw unappliedError(error)
+    } finally {
+      await backups?.close()
     }
   }
 }

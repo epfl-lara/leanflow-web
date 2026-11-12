@@ -15,6 +15,15 @@ function positiveNumber(env, name, fallback, integer = true) {
   return value
 }
 
+function nonnegativeInteger(env, name, fallback) {
+  const raw = env[name]?.trim()
+  if (!raw) return fallback
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < 0)
+    throw new Error(`${name} must be a nonnegative integer.`)
+  return value
+}
+
 export function validateSetupBuildTimeout(
   value,
   label = 'setupBuildTimeoutMs',
@@ -35,6 +44,12 @@ export function loadCapacity(env = process.env) {
   return {
     workers: positiveNumber(env, 'STUDIO_MAX_WORKERS', 6),
     workerQueue: positiveNumber(env, 'STUDIO_MAX_WORKER_QUEUE', 24),
+    interactiveWorkers: nonnegativeInteger(
+      env,
+      'STUDIO_RESERVED_INTERACTIVE_WORKERS',
+      1,
+    ),
+    batchWorkers: nonnegativeInteger(env, 'STUDIO_RESERVED_BATCH_WORKERS', 3),
     editors: positiveNumber(env, 'STUDIO_MAX_EDITORS', 4),
     editorsPerProject: positiveNumber(env, 'STUDIO_MAX_EDITORS_PER_PROJECT', 2),
     terminals: positiveNumber(env, 'STUDIO_MAX_TERMINALS', 2),

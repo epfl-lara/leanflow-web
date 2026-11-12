@@ -3,6 +3,7 @@ import { api, errorText, type Project } from './api'
 import { downloadProject } from './downloads'
 import { DraftDownloads } from './DraftDownloads'
 import { Icon } from './Icons'
+import { LegacyFileRecovery } from './LegacyFileRecovery'
 
 const recoveryError = (error: unknown) =>
   error instanceof DOMException && error.name === 'TimeoutError'
@@ -102,7 +103,9 @@ export function ProjectFileRecovery({
       >
         {refreshing ? 'Refreshing project status…' : 'Refresh project status'}
       </button>
-      {admin ? (
+      {admin && project.legacyFileRecoveryRequired ? (
+        <LegacyFileRecovery project={project} onRecovered={onRecovered} />
+      ) : admin ? (
         <>
           <p>
             Retry recovery after project work finishes. This keeps your drafts

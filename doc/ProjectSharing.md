@@ -26,13 +26,15 @@ Each agent receives an isolated copy of the selected project and its initiating 
 
 Agents coordinate through saved file revisions. There is no automatic exchange of private prompts or agent messages.
 
-Disposable verification copies are removed after their workers stop. The candidate used for reviewing a run stays private and available. Retained run candidates and file history still consume disk space; monitor free space and plan retention before expanding to larger teams.
+Disposable verification copies are removed after their workers stop. The candidate used for reviewing a run stays private and available. Retained runs and history are never deleted automatically. Storage warnings and reserved free space protect admission for new imports, setup, and private copies; existing saves, downloads, cancellation, and recovery stay available. Expanding the filesystem makes the added space available without a restart. See [project storage](Storage.md) for thresholds and retention guidance.
 
 ## Concurrent file updates
 
 Editable text uses an authenticated project connection and a Yjs document for each open file. Concurrent browser edits merge. Undo and Redo affect the current user's edits without undoing collaborators' changes. The server acknowledges an edit after saving it through the project's version-checked write queue. Updates to other tabs contain incremental changes; reconnecting transfers the document state again.
 
 Agent and terminal changes enter through checked file transactions and then update open documents. If a touched file changed since the agent or terminal's baseline, publication pauses rather than overwriting the newer file. Agent changes remain available in that account's run. Restart the task from the current project or review the conflicting edits. Verification also checks the saved context, so a change to an imported file can require a fresh check.
+
+Large batches hold the write queue for that project until they finish. Another save in the same project can wait for the batch; your local draft remains editable and other projects keep responding. Keep the tab open until saving is confirmed. Replacing an existing file preserves its name throughout the replacement, so readers see complete old or new contents rather than a temporarily missing file.
 
 Configuration files use the normal save path and its active-work checks. They do not use the live text connection. Changing Lean or Lake configuration requires preparing the shared environment again. The selected Lean release and dependency pins are preserved.
 
@@ -58,9 +60,9 @@ Preparation temporarily pauses live saves. Other members see the setup status; p
 
 Live editing initially allows 128 connections across the server, 12 per account, 16 live files per tab, 32 per account, and 128 retained documents with 64 MiB of encoded document state. Worker limits separately control active Lean sessions. Review these limits and measure memory, save traffic, and retained history before expanding to larger teams.
 
-New multi-file updates save a durable recovery record before replacing files. After a restart, an unfinished update restores every original file; an update with a verified commit record keeps every saved change. Recovery records allow at most 12,000 files and 32 MiB of original content per update; editor batch saves and agent changes retain their 1,000-file limits, and uploads retain their 5,000-file limit. If a file has an unexpected edit, a symbolic link, or a damaged recovery record, editing and jobs pause only for that project. You can still read and download available files and local drafts and manage sharing. After a temporary storage problem clears, a project Admin can choose **Retry file recovery** without restarting the server. Recovery checks that the project has no active work and never overwrites unexpected content. Archiving stays blocked until recovery succeeds.
+New multi-file updates sync private recovery copies before replacing files. The database stores bounded metadata instead of embedding source text in large JSON records, so other projects can keep responding during large updates. After a restart, an unfinished update restores every original file; an update with a verified commit record keeps every saved change. Recovery records allow at most 12,000 files and 32 MiB of original content per update; editor batch saves and agent changes retain their 1,000-file limits, and uploads retain their 5,000-file limit. If a file has an unexpected edit, a symbolic link, or a damaged recovery record, editing and jobs pause only for that project. You can still read and download available files and local drafts and manage sharing. After a temporary storage problem clears, a project Admin can choose **Retry file recovery** without restarting the server. Recovery checks that the project has no active work and never overwrites unexpected content. Archiving stays blocked until recovery succeeds.
 
-If retry still fails, ask the server administrator to back up the project, its retained history, and the workspace database before making manual changes. Server logs identify the project, transaction, relative file, and failing check. The matching record is in `pending_project_transactions` in `workspaces.sqlite`; originals remain in the transaction's `history/<project>/<transaction>/before/` directory or its durable recovery record. Resolve the storage problem or recover the expected original files, then retry through the project. Do not delete pending records or change their hashes to bypass a conflict. Interrupted histories from releases without recovery records still require manual administrator recovery. These rules also apply to private projects. External writes from administrator shells or unsupported workers can race project operations; stop those writers before recovery. Empty folders created by an interrupted update may remain.
+If retry still fails, ask the server administrator to back up the project, its retained history, and the workspace database before making manual changes. Server logs identify the project, transaction, relative file, and failing check. The matching record is in `pending_project_transactions` in `workspaces.sqlite`; originals remain in the transaction's `history/<project>/<transaction>/before/` directory or its durable recovery record. Resolve the storage problem or recover the expected original files, then retry through the project. Do not delete pending records or change their hashes to bypass a conflict. Older interrupted updates appear under **Review older interrupted updates**. A project Admin can download retained originals, then confirm **Restore originals** or **Keep current files**. Restoring checks every saved file version again and keeps a backup of the current files. Unexpected later edits disable automatic restore; keeping the current files preserves them and resumes editing. Older originals are retained in history. Damaged or unsafe storage still needs a server administrator; recovery never bypasses those checks. These rules also apply to private projects. External writes from administrator shells or unsupported workers can race project operations; stop those writers before recovery. Empty folders created by an interrupted update may remain.
 
 ## Validate sharing before deployment
 
@@ -79,6 +81,10 @@ node scripts/check-terminal-opening-ui.mjs
 node scripts/check-editor-startup-ui.mjs
 node scripts/check-session-account-switch-ui.mjs
 node scripts/check-account-setup-invitation-ui.mjs
+node scripts/check-storage-status-ui.mjs
+node scripts/check-legacy-file-recovery-ui.mjs
+node scripts/check-project-transactions-runtime.mjs
+node scripts/check-worker-capacity-runtime.mjs
 node scripts/check-project-sharing-runtime.mjs
 ```
 

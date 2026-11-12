@@ -57,6 +57,7 @@ async function fixture(t) {
 
 const childSource = `
 import fs from 'node:fs/promises'
+import path from 'node:path'
 import { syncBuiltinESMExports } from 'node:module'
 import { WorkspaceStore } from ${JSON.stringify(new URL('../workspaces.mjs', import.meta.url).href)}
 const [dataDir, projectId, stopAt, configuration] = process.argv.slice(1)
@@ -73,13 +74,17 @@ if (configuration === 'yes') {
   const original = await store.readFile(projectId, 'alice', 'lakefile.toml')
   changes.push({ path: 'lakefile.toml', beforeHash: original.hash, after: original.content + '\\n-- updated\\n' })
 }
-const originalRename = fs.rename
+const originalRename = fs.rename, originalLink = fs.link
 let reached = 0
+const point = () => { if (reached++ === Number(stopAt)) process.kill(process.pid, 'SIGKILL') }
+const before = async filename => (await fs.realpath(path.dirname(String(filename)))).endsWith('/before')
+fs.link = async (source, destination) => {
+  await originalLink(source, destination)
+  if (await before(destination)) point()
+}
 fs.rename = async (source, destination) => {
   await originalRename(source, destination)
-  if (String(source).includes('/staged/') || String(destination).includes('/before/') || String(destination).endsWith('/applied.json')) {
-    if (reached++ === Number(stopAt)) process.kill(process.pid, 'SIGKILL')
-  }
+  if (String(source).includes('/staged/') || await before(destination) || String(destination).endsWith('/applied.json')) point()
 }
 syncBuiltinESMExports()
 await store.applyChanges(projectId, 'alice', changes)
@@ -140,6 +145,19 @@ for (const [point, label] of [
   test(`SIGKILL after ${label} recovers atomically and reopening again is idempotent`, async (t) => {
     const f = await fixture(t)
     await crash(f, point)
+    if (point === 0) {
+      const pending = f.store.db
+        .prepare('SELECT id FROM pending_project_transactions')
+        .get()
+      const source = await fs.stat(path.join(f.project.root, 'A.lean'))
+      const backup = await fs.stat(
+        path.join(f.store.historyDir, f.project.id, pending.id, 'before', '0'),
+      )
+      assert.equal(source.nlink, 2)
+      assert.equal(backup.nlink, 2)
+      assert.equal(source.ino, backup.ino)
+      assert.equal(source.dev, backup.dev)
+    }
     for (let reopen = 0; reopen < 2; reopen++) {
       await f.reopen()
       assert.deepEqual(
@@ -149,6 +167,10 @@ for (const [point, label] of [
           : ['-- original A\n', null, '-- original Z\n'],
       )
       assert.equal(f.store.get(f.project.id, 'alice').status, 'ready')
+      assert.equal(
+        (await fs.stat(path.join(f.project.root, 'A.lean'))).nlink,
+        1,
+      )
       assert.equal(
         f.store.db
           .prepare('SELECT COUNT(*) AS count FROM pending_project_transactions')
@@ -560,7 +582,7 @@ test('SIGKILL while writing rollback staging recovers again without leaking proj
   const pending = f.store.db
     .prepare('SELECT id FROM pending_project_transactions')
     .get()
-  // Exercise the durable SQL fallback after the original backup is unavailable.
+  // Exercise the independent durable originals after the backup inode is unavailable.
   await fs.unlink(
     path.join(f.dataDir, 'history', f.project.id, pending.id, 'before', '0'),
   )
@@ -766,7 +788,7 @@ for (const defect of ['version', 'owner', 'path', 'hash-type', 'mode'])
       .prepare('SELECT * FROM pending_project_transactions')
       .get()
     const intent = JSON.parse(row.payload)
-    if (defect === 'version') intent.version = 2
+    if (defect === 'version') intent.version = 99
     if (defect === 'owner') intent.owner = 'someone-else'
     if (defect === 'path') intent.changes[0].path = '../outside.lean'
     if (defect === 'hash-type')
@@ -866,12 +888,15 @@ if (operation !== 'recover') {
     const before = await store.readFile(projectId, 'alice', filename)
     changes.push({ path: filename, beforeHash: before.hash, after: operation === 'apply' ? '-- committed\\n' : '-- interrupted\\n' })
   }
-  const originalRename = fs.rename
+  const originalRename = fs.rename, originalLink = fs.link
+  fs.link = async (from, to) => {
+    await originalLink(from, to)
+    if (operation === 'kill' && String(to).endsWith('/79')) process.kill(process.pid, 'SIGKILL')
+  }
   fs.rename = async (from, to) => {
     if (operation === 'rollback' && String(from).includes('/staged/') && String(to).endsWith('/File79.lean'))
       throw new Error('Fixture late write failure')
     const result = await originalRename(from, to)
-    if (operation === 'kill' && String(to).endsWith('/before/79')) process.kill(process.pid, 'SIGKILL')
     return result
   }
   syncBuiltinESMExports()
@@ -1255,3 +1280,490 @@ for (const defect of ['hash', 'symlink', 'hardlink'])
       1,
     )
   })
+
+for (const point of [3, 4])
+  test(`version 1 inline recovery intents remain compatible after ${point === 4 ? 'commit' : 'interruption'}`, async (t) => {
+    const f = await fixture(t)
+    await crash(f, point)
+    const row = f.store.db
+      .prepare('SELECT * FROM pending_project_transactions')
+      .get()
+    const intent = JSON.parse(row.payload)
+    const directory = path.join(f.store.historyDir, f.project.id, row.id)
+    assert.equal(intent.version, 2)
+    intent.version = 1
+    for (const [index, change] of intent.changes.entries()) {
+      change.before =
+        change.beforeHash === null
+          ? null
+          : (
+              await fs.readFile(
+                path.join(directory, 'originals', String(index)),
+              )
+            ).toString('base64')
+      delete change.beforeSize
+      delete change.afterSize
+      delete change.beforeMode
+    }
+    const payload = JSON.stringify(intent)
+    f.store.db
+      .prepare('UPDATE pending_project_transactions SET payload=? WHERE id=?')
+      .run(payload, row.id)
+    await fs.rm(path.join(directory, 'originals'), { recursive: true })
+    if (point === 4) {
+      const marker = JSON.parse(
+        await fs.readFile(path.join(directory, 'applied.json'), 'utf8'),
+      )
+      marker.intentHash = hash(payload)
+      await fs.writeFile(
+        path.join(directory, 'applied.json'),
+        JSON.stringify(marker),
+      )
+    }
+    for (let reopen = 0; reopen < 2; reopen++) {
+      await f.reopen()
+      assert.deepEqual(
+        await state(f),
+        point === 4
+          ? ['-- new A\n', '-- new file\n', null]
+          : ['-- original A\n', null, '-- original Z\n'],
+      )
+      assert.equal(
+        f.store.get(f.project.id, 'alice').fileRecoveryRequired,
+        undefined,
+      )
+      assert.equal(
+        f.store.db
+          .prepare('SELECT COUNT(*) AS count FROM pending_project_transactions')
+          .get().count,
+        0,
+      )
+    }
+  })
+
+for (const defect of ['missing', 'hash', 'symlink', 'hardlink', 'mode', 'size'])
+  test(`version 2 recovery refuses ${defect} independent originals before changing any source`, async (t) => {
+    const f = await fixture(t)
+    await crash(f, 3)
+    const row = f.store.db
+      .prepare('SELECT * FROM pending_project_transactions')
+      .get()
+    const original = path.join(
+      f.store.historyDir,
+      f.project.id,
+      row.id,
+      'originals',
+      '0',
+    )
+    const outside = path.join(f.dataDir, 'outside-original')
+    await fs.writeFile(outside, '-- original A\n')
+    if (defect === 'missing') await fs.unlink(original)
+    if (defect === 'hash') await fs.writeFile(original, '-- modified A\n')
+    if (defect === 'size')
+      await fs.writeFile(original, '-- different sized bytes\n')
+    if (defect === 'mode') await fs.chmod(original, 0o600)
+    if (['symlink', 'hardlink'].includes(defect)) {
+      await fs.unlink(original)
+      if (defect === 'symlink') await fs.symlink(outside, original)
+      else await fs.link(outside, original)
+    }
+    await f.reopen()
+    assert.deepEqual(await state(f), ['-- new A\n', '-- new file\n', null])
+    assert.equal(f.store.get(f.project.id, 'alice').fileRecoveryRequired, true)
+    assert.equal(
+      f.store.db
+        .prepare('SELECT COUNT(*) AS count FROM pending_project_transactions')
+        .get().count,
+      1,
+    )
+    assert.equal(await fs.readFile(outside, 'utf8'), '-- original A\n')
+  })
+
+for (const failure of ['write', 'sync'])
+  test(`failure to durably ${failure} independent originals preserves source and releases unstarted staging`, async (t) => {
+    const f = await fixture(t)
+    const originalOpen = fs.open
+    t.mock.method(fs, 'open', async (filename, ...args) => {
+      const handle = await originalOpen(filename, ...args)
+      if (String(filename).includes('/originals/')) {
+        handle[failure === 'write' ? 'writeFile' : 'sync'] = async () => {
+          throw Object.assign(new Error('Fixture storage unavailable'), {
+            code: 'ENOSPC',
+          })
+        }
+      }
+      return handle
+    })
+    syncBuiltinESMExports()
+    try {
+      await assert.rejects(
+        f.store.applyChanges(f.project.id, 'alice', [
+          {
+            path: 'A.lean',
+            beforeHash: hash('-- original A\n'),
+            after: '-- new A\n',
+          },
+        ]),
+        { status: 503 },
+      )
+    } finally {
+      t.mock.restoreAll()
+      syncBuiltinESMExports()
+    }
+    assert.deepEqual(await state(f), [
+      '-- original A\n',
+      null,
+      '-- original Z\n',
+    ])
+    assert.equal(
+      f.store.db
+        .prepare('SELECT COUNT(*) AS count FROM pending_project_transactions')
+        .get().count,
+      0,
+    )
+    assert.deepEqual(
+      await fs.readdir(path.join(f.store.historyDir, f.project.id)),
+      [],
+    )
+    assert.equal(
+      f.store.get(f.project.id, 'alice').fileRecoveryRequired,
+      undefined,
+    )
+  })
+
+test('independent originals remain until the committed pending record is durably released', async (t) => {
+  const f = await fixture(t)
+  const originalPrepare = f.store.db.prepare.bind(f.store.db)
+  t.mock.method(f.store.db, 'prepare', (sql) => {
+    if (sql.startsWith('DELETE FROM pending_project_transactions '))
+      throw new Error('Fixture database briefly unavailable')
+    return originalPrepare(sql)
+  })
+  try {
+    await assert.rejects(
+      f.store.applyChanges(f.project.id, 'alice', [
+        {
+          path: 'A.lean',
+          beforeHash: hash('-- original A\n'),
+          after: '-- committed\n',
+        },
+      ]),
+      { status: 503 },
+    )
+  } finally {
+    t.mock.restoreAll()
+  }
+  const pending = f.store.db
+    .prepare('SELECT * FROM pending_project_transactions')
+    .get()
+  const directory = path.join(f.store.historyDir, f.project.id, pending.id)
+  assert.equal(
+    await fs.readFile(path.join(directory, 'originals', '0'), 'utf8'),
+    '-- original A\n',
+  )
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'alice', 'A.lean')).content,
+    '-- committed\n',
+  )
+  await f.store.retryFileRecovery(f.project.id, 'alice')
+  assert.equal(
+    f.store.db
+      .prepare('SELECT COUNT(*) AS count FROM pending_project_transactions')
+      .get().count,
+    0,
+  )
+  await assert.rejects(fs.stat(path.join(directory, 'originals')), {
+    code: 'ENOENT',
+  })
+  assert.equal(
+    await fs.readFile(path.join(directory, 'before', '0'), 'utf8'),
+    '-- original A\n',
+  )
+})
+
+test('large source updates keep recovery metadata small while retaining source history', async (t) => {
+  const f = await fixture(t)
+  const before = '-- original\n' + 'x'.repeat(2 * 1024 * 1024)
+  const after = '-- updated\n' + 'y'.repeat(2 * 1024 * 1024)
+  const changes = []
+  for (const filename of ['First.lean', 'Second.lean']) {
+    await fs.writeFile(path.join(f.project.root, filename), before)
+    changes.push({ path: filename, beforeHash: hash(before), after })
+  }
+  const originalLink = fs.link
+  let pendingBytes = 0,
+    pending
+  t.mock.method(fs, 'link', async (source, destination) => {
+    if (!pending) {
+      pending = f.store.db
+        .prepare('SELECT * FROM pending_project_transactions')
+        .get()
+      pendingBytes = Buffer.byteLength(pending.payload)
+      const intent = JSON.parse(pending.payload)
+      const directory = path.join(f.store.historyDir, f.project.id, pending.id)
+      for (const [index, change] of intent.changes.entries())
+        assert.equal(
+          hash(
+            await fs.readFile(path.join(directory, 'originals', String(index))),
+          ),
+          change.beforeHash,
+        )
+    }
+    return originalLink(source, destination)
+  })
+  syncBuiltinESMExports()
+  try {
+    assert.equal(
+      (await f.store.applyChanges(f.project.id, 'alice', changes)).applied,
+      2,
+    )
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+  assert(
+    pendingBytes > 0 && pendingBytes < 8192,
+    `Recovery metadata must remain small: ${pendingBytes}`,
+  )
+  assert.equal(
+    f.store.db
+      .prepare('SELECT COUNT(*) AS count FROM pending_project_transactions')
+      .get().count,
+    0,
+  )
+  const directory = path.join(f.store.historyDir, f.project.id, pending.id)
+  await assert.rejects(fs.stat(path.join(directory, 'originals')), {
+    code: 'ENOENT',
+  })
+  for (const [index, change] of changes.entries()) {
+    assert.equal(
+      await fs.readFile(path.join(directory, 'before', String(index)), 'utf8'),
+      before,
+    )
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'alice', change.path)).content,
+      after,
+    )
+  }
+})
+
+test('restoring historical permissions preserves current permissions if independent-byte rollback is needed', async (t) => {
+  const f = await fixture(t)
+  await fs.chmod(path.join(f.project.root, 'A.lean'), 0o600)
+  const originalOpen = fs.open,
+    originalRename = fs.rename
+  t.mock.method(fs, 'open', async (filename, ...args) => {
+    if (path.basename(String(filename)).startsWith('.applied-'))
+      throw Object.assign(new Error('Fixture cannot commit restoration'), {
+        code: 'ENOSPC',
+      })
+    return originalOpen(filename, ...args)
+  })
+  t.mock.method(fs, 'rename', async (from, to) => {
+    await originalRename(from, to)
+    if (String(from).endsWith('/staged/0'))
+      await fs.unlink(
+        path.join(path.dirname(path.dirname(String(from))), 'before', '0'),
+      )
+  })
+  syncBuiltinESMExports()
+  try {
+    await assert.rejects(
+      f.store.transactions.apply(f.project, [
+        {
+          path: 'A.lean',
+          before: '-- original A\n',
+          beforeHash: hash('-- original A\n'),
+          after: '-- restored historical text\n',
+          beforeMode: 0o600,
+          mode: 0o640,
+        },
+      ]),
+      { status: 503 },
+    )
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+  assert.equal(
+    await fs.readFile(path.join(f.project.root, 'A.lean'), 'utf8'),
+    '-- original A\n',
+  )
+  assert.equal(
+    (await fs.stat(path.join(f.project.root, 'A.lean'))).mode & 0o777,
+    0o600,
+  )
+  assert.equal(
+    f.store.db
+      .prepare('SELECT COUNT(*) AS count FROM pending_project_transactions')
+      .get().count,
+    0,
+  )
+  await f.store.transactions.apply(f.project, [
+    {
+      path: 'A.lean',
+      before: '-- original A\n',
+      beforeHash: hash('-- original A\n'),
+      after: '-- restored historical text\n',
+      beforeMode: 0o600,
+      mode: 0o640,
+    },
+  ])
+  assert.equal(
+    await fs.readFile(path.join(f.project.root, 'A.lean'), 'utf8'),
+    '-- restored historical text\n',
+  )
+  assert.equal(
+    (await fs.stat(path.join(f.project.root, 'A.lean'))).mode & 0o777,
+    0o640,
+  )
+})
+
+for (const outcome of ['commit', 'rollback'])
+  test(`concurrent readers never lose existing files during a 96-file ${outcome}`, async (t) => {
+    const f = await fixture(t)
+    const filenames = Array.from(
+      { length: 96 },
+      (_, index) => `Read${index}.lean`,
+    )
+    const old = '-- original source\n',
+      next = '-- updated source\n'
+    for (const filename of filenames)
+      await fs.writeFile(path.join(f.project.root, filename), old)
+    const originalRename = fs.rename,
+      originalLink = fs.link
+    let boundaries = 0,
+      rounds = 0,
+      running = true
+    async function inspect(filename) {
+      if (!filenames.includes(filename)) return
+      const contents = (await f.store.readFile(f.project.id, 'alice', filename))
+        .content
+      assert(
+        [old, next].includes(contents),
+        `${filename} must have complete old or new source`,
+      )
+      const listed = new Set(await fs.readdir(f.project.root))
+      for (const expected of filenames)
+        assert(
+          listed.has(expected),
+          `${expected} disappeared from the file list`,
+        )
+      // Several complete API listings cover source mutation boundaries without
+      // scheduling 19,000 metadata reads ahead of the source writer.
+      if (boundaries % 24 === 0) {
+        const publicFiles = new Set(
+          (await f.store.files(f.project.id, 'alice')).map((file) => file.path),
+        )
+        for (const expected of filenames) assert(publicFiles.has(expected))
+      }
+      boundaries++
+    }
+    t.mock.method(fs, 'link', async (from, to) => {
+      await originalLink(from, to)
+      await inspect(path.basename(String(from)))
+    })
+    t.mock.method(fs, 'rename', async (from, to) => {
+      if (outcome === 'rollback' && String(from).includes('/staged/79'))
+        throw new Error('Fixture interrupts a late replacement')
+      await originalRename(from, to)
+      const target = path.basename(String(to)),
+        source = path.basename(String(from))
+      await inspect(filenames.includes(target) ? target : source)
+    })
+    syncBuiltinESMExports()
+    const reader = (async () => {
+      while (running) {
+        await Promise.all(
+          filenames.map(async (filename) => {
+            const content = await fs.readFile(
+              path.join(f.project.root, filename),
+              'utf8',
+            )
+            assert(
+              [old, next].includes(content),
+              `${filename} must never be missing, empty or partial`,
+            )
+          }),
+        )
+        rounds++
+        await new Promise((resolve) => setTimeout(resolve, 2))
+      }
+    })()
+    // Observe a rejection immediately so a failed reader cannot leak an
+    // unhandled promise while the transaction finishes its own cleanup.
+    let readFailure
+    const reading = reader.catch((error) => {
+      readFailure = error
+      running = false
+    })
+    try {
+      const operation = f.store.applyChanges(
+        f.project.id,
+        'alice',
+        filenames.map((filename) => ({
+          path: filename,
+          beforeHash: hash(old),
+          after: next,
+        })),
+      )
+      if (outcome === 'rollback')
+        await assert.rejects(operation, { status: 503 })
+      else assert.equal((await operation).applied, filenames.length)
+    } finally {
+      running = false
+      await reading
+      t.mock.restoreAll()
+      syncBuiltinESMExports()
+    }
+    if (readFailure) throw readFailure
+    assert(rounds >= 2, 'Readers must overlap the file update')
+    assert(
+      boundaries >= 96,
+      'Public reads and listings must cover mutation boundaries',
+    )
+    for (const filename of filenames) {
+      assert.equal(
+        (await f.store.readFile(f.project.id, 'alice', filename)).content,
+        outcome === 'commit' ? next : old,
+      )
+      assert.equal(
+        (await fs.stat(path.join(f.project.root, filename))).nlink,
+        1,
+      )
+    }
+    assert.equal(
+      f.store.db
+        .prepare('SELECT COUNT(*) AS count FROM pending_project_transactions')
+        .get().count,
+      0,
+    )
+  })
+
+test('a third hardlink after an interrupted owned backup is refused before touching source', async (t) => {
+  const f = await fixture(t)
+  await crash(f, 0)
+  const outside = path.join(f.dataDir, 'unexpected-alias.lean')
+  await fs.link(path.join(f.project.root, 'A.lean'), outside)
+  await f.reopen()
+  assert.equal(f.store.get(f.project.id, 'alice').fileRecoveryRequired, true)
+  assert.equal(
+    await fs.readFile(path.join(f.project.root, 'A.lean'), 'utf8'),
+    '-- original A\n',
+  )
+  assert.equal(await fs.readFile(outside, 'utf8'), '-- original A\n')
+  assert.equal((await fs.stat(path.join(f.project.root, 'A.lean'))).nlink, 3)
+  assert.equal(
+    f.store.db
+      .prepare('SELECT COUNT(*) AS count FROM pending_project_transactions')
+      .get().count,
+    1,
+  )
+  await fs.unlink(outside)
+  await f.store.retryFileRecovery(f.project.id, 'alice')
+  assert.equal((await fs.stat(path.join(f.project.root, 'A.lean'))).nlink, 1)
+  assert.equal(
+    f.store.get(f.project.id, 'alice').fileRecoveryRequired,
+    undefined,
+  )
+})

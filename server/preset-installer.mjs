@@ -239,8 +239,17 @@ export class PresetInstaller {
         const parent = path.join(runtime.runtimeDir, 'template-check')
         await fs.mkdir(parent, { recursive: true })
         const candidate = await fs.mkdtemp(path.join(parent, `${preset.id}-`))
-        await runtime.claimTemporaryWorkspace(candidate)
+        const created = await fs.lstat(candidate)
+        let claimed = false
+        let claimConflict = false
         try {
+          try {
+            await runtime.claimTemporaryWorkspace(candidate)
+          } catch (error) {
+            claimConflict = error.code === 'EEXIST'
+            throw error
+          }
+          claimed = true
           const packages = path.join(root, '.lake', 'packages')
           await fs.cp(root, candidate, {
             recursive: true,
@@ -252,7 +261,24 @@ export class PresetInstaller {
           await execute(candidate, ['lake', 'env', 'lean', 'Main.lean'], 'none')
           await execute(candidate, ['lake', 'build', 'Main'], 'none')
         } finally {
-          await runtime.releaseTemporaryWorkspace(candidate)
+          if (claimed) await runtime.releaseTemporaryWorkspace(candidate)
+          else if (!claimConflict) {
+            // Allocation can fail before this directory acquires a claim.
+            // Remove only our unchanged empty mkdtemp directory; a replaced
+            // path or another claim must remain available to its owner.
+            const current = await fs.lstat(candidate).catch((error) => {
+              if (error.code === 'ENOENT') return null
+              throw error
+            })
+            if (
+              current?.isDirectory() &&
+              !current.isSymbolicLink() &&
+              current.dev === created.dev &&
+              current.ino === created.ino &&
+              (await fs.realpath(candidate)) === candidate
+            )
+              await fs.rmdir(candidate)
+          }
         }
       }
       signal.throwIfAborted()

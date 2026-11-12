@@ -849,6 +849,13 @@ try {
   report.browserState = {}
   for (const [key, page] of Object.entries(pages)) {
     report.browserState[key] = {
+      url: page.url().split('#')[0],
+      body: (
+        await page
+          .locator('body')
+          .innerText()
+          .catch(() => '')
+      ).slice(0, 4000),
       text: await page
         .locator('.monaco-editor .view-lines')
         .first()

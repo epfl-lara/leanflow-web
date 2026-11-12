@@ -4,9 +4,13 @@ Use a Linux server and a dedicated account with Docker access. Follow [Install L
 
 ## Storage and capacity
 
-Choose a persistent directory for accounts, projects, and caches. For a separate data volume, set `STUDIO_DATA_DIR` in `.env` before preparing libraries; the directory must be writable by the service account. Docker images and containers also need space in Docker's data directory.
+Choose a persistent directory for accounts, projects, and caches. For a separate data volume, set `STUDIO_DATA_DIR` in `.env` before preparing libraries; the directory must be writable by the service account. Docker images and containers also need space in Docker's data directory. Configure [storage safeguards](Storage.md) to preserve working space without automatically deleting retained files.
 
 Expanding an existing filesystem makes its extra space available automatically. Moving existing data to another volume requires a planned migration. Additional disk space does not increase CPU, memory, or worker limits; review [capacity settings](Configuration.md#worker-capacity) for the intended workload. Keep private backups of the data directory and configuration; see [upgrade guidance](Configuration.md#back-up-before-upgrading).
+
+Keep editors responsive during checks by reserving worker capacity in both directions. `STUDIO_RESERVED_INTERACTIVE_WORKERS=1` keeps one slot available for editors and private terminals; `STUDIO_RESERVED_BATCH_WORKERS=3` keeps three slots available for setup, agents, and full checks. Both use the same total worker count and memory allowance. With seven effective slots, these defaults allow up to four interactive sessions and six batch slots, subject to the shared total. Close unused editors or terminals if interactive capacity is full. Reservations shrink on smaller servers; a single-slot server cannot run interactive work and checks simultaneously.
+
+Queued work keeps its place within its class. A full check waits for its required slots without smaller batch jobs repeatedly overtaking it. Cancelling queued work releases its place without stopping unrelated work. Capacity status reports effective class limits and active and queued slots. Before a larger rollout, run concurrent project checks on representative Lean projects with the intended hardware and provider limits; the deterministic worker-load regressions validate admission and cancellation, not a hardware sizing guarantee.
 
 ## Run as a service
 
