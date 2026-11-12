@@ -208,6 +208,20 @@ export class Terminals {
         fail('Invalid terminal input. Reopen the terminal to continue.', 1008)
       }
     })
+    let startupCleanup
+    session.finalize = () => {
+      startupCleanup ||= (async () => {
+        if (session.snapshot)
+          await this.workspaces.cleanupTerminalSnapshot(session.snapshot, {
+            finalize: true,
+          })
+        this.sessions.delete(session)
+      })().catch((error) => {
+        startupCleanup = undefined
+        throw error
+      })
+      return startupCleanup
+    }
     const start = async () => {
       try {
         assertAuthenticated()
@@ -421,13 +435,7 @@ export class Terminals {
       } finally {
         clearTimeout(startupTimeout)
         session.starting = false
-        if (!child) {
-          if (session.snapshot)
-            await this.workspaces.cleanupTerminalSnapshot(session.snapshot, {
-              finalize: true,
-            })
-          this.sessions.delete(session)
-        }
+        if (!child) await session.finalize()
       }
     }
     session.starting = true
@@ -452,7 +460,14 @@ export class Terminals {
         .map(async (session) => {
           session.ws.close(1000, 'Terminal closed')
           session.child?.kill()
-          await session.startup
+          try {
+            await session.startup
+          } catch (error) {
+            if (session.child) throw error
+            // A failed startup keeps its private copy guarded until cleanup
+            // succeeds. Retry that cleanup even though no worker was started.
+            await session.finalize()
+          }
           session.child?.kill()
           try {
             await session.finished

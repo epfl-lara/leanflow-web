@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import * as Y from 'yjs'
 import { replaceDocumentText } from '../../../shared/document-text.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configuration.mjs'
+import { sourceFileByteLimit } from '../../../shared/source-limits.mjs'
 const CONFIGURATION_FILES = new Set(PROJECT_CONFIGURATION_FILES)
 const MAX_LIVE_DOCUMENTS = 16
 const LIVE_EDITING_RECOVERY =
@@ -9,7 +10,7 @@ const LIVE_EDITING_RECOVERY =
 const liveFile = (path: string) =>
   !path.startsWith('.lake/') && !CONFIGURATION_FILES.has(path)
 import type { WorkspaceBuffers, WorkspaceScope } from './workspaceBuffers'
-import type { OpenFile } from './api'
+import { sessionBoundUrl, type OpenFile } from './api'
 import { LocalDocumentHistory } from './localDocumentHistory'
 
 interface LiveDocument {
@@ -24,6 +25,7 @@ interface LiveDocument {
   bufferHash: string
   openRequestId: number
   pending: Set<number>
+  sourceLimitFailure?: string
   failedLocalContent?: string
 }
 interface CollaborationControl {
@@ -131,6 +133,10 @@ export function useProjectCollaboration({
         restPaths: new Set<string>(),
       }
     const documents = new Map<string, LiveDocument>()
+    const hasDocumentFailure = () =>
+      [...documents.values()].some(
+        (record) => record.blocked || record.sourceLimitFailure,
+      )
     const fallbackPaths = historyVisit.current.restPaths
     const fallbackHistories = new Map<string, LocalDocumentHistory>()
     const managedHistory = historyVisit.current.paths
@@ -234,7 +240,7 @@ export function useProjectCollaboration({
       } else destroyRecord(record)
       documents.delete(path)
       fallbackPaths.add(path)
-      if (![...documents.values()].some((item) => item.blocked)) failure = null
+      if (!hasDocumentFailure()) failure = null
       setIssue(
         `${path} uses normal version-checked saving because this edit is too complex to merge live. ${LIVE_EDITING_RECOVERY}`,
       )
@@ -298,23 +304,49 @@ export function useProjectCollaboration({
         wire.destroy()
       }
     }
+    const sourceFits = (path: string, content: string) => {
+      const limit = sourceFileByteLimit(path)
+      return (
+        !content.includes('\0') &&
+        content.length <= limit &&
+        new TextEncoder().encode(content).byteLength <= limit
+      )
+    }
     const sendDelta = (
       path: string,
       record: LiveDocument,
-      vector: Uint8Array,
+      vector?: Uint8Array,
     ) => {
+      const replay = record.sourceLimitFailure !== undefined
+      if (replay) {
+        if (!ready || socket?.readyState !== WebSocket.OPEN) return
+        const content = record.doc.getText('source').toString()
+        if (!sourceFits(path, content)) return
+        // The rejected connection was closed. This replay covers every local
+        // operation, including earlier writes whose durable ACK was lost.
+        record.pending.clear()
+      }
       const id = ++requestId
       record.pending.add(id)
-      if (
-        !send({
-          type: 'update',
-          path,
-          documentId: record.id,
-          update: encode(Y.encodeStateAsUpdate(record.doc, vector)),
-          requestId: id,
-        })
-      )
-        if (socket?.readyState === WebSocket.OPEN) socket.close()
+      const sent = send({
+        type: 'update',
+        path,
+        documentId: record.id,
+        update: encode(
+          replay || vector === undefined
+            ? replayUpdate(record)
+            : Y.encodeStateAsUpdate(record.doc, vector),
+        ),
+        requestId: id,
+      })
+      if (sent && replay) {
+        record.sourceLimitFailure = undefined
+        if (!hasDocumentFailure()) {
+          failure = null
+          clearIssue()
+        }
+      }
+      if (!sent && socket?.readyState === WebSocket.OPEN) socket.close()
     }
     const captureLocal = (
       path: string,
@@ -394,7 +426,7 @@ export function useProjectCollaboration({
         ) {
           record.blocked = false
           record.failedLocalContent = undefined
-          if (![...documents.values()].some((item) => item.blocked)) {
+          if (!hasDocumentFailure()) {
             failure = null
             clearIssue()
           }
@@ -409,7 +441,7 @@ export function useProjectCollaboration({
           destroyRecord(record)
           documents.delete(path)
           record = undefined
-          if (![...documents.values()].some((item) => item.blocked)) {
+          if (!hasDocumentFailure()) {
             failure = null
             clearIssue()
           }
@@ -433,8 +465,15 @@ export function useProjectCollaboration({
         }
         if (!record.opened || record.blocked || !canEdit || file.readOnly)
           continue
+        if (record.sourceLimitFailure && !sourceFits(path, file.content)) {
+          fail(record.sourceLimitFailure)
+          continue
+        }
         try {
-          captureLocal(path, record, file.content)
+          if (record.sourceLimitFailure) {
+            captureLocal(path, record, file.content, false)
+            sendDelta(path, record)
+          } else captureLocal(path, record, file.content)
         } catch (error) {
           if (diffLimitFallback(path, record, error)) continue
           record.blocked = true
@@ -504,6 +543,27 @@ export function useProjectCollaboration({
             ? message.status
             : 400
         const transient = status === 429 || status >= 500
+        const failedRequest =
+          'requestId' in message && typeof message.requestId === 'number'
+            ? message.requestId
+            : undefined
+        if (
+          status === 413 &&
+          record &&
+          failedRequest !== undefined &&
+          record.pending.has(failedRequest)
+        ) {
+          record.pending.delete(failedRequest)
+          record.sourceLimitFailure =
+            'message' in message && typeof message.message === 'string'
+              ? message.message
+              : 'This shared edit exceeds the source file limit. Reduce the file before saving.'
+          fail(record.sourceLimitFailure)
+          // Later deltas on this connection can depend on the rejected text.
+          // Reconnect before replaying a corrected source with all causal IDs.
+          socket?.close(1013, 'Reduce the file before live saving resumes.')
+          return
+        }
         if (
           status === 429 &&
           path &&
@@ -604,6 +664,12 @@ export function useProjectCollaboration({
         return
       }
       const reconnecting = !record.opened
+      if (reconnecting && record.sourceLimitFailure) {
+        // The full reopen follows every write queued by the closed connection.
+        // Its old ACKs cannot arrive here. Local operations remain in the doc
+        // for replay, or for a version-checked fallback if exact diffing fails.
+        record.pending.clear()
+      }
       let capturedLocal = false
       // Typing can reach the buffer during the send debounce. Capture it before
       // applying a remote update, or the remote baseline could erase that draft.
@@ -619,7 +685,7 @@ export function useProjectCollaboration({
             message.path,
             record,
             file.content,
-            !reconnecting,
+            !reconnecting && !record.sourceLimitFailure,
           )
         } catch (error) {
           if (diffLimitFallback(message.path, record, error)) return
@@ -662,19 +728,13 @@ export function useProjectCollaboration({
         sameIdentity &&
         reconnecting &&
         canEdit &&
-        (record.pending.size || capturedLocal)
+        (!record.sourceLimitFailure ||
+          sourceFits(message.path, record.doc.getText('source').toString())) &&
+        (record.pending.size || capturedLocal || record.sourceLimitFailure)
       ) {
         // Full updates are idempotent; replay edits whose durable ACK was lost.
         record.pending.clear()
-        const id = ++requestId
-        record.pending.add(id)
-        send({
-          type: 'update',
-          path: message.path,
-          documentId: record.id,
-          update: encode(replayUpdate(record)),
-          requestId: id,
-        })
+        sendDelta(message.path, record)
       }
       if (record.blocked) {
         if (!dirty || file.content === savedContent) record.blocked = false
@@ -692,7 +752,7 @@ export function useProjectCollaboration({
       } finally {
         applying = false
       }
-      if (![...documents.values()].some((item) => item.blocked)) {
+      if (!hasDocumentFailure()) {
         failure = null
         clearIssue()
       }
@@ -704,10 +764,14 @@ export function useProjectCollaboration({
       if (!current()) return
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
       socket = new WebSocket(
-        `${protocol}//${location.host}/websocket/collaboration/${encodeURIComponent(scope.projectId!)}`,
+        sessionBoundUrl(
+          `${protocol}//${location.host}/websocket/collaboration/${encodeURIComponent(scope.projectId!)}`,
+        ),
       )
+      const connection = socket
       socket.addEventListener('message', (event: MessageEvent<unknown>) => {
         try {
+          if (connection.readyState !== WebSocket.OPEN) return
           if (typeof event.data === 'string') receive(event.data)
         } catch {
           fail(

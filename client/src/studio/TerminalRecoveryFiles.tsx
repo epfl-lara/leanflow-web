@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, ApiError, errorText } from './api'
+import { api, ApiError, errorText, sessionBoundUrl } from './api'
 
 interface RecoveryFiles {
   files: { path: string; size: number; downloadable: boolean }[]
@@ -92,7 +92,9 @@ export function TerminalRecoveryFiles({
                   {file.downloadable ? (
                     <a
                       className="button small secondary"
-                      href={`${base}/download?path=${encodeURIComponent(file.path)}`}
+                      href={sessionBoundUrl(
+                        `${base}/download?path=${encodeURIComponent(file.path)}`,
+                      )}
                       aria-label={`Download ${file.path}`}
                       download
                     >

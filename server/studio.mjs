@@ -7,6 +7,11 @@ import compression from 'compression'
 import { WebSocketServer } from 'ws'
 import { Auth, sameOrigin } from './auth.mjs'
 import { authRequestJson, isPublicAuthRequest } from './auth-request-limits.mjs'
+import {
+  expectedSessionUser,
+  requireBrowserSessionBinding,
+  requireSessionUser,
+} from './session-identity.mjs'
 import { Runtime } from './runtime.mjs'
 import { Terminals, validateTerminalOpeningId } from './terminals.mjs'
 import { WorkspaceStore, validateRepository } from './workspaces.mjs'
@@ -512,12 +517,18 @@ export async function createStudio({
   app.use(authRequestJson())
   // Protected requests authenticate before allocating a source/upload body.
   app.use('/api', (req, res, next) => {
-    if (isPublicAuthRequest(req)) return next()
+    const publicAccountRequest = isPublicAuthRequest(req)
+    if (publicAccountRequest && /^\/login\/?$/i.test(req.path)) return next()
+    const expectedUser = expectedSessionUser(req)
     req.user = auth.identify(req)
+    if (publicAccountRequest && !req.user) return next()
     if (!req.user)
       return res
         .status(401)
         .json({ error: 'Sign in with your collaborator access token.' })
+    requireSessionUser(req.user, expectedUser)
+    if (req.method !== 'GET' || !/^\/session\/?$/i.test(req.path))
+      requireBrowserSessionBinding(req, expectedUser)
     next()
   })
   const ordinaryJson = express.json({ limit: SMALL_SOURCE_JSON_BYTES }),
@@ -809,6 +820,43 @@ export async function createStudio({
   app.get('/api/projects/:id', (req, res) =>
     res.json(publicProject(workspaces.get(req.params.id, req.user.id))),
   )
+  app.post('/api/projects/:id/file-recovery/retry', async (req, res) => {
+    const { id } = req.params
+    const actor = req.user.id
+    workspaces.requireAdmin(id, actor)
+    if (
+      !req.body ||
+      typeof req.body !== 'object' ||
+      Array.isArray(req.body) ||
+      Object.keys(req.body).length
+    )
+      throw Object.assign(
+        new Error('Send an empty object to retry file recovery.'),
+        {
+          status: 400,
+        },
+      )
+    const assertIdle = () => {
+      requireNoActiveWork(id, actor)
+      const finishing = [jobs, agents, texBuilds].some((manager) =>
+        [...(manager?.active?.keys() || [])].some(
+          (runId) => events.getMetadata(runId).projectId === id,
+        ),
+      )
+      if (finishing)
+        throw Object.assign(
+          new Error(
+            'Project work is still finishing. Wait before retrying file recovery.',
+          ),
+          { status: 409 },
+        )
+    }
+    assertIdle()
+    const project = await workspaces.retryFileRecovery(id, actor, {
+      assertIdle,
+    })
+    res.json(publicProject(project))
+  })
   app.post('/api/projects/:id/terminal/stop', async (req, res) => {
     workspaces.get(req.params.id, req.user.id)
     const input = req.body === undefined ? {} : req.body
@@ -1443,21 +1491,46 @@ export async function createStudio({
     maxPayload: MAX_SOURCE_JSON_BYTES,
   })
   server.on('upgrade', (req, socket, head) => {
-    const user = auth.identify(req)
-    const match = /^\/websocket\/([a-zA-Z0-9_-]+)$/.exec(req.url || '')
-    const terminalMatch =
-      /^\/websocket\/terminal\/([a-zA-Z0-9_-]+)(\?[^#]*)?$/.exec(req.url || '')
-    const collaborationMatch =
-      /^\/websocket\/collaboration\/([a-zA-Z0-9_-]+)$/.exec(req.url || '')
     const reject = (status) => {
       socket.end(
         `HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\nCache-Control: no-store\r\n\r\n`,
       )
     }
+    let url
+    try {
+      url = new URL(req.url || '/', 'http://leanflow.invalid')
+    } catch {
+      return reject('400 Bad Request')
+    }
+    const user = auth.identify(req)
+    const match = /^\/websocket\/([a-zA-Z0-9_-]+)$/.exec(url.pathname)
+    const terminalMatch = /^\/websocket\/terminal\/([a-zA-Z0-9_-]+)$/.exec(
+      url.pathname,
+    )
+    const collaborationMatch =
+      /^\/websocket\/collaboration\/([a-zA-Z0-9_-]+)$/.exec(url.pathname)
     if (!user) return reject('401 Unauthorized')
     if (!sameOrigin(req, origin)) return reject('403 Forbidden')
     if (!match && !terminalMatch && !collaborationMatch)
       return reject('404 Not Found')
+    try {
+      const allowed = terminalMatch
+        ? new Set(['openingId', 'expectedUserId'])
+        : new Set(['expectedUserId'])
+      if ([...url.searchParams.keys()].some((key) => !allowed.has(key)))
+        return reject('400 Bad Request')
+      const expectedUser = expectedSessionUser(req)
+      requireSessionUser(user, expectedUser)
+      requireBrowserSessionBinding(req, expectedUser)
+    } catch (error) {
+      return reject(
+        error.status === 401
+          ? '401 Unauthorized'
+          : error.status === 428
+            ? '428 Precondition Required'
+            : '400 Bad Request',
+      )
+    }
     let project
     try {
       project = workspaces.get(
@@ -1477,11 +1550,8 @@ export async function createStudio({
     if (terminalMatch) {
       let openingId
       try {
-        const query = new URLSearchParams(terminalMatch[2] || '')
-        if (
-          [...query.keys()].some((key) => key !== 'openingId') ||
-          query.getAll('openingId').length > 1
-        )
+        const query = url.searchParams
+        if (query.getAll('openingId').length > 1)
           return reject('400 Bad Request')
         openingId = validateTerminalOpeningId(
           query.get('openingId') ?? undefined,

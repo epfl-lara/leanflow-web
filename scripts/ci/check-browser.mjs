@@ -48,6 +48,9 @@ const chatSuites = [
 ]
 const workspaceSuites = [
   'account-controls',
+  'session-account-switch',
+  'account-setup-invitation',
+  'project-file-recovery',
   'project-sharing',
   'session-project-drafts',
   'terminal-opening',

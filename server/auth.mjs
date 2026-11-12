@@ -18,6 +18,14 @@ const equal = (a, b) => {
   return left.length === right.length && timingSafeEqual(left, right)
 }
 
+export function requestBearerToken(request) {
+  return (
+    /^Bearer ([A-Za-z0-9_-]+)$/.exec(
+      request.headers.authorization || '',
+    )?.[1] ?? null
+  )
+}
+
 function accountName(input) {
   const name = typeof input === 'string' ? input.trim() : ''
   if (!name || name.length > 80 || !/^[\p{L}\p{M}\p{N} ._'’\-]+$/u.test(name))
@@ -208,9 +216,7 @@ export class Auth {
   }
   identify(req) {
     if (!this.#readCurrentUsers()) return null
-    const bearer = /^Bearer ([A-Za-z0-9_-]+)$/.exec(
-      req.headers.authorization || '',
-    )?.[1]
+    const bearer = requestBearerToken(req)
     if (bearer)
       return (
         this.users.find((user) => equal(user.tokenHash, hash(bearer))) || null

@@ -176,7 +176,8 @@ export async function chatBrowserFixture({
       ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
       : {}),
   })
-  const page = await browser.newPage({ viewport })
+  const context = await browser.newContext({ viewport })
+  const page = await context.newPage()
   page.on('pageerror', (error) =>
     report.errors.push(error.stack || error.message),
   )

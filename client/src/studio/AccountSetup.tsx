@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { ProviderKeyForm } from './ProviderKeyForm'
 import { ProfileForm } from './ProfileForm'
 import { type Account, type Session, errorText } from './api'
@@ -14,6 +14,7 @@ export function AccountSetup({
   onRetry,
   viewerProjects = [],
   onOpenViewer,
+  invitationNotice,
 }: {
   session: Session
   onSaved: () => void
@@ -24,6 +25,7 @@ export function AccountSetup({
   onRetry: () => void
   viewerProjects?: readonly { id: string; name: string }[]
   onOpenViewer?: (id: string) => void
+  invitationNotice?: ReactNode
 }) {
   const [providerBusy, setProviderBusy] = useState(false)
   const [profileBusy, setProfileBusy] = useState(false)
@@ -46,6 +48,7 @@ export function AccountSetup({
       <div className="login-card">
         <Brand />
         <h1>Welcome, {session.user.name}.</h1>
+        {invitationNotice}
         {session.user.profileComplete === false ? (
           <>
             <p>Confirm your display name to get started.</p>

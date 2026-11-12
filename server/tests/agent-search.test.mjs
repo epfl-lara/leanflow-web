@@ -8,6 +8,7 @@ import { PassThrough, Writable } from 'node:stream'
 import { AgentManager } from '../agents.mjs'
 import { EventStore } from '../events.mjs'
 import { WorkspaceStore } from '../workspaces.mjs'
+import { Runtime } from '../runtime.mjs'
 
 const toolchain = 'leanprover/lean4:v4.34.1'
 const auditEnv = {
@@ -17,7 +18,11 @@ const auditEnv = {
   LEAN_SRC_PATH: '/workspace',
 }
 
-async function fixture(t, edit = async () => {}, { buildFails = false } = {}) {
+async function fixture(
+  t,
+  edit = async () => {},
+  { buildFails = false, onRun, onVerificationCopy } = {},
+) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-ask-search-'))
   const calls = [],
     requests = []
@@ -32,6 +37,7 @@ async function fixture(t, edit = async () => {}, { buildFails = false } = {}) {
     },
     async run(workspace, args, options) {
       if (args[0] !== 'git') calls.push({ workspace, args, options })
+      await onRun?.(workspace, args, options)
       if (args[0] === 'lake' && args[1] === 'update')
         await fs.writeFile(
           path.join(workspace, 'lake-manifest.json'),
@@ -126,6 +132,14 @@ async function fixture(t, edit = async () => {}, { buildFails = false } = {}) {
   })
   await workspaces.jobs.get(project.id)
   assert.equal(workspaces.get(project.id, 'alice').status, 'ready')
+  if (onVerificationCopy) {
+    const copy = workspaces.verificationCopy.bind(workspaces)
+    workspaces.verificationCopy = async (...args) => {
+      const snapshot = await copy(...args)
+      await onVerificationCopy(snapshot)
+      return snapshot
+    }
+  }
   const events = new EventStore(root)
   const manager = new AgentManager({
     runtime,
@@ -164,7 +178,16 @@ async function fixture(t, edit = async () => {}, { buildFails = false } = {}) {
     await Promise.all([...manager.tasks])
     return events.get(job.id)
   }
-  return { manager, workspaces, project, calls, requests, events, execute }
+  return {
+    manager,
+    workspaces,
+    project,
+    calls,
+    requests,
+    events,
+    execute,
+    runtime,
+  }
 }
 
 test('finishing live Lean edits rebuilds the saved workspace before publishing the final editor refresh', async (t) => {
@@ -549,6 +572,17 @@ test(
         await fs.unlink(path.join(workspace, 'Obsolete.txt'))
         await fs.writeFile(path.join(workspace, 'Summary.md'), '# Summary\n')
       },
+      {
+        onVerificationCopy: async (copy) => {
+          assert.equal(
+            await fs.readFile(path.join(copy.root, 'Summary.md'), 'utf8'),
+            '# Summary\n',
+          )
+          await assert.rejects(fs.stat(path.join(copy.root, 'Obsolete.txt')), {
+            code: 'ENOENT',
+          })
+        },
+      },
     )
     for (const file of ['Notes.md', 'Old.txt', 'Obsolete.txt'])
       await workspaces.writeFile(
@@ -579,17 +613,7 @@ test(
       workspaces.readFile(project.id, 'alice', 'Summary.md'),
       { status: 404 },
     )
-    assert.equal(
-      await fs.readFile(
-        path.join(result.verificationRoot, 'Summary.md'),
-        'utf8',
-      ),
-      '# Summary\n',
-    )
-    await assert.rejects(
-      fs.stat(path.join(result.verificationRoot, 'Obsolete.txt')),
-      { code: 'ENOENT' },
-    )
+    assert.equal(result.verificationRoot, null)
     await manager.apply('alice', result.id)
     assert.equal(
       (await workspaces.readFile(project.id, 'alice', 'Notes.md')).content,
@@ -648,6 +672,7 @@ test(
   async (t) => {
     for (const buildFails of [false, true])
       await t.test(buildFails ? 'invalid Lean' : 'valid Lean', async (t) => {
+        let verificationRoot
         const { manager, workspaces, project, calls, execute } = await fixture(
           t,
           async (workspace) => {
@@ -662,7 +687,13 @@ test(
               '# Proof notes\n',
             )
           },
-          { buildFails },
+          {
+            buildFails,
+            onRun: (root, args) => {
+              if (args[0] === 'lake' && args[1] === 'env')
+                verificationRoot = root
+            },
+          },
         )
         const original = await workspaces.readFile(
           project.id,
@@ -688,10 +719,12 @@ test(
         assert(
           calls.every(
             (call) =>
-              call.workspace === result.verificationRoot &&
+              call.workspace === verificationRoot &&
               call.options.network === 'none',
           ),
         )
+        assert.equal(result.verificationRoot, null)
+        await assert.rejects(fs.stat(verificationRoot), { code: 'ENOENT' })
         if (buildFails) {
           await assert.rejects(manager.apply('alice', result.id), {
             status: 409,
@@ -795,5 +828,481 @@ test(
       ),
       /Original baseline/,
     )
+  },
+)
+
+test('completed independent verification removes only its disposable copy after checking its contents', async (t) => {
+  let checkedRoot
+  const candidate = 'theorem fixture : True := by trivial\n'
+  const { workspaces, execute } = await fixture(
+    t,
+    (root) => fs.writeFile(path.join(root, 'Main.lean'), candidate),
+    {
+      onRun: async (root, args) => {
+        if (args[0] !== 'python3') return
+        checkedRoot = root
+        assert.equal(
+          await fs.readFile(path.join(root, 'Main.lean'), 'utf8'),
+          candidate,
+        )
+      },
+    },
+  )
+  const result = await execute('Prove the fixture theorem.')
+  assert.equal(result.status, 'completed', result.error)
+  assert.equal(result.verification.complete, true)
+  assert.ok(checkedRoot)
+  assert.equal(result.verificationRoot, null)
+  await assert.rejects(fs.stat(path.dirname(checkedRoot)), { code: 'ENOENT' })
+  assert.equal(
+    await fs.readFile(path.join(result.snapshot.root, 'Main.lean'), 'utf8'),
+    candidate,
+  )
+  assert.equal((await workspaces.changes(result.snapshot)).length, 1)
+})
+
+test('failed independent checks dispose their verification copy and retain reviewable candidate changes', async (t) => {
+  for (const throws of [false, true])
+    await t.test(
+      throws ? 'verification exception' : 'failed Lean build',
+      async (t) => {
+        let checkedRoot
+        const candidate = 'theorem fixture : True := by trivial\n'
+        const f = await fixture(
+          t,
+          (root) => fs.writeFile(path.join(root, 'Main.lean'), candidate),
+          {
+            buildFails: !throws,
+            onRun: (root, args) => {
+              if (args[0] !== 'lake' || args[1] !== 'build') return
+              checkedRoot = root
+              if (throws) throw new Error('Fixture independent verifier failed')
+            },
+          },
+        )
+        const result = await f.execute('Prove the fixture theorem.')
+        assert.equal(
+          result.status,
+          throws ? 'failed' : 'completed',
+          result.error,
+        )
+        if (!throws) assert.equal(result.verification.complete, false)
+        assert.ok(checkedRoot)
+        assert.equal(result.verificationRoot, null)
+        await assert.rejects(fs.stat(path.dirname(checkedRoot)), {
+          code: 'ENOENT',
+        })
+        assert.equal(
+          await fs.readFile(
+            path.join(result.snapshot.root, 'Main.lean'),
+            'utf8',
+          ),
+          candidate,
+        )
+        assert.equal((await f.workspaces.changes(result.snapshot)).length, 1)
+      },
+    )
+})
+
+test('Stop retains the verification copy until its worker finishes and then disposes only that copy', async (t) => {
+  let entered,
+    release,
+    enabled = false
+  const started = new Promise((resolve) => {
+    entered = resolve
+  })
+  const held = new Promise((resolve) => {
+    release = resolve
+  })
+  t.after(() => release())
+  let f
+  const worker = {}
+  f = await fixture(
+    t,
+    (root) =>
+      fs.writeFile(
+        path.join(root, 'Main.lean'),
+        'theorem fixture : True := by trivial\n',
+      ),
+    {
+      onRun: async (root, args, options) => {
+        if (!enabled || args[0] !== 'lake' || args[1] !== 'build') return
+        worker.workspaceRoot = root
+        f.runtime.children.add(worker)
+        entered(root)
+        try {
+          await held
+          options.signal.throwIfAborted()
+        } finally {
+          f.runtime.children.delete(worker)
+        }
+      },
+    },
+  )
+  f.runtime.children = new Set()
+  enabled = true
+  const job = await f.manager.start('alice', f.project.id, {
+    mode: 'search',
+    prompt: 'Prove the fixture theorem.',
+    liveEdits: false,
+  })
+  const verificationRoot = await started
+  let finished = false
+  const stopping = f.manager.stop('alice', job.id).then((result) => {
+    finished = true
+    return result
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(finished, false)
+  assert.equal(f.runtime.children.has(worker), true)
+  assert((await fs.stat(verificationRoot)).isDirectory())
+  release()
+  assert.equal((await stopping).status, 'cancelled')
+  const result = f.events.get(job.id)
+  assert.equal(result.verificationRoot, null)
+  await assert.rejects(fs.stat(path.dirname(verificationRoot)), {
+    code: 'ENOENT',
+  })
+  assert((await fs.stat(result.snapshot.root)).isDirectory())
+})
+
+test('a failed disposable-copy cleanup keeps its claims and can be retried without deleting run history', async (t) => {
+  let verificationRoot,
+    rejectCleanup = true
+  const bindings = new Map()
+  const f = await fixture(
+    t,
+    (root) =>
+      fs.writeFile(
+        path.join(root, 'Main.lean'),
+        'theorem fixture : True := by trivial\n',
+      ),
+    {
+      onRun: (root, args) => {
+        if (args[0] === 'python3') verificationRoot = root
+      },
+    },
+  )
+  f.runtime.inheritDependencies = async (source, destination) => {
+    bindings.set(destination, source)
+  }
+  f.runtime.clearInheritedDependencies = async (root) => {
+    if (root === verificationRoot && rejectCleanup)
+      throw new Error('Fixture registry unavailable')
+    bindings.delete(root)
+  }
+  const result = await f.execute('Prove the fixture theorem.')
+  assert.equal(result.status, 'completed', result.error)
+  assert.equal(result.verificationRoot, verificationRoot)
+  assert.equal(result.verificationCleanupPending, true)
+  assert.equal(
+    JSON.parse(
+      await fs.readFile(
+        path.join(path.dirname(verificationRoot), 'manifest.json'),
+        'utf8',
+      ),
+    ).purpose,
+    'verification',
+  )
+  assert.equal(bindings.has(verificationRoot), true)
+  rejectCleanup = false
+  const retried = await f.manager.stop('alice', result.id)
+  assert.equal(retried.status, 'completed')
+  assert.equal(retried.verificationRoot, null)
+  assert.equal(retried.verificationCleanupPending, false)
+  assert.equal(bindings.has(verificationRoot), false)
+  assert.equal(bindings.has(result.snapshot.root), true)
+  await assert.rejects(fs.stat(path.dirname(verificationRoot)), {
+    code: 'ENOENT',
+  })
+  assert((await fs.stat(result.snapshot.root)).isDirectory())
+})
+
+test('optimization keeps its disposable verification copy until candidate measurement has finished', async (t) => {
+  let enter, release
+  const measuring = new Promise((resolve) => {
+    enter = resolve
+  })
+  const held = new Promise((resolve) => {
+    release = resolve
+  })
+  t.after(() => release())
+  const f = await fixture(t, (root) =>
+    fs.writeFile(
+      path.join(root, 'Main.lean'),
+      'theorem fixture : True := by\n  trivial\n',
+    ),
+  )
+  const original = await f.workspaces.readFile(
+    f.project.id,
+    'alice',
+    'Main.lean',
+  )
+  await f.workspaces.writeFile(
+    f.project.id,
+    'alice',
+    'Main.lean',
+    'theorem fixture : True := by\n  exact True.intro\n',
+    original.hash,
+  )
+  f.runtime.children = new Set()
+  let measurements = 0
+  const worker = {}
+  f.manager.optimizationMeasure = async (_runtime, root) => {
+    measurements++
+    if (measurements === 2) {
+      worker.workspaceRoot = root
+      f.runtime.children.add(worker)
+      enter(root)
+      await held
+      f.runtime.children.delete(worker)
+    }
+    return {
+      available: true,
+      compiled: true,
+      proofTokens: 10,
+      totalHeartbeatsRaw: 1000,
+      heartbeats: 1,
+    }
+  }
+  const executing = f.execute('Optimize the proof.', {
+    mode: 'optimize',
+    files: ['Main.lean'],
+  })
+  const root = await measuring
+  assert((await fs.stat(root)).isDirectory())
+  assert.equal(f.runtime.children.has(worker), true)
+  release()
+  const result = await executing
+  assert.equal(result.status, 'completed', result.error)
+  assert.equal(measurements, 2)
+  assert.equal(result.optimization.candidate.available, true)
+  assert.equal(result.verificationRoot, null)
+  await assert.rejects(fs.stat(path.dirname(root)), { code: 'ENOENT' })
+  assert((await fs.stat(result.snapshot.root)).isDirectory())
+})
+
+async function realWorkerLifecycle(
+  t,
+  f,
+  { failCleanup = false, holdCleanup = false } = {},
+) {
+  const dataDir = path.dirname(f.workspaces.snapshotsDir)
+  const failed = path.join(dataDir, 'fixture-cleanup-failed')
+  const held = path.join(dataDir, 'fixture-cleanup-held')
+  const removing = path.join(dataDir, 'fixture-cleanup-requested')
+  const docker = path.join(dataDir, 'docker-agent-lifecycle-fixture')
+  await fs.mkdir(path.join(dataDir, 'runtime'), { recursive: true })
+  if (failCleanup) await fs.writeFile(failed, 'reject cleanup')
+  if (holdCleanup) await fs.writeFile(held, 'hold cleanup')
+  await fs.writeFile(
+    docker,
+    `#!${process.execPath}
+import fs from 'node:fs'
+import readline from 'node:readline'
+const args = process.argv.slice(2)
+if (args[0] === 'rm') {
+  fs.writeFileSync(${JSON.stringify(removing)}, 'cleanup requested')
+  const complete = () => {
+    if (fs.existsSync(${JSON.stringify(failed)})) { console.error('fixture cleanup failed'); process.exit(1) }
+    if (!fs.existsSync(${JSON.stringify(held)})) process.exit(0)
+  }
+  complete(); setInterval(complete, 5)
+} else if (args[0] === 'run') {
+  if (args.includes('lemex')) {
+    const mount = args.find(value => value.startsWith('type=bind,src=') && value.includes(',dst=/workspace'))
+    const root = mount.slice('type=bind,src='.length).split(',dst=/workspace')[0]
+    const send = value => process.stdout.write(JSON.stringify(value) + '\\n')
+    readline.createInterface({ input: process.stdin }).on('line', line => {
+      const request = JSON.parse(line)
+      if (request.id === undefined) return
+      send({ id: request.id, result: request.method === 'thread/start' ? {thread:{id:'thread'}} : request.method === 'turn/start' ? {turn:{id:'turn'}} : {} })
+      if (request.method === 'turn/start') {
+        fs.writeFileSync(root + '/Main.lean', 'theorem lifecycle : True := by trivial\\n')
+        send({ method: 'item/agentMessage/delta', params: { itemId: 'answer', delta: 'Lifecycle fixture completed.' } })
+        send({ method: 'turn/completed', params: { turn: { id: 'turn', status: 'completed' } } })
+      }
+    })
+  }
+  setInterval(() => {}, 1000)
+}
+`,
+    { mode: 0o700 },
+  )
+  const runtime = new Runtime({ dataDir, docker, maxConcurrent: 2 })
+  runtime.ready = true
+  runtime.imageId = 'fixture-image'
+  const otherRoot = path.join(dataDir, 'unrelated-editor')
+  await fs.mkdir(otherRoot)
+  const other = runtime.spawn(otherRoot, ['hold-editor'], { cleanHome: true })
+  f.runtime.children = runtime.children
+  f.runtime.queue = runtime.queue
+  f.runtime.spawn = (root, args, options) =>
+    runtime.spawn(root, args, { ...options, cleanHome: true })
+  f.runtime.stopProject = (root) => runtime.stopProject(root)
+  f.runtime.releaseVerificationWorkspace = (root) =>
+    runtime.releaseVerificationWorkspace(root)
+  let cleaning
+  const cleanup = () =>
+    (cleaning ??= (async () => {
+      runtime.stopping = true
+      await fs.rm(failed, { force: true })
+      await fs.rm(held, { force: true })
+      const roots = new Set(
+        [...runtime.children]
+          .map((child) => child.workspaceRoot)
+          .concat(runtime.queue.map((job) => job.root)),
+      )
+      await Promise.allSettled(
+        [...roots].map((root) => runtime.stopProject(root)),
+      )
+      await runtime.shutdown()
+    })())
+  t.after(cleanup)
+  return { runtime, other, removing, held, cleanup }
+}
+
+test(
+  'agent cleanup failure fails before final publication or independent verification can queue behind its retained slot',
+  { timeout: 5000 },
+  async (t) => {
+    const f = await fixture(t)
+    const real = await realWorkerLifecycle(t, f, { failCleanup: true })
+    try {
+      const run = f.runtime.run.bind(f.runtime)
+      let copies = 0,
+        verifiers = 0
+      const copy = f.workspaces.verificationCopy.bind(f.workspaces)
+      f.workspaces.verificationCopy = (...args) => {
+        copies++
+        return copy(...args)
+      }
+      f.runtime.run = (root, args, options) => {
+        if (
+          root !== f.project.root &&
+          args[0] === 'lake' &&
+          args[1] === 'env'
+        ) {
+          verifiers++
+          return real.runtime.run(root, args, { ...options, cleanHome: true })
+        }
+        return run(root, args, options)
+      }
+      const original = await f.workspaces.readFile(
+        f.project.id,
+        'alice',
+        'Main.lean',
+      )
+      const job = await f.manager.start('alice', f.project.id, {
+        mode: 'search',
+        prompt: 'Run the isolated lifecycle fixture.',
+        liveEdits: false,
+      })
+      for (
+        let attempt = 0;
+        attempt < 150 && f.events.getMetadata(job.id).status !== 'failed';
+        attempt++
+      )
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      const result = f.events.get(job.id)
+      assert.equal(
+        result.status,
+        'failed',
+        JSON.stringify({
+          status: result.status,
+          copies,
+          verifiers,
+          queued: real.runtime.queue.length,
+        }),
+      )
+      await Promise.all([...f.manager.tasks])
+      assert.equal(copies, 0)
+      assert.equal(verifiers, 0)
+      assert.equal(real.runtime.queue.length, 0)
+      assert.match(result.error, /project worker could not be stopped/)
+      assert.equal(f.manager.active.has(job.id), false)
+      assert.equal((await f.manager.stop('alice', job.id)).status, 'failed')
+      assert.equal(real.runtime.children.has(real.other), true)
+      assert.equal(real.other.cancelled, undefined)
+      assert.equal(
+        await fs.readFile(path.join(result.snapshot.root, 'Main.lean'), 'utf8'),
+        'theorem lifecycle : True := by trivial\n',
+      )
+      assert.deepEqual(
+        await f.workspaces.readFile(f.project.id, 'alice', 'Main.lean'),
+        original,
+      )
+    } finally {
+      await real.cleanup()
+    }
+  },
+)
+
+test(
+  'the final live tail and verification wait for provider worker cleanup without stopping another editor',
+  { timeout: 5000 },
+  async (t) => {
+    const f = await fixture(t)
+    const real = await realWorkerLifecycle(t, f, { holdCleanup: true })
+    try {
+      let copies = 0
+      const copy = f.workspaces.verificationCopy.bind(f.workspaces)
+      f.workspaces.verificationCopy = (...args) => {
+        copies++
+        return copy(...args)
+      }
+      const job = await f.manager.start('alice', f.project.id, {
+        mode: 'search',
+        prompt: 'Run the isolated live-tail fixture.',
+        liveEdits: true,
+      })
+      let requested = false
+      for (let attempt = 0; attempt < 150; attempt++) {
+        if (await fs.stat(real.removing).catch(() => null)) {
+          requested = true
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+      assert.equal(requested, true)
+      const active = f.manager.active.get(job.id)
+      assert.ok(active?.mirror)
+      // Keep this check about the final flush; normal periodic live updates have
+      // their own coverage and are allowed while a provider is still working.
+      clearInterval(active.mirror.timer)
+      assert.equal(active.mirror.stopped, false)
+      assert.equal(copies, 0)
+      assert.equal(real.runtime.children.size, 2)
+      assert.equal(real.other.cancelled, undefined)
+      const completed = new Promise((resolve) =>
+        f.events.on(job.id, (event) => {
+          if (
+            event.type === 'status' &&
+            ['completed', 'failed'].includes(event.data.status)
+          )
+            resolve()
+        }),
+      )
+      await fs.rm(real.held)
+      await completed
+      await Promise.all([...f.manager.tasks])
+      const result = f.events.get(job.id)
+      assert.equal(result.status, 'completed', result.error)
+      assert.equal(result.verification.complete, true)
+      assert.equal(copies, 1)
+      assert.equal(result.liveChanges.length, 1)
+      assert.match(result.message, /Lifecycle fixture completed/)
+      assert.equal(
+        (await f.workspaces.readFile(f.project.id, 'alice', 'Main.lean'))
+          .content,
+        'theorem lifecycle : True := by trivial\n',
+      )
+      assert.equal(real.runtime.children.has(real.other), true)
+      assert.equal(real.runtime.children.size, 1)
+      assert.equal(real.other.cancelled, undefined)
+      assert((await fs.stat(result.snapshot.root)).isDirectory())
+    } finally {
+      await real.cleanup()
+    }
   },
 )

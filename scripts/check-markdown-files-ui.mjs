@@ -812,6 +812,7 @@ try {
   assert.equal(newTabUrl.origin, new URL(page.url()).origin)
   assert.equal(newTabUrl.pathname, `/api/projects/${projectId}/file-preview`)
   assert.equal(newTabUrl.searchParams.get('path'), 'Paper.PDF')
+  assert.equal(newTabUrl.searchParams.get('expectedUserId'), 'fixture-owner')
   assert.equal(newTabUrl.searchParams.has('token'), false)
   report.checks.push(
     'The PDF new-tab link uses the authenticated same-origin preview endpoint so it remains valid independently of the in-app blob URL',

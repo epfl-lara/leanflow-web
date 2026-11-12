@@ -11,6 +11,7 @@ import {
 import {
   api,
   ApiError,
+  bindSessionUser,
   errorText,
   markSessionRestored,
   post,
@@ -48,6 +49,7 @@ import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configurati
 import { isPdfFile, isBinaryAssetFile } from '../../../shared/file-previews.mjs'
 import { ProofOutline } from './ProofOutline'
 import { ProjectModal } from './ProjectModal'
+import { ProjectFileRecovery } from './ProjectFileRecovery'
 import { ImportedProjectSetup } from './ImportedProjectSetup'
 import { RepositoryCredentialsDialog } from './RepositoryCredentialsDialog'
 import type { RepositoryCredentials } from './RepositoryCredentialsFields'
@@ -128,7 +130,10 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
     setBusy(true)
     setError('')
     try {
-      await post('/api/login', { token: token.trim() })
+      const signedIn = await post<{ user: Account }>('/api/login', {
+        token: token.trim(),
+      })
+      bindSessionUser(signedIn.user.id)
       const session = await api<Session>('/api/session')
       setRunEventTransport(session.eventTransport)
       markSessionRestored()
@@ -493,9 +498,10 @@ export function Studio() {
   )
   const mathlibAvailable = playgroundPreparation.state === 'ready'
   const workspaceEditable =
-    project?.status === 'ready' ||
-    (project?.status === 'error' &&
-      (singleFileMode || project.needsPreparation === true))
+    !project?.fileRecoveryRequired &&
+    (project?.status === 'ready' ||
+      (project?.status === 'error' &&
+        (singleFileMode || project.needsPreparation === true)))
   useEffect(() => {
     if (project?.status === 'needs-setup') setToolsOpen(false)
   }, [project?.id, project?.status])
@@ -639,6 +645,7 @@ export function Studio() {
     try {
       await pauseSessionActivity()
       await post('/api/logout')
+      bindSessionUser(null)
       sessionRequest.current++
       setSessionRefreshing(false)
       setSession(null)
@@ -662,6 +669,7 @@ export function Studio() {
     try {
       const value = await api<Session>('/api/session')
       if (request !== sessionRequest.current) return
+      bindSessionUser(value.user.id)
       setRunEventTransport(value.eventTransport)
       setSession((current) =>
         profileAtStart !== profileRevision.current &&
@@ -1941,6 +1949,35 @@ export function Studio() {
     />
   )
 
+  const invitationNotice = invitationToken && (
+    <div
+      className="workspace-alert"
+      role={invitationIssue ? 'alert' : 'status'}
+    >
+      <span>{invitationIssue || 'Opening shared project…'}</span>
+      {invitationIssue && (
+        <>
+          <button
+            className="button small secondary"
+            onClick={() => setInvitationAttempt((value) => value + 1)}
+          >
+            Retry invitation
+          </button>
+          <button
+            className="button small subtle"
+            onClick={() => {
+              sessionStorage.removeItem('lemex-project-invitation')
+              setInvitationToken(null)
+              setInvitationIssue('')
+            }}
+          >
+            Dismiss
+          </button>
+        </>
+      )}
+    </div>
+  )
+
   if (authRequired && !session)
     return (
       <Login
@@ -1967,6 +2004,7 @@ export function Studio() {
           }}
           onProfileSaved={acceptProfile}
           onLogout={logout}
+          invitationNotice={invitationNotice}
           viewerProjects={
             session.user.profileComplete === false
               ? []
@@ -2656,34 +2694,7 @@ export function Studio() {
             </button>
           </div>
         )}
-        {invitationToken && (
-          <div
-            className="workspace-alert"
-            role={invitationIssue ? 'alert' : 'status'}
-          >
-            <span>{invitationIssue || 'Opening shared project…'}</span>
-            {invitationIssue && (
-              <>
-                <button
-                  className="button small secondary"
-                  onClick={() => setInvitationAttempt((value) => value + 1)}
-                >
-                  Retry invitation
-                </button>
-                <button
-                  className="button small subtle"
-                  onClick={() => {
-                    sessionStorage.removeItem('lemex-project-invitation')
-                    setInvitationToken(null)
-                    setInvitationIssue('')
-                  }}
-                >
-                  Dismiss
-                </button>
-              </>
-            )}
-          </div>
-        )}
+        {invitationNotice}
         {collaboration.issue && project && (
           <div className="workspace-alert draft-protection-alert" role="status">
             <span>{collaboration.issue}</span>
@@ -2762,6 +2773,19 @@ export function Studio() {
               ))}
             </div>
           </div>
+        ) : project.fileRecoveryRequired ? (
+          <ProjectFileRecovery
+            key={project.id}
+            project={project}
+            drafts={dirtyFiles}
+            onRecovered={(value) => {
+              if (!bufferStore.isCurrent(scope) || value.id !== project.id)
+                return
+              setProjects((previous) =>
+                previous.map((item) => (item.id === value.id ? value : item)),
+              )
+            }}
+          />
         ) : project.status === 'needs-setup' && !projectCanEdit ? (
           <div className="preparation-state">
             <h1>Project setup is pending</h1>

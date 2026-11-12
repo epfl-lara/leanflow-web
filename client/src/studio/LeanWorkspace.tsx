@@ -21,6 +21,7 @@ import {
   type CSSProperties,
 } from 'react'
 import type { FileEntry, OpenFile } from './api'
+import { sessionBoundUrl } from './api'
 import { connectInfoviewTheme } from './infoviewTheme'
 import { leanEditorTheme } from './leanEditorTheme'
 import './leanEditorTheme.css'
@@ -421,7 +422,9 @@ export function LeanWorkspace({
         own.definitionPreviewFiles = new DefinitionPreviewFiles(projectId)
         await lean.start({
           websocket: {
-            url: `${protocol}//${location.host}/websocket/${encodeURIComponent(projectId)}`,
+            url: sessionBoundUrl(
+              `${protocol}//${location.host}/websocket/${encodeURIComponent(projectId)}`,
+            ),
           },
           // Global VS Code UI services retain this element across projects.
           htmlElement: document.getElementById('root') ?? editorEl.current,

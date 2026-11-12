@@ -1,4 +1,4 @@
-import { api, type RunEvent } from './api'
+import { api, sessionBoundUrl, type RunEvent } from './api'
 
 let transport: 'sse' | 'poll' = 'sse'
 export function setRunEventTransport(value?: 'sse' | 'poll') {
@@ -13,11 +13,14 @@ export class PollingRunEvents extends EventTarget {
   private timer?: ReturnType<typeof setTimeout>
   private cursor: number
   private endpoint: string
+  private query: URLSearchParams
   constructor(url: string) {
     super()
     const [endpoint, query] = url.split('?')
     this.endpoint = endpoint
-    this.cursor = Number(new URLSearchParams(query).get('after') || 0)
+    this.query = new URLSearchParams(query)
+    this.cursor = Number(this.query.get('after') || 0)
+    this.query.set('transport', 'poll')
     queueMicrotask(() => {
       void this.read()
     })
@@ -26,8 +29,9 @@ export class PollingRunEvents extends EventTarget {
     if (this.controller.signal.aborted) return
     let delay = 750
     try {
+      this.query.set('after', String(this.cursor))
       const result = await api<{ events: RunEvent[] }>(
-        `${this.endpoint}?transport=poll&after=${this.cursor}`,
+        `${this.endpoint}?${this.query}`,
         { signal: this.controller.signal },
       )
       if (this.controller.signal.aborted) return
@@ -63,5 +67,8 @@ export class PollingRunEvents extends EventTarget {
 }
 
 export function openRunEvents(url: string): EventSource | PollingRunEvents {
-  return transport === 'poll' ? new PollingRunEvents(url) : new EventSource(url)
+  const endpoint = sessionBoundUrl(url)
+  return transport === 'poll'
+    ? new PollingRunEvents(endpoint)
+    : new EventSource(endpoint)
 }

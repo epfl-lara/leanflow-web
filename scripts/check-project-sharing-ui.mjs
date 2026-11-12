@@ -15,6 +15,7 @@ const individualRequests = []
 app.get(
   '/api/projects/sharing-viewer/terminal-recoveries/private-copy/download',
   (request, response) => {
+    assert.equal(request.query.expectedUserId, 'fixture-admin')
     if (request.query.path !== undefined) {
       individualRequests.push(request.query.path)
       assert.equal(request.query.path, individualPath)
@@ -180,7 +181,9 @@ try {
   )
   const liveSockets = new Map()
   await page.routeWebSocket('**/websocket/collaboration/**', (socket) => {
-    const id = new URL(socket.url()).pathname.split('/').at(-1)
+    const url = new URL(socket.url())
+    assert.equal(url.searchParams.get('expectedUserId'), 'fixture-admin')
+    const id = url.pathname.split('/').at(-1)
     liveSockets.set(id, socket)
   })
   await page.route('**/api/accounts/search?*', (route) =>
@@ -707,9 +710,17 @@ try {
     exact: true,
   })
   await privateRecovery.waitFor()
-  assert.equal(
+  const privateRecoveryUrl = new URL(
     await privateRecovery.getAttribute('href'),
+    base,
+  )
+  assert.equal(
+    privateRecoveryUrl.pathname,
     '/api/projects/sharing-viewer/terminal-recoveries/private-copy/download',
+  )
+  assert.deepEqual(
+    [...privateRecoveryUrl.searchParams],
+    [['expectedUserId', 'fixture-admin']],
   )
   let listingAttempts = 0
   await page.route(
@@ -751,13 +762,19 @@ try {
     exact: true,
   })
   await individualDownload.waitFor()
-  assert.equal(
-    new URL(
-      await individualDownload.getAttribute('href'),
-      base,
-    ).searchParams.get('path'),
-    individualPath,
+  const individualUrl = new URL(
+    await individualDownload.getAttribute('href'),
+    base,
   )
+  assert.equal(individualUrl.searchParams.get('path'), individualPath)
+  assert.equal(
+    individualUrl.searchParams.get('expectedUserId'),
+    'fixture-admin',
+  )
+  assert.deepEqual([...individualUrl.searchParams.keys()].sort(), [
+    'expectedUserId',
+    'path',
+  ])
   assert.equal(
     await individualFiles
       .getByRole('link', { name: 'Download huge-output.bin', exact: true })

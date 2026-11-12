@@ -295,7 +295,8 @@ test('optimization measures a protected baseline and only measures the clean can
         { path: 'Main.lean', before: original, after: final },
       ],
       verificationCopy: async (_snapshot, changes, options) => {
-        assert.deepEqual(options, {})
+        assert(options.signal instanceof AbortSignal)
+        assert.equal(options.signal.aborted, false)
         await fs.writeFile(path.join(cleanRoot, 'Main.lean'), changes[0].after)
         return { root: cleanRoot }
       },

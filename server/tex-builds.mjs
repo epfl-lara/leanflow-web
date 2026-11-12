@@ -292,6 +292,7 @@ export class TexBuildManager {
     if (this.stopping)
       fail('The server is shutting down. Compile after it restarts.', 503)
     this.workspaces.get(projectId, owner)
+    this.workspaces.assertRecoveryReady?.(projectId)
     this.assertCanStart(owner, projectId)
     if (
       !input ||
@@ -310,6 +311,7 @@ export class TexBuildManager {
     signal?.throwIfAborted()
     const info = await this.availability()
     this.workspaces.get(projectId, owner)
+    this.workspaces.assertRecoveryReady?.(projectId)
     this.assertCanStart(owner, projectId)
     if (!info.available) fail(info.error, 503)
     if (this.stopping)

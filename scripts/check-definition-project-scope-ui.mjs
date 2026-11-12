@@ -116,7 +116,14 @@ try {
     'beta editor model',
   )
   await until(
-    () => report.sockets.some((url) => url.endsWith('/websocket/beta')),
+    () =>
+      report.sockets.some((value) => {
+        const url = new URL(value)
+        return (
+          url.pathname === '/websocket/beta' &&
+          url.searchParams.get('expectedUserId') === 'fixture-owner'
+        )
+      }),
     'beta Lean connection',
   )
   await until(

@@ -1544,18 +1544,14 @@ test('a disconnected terminal holds its project guard and capacity until worker 
     409,
   )
   finishCleanup()
-  // Worker completion also closes its credential socket and disposable home.
-  // Wait for that observable cleanup rather than assuming one event-loop turn.
+  // Removing a worker home can precede the terminal's final snapshot cleanup.
+  // The stop receipt waits for all finalization and release of its session guard.
+  assert.equal(
+    (await f.request(`/api/projects/${f.project.id}/terminal/stop`, options))
+      .status,
+    200,
+  )
   const previousHome = f.runtime.spawned[0].workerHome
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try {
-      await fs.stat(previousHome)
-    } catch (error) {
-      if (error.code === 'ENOENT') break
-      throw error
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5))
-  }
   await assert.rejects(fs.stat(previousHome), { code: 'ENOENT' })
   // The broker may remove its home before the session finalizer releases the
   // project guard. Await the public stop acknowledgement as the final barrier.

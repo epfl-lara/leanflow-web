@@ -5,6 +5,7 @@ import { Icon } from './Icons'
 import { ResizeHandle } from './ResizeHandle'
 import { useStoredSize } from './layout'
 import { messageId } from './messageId'
+import { sessionBoundUrl } from './api'
 import '@xterm/xterm/css/xterm.css'
 import './terminal.css'
 
@@ -72,7 +73,7 @@ export function TerminalPanel({
     url.searchParams.set('openingId', openingId)
     openingChange.current?.(openingId)
     url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const socket = new WebSocket(url)
+    const socket = new WebSocket(sessionBoundUrl(url))
     socket.binaryType = 'arraybuffer'
     let disposed = false
     let failure = ''

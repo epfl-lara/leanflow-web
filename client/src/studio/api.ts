@@ -123,6 +123,7 @@ export interface Project {
   name: string
   status: 'preparing' | 'needs-setup' | 'ready' | 'error'
   needsPreparation?: boolean
+  fileRecoveryRequired?: boolean
   toolchain?: string
   preset?: string
   libraries?: string[]
@@ -414,6 +415,31 @@ export class ApiError extends Error {
 export const SESSION_EXPIRED_EVENT = 'leanflow:session-expired'
 export const SESSION_RESTORED_EVENT = 'leanflow:session-restored'
 let sessionRevision = 0
+let sessionUserId: string | null = null
+
+// Each tab keeps the account that owns its drafts, even if another tab replaces
+// the shared sign-in cookie. Only bootstrap, explicit login and logout bind it.
+export function bindSessionUser(userId: string | null) {
+  if (sessionUserId === userId) return
+  sessionUserId = userId
+  sessionRevision += 1
+}
+
+export function sessionBoundUrl(value: string | URL): string {
+  if (!sessionUserId) return String(value)
+  const relative = typeof value === 'string' && value.startsWith('/')
+  const url = new URL(String(value), 'http://leanflow.invalid')
+  url.searchParams.set('expectedUserId', sessionUserId)
+  return relative ? `${url.pathname}${url.search}${url.hash}` : url.href
+}
+
+function requireCurrentSession(userId: string | null) {
+  if (sessionUserId !== userId)
+    throw new ApiError(
+      'The workspace account changed. Try again in this account.',
+      409,
+    )
+}
 
 // A late response from the expired session must not reopen recovery after login.
 export function markSessionRestored() {
@@ -427,11 +453,17 @@ async function request(
   options: RequestInit = {},
 ): Promise<Response> {
   const requestSessionRevision = sessionRevision
+  const requestUserId = sessionUserId
+  const headers = new Headers(options.headers)
+  headers.set('Content-Type', 'application/json')
+  if (requestUserId && path.split('?')[0] !== '/api/login')
+    headers.set('X-Leanflow-User', requestUserId)
   const response = await fetch(path, {
     credentials: 'same-origin',
     ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+    headers,
   })
+  requireCurrentSession(requestUserId)
   if (
     response.status === 401 &&
     path.split('?')[0] !== '/api/login' &&
@@ -477,11 +509,14 @@ export async function api<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
+  const requestUserId = sessionUserId
   const data = await responseData(await request(path, options))
+  requireCurrentSession(requestUserId)
   return data as T
 }
 
 export async function apiPdf(path: string, signal: AbortSignal): Promise<Blob> {
+  const requestUserId = sessionUserId
   const response = await request(path, { signal })
   if (!response.ok) await responseData(response)
   if (
@@ -491,12 +526,15 @@ export async function apiPdf(path: string, signal: AbortSignal): Promise<Blob> {
     throw new Error(
       'This file could not be opened as a PDF. Choose a PDF document.',
     )
-  return response.blob()
+  const blob = await response.blob()
+  requireCurrentSession(requestUserId)
+  return blob
 }
 
 export async function apiDownload(
   path: string,
 ): Promise<{ blob: Blob; filename: string | null }> {
+  const requestUserId = sessionUserId
   const response = await request(path)
   if (!response.ok) await responseData(response)
   const disposition = response.headers.get('content-disposition') || ''
@@ -515,7 +553,9 @@ export async function apiDownload(
       ?.split(/[\\/]/)
       .at(-1)
       ?.replace(/[\x00-\x1f\x7f]/g, '') || null
-  return { blob: await response.blob(), filename }
+  const blob = await response.blob()
+  requireCurrentSession(requestUserId)
+  return { blob, filename }
 }
 
 export const post = <T>(path: string, body: unknown = {}) =>

@@ -1,6 +1,7 @@
 // Limits apply to decoded UTF-8 source bytes, not JavaScript character counts.
 export const MAX_SOURCE_FILE_BYTES = 8 * 1024 * 1024
 export const MAX_SOURCE_UPLOAD_BYTES = 32 * 1024 * 1024
+export const MAX_PROJECT_FILES = 12000
 export const SMALL_SOURCE_JSON_BYTES = 3 * 1024 * 1024
 
 // JSON can escape one source byte as six bytes. Include room for file paths,

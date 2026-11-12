@@ -764,6 +764,7 @@ export class AgentManager {
         job.projectId,
         job.owner,
         id,
+        { signal: active.controller.signal },
       )
       this.events.updateMetadata(id, {
         snapshot,
@@ -1164,6 +1165,7 @@ export class AgentManager {
       rpc.close()
       active.rpc = null
       await active.childClosed
+      await active.workerStopped
       await active.mirror?.stop({ flush: result.status === 'completed' })
       if (active.controller.signal.aborted) return
       if (result.status !== 'completed')
@@ -1239,9 +1241,15 @@ export class AgentManager {
         this.#log(id, 'Checking the candidate independently with Lean…\n')
       }
       const clean = await this.workspaces.verificationCopy(snapshot, changes, {
+        signal: active.controller.signal,
+        onCaptured: (copy) => {
+          active.verificationCopy = copy
+          this.events.updateMetadata(id, { verificationRoot: copy.root })
+        },
         ...(job.liveEdits ? { liveChanges: live.liveChanges || [] } : {}),
         ...(job.mode === 'search' ? { allowProjectFiles: true } : {}),
       })
+      active.verificationCopy = clean
       this.events.updateMetadata(id, { verificationRoot: clean.root })
       let checks = changes
       if (!changes.length && !['search', 'formalize'].includes(job.mode)) {
@@ -1322,6 +1330,15 @@ export class AgentManager {
             ? 'The run stopped before this message was accepted.'
             : undefined,
         )
+        try {
+          await this.#cleanupVerification(id, active.verificationCopy)
+        } catch {
+          this.events.updateMetadata(id, { verificationCleanupPending: true })
+          this.#log(
+            id,
+            'Temporary independent check files were kept because cleanup could not finish.\n',
+          )
+        }
         if (cleanupError) {
           const message = this.config.redact(cleanupError.message)
           this.events.updateMetadata(id, { status: 'failed', error: message })
@@ -1333,6 +1350,27 @@ export class AgentManager {
       }
     }
   }
+  async #cleanupVerification(id, snapshot) {
+    if (!this.workspaces.cleanupVerificationCopy) return
+    const job = this.events.getMetadata(id)
+    const copy =
+      snapshot ||
+      (job.verificationRoot
+        ? {
+            root: job.verificationRoot,
+            purpose: 'verification',
+            sourceRunId: id,
+            projectId: job.projectId,
+            actor: job.owner,
+          }
+        : null)
+    if (!copy) return
+    await this.workspaces.cleanupVerificationCopy(copy, { stopWorkers: true })
+    this.events.updateMetadata(id, {
+      verificationRoot: null,
+      verificationCleanupPending: false,
+    })
+  }
   async stop(owner, id, reason = 'Stopped by the user.') {
     const job = this.events.getMetadata(id, owner)
     assertAgentJob(job)
@@ -1341,6 +1379,7 @@ export class AgentManager {
       await active?.mirror?.stop()
       await active?.done
       await active?.workerStopped
+      await this.#cleanupVerification(id)
       return this.events.get(id, owner)
     }
     if (active?.stopPromise) return active.stopPromise
@@ -1371,6 +1410,7 @@ export class AgentManager {
       await active?.mirror?.stop()
       await active?.done
       await active?.workerStopped
+      await this.#cleanupVerification(id)
       await this.followups.finish(
         id,
         'The run stopped before this message was accepted.',

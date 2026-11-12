@@ -425,7 +425,10 @@ try {
     popupUrl.pathname,
     `/api/projects/${projectId}/tex/builds/tex-1/pdf`,
   )
-  assert.equal(popupUrl.search, '')
+  assert.deepEqual(
+    [...popupUrl.searchParams],
+    [['expectedUserId', 'fixture-owner']],
+  )
   assert.equal(await openPdf.getAttribute('rel'), 'noopener noreferrer')
   await page.context().addCookies([
     {

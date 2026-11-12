@@ -11,6 +11,7 @@ import {
   documentOffsetAfterEdit,
 } from '../../../shared/document-text.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configuration.mjs'
+import { sourceFileByteLimit } from '../../../shared/source-limits.mjs'
 
 function transpile(name, imports = {}) {
   const { outputText } = ts.transpileModule(
@@ -142,6 +143,8 @@ function fixture(t, initial = 'base source\n', options = {}) {
       react,
       yjs: Y,
       './localDocumentHistory': { LocalDocumentHistory },
+      './api': { sessionBoundUrl: (value) => value },
+      '../../../shared/source-limits.mjs': { sourceFileByteLimit },
       '../../../shared/document-text.mjs': {
         replaceDocumentText: options.replaceDocumentText || replaceDocumentText,
       },
@@ -280,7 +283,7 @@ test('configuration stays on REST saves after pending live document edits are ac
 })
 
 test('rejected persistence preserves its draft and allows an explicit reload to recover', async (t) => {
-  for (const status of [409, 413, 403])
+  for (const status of [409, 403])
     await t.test(`HTTP status ${status}`, async (t) => {
       const { store, socket, server, hook } = fixture(t)
       store.change('Main.lean', `-- retain failed ${status}\nbase source\n`)
@@ -673,6 +676,212 @@ function serviceFixture(t, initial) {
     },
   }
 }
+
+async function admitServiceDocument(backend, socket) {
+  socket.receive({ type: 'ready' })
+  const open = socket.sent.filter((message) => message.type === 'open').at(-1)
+  await backend.service.message(backend.client, open)
+  backend.deliver(socket)
+}
+
+function lastDocumentUpdate(socket) {
+  return socket.sent.filter((message) => message.type === 'update').at(-1)
+}
+
+async function rejectedDocumentUpdate(backend, update) {
+  let rejection
+  try {
+    await backend.service.message(backend.client, update)
+  } catch (error) {
+    rejection = error
+  }
+  assert.ok(rejection, 'the actual document service rejects this update')
+  return {
+    type: 'error',
+    path: update.path,
+    requestId: update.requestId,
+    status: rejection.status,
+    message: rejection.message,
+  }
+}
+
+test('a corrected source-limit rejection replays lost-ack edits and preserves concurrent saved source', async (t) => {
+  const baseline = 'base source\n'
+  const { store, socket, hook } = fixture(t, baseline, { deferReady: true })
+  const backend = serviceFixture(t, baseline)
+  await admitServiceDocument(backend, socket)
+  const accepted = 'LOCAL_ACCEPTED\n' + baseline
+  store.change('Main.lean', accepted)
+  const flushing = hook.flush()
+  await backend.service.message(backend.client, lastDocumentUpdate(socket))
+  // Keep this successful durable ACK in flight while the next edit is rejected.
+  store.change('Main.lean', accepted + 'x'.repeat(8 * 1024 * 1024))
+  const rejectedFlush = hook.flush()
+  const rejection = await rejectedDocumentUpdate(
+    backend,
+    lastDocumentUpdate(socket),
+  )
+  assert.equal(rejection.status, 413)
+  const corrected = accepted + 'xx'
+  store.change('Main.lean', corrected)
+  socket.receive(rejection)
+  await assert.rejects(flushing, /source file limit/)
+  await assert.rejects(rejectedFlush, /source file limit/)
+  backend.restSave(backend.source() + 'REMOTE_WHILE_RECONNECTING\n')
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reopened = Socket.instances.at(-1)
+  assert.notEqual(reopened, socket)
+  await admitServiceDocument(backend, reopened)
+  const replay = lastDocumentUpdate(reopened)
+  assert.ok(replay, 'a corrected draft is replayed without another keystroke')
+  await backend.service.message(backend.client, replay)
+  backend.deliver(reopened)
+  assert.equal(await hook.flush(), true)
+  assert.equal(
+    backend.source().replace('REMOTE_WHILE_RECONNECTING\n', ''),
+    corrected,
+  )
+  assert.equal(backend.source().split('REMOTE_WHILE_RECONNECTING\n').length, 2)
+  assert.equal(store.getSnapshot().file.content, backend.source())
+  assert.deepEqual(store.dirty(), [])
+})
+
+test('a small replacement of an oversized pasted line can retire to version-checked saving', async (t) => {
+  const baseline = 'base source\n'
+  const { store, socket, hook, rerender } = fixture(t, baseline, {
+    deferReady: true,
+  })
+  const backend = serviceFixture(t, baseline)
+  await admitServiceDocument(backend, socket)
+  store.change('Main.lean', baseline + 'x'.repeat(8 * 1024 * 1024))
+  const flushing = hook.flush()
+  const rejection = await rejectedDocumentUpdate(
+    backend,
+    lastDocumentUpdate(socket),
+  )
+  assert.equal(rejection.status, 413)
+  socket.receive(rejection)
+  await assert.rejects(flushing, /source file limit/)
+  const corrected = baseline + '-- valid replacement\n'
+  store.change('Main.lean', corrected)
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reopened = Socket.instances.at(-1)
+  await admitServiceDocument(backend, reopened)
+  assert.equal(await hook.flush(), false)
+  assert.match(rerender().issue, /normal version-checked saving/)
+  assert.equal(lastDocumentUpdate(reopened), undefined)
+  const snapshot = store.getSnapshot().file
+  assert.equal(snapshot.content, corrected)
+  assert.equal(
+    snapshot.hash,
+    hash(backend.source()),
+    'fallback preserves the actual CAS baseline',
+  )
+  backend.restSave(snapshot.content)
+  store.saved(
+    [snapshot],
+    [{ path: snapshot.path, hash: hash(snapshot.content) }],
+  )
+  assert.deepEqual(store.dirty(), [])
+  assert.equal(backend.source(), corrected)
+})
+
+test('private Undo recovers an oversized UTF-8 paste without removing remote text', async (t) => {
+  const baseline = 'base source\n'
+  const { store, socket, hook } = fixture(t, baseline, { deferReady: true })
+  const backend = serviceFixture(t, baseline)
+  await admitServiceDocument(backend, socket)
+  backend.restSave(baseline + 'REMOTE_BEFORE_PASTE\n')
+  await backend.service.refresh(
+    backend.service.documents.values().next().value,
+    backend.client.actor,
+  )
+  backend.deliver(socket)
+  const withRemote = store.getSnapshot().file.content
+  const pasted = withRemote + '😀'.repeat(2 * 1024 * 1024)
+  assert(pasted.length < sourceFileByteLimit('Main.lean'))
+  store.change('Main.lean', pasted)
+  const flushing = hook.flush()
+  const rejection = await rejectedDocumentUpdate(
+    backend,
+    lastDocumentUpdate(socket),
+  )
+  assert.equal(rejection.status, 413)
+  socket.receive(rejection)
+  await assert.rejects(flushing, /source file limit/)
+  assert.equal(hook.undo('Main.lean'), true)
+  assert.equal(store.getSnapshot().file.content, withRemote)
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reopened = Socket.instances.at(-1)
+  await admitServiceDocument(backend, reopened)
+  const replay = lastDocumentUpdate(reopened)
+  assert.ok(replay)
+  await backend.service.message(backend.client, replay)
+  backend.deliver(reopened)
+  assert.equal(await hook.flush(), true)
+  assert.equal(backend.source(), withRemote)
+  assert.equal(store.getSnapshot().file.content, withRemote)
+})
+
+test('a rejected live source waits for correction while receiving remote edits and ignores dependent errors on its closed connection', async (t) => {
+  const baseline = 'base source\n'
+  const { store, socket, hook, rerender } = fixture(t, baseline, {
+    deferReady: true,
+  })
+  const backend = serviceFixture(t, baseline)
+  await admitServiceDocument(backend, socket)
+  store.change('Main.lean', baseline + '\0')
+  const flushing = hook.flush()
+  const rejection = await rejectedDocumentUpdate(
+    backend,
+    lastDocumentUpdate(socket),
+  )
+  assert.equal(rejection.status, 413)
+  // Another already-sent delta can refer to the rejected insertion.
+  store.change('Main.lean', baseline + '\0later')
+  const dependentFlush = hook.flush()
+  const dependentError = await rejectedDocumentUpdate(
+    backend,
+    lastDocumentUpdate(socket),
+  )
+  assert.equal(dependentError.status, 400)
+  socket.receive(rejection)
+  socket.receive(dependentError)
+  await assert.rejects(flushing, /source file limit/)
+  await assert.rejects(dependentFlush, /source file limit/)
+  await new Promise((resolve) => setTimeout(resolve, 550))
+  const reopened = Socket.instances.at(-1)
+  await admitServiceDocument(backend, reopened)
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(
+    lastDocumentUpdate(reopened),
+    undefined,
+    'invalid source is not replayed repeatedly',
+  )
+  assert.match(rerender().issue, /source file limit/)
+  backend.restSave('REMOTE_AFTER_REJECTION\n' + baseline)
+  await backend.service.refresh(
+    backend.service.documents.values().next().value,
+    backend.client.actor,
+  )
+  backend.deliver(reopened)
+  assert.match(store.getSnapshot().file.content, /REMOTE_AFTER_REJECTION/)
+  store.change(
+    'Main.lean',
+    store.getSnapshot().file.content.replace('\0later', '-- corrected\n'),
+  )
+  const correctedFlush = hook.flush()
+  const replay = lastDocumentUpdate(reopened)
+  assert.ok(replay)
+  await backend.service.message(backend.client, replay)
+  backend.deliver(reopened)
+  assert.equal(await correctedFlush, true)
+  assert.equal(
+    backend.source(),
+    'REMOTE_AFTER_REJECTION\n' + baseline + '-- corrected\n',
+  )
+  assert.equal(rerender().issue, null)
+})
 
 test('reload generations ignore queued deltas and stale full opens before accepting their own full baseline', async (t) => {
   const { store, socket, server, hook } = fixture(t)

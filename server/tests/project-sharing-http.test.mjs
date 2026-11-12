@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
 import fs from 'node:fs/promises'
 import { mkdirSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import net from 'node:net'
 import http from 'node:http'
 import os from 'node:os'
@@ -1524,6 +1525,45 @@ test('account recovery listing finds only personal terminal copies after project
     [foreign.runId],
   )
   const endpoint = `${f.base}/terminal-recoveries/${own.runId}`
+  const binding = `expectedUserId=${encodeURIComponent(f.editor.id)}`
+  const archive = await f.request(`${endpoint}/download?${binding}`, {
+    actor: f.editor,
+  })
+  assert.equal(archive.status, 200)
+  const zip = await JSZip.loadAsync(await archive.arrayBuffer())
+  assert(zip.file('Main.lean'))
+  const individual = await f.request(
+    `${endpoint}/download?path=Main.lean&${binding}`,
+    { actor: f.editor },
+  )
+  assert.equal(individual.status, 200)
+  assert.equal(
+    await individual.text(),
+    await zip.file('Main.lean').async('string'),
+  )
+  const listing = await f.request(`${endpoint}/files?${binding}`, {
+    actor: f.editor,
+  })
+  assert.equal(listing.status, 200)
+  assert((await listing.json()).files.some((file) => file.path === 'Main.lean'))
+  for (const suffix of ['download', 'download?path=Main.lean', 'files']) {
+    const separator = suffix.includes('?') ? '&' : '?'
+    const response = await f.request(
+      `${endpoint}/${suffix}${separator}${binding}`,
+      {
+        actor: f.owner,
+      },
+    )
+    assert.equal(response.status, 401)
+  }
+  assert.equal(
+    (
+      await f.request(`${endpoint}/download?unexpected=1&${binding}`, {
+        actor: f.editor,
+      })
+    ).status,
+    400,
+  )
   assert.equal(
     (await f.request(`${endpoint}/download`, { actor: f.editor })).status,
     200,
@@ -1879,4 +1919,290 @@ test('account discovery is rate limited per user without blocking other accounts
       .status,
     200,
   )
+})
+
+test('stale cookie clients cannot read private chats, write files, or start runs without an account binding', async (t) => {
+  const f = await fixture(t)
+  const login = await f.request('/api/login', {
+    actor: null,
+    method: 'POST',
+    body: { token: f.editor.token },
+  })
+  assert.equal(login.status, 200)
+  const cookie = login.headers.get('set-cookie').split(';')[0]
+  const privateChat = f.chats.create(f.editor.id, f.project.id, {
+    title: 'BETA_PRIVATE_CHAT_SENTINEL',
+  })
+  const source = await f.workspaces.readFile(
+    f.project.id,
+    f.editor.id,
+    'Main.lean',
+  )
+  const privateRun = f.events.create(f.editor.id, {
+    kind: 'agent',
+    projectId: f.project.id,
+    chatId: privateChat.id,
+    prompt: 'BETA_PRIVATE_PROMPT_SENTINEL',
+  })
+  f.events.updateMetadata(privateRun.id, { status: 'completed' })
+  const admitted = []
+  // Record real route admission without starting a worker or contacting a provider.
+  f.agents.start = async (actor, projectId, input) => {
+    admitted.push({ actor, projectId, prompt: input.prompt })
+    const run = f.events.create(actor, { ...input, kind: 'agent', projectId })
+    f.events.updateMetadata(run.id, {
+      status: 'failed',
+      error: 'Fixture execution stopped.',
+    })
+    return f.events.getMetadata(run.id, actor)
+  }
+  const cookieRequest = (
+    endpoint,
+    { method = 'GET', body, headers = {} } = {},
+  ) =>
+    fetch(f.origin + endpoint, {
+      method,
+      signal: AbortSignal.timeout(5000),
+      headers: {
+        Cookie: cookie,
+        Origin: f.origin,
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...headers,
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+  for (const [endpoint, method = 'GET', body] of [
+    [`${f.base}/chats`],
+    [`/api/chats/${privateChat.id}`],
+    [
+      `${f.base}/chats`,
+      'POST',
+      { title: 'Stale tab must not create this chat' },
+    ],
+    [
+      `/api/chats/${privateChat.id}/runs`,
+      'POST',
+      { prompt: 'ALPHA_PRIVATE_DRAFT' },
+    ],
+    [
+      `${f.base}/file?path=Main.lean`,
+      'PUT',
+      { content: '-- ALPHA_PRIVATE_EDIT\n', expectedHash: source.hash },
+    ],
+    [
+      `/api/runs/${privateRun.id}/messages`,
+      'POST',
+      { text: 'ALPHA_PRIVATE_FOLLOWUP' },
+    ],
+    [`${f.base}/download?path=Main.lean`],
+    ['/api/terminal-recoveries'],
+    [`/api/runs/${privateRun.id}/events`],
+    [`/api/runs/${privateRun.id}/events?transport=poll`],
+    ['/api/logout', 'POST', {}],
+  ]) {
+    const response = await cookieRequest(endpoint, { method, body })
+    if (response.status !== 428) await response.body?.cancel()
+    assert.equal(response.status, 428, `${method} ${endpoint}`)
+    assert.equal(response.headers.get('set-cookie'), null)
+    const message = (await response.json()).error
+    assert.match(message, /older workspace version/)
+    assert.match(message, /unsaved editor drafts.*unsent messages.*reloading/)
+    assert.match(message, /Signing in again will not update this tab/)
+    assert(!message.includes('BETA_PRIVATE'))
+  }
+  for (const authorization of ['Basic stale-client', 'Bearer malformed!']) {
+    const response = await cookieRequest(`${f.base}/chats`, {
+      headers: { Authorization: authorization },
+    })
+    assert.equal(response.status, 428)
+  }
+  assert.deepEqual(admitted, [])
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, f.editor.id, 'Main.lean'))
+      .content,
+    source.content,
+  )
+  assert.deepEqual(
+    f.chats.list(f.editor.id, f.project.id).map((chat) => chat.id),
+    [privateChat.id],
+  )
+  const bootstrap = await cookieRequest('/api/session')
+  assert.equal(bootstrap.status, 200)
+  assert.equal((await bootstrap.json()).user.id, f.editor.id)
+  const boundHeaders = { 'X-Leanflow-User': f.editor.id }
+  const bound = await cookieRequest(`${f.base}/chats`, {
+    headers: boundHeaders,
+  })
+  assert.equal(bound.status, 200)
+  assert.equal((await bound.json())[0].title, 'BETA_PRIVATE_CHAT_SENTINEL')
+  const save = await cookieRequest(`${f.base}/file?path=Main.lean`, {
+    method: 'PUT',
+    headers: boundHeaders,
+    body: {
+      content: source.content + '-- bound save\n',
+      expectedHash: source.hash,
+    },
+  })
+  assert.equal(save.status, 200)
+  const boundRun = await cookieRequest(`/api/chats/${privateChat.id}/runs`, {
+    method: 'POST',
+    headers: boundHeaders,
+    body: { prompt: 'BOUND_EDITOR_PROMPT' },
+  })
+  assert.equal(boundRun.status, 202)
+  const bearer = await cookieRequest(`/api/chats/${privateChat.id}/runs`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${f.editor.token}` },
+    body: { prompt: 'LEGACY_BEARER_PROMPT' },
+  })
+  assert.equal(bearer.status, 202)
+  assert.deepEqual(admitted, [
+    {
+      actor: f.editor.id,
+      projectId: f.project.id,
+      prompt: 'BOUND_EDITOR_PROMPT',
+    },
+    {
+      actor: f.editor.id,
+      projectId: f.project.id,
+      prompt: 'LEGACY_BEARER_PROMPT',
+    },
+  ])
+  const ordinaryLogin = await cookieRequest('/api/login', {
+    method: 'POST',
+    body: { token: f.owner.token },
+  })
+  assert.equal(ordinaryLogin.status, 200)
+  assert.equal((await ordinaryLogin.json()).user.id, f.owner.id)
+  const anonymousLogout = await f.request('/api/logout', {
+    actor: null,
+    method: 'POST',
+    body: {},
+  })
+  assert.equal(anonymousLogout.status, 200)
+  assert.match(anonymousLogout.headers.get('set-cookie'), /Max-Age=0/)
+})
+
+test('file recovery retries require an idle project Admin and preserve work in other projects', async (t) => {
+  const f = await fixture(t)
+  const before = await f.workspaces.readFile(
+    f.project.id,
+    f.owner.id,
+    'Main.lean',
+  )
+  const originalRename = fs.rename
+  t.mock.method(fs, 'rename', async (source, destination) => {
+    if (String(destination).endsWith('/applied.json'))
+      throw new Error('Fixture commit marker unavailable')
+    if (
+      String(destination).endsWith('/Main.lean') &&
+      path.basename(await fs.realpath(path.dirname(String(source)))) ===
+        'before'
+    )
+      throw new Error('Fixture rollback storage unavailable')
+    return originalRename(source, destination)
+  })
+  syncBuiltinESMExports()
+  try {
+    await assert.rejects(
+      f.workspaces.applyChanges(f.project.id, f.owner.id, [
+        {
+          path: 'Main.lean',
+          beforeHash: before.hash,
+          after: '-- interrupted source\n',
+        },
+      ]),
+      { status: 503 },
+    )
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+  assert.equal(
+    f.workspaces.get(f.project.id, f.owner.id).fileRecoveryRequired,
+    true,
+  )
+  const endpoint = `${f.base}/file-recovery/retry`
+  for (const actor of [f.editor, f.viewer])
+    assert.equal(
+      (await f.request(endpoint, { actor, method: 'POST', body: {} })).status,
+      403,
+    )
+  assert.equal(
+    (await f.request(endpoint, { actor: f.outsider, method: 'POST', body: {} }))
+      .status,
+    404,
+  )
+  for (const body of [null, [], { restart: true }])
+    assert.equal(
+      (await f.request(endpoint, { method: 'POST', body })).status,
+      400,
+    )
+  const active = f.events.create(f.editor.id, {
+    kind: 'agent',
+    projectId: f.project.id,
+  })
+  f.events.updateMetadata(active.id, { status: 'running' })
+  const refused = await f.request(endpoint, { method: 'POST', body: {} })
+  assert.equal(refused.status, 409)
+  assert.match(
+    (await refused.json()).error,
+    /Another collaborator has active work/,
+  )
+  assert.equal(f.events.getMetadata(active.id).status, 'running')
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, f.owner.id, 'Main.lean'))
+      .content,
+    '-- interrupted source\n',
+  )
+  f.events.updateMetadata(active.id, { status: 'completed' })
+  f.agents.active.set(active.id, Promise.resolve())
+  try {
+    const finishing = await f.request(endpoint, { method: 'POST', body: {} })
+    assert.equal(finishing.status, 409)
+    assert.match(
+      (await finishing.json()).error,
+      /Project work is still finishing/,
+    )
+    assert.equal(f.agents.active.has(active.id), true)
+  } finally {
+    f.agents.active.delete(active.id)
+  }
+  const healthy = await f.workspaces.create(f.owner.id, {
+    preset: 'lean',
+    name: 'Healthy recovery sibling',
+  })
+  await f.workspaces.jobs.get(healthy.id)
+  const healthyRun = f.events.create(f.owner.id, {
+    kind: 'agent',
+    projectId: healthy.id,
+  })
+  f.events.updateMetadata(healthyRun.id, { status: 'running' })
+  await f.workspaces.writeFile(
+    healthy.id,
+    f.owner.id,
+    'Healthy.lean',
+    '-- healthy project remains usable\n',
+    null,
+  )
+  const recovered = await f.request(endpoint, { method: 'POST', body: {} })
+  assert.equal(recovered.status, 200)
+  const project = await recovered.json()
+  assert.equal(project.id, f.project.id)
+  assert.equal(project.status, 'ready')
+  assert.equal(project.fileRecoveryRequired, undefined)
+  assert.equal(project.root, undefined)
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, f.owner.id, 'Main.lean'))
+      .content,
+    before.content,
+  )
+  assert.equal(f.events.getMetadata(healthyRun.id).status, 'running')
+  assert.equal(
+    (await f.workspaces.readFile(healthy.id, f.owner.id, 'Healthy.lean'))
+      .content,
+    '-- healthy project remains usable\n',
+  )
+  assert.equal(f.workspaces.get(healthy.id, f.owner.id).status, 'ready')
+  f.events.updateMetadata(healthyRun.id, { status: 'completed' })
 })

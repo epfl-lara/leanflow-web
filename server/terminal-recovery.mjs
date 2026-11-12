@@ -35,7 +35,9 @@ export function installTerminalRecoveryRoutes(
     const recovery = await workspaces.terminalRecovery(id, actor, runId)
     const filename = req.query.path
     if (
-      Object.keys(req.query).some((key) => listing || key !== 'path') ||
+      Object.keys(req.query).some(
+        (key) => key !== 'expectedUserId' && (listing || key !== 'path'),
+      ) ||
       (filename !== undefined && !isProjectDownloadPath(filename))
     )
       throw Object.assign(new Error('Choose a permitted recovery file.'), {

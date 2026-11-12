@@ -220,23 +220,24 @@ for (const operation of [
       )
     const changes =
       operation === 'agent publication' ? await store.changes(snapshot) : null
-    const originalWrite = promiseFs.writeFile
+    const originalOpen = promiseFs.open
     let staged = false
-    const mockedWrite = t.mock.method(
-      promiseFs,
-      'writeFile',
-      async (...args) => {
-        const result = await originalWrite(...args)
-        if (
-          String(args[0]).startsWith(store.historyDir + path.sep) &&
-          String(args[0]).includes('/staged/')
-        ) {
+    const mockedOpen = t.mock.method(promiseFs, 'open', async (...args) => {
+      const handle = await originalOpen(...args)
+      if (
+        String(args[0]).startsWith(store.historyDir + path.sep) &&
+        String(args[0]).includes('/staged/')
+      ) {
+        const originalWrite = handle.writeFile.bind(handle)
+        handle.writeFile = async (...contents) => {
+          const result = await originalWrite(...contents)
           staged = true
           active = false
+          return result
         }
-        return result
-      },
-    )
+      }
+      return handle
+    })
     syncBuiltinESMExports()
     try {
       const pending =
@@ -258,7 +259,7 @@ for (const operation of [
         before.content,
       )
     } finally {
-      mockedWrite.mock.restore()
+      mockedOpen.mock.restore()
       syncBuiltinESMExports()
     }
   })

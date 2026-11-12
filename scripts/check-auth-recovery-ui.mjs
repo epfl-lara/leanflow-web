@@ -33,6 +33,7 @@ const fixture = await chatBrowserFixture({
 })
 const { page, browser, state, report } = fixture
 let expired = false
+let expireNextSave = false
 let holdGit = false
 let delayedGit
 let saveAttempts = 0
@@ -82,6 +83,10 @@ await page.route('**/api/**', async (route) => {
   }
   if (endpoint.endsWith('/file') && request.method() === 'PUT') {
     saveAttempts++
+    if (expireNextSave) {
+      expireNextSave = false
+      expired = true
+    }
     if (expired) return respond({ error: 'Session expired.' }, 401)
     savedContent = request.postDataJSON().content
     state.files[projectId]['Main.lean'] = savedContent
@@ -99,11 +104,7 @@ try {
   const composer = page.getByLabel('Message Lemex')
   const draft = 'Keep this draft while I renew my session.'
   await composer.fill(draft)
-  await page.locator('.monaco-editor textarea').focus()
-  await page.keyboard.press('Control+End')
-  await page.keyboard.insertText('-- unsaved recovery marker\n')
   const save = page.getByRole('button', { name: 'Save', exact: true })
-  await until(() => save.isEnabled(), 'dirty editor')
   await page.evaluate(() => {
     window.__recoveryEditor = document.querySelector('.monaco-editor')
   })
@@ -113,8 +114,13 @@ try {
     .getByRole('button', { name: 'Refresh Git status', exact: true })
     .click()
   await until(() => !!delayedGit, 'old-session request in flight')
-  expired = true
-  await save.click()
+  // Expire the first autosave response, so background polling cannot open the
+  // recovery modal before a simulated Save click reaches the editor.
+  expireNextSave = true
+  await page.locator('.monaco-editor textarea').focus()
+  await page.keyboard.press('Control+End')
+  await page.keyboard.insertText('-- unsaved recovery marker\n')
+  await until(() => saveAttempts === 1, 'expired autosave reaches the server')
 
   const dialog = page.getByRole('dialog', { name: 'Sign in to continue' })
   await dialog.waitFor()

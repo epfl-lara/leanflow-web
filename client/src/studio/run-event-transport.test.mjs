@@ -15,7 +15,7 @@ function transport(api) {
   )
   const module = { exports: {} }
   new Function('require', 'module', 'exports', outputText)(
-    () => ({ api }),
+    () => ({ api, sessionBoundUrl: (url) => url }),
     module,
     module.exports,
   )
@@ -52,7 +52,9 @@ test('JSON event transport replays cursors, retries failures, and aborts cleanly
         .map((seq) => ({ seq, type: 'message', data: { text: String(seq) } })),
     }
   })
-  const stream = new PollingRunEvents('/api/runs/fixture/events?after=1')
+  const stream = new PollingRunEvents(
+    '/api/runs/fixture/events?after=1&expectedUserId=alpha',
+  )
   const events = [],
     states = []
   stream.addEventListener('open', () => states.push('open'))
@@ -69,7 +71,9 @@ test('JSON event transport replays cursors, retries failures, and aborts cleanly
   fail = true
   next()
   await settle()
-  assert(calls[1].url.endsWith('after=3'))
+  const retryUrl = new URL(calls[1].url, 'https://fixture.example')
+  assert.equal(retryUrl.searchParams.get('after'), '3')
+  assert.equal(retryUrl.searchParams.get('expectedUserId'), 'alpha')
   assert.equal(stream.readyState, 0)
   fail = false
   next()
