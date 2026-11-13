@@ -33,12 +33,22 @@ function fixture() {
     options = { documentSelector: ['lean4'] }
   let calls = 0,
     stops = 0,
-    erased = 0
+    erased = 0,
+    restarts = 0,
+    running = false
   const clients = []
   const raw = {
-    start: async () => {},
+    start: async () => {
+      running = true
+    },
+    restart: async () => {
+      restarts++
+      running = true
+    },
+    isRunning: () => running,
     stop: async () => {
       stops++
+      running = false
     },
   }
   const provider = {
@@ -83,6 +93,9 @@ function fixture() {
     },
     get erased() {
       return erased
+    },
+    get restarts() {
+      return restarts
     },
   }
 }
@@ -153,6 +166,109 @@ test('an unsupported provider shape fails with an actionable pinned-package erro
       ),
     /Restore the pinned editor packages/,
   )
+})
+
+test('sleep stops the editor connection and blocks background starts until a single explicit wake', async () => {
+  const f = fixture()
+  f.gate.resolve(f.raw)
+  await f.provider.ensureClient('root')
+  await f.lifecycle.suspend()
+  assert.equal(f.lifecycle.sleeping, true)
+  assert.equal(f.stops, 1)
+  assert.equal(f.raw.isRunning(), false)
+  assert.deepEqual(await f.provider.ensureClient('background keepalive'), [
+    false,
+    undefined,
+  ])
+  assert.equal(f.calls, 1)
+  await Promise.all([f.lifecycle.resume('root'), f.lifecycle.resume('root')])
+  assert.equal(f.lifecycle.sleeping, false)
+  assert.equal(f.restarts, 1)
+  assert.equal(f.raw.isRunning(), true)
+  assert.equal(f.calls, 1)
+  await f.lifecycle.close()
+})
+
+test('sleep drains a pending start and waking during shutdown waits before reconnecting', async () => {
+  const f = fixture()
+  const starting = f.provider.ensureClient('root')
+  const sleeping = f.lifecycle.suspend()
+  const waking = f.lifecycle.resume('root')
+  await Promise.resolve()
+  assert.equal(f.restarts, 0)
+  f.gate.resolve(f.raw)
+  await Promise.all([starting, sleeping, waking])
+  assert.equal(f.stops, 1)
+  assert.equal(f.restarts, 1)
+  assert.equal(f.raw.isRunning(), true)
+  await f.lifecycle.close()
+})
+
+test('closing a sleeping editor cancels a queued wake instead of reviving its worker', async () => {
+  const f = fixture()
+  const starting = f.provider.ensureClient('root')
+  const sleeping = f.lifecycle.suspend()
+  const waking = f.lifecycle.resume('root')
+  const closing = f.lifecycle.close()
+  f.gate.resolve(f.raw)
+  await Promise.all([starting, sleeping, waking, closing])
+  assert.equal(f.restarts, 0)
+  assert.equal(f.raw.isRunning(), false)
+  await f.lifecycle.resume('root')
+  assert.equal(f.restarts, 0)
+})
+
+test('waking a document without a Lean client does not allocate one unnecessarily', async () => {
+  const f = fixture()
+  await f.lifecycle.suspend()
+  await f.lifecycle.resume('root', false)
+  assert.equal(f.lifecycle.sleeping, false)
+  assert.equal(f.calls, 0)
+  assert.equal(f.restarts, 0)
+  await f.lifecycle.close()
+})
+
+test('sleep requested during a pending wake waits for it and then releases its worker', async () => {
+  const f = fixture()
+  f.gate.resolve(f.raw)
+  await f.provider.ensureClient('root')
+  await f.lifecycle.suspend()
+  const gate = deferred()
+  f.raw.restart = async () => gate.promise
+  const waking = f.lifecycle.resume('root')
+  const sleeping = f.lifecycle.suspend()
+  gate.resolve()
+  await Promise.all([waking, sleeping])
+  assert.equal(f.lifecycle.sleeping, true)
+  assert.equal(f.raw.isRunning(), false)
+  await f.lifecycle.close()
+})
+
+test('rapid sleep-wake changes preserve the latest intent and block starts until shutdown finishes', async () => {
+  const f = fixture()
+  f.gate.resolve(f.raw)
+  await f.provider.ensureClient('root')
+  const stopping = deferred()
+  const stop = f.raw.stop
+  f.raw.stop = async () => {
+    await stopping.promise
+    await stop()
+  }
+  const firstSleep = f.lifecycle.suspend()
+  const firstWake = f.lifecycle.resume('root')
+  const secondSleep = f.lifecycle.suspend()
+  const lastWake = f.lifecycle.resume('root')
+  assert.deepEqual(await f.provider.ensureClient('background event'), [
+    false,
+    undefined,
+  ])
+  assert.equal(f.restarts, 0)
+  stopping.resolve()
+  await Promise.all([firstSleep, firstWake, secondSleep, lastWake])
+  assert.equal(f.lifecycle.sleeping, false)
+  assert.equal(f.raw.isRunning(), true)
+  assert.equal(f.restarts, 1)
+  await f.lifecycle.close()
 })
 
 test('the actual language client startup preserves its rejection when channel closure clears the shared startup field', async () => {

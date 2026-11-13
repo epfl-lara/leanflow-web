@@ -34,8 +34,10 @@ import { initializeLeanEditor } from './leanEditorServices'
 import { DefinitionPreviewFiles } from './definitionPreviewFiles'
 import { WorkspaceEditor } from './workspaceEditor'
 import { installLeanClientLifecycle } from './leanClientLifecycle'
+import { watchEditorIdle } from './editorIdle'
 import { installCollaborativeEditorUndo } from './collaborativeEditorUndo'
 import { CollaboratorCursors } from './collaboratorCursors'
+import { LeanCommentImagePreviews } from './leanCommentImagePreviews'
 import type { ProjectPeer, ProjectSelection } from './projectPresence'
 import { LeanModelCache } from './leanModelCache'
 import type { RenameSource } from './workspaceBuffers'
@@ -205,8 +207,10 @@ interface Runtime {
   modelCache: LeanModelCache
   disabledRenameAction?: { dispose(): void }
   clientLifecycle?: ReturnType<typeof installLeanClientLifecycle>
+  idleCleanup?: () => void
   collaborativeUndo?: ReturnType<typeof installCollaborativeEditorUndo>
   collaboratorCursors?: CollaboratorCursors
+  commentImages?: LeanCommentImagePreviews
   definitionPreviewFiles?: DefinitionPreviewFiles
 }
 interface ConnectionClient {
@@ -334,6 +338,7 @@ export function LeanWorkspace({
   const [texIssue, setTexIssue] = useState('')
   const [connectionIssue, setConnectionIssue] = useState('')
   const [restarting, setRestarting] = useState(false)
+  const [sleeping, setSleeping] = useState(false)
   const [restartIssue, setRestartIssue] = useState('')
   const [requestIssue, setRequestIssue] = useState('')
   const [renameIssue, setRenameIssue] = useState('')
@@ -362,6 +367,7 @@ export function LeanWorkspace({
     setRequestIssue('')
     setRestartIssue('')
     setRestarting(false)
+    setSleeping(false)
     setRenameIssue('')
     setLoading(true)
     onStateRef.current('Connecting to Lean')
@@ -484,13 +490,61 @@ export function LeanWorkspace({
                 )
               },
             )
+            const active = own
+            active.idleCleanup = watchEditorIdle(
+              document,
+              infoEl.current,
+              () => {
+                if (cancelled || runtime.current !== active) return
+                setSleeping(true)
+                onStateRef.current('Lean editor sleeping')
+                void active.clientLifecycle?.suspend().catch(() => {
+                  if (!cancelled)
+                    setRestartIssue(
+                      'Lean could not pause. Use Restart Lean to reconnect.',
+                    )
+                })
+              },
+              () => {
+                if (cancelled || runtime.current !== active) return
+                setSleeping(false)
+                onStateRef.current('Reconnecting to Lean')
+                void active.clientLifecycle
+                  ?.resume(
+                    new FileUri('/workspace/__lemex_client__.lean'),
+                    !!fileRef.current?.path.endsWith('.lean'),
+                  )
+                  .then(() => {
+                    if (
+                      !cancelled &&
+                      runtime.current === active &&
+                      !active.clientLifecycle?.sleeping
+                    ) {
+                      setRestartIssue('')
+                      onStateRef.current(
+                        provider
+                          .getClients()
+                          .some((client) => client.isRunning())
+                          ? 'Lean connected'
+                          : 'Lean editor ready',
+                      )
+                    }
+                  })
+                  .catch(() => {
+                    if (!cancelled)
+                      setRestartIssue(
+                        'Lean could not reconnect. Use Restart Lean or reopen the project to retry.',
+                      )
+                  })
+              },
+            )
             own.connectionSubscriptions.push(
               provider.clientAdded((client: ConnectionClient) => {
                 if (cancelled) return
                 onStateRef.current('Connecting to Lean')
                 own?.connectionSubscriptions?.push(
                   client.restarted(() => {
-                    if (!cancelled)
+                    if (!cancelled && !active.clientLifecycle?.sleeping)
                       onStateRef.current(
                         client.isRunning()
                           ? 'Lean connected'
@@ -506,7 +560,8 @@ export function LeanWorkspace({
                 )
               }),
               provider.clientStopped(() => {
-                if (!cancelled) onStateRef.current('Lean server stopped')
+                if (!cancelled && !active.clientLifecycle?.sleeping)
+                  onStateRef.current('Lean server stopped')
               }),
             )
           }
@@ -556,6 +611,7 @@ export function LeanWorkspace({
     }).catch(() => undefined)
     return () => {
       cancelled = true
+      own?.idleCleanup?.()
       void serialize(async () => {
         own?.subscription?.dispose()
         own?.outlineCleanup?.()
@@ -566,6 +622,7 @@ export function LeanWorkspace({
         own?.disabledRenameAction?.dispose()
         own?.collaborativeUndo?.dispose()
         own?.collaboratorCursors?.dispose()
+        own?.commentImages?.dispose()
         const closingFile = own?.editor?.modelRef?.object
         if (closingFile) {
           // Virtual file changes can still be reloading this managed model.
@@ -723,6 +780,8 @@ export function LeanWorkspace({
       active.collaborativeUndo = undefined
       active.collaboratorCursors?.dispose()
       active.collaboratorCursors = undefined
+      active.commentImages?.dispose()
+      active.commentImages = undefined
       active.visibleReadyPath = undefined
       await active.lean.closeHiddenDocuments()
       if (cancelled || runtime.current !== active || active.lean.disposed)
@@ -884,6 +943,13 @@ export function LeanWorkspace({
           (selection) => onCollaborativeSelectionRef.current?.(selection),
         )
         active.collaboratorCursors.update(collaboratorsRef.current || [])
+        if (snapshot.path.endsWith('.lean'))
+          active.commentImages = new LeanCommentImagePreviews(
+            editor,
+            projectId,
+            snapshot.path,
+            (path) => onOpenFileRef.current(path),
+          )
         await active.lean.showVisibleDocument()
         if (cancelled) return
         // Document symbols and proof selections belong to Lean files. Reading
@@ -909,7 +975,12 @@ export function LeanWorkspace({
           )
         }
         const loadOutline = async (retries = 0) => {
-          if (outlineDisposed || model.isDisposed()) return
+          if (
+            outlineDisposed ||
+            model.isDisposed() ||
+            active.clientLifecycle?.sleeping
+          )
+            return
           const client = active.lean.clientProvider
             ?.getClients()
             .find((item) => item.isRunning())
@@ -1016,6 +1087,8 @@ export function LeanWorkspace({
           runtime.current.subscription?.dispose()
           runtime.current.collaboratorCursors?.dispose()
           runtime.current.collaboratorCursors = undefined
+          runtime.current.commentImages?.dispose()
+          runtime.current.commentImages = undefined
           runtime.current.outlineCleanup?.()
           runtime.current.outlineCleanup = undefined
           runtime.current.restoreOpenEditor?.()
@@ -1335,8 +1408,15 @@ export function LeanWorkspace({
     const provider = active?.lean.clientProvider
     if (!active?.clientLifecycle || !provider || restarting || failure) return
     setRestarting(true)
+    setSleeping(false)
     setRestartIssue('')
     try {
+      if (active.clientLifecycle.sleeping) {
+        await active.clientLifecycle.resume(
+          new FileUri('/workspace/__lemex_client__.lean'),
+        )
+        return
+      }
       let clients = provider.getClients()
       if (clients.length) {
         await Promise.all(clients.map((client) => client.restart()))
@@ -1374,6 +1454,12 @@ export function LeanWorkspace({
       style={{ '--goals-size': `${goalsSize}%` } as CSSProperties}
     >
       <div className="source-pane proof-source-pane">
+        {sleeping && (
+          <output className="lean-connection-notice">
+            Lean editor sleeping to free memory. Click or type to reconnect.
+            Your unsaved edits stay here; background jobs continue.
+          </output>
+        )}
         {markdownIssue && isMarkdownPath(file?.path) && (
           <output className="lean-connection-notice">{markdownIssue}</output>
         )}

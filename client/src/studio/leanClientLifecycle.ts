@@ -38,6 +38,15 @@ export function installLeanClientLifecycle(
       'This Lean editor version cannot safely cancel startup. Restore the pinned editor packages before retrying.',
     )
   let closing = false
+  let sleeping = false
+  let requestedSleep = false
+  let transition: Promise<void> = Promise.resolve()
+  let generation = 0
+  const enqueue = (action: () => Promise<void>) => {
+    const next = transition.then(action)
+    transition = next.catch(() => undefined)
+    return next
+  }
   const factories = new Set<Promise<BaseLanguageClient>>()
   const starts = new Set<ReturnType<LeanClientProvider['ensureClient']>>()
   const factory = host.setupClient
@@ -59,7 +68,7 @@ export function installLeanClientLifecycle(
       if (result.status === 'rejected') issue(result.reason)
   }
   provider.ensureClient = function (uri) {
-    if (closing) return Promise.resolve([false, undefined])
+    if (closing || sleeping) return Promise.resolve([false, undefined])
     const pending = ensure
       .call(this, uri)
       .catch(
@@ -88,8 +97,55 @@ export function installLeanClientLifecycle(
     return pending
   }
   return {
+    get sleeping() {
+      return sleeping
+    },
+    suspend() {
+      if (closing || requestedSleep) return transition
+      requestedSleep = true
+      sleeping = true
+      generation++
+      // Freeze new starts before draining an existing one. Keep the editor and
+      // its models mounted; only the independent Lean connection goes away.
+      return enqueue(async () => {
+        await Promise.allSettled([...starts, ...factories])
+        await stop()
+      })
+    },
+    resume(
+      uri: Parameters<LeanClientProvider['ensureClient']>[0],
+      startIfMissing = true,
+    ) {
+      if (closing) return Promise.resolve()
+      requestedSleep = false
+      const requestedGeneration = ++generation
+      return enqueue(async () => {
+        if (closing || requestedSleep || requestedGeneration !== generation)
+          return
+        // Prior shutdown has finished before background ensureClient calls
+        // may start a connection again. Latest activity wins rapid sleep/wake.
+        sleeping = false
+        const clients = provider.getClients()
+        if (!clients.length && !startIfMissing) return
+        if (clients.length)
+          await Promise.all(
+            clients
+              .filter((client) => !client.isRunning())
+              .map((client) => client.restart()),
+          )
+        else await provider.ensureClient(uri)
+        if (closing || requestedSleep) await stop()
+        else if (!provider.getClients().some((client) => client.isRunning()))
+          throw new Error(
+            'Lean could not reconnect. Use Restart Lean to retry.',
+          )
+      })
+    },
     async close() {
       closing = true
+      requestedSleep = true
+      sleeping = true
+      generation++
       const deadline = Date.now() + timeoutMs
       const wait = async (pending: Promise<unknown>) => {
         let timer: ReturnType<typeof setTimeout> | undefined
@@ -104,7 +160,7 @@ export function installLeanClientLifecycle(
           clearTimeout(timer)
         }
       }
-      await wait(Promise.allSettled([...starts, ...factories]))
+      await wait(Promise.allSettled([...starts, ...factories, transition]))
       // A failed transport can also strand shutdown. Keep one deadline for
       // startup and stop so a project switch cannot wait on that socket forever.
       await wait(stop())

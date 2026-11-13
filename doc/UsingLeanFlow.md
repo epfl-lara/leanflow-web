@@ -88,6 +88,15 @@ Choose an HTML file to view its static page, including inline styles and local p
 
 Project images also display inside Markdown documents and assistant replies, using links such as `![Diagram](figures/diagram.svg)`. Choose an image to open it in **Files**. Ask Lemex to save generated diagrams as SVG; uploaded raster images can be linked as well. New raster output in an assistant's private copy is not published as a project file. External images stay links until you choose to open them.
 
+Show a project image beneath a Lean comment by referencing its path relative to the Lean file:
+
+```lean
+/- ![Diagram](figures/diagram.svg) -/
+-- [Another diagram](figures/other.png)
+```
+
+Choose the arrow beside the caption to collapse or expand a picture. Choose the picture to open the full preview. Use **Reload** after regenerating a figure. Comment previews show up to 20 images in Lean files of at most 512 KiB. External URLs are not loaded.
+
 Drag the scrollbar inside **Files** to scroll long lists. The separate strip to its right resizes the sidebar. You can also focus a separator and use the arrow keys.
 
 ## Edit and compile LaTeX
@@ -103,6 +112,8 @@ The first version supports pdfLaTeX, automatic reruns through latexmk, and BibTe
 Put the root document at the common parent of its inputs and use paths such as `\input{chapters/introduction}`. Parent paths such as `../chapter.tex` and absolute paths are blocked by the isolated compiler. A root in a subfolder can include files below that subfolder.
 
 ## View evaluation results and stop a check
+
+After 30 minutes without typing, clicking, scrolling, or touch interaction, the Lean editor sleeps to free server memory. Click or type to reconnect. Your open text, cursor, and undo history stay in the browser. Background assistant runs and checks continue while the editor sleeps.
 
 Put the cursor on a completed `#eval` command to see its output in **Goals & diagnostics**. For example:
 

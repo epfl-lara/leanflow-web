@@ -9,17 +9,23 @@ export function MarkdownProjectImage({
   path,
   alt,
   onOpen,
+  revision,
 }: {
   projectId: string
   path: string
   alt?: string
   onOpen?: () => void
+  revision?: number
 }) {
   const linked = useContext(MarkdownImageLinkContext)
   const [failedSource, setFailedSource] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
   const source = sessionBoundUrl(
-    `/api/projects/${encodeURIComponent(projectId)}/file-preview?path=${encodeURIComponent(path)}`,
+    `/api/projects/${encodeURIComponent(projectId)}/file-preview?path=${encodeURIComponent(path)}${
+      revision === undefined && !attempt
+        ? ''
+        : `&previewRevision=${revision ?? 0}-${attempt}`
+    }`,
   )
   const failed = failedSource === source
   const image = failed ? (

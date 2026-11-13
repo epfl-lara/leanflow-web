@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { api } from './api'
+import { listenForUserActivity } from './userActivity'
 
 const RENEW_INTERVAL_MS = 60_000
 const LOGOUT_DRAIN_TIMEOUT_MS = 5000
@@ -70,20 +71,14 @@ export function useSessionActivity(
       }
     }
 
-    function activity(event: Event) {
-      if (paused || !event.isTrusted || document.visibilityState !== 'visible')
-        return
+    function activity() {
+      if (paused) return
       lastActivity = Date.now()
       pending = true
       schedule()
     }
 
-    const events = ['pointerdown', 'keydown', 'wheel', 'touchstart']
-    for (const name of events)
-      document.addEventListener(name, activity, {
-        capture: true,
-        passive: true,
-      })
+    const stopActivity = listenForUserActivity(document, activity)
     const currentControls: ActivityControls = {
       async pause() {
         paused = true
@@ -120,8 +115,7 @@ export function useSessionActivity(
       if (controls.current === currentControls) controls.current = null
       clearTimeout(timer)
       controller?.abort()
-      for (const name of events)
-        document.removeEventListener(name, activity, true)
+      stopActivity()
     }
   }, [userId, expired])
 
