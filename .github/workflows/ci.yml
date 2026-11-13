@@ -55,9 +55,7 @@ jobs:
           .runtime/python-tools/bin/black --check scripts/package-lemex.py scripts/test_lean_probe_worker.py deploy/lean-probe-worker
           python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Test
-        run: |
-          npm test
-          node --test scripts/ten-proofs-fixture.test.mjs
+        run: node scripts/ci/check-tests.mjs
       - name: Typecheck
         run: npm run check
       - name: Lint
