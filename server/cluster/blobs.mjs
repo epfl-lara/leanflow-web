@@ -9,9 +9,17 @@ import { ObjectBudget, pythonBudget } from './budget.mjs'
 
 const execute = promisify(execFile)
 const MAX_CHUNK = 256 * 1024
-const MAX_MANIFEST = 32 * 1024 * 1024
-const MAX_ENTRIES = 150000
+export const MAX_MANIFEST = 64 * 1024 * 1024
+export const MAX_ENTRIES = 250000
+const STANDARD_MAX_MANIFEST = 32 * 1024 * 1024
+const STANDARD_MAX_ENTRIES = 150000
 const MAX_FILE = 2 * 1024 ** 3
+
+function manifestLimits(kind) {
+  return kind === 'dependencies'
+    ? { bytes: MAX_MANIFEST, entries: MAX_ENTRIES }
+    : { bytes: STANDARD_MAX_MANIFEST, entries: STANDARD_MAX_ENTRIES }
+}
 const secretParts = new Set([
   '.git',
   '.lemex',
@@ -77,7 +85,7 @@ export function validateManifest(value) {
     value.version !== 1 ||
     !['source', 'dependencies', 'toolchain', 'result'].includes(value.kind) ||
     !Array.isArray(value.entries) ||
-    value.entries.length > MAX_ENTRIES
+    value.entries.length > manifestLimits(value.kind).entries
   )
     throw clusterError('Invalid snapshot manifest.')
   const names = new Map()
@@ -582,10 +590,12 @@ export class BlobStore {
     }
   }
 
-  async manifest(hash) {
+  async manifest(hash, expectedKind) {
     digest(hash)
     const cached = this.manifestCache.get(hash)
     if (cached) {
+      if (expectedKind && cached.value.kind !== expectedKind)
+        throw clusterError('Invalid snapshot manifest kind.')
       this.manifestCache.delete(hash)
       this.manifestCache.set(hash, cached)
       return cached.value
@@ -593,8 +603,16 @@ export class BlobStore {
     let value
     let bytes
     try {
-      bytes = await this.read(hash)
+      bytes = await this.read(
+        hash,
+        expectedKind ? manifestLimits(expectedKind).bytes : MAX_MANIFEST,
+      )
       value = JSON.parse(bytes.toString('utf8'))
+      if (
+        bytes.length > manifestLimits(value.kind).bytes ||
+        (expectedKind && value.kind !== expectedKind)
+      )
+        throw clusterError('Invalid snapshot manifest.')
     } catch (error) {
       if (error.code === 'digest_mismatch') throw error
       throw clusterError('Invalid snapshot manifest.')
@@ -621,7 +639,7 @@ export class BlobStore {
     const data = Buffer.from(
       JSON.stringify({ version: 1, kind, entries: value.entries }),
     )
-    if (data.length > MAX_MANIFEST)
+    if (data.length > manifestLimits(kind).bytes)
       throw clusterError('Snapshot manifest exceeds its limit.')
     return {
       ...(await this.put(data)),
@@ -740,10 +758,10 @@ export class BlobStore {
 
 const captureScript = String.raw`
 import hashlib,json,os,signal,stat,sys,tempfile
-root,objects,kind,ignore_lake,reserve,budget_filename,max_bytes,max_files=sys.argv[1:]
+root,objects,kind,ignore_lake,reserve,budget_filename,max_bytes,max_files,max_entries=sys.argv[1:]
 ignore_lake=ignore_lake=='1'
 reserve=int(reserve)
-max_bytes=int(max_bytes);max_files=int(max_files)
+max_bytes=int(max_bytes);max_files=int(max_files);max_entries=int(max_entries)
 ${pythonBudget}
 def interrupted(signum,frame):raise InterruptedError('Snapshot stopped')
 signal.signal(signal.SIGTERM,interrupted)
@@ -760,7 +778,7 @@ def walk(fd,prefix=''):
  for name in names:
   if private(name) or (ignore_lake and not prefix and name=='.lake'):continue
   relative=prefix+'/'+name if prefix else name
-  if len(entries)>=150000:raise ValueError('Too many snapshot entries')
+  if len(entries)>=max_entries:raise ValueError('Too many snapshot entries')
   before=os.stat(name,dir_fd=fd,follow_symlinks=False)
   if stat.S_ISLNK(before.st_mode):
    entries.append(dict(path=relative,type='symlink',target=os.readlink(name,dir_fd=fd)))
@@ -840,8 +858,9 @@ export async function captureTree(
       store.budget.filename,
       String(store.maxBytes),
       String(store.maxFiles),
+      String(manifestLimits(kind).entries),
     ],
-    { signal, maxBuffer: MAX_MANIFEST, timeout: 30 * 60 * 1000 },
+    { signal, maxBuffer: manifestLimits(kind).bytes, timeout: 30 * 60 * 1000 },
   )
   const manifest = validateManifest(JSON.parse(stdout))
   await syncDirectory(store.objects)

@@ -1,9 +1,10 @@
 import { constants } from 'node:buffer'
 import { EventEmitter } from 'node:events'
 
-// Version of the frame format below, for peers to compare in their
-// application handshake. Frames themselves carry no version field.
-export const PROTOCOL_VERSION = 1
+// Application contract, compared during the handshake. Version 2 permits
+// larger dependency manifests; version 1 peers must not receive those assets.
+// Frames themselves carry no version field.
+export const PROTOCOL_VERSION = 2
 
 // Each frame is a 4-byte unsigned big-endian length followed by that many
 // bytes of UTF-8 JSON. A malformed frame closes the connection, because the

@@ -5,10 +5,11 @@ import {
   resolveExecutionProfile,
   workerBundleDigest,
 } from '../cluster/config.mjs'
+import { PROTOCOL_VERSION } from '../cluster/protocol.mjs'
 
 const config = { version: 1, lineage: 'profile-test', mode: 'serve', nodes: [] }
 const old = {
-  version: 1,
+  version: PROTOCOL_VERSION,
   bundleDigest: 'a'.repeat(64),
   imageDigest: 'sha256:' + 'b'.repeat(64),
 }
@@ -24,7 +25,7 @@ test('without an explicit execution profile the coordinator still requires match
   assert.deepEqual(
     await resolveExecutionProfile(controllerConfig(config), current),
     {
-      version: 1,
+      version: PROTOCOL_VERSION,
       bundleDigest: await workerBundleDigest(),
       imageDigest: current,
     },
@@ -39,11 +40,12 @@ test('an execution profile cannot accept another protocol, partial pins or malfo
     null,
     [],
     {},
-    { ...old, version: 2 },
+    { ...old, version: 1 },
+    { ...old, version: PROTOCOL_VERSION + 1 },
     { ...old, bundleDigest: 'latest' },
     { ...old, imageDigest: 'worker:latest' },
-    { version: 1, bundleDigest: old.bundleDigest },
-    { version: 1, imageDigest: old.imageDigest },
+    { version: PROTOCOL_VERSION, bundleDigest: old.bundleDigest },
+    { version: PROTOCOL_VERSION, imageDigest: old.imageDigest },
   ])
     assert.throws(() =>
       controllerConfig({ ...config, executionProfile: value }),

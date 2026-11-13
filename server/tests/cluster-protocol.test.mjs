@@ -115,7 +115,7 @@ function trackUnhandled(t) {
 
 test('peers exchange requests and replies in both directions', async (t) => {
   const { left, right } = pair(t)
-  assert.equal(PROTOCOL_VERSION, 1)
+  assert.equal(PROTOCOL_VERSION, 2)
   left.handle('math.add', ({ a, b }) => a + b)
   left.handle('noop', () => {})
   right.handle('worker/status', async () => ({

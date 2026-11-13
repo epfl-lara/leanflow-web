@@ -847,7 +847,7 @@ export class ClusterController {
   async #localManifest(hash, kind) {
     let manifest
     try {
-      manifest = await this.#blobs.manifest(hash)
+      manifest = await this.#blobs.manifest(hash, kind)
     } catch {
       throw snapshotInvalid()
     }

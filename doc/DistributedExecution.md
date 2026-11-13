@@ -94,7 +94,7 @@ worker release. Set `executionProfile` in the protected controller configuration
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "bundleDigest": "WORKER_BUNDLE_SHA256",
   "imageDigest": "sha256:WORKER_IMAGE_SHA256"
 }
@@ -108,6 +108,9 @@ profile retains the old release's behavior and limits; it does not apply those
 fixes remotely. The maintenance CLI's `--image` must match this profile. Local
 work continues to use the coordinator's own configured image. Without this field,
 the original matching-image-and-bundle requirement remains in force.
+Protocol 2 requires the larger dependency bounds on both peers. Protocol 1 pins
+are rejected; upgrade with distributed admission off rather than retaining an
+older worker profile during this transition.
 
 Install Node at `/opt/leanflow/node/bin/node`, or adjust both the supplied
 [service](../deploy/leanflow-node.service) and
@@ -173,6 +176,7 @@ node server/cluster/control.mjs --help
 node server/cluster/control.mjs status --config /private/controller.json --data /coordinator/data --image sha256:IMAGE_ID
 node server/cluster/control.mjs image --config /private/controller.json --data /coordinator/data --image sha256:IMAGE_ID --node worker-a --archive /private/worker-image.tar.gz
 node server/cluster/control.mjs prepare --config /private/controller.json --data /coordinator/data --image sha256:IMAGE_ID --node worker-a --toolchain leanprover/lean4:v4.35.0 --toolchain-dir /coordinator/data/runtime/elan/toolchains/leanprover--lean4---v4.35.0
+node server/cluster/control.mjs prepare --config /private/controller.json --data /coordinator/data --image sha256:IMAGE_ID --node worker-a --toolchain leanprover/lean4:v4.35.0 --toolchain-manifest TOOLCHAIN_SHA256 --dependency-dir /coordinator/data/runtime/shared-dependencies/CACHE_KEY
 node server/cluster/control.mjs fixture --config /private/controller.json --data /coordinator/data --image sha256:IMAGE_ID --node worker-a --toolchain leanprover/lean4:v4.35.0 --toolchain-dir /coordinator/data/runtime/elan/toolchains/leanprover--lean4---v4.35.0 --operation check.kernel
 ```
 
@@ -181,6 +185,15 @@ compressed. `prepare` runs conformance. `fixture` then checks a synthetic projec
 including a selected file that imports its freshly compiled project module, and
 requires an invalid proof to fail. No model provider is used. Drain active work
 before restarting the website to switch cluster modes.
+
+Pre-stage large environments with `prepare --dependency-dir` while admission is
+off. It accepts only a current protected cache under the coordinator's managed
+dependency directory with the requested toolchain. Alternatively use
+`prepare --dependencies MANIFEST_SHA256` for an already captured dependency
+manifest. Both paths transfer and install all assets before checks need them.
+Check object-count and byte usage on both hosts: their budgets cover all
+toolchains, source snapshots and cached environments together. Leave room for
+several versions, rather than matching the object budget to one manifest's cap.
 
 Start with `shadow`, which starts the local authoritative check immediately and
 runs a bounded remote comparison in the background. The local result never
@@ -210,9 +223,14 @@ are hashed; resumed uploads verify their complete digest. Source contains no
 credentials or Git metadata. Projects requiring omitted private files or legacy
 mutable dependencies keep the existing local check path. Each attempt gets a
 private writable Lake cache and a fresh home; public dependencies stay read-only.
-Each transferred snapshot is limited to 150,000 entries and 32 MiB of manifest
-metadata. Large dependency caches can exceed those limits and keep checks local;
+Dependency snapshots are limited to 250,000 entries and 64 MiB of manifest
+metadata. Source, toolchain and result snapshots retain 150,000 entries and
+32 MiB. Large dependency caches can exceed those limits and keep checks local;
 measure the actual cache before counting its projects as remote capacity.
+The coordinator and workers must both run protocol 2 with these limits. A
+protocol 1 execution profile is rejected before connecting.
+Capture failures fall back before assignment. Transfer or installation failures
+after assignment are reported as check failures; they do not trigger a local retry.
 Public Git dependencies carry only generated shallow metadata for their locked
 revision and reachable source objects. Original Git configuration, hooks,
 credentials and unrelated history are never copied.

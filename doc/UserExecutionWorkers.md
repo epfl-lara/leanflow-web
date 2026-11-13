@@ -33,7 +33,7 @@ fields for this installation:
   "maxConcurrent": 4,
   "scratchBytes": 68719476736,
   "maxStoreBytes": 68719476736,
-  "maxStoreFiles": 250000,
+  "maxStoreFiles": 500000,
   "reserveBytes": 68719476736
 }
 ```

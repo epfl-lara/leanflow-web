@@ -3,11 +3,54 @@ import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { dependencyPackageDirectory } from '../project-libraries.mjs'
-import { captureTree } from './blobs.mjs'
+import { captureTree, MAX_ENTRIES, MAX_MANIFEST } from './blobs.mjs'
 import { clusterError } from './state.mjs'
 import { pythonBudget } from './budget.mjs'
+import { sharedDependencyCacheSchema } from '../shared-dependencies.mjs'
 
 const execute = promisify(execFile)
+
+export async function capturePreparedDependencies(
+  store,
+  root,
+  { dataDir, version, signal } = {},
+) {
+  const parent = path.join(dataDir, 'runtime/shared-dependencies')
+  if (
+    !path.isAbsolute(root) ||
+    path.dirname(root) !== parent ||
+    !/^[a-f0-9]{64}$/.test(path.basename(root)) ||
+    (await fs.realpath(root)) !== root
+  )
+    throw clusterError(
+      'Select a prepared, server-managed dependency directory.',
+    )
+  const marker = path.join(root, '.ready.json')
+  const pin = path.join(root, 'lean-toolchain')
+  for (const [filename, maxBytes] of [
+    [marker, 65536],
+    [pin, 1024],
+  ]) {
+    const stat = await fs.lstat(filename)
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      stat.size > maxBytes ||
+      stat.mode & 0o022
+    )
+      throw clusterError('The prepared dependency metadata is not protected.')
+  }
+  const ready = JSON.parse(await fs.readFile(marker, 'utf8'))
+  if (
+    ready.schema !== sharedDependencyCacheSchema ||
+    ready.key !== path.basename(root) ||
+    (await fs.readFile(pin, 'utf8')).trim() !== version
+  )
+    throw clusterError(
+      'Prepare the current dependency cache for this pinned toolchain first.',
+    )
+  return captureDependencies(store, root, { signal })
+}
 
 // Export only the locked commit and its reachable tree, with a fresh index and
 // fixed configuration. Original Git configs, hooks, alternates, reflogs and
@@ -25,7 +68,7 @@ env={k:v for k,v in os.environ.items() if not k.startswith('GIT_')}
 env.update(GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL='/dev/null',GIT_OPTIONAL_LOCKS='0',GIT_TERMINAL_PROMPT='0')
 entries=[];directories=set()
 def put(name,data):
- if len(entries)>=150000 or len(data)>64*1024**2:raise ValueError('Dependency metadata exceeds its bound')
+ if len(entries)>=${MAX_ENTRIES} or len(data)>64*1024**2:raise ValueError('Dependency metadata exceeds its bound')
  space=os.statvfs(objects)
  if space.f_bavail*space.f_frsize-len(data)<reserve:raise OSError('Worker storage reserve reached')
  h=hashlib.sha256(data).hexdigest();target=os.path.join(objects,h)
@@ -52,7 +95,7 @@ for record in records:
  if git(['rev-parse','--verify','HEAD']).decode().strip()!=head:raise ValueError('Dependency HEAD differs from its lockfile')
  tree=git(['rev-parse',head+'^{tree}']).decode().strip()
  object_ids=[head]+git(['rev-list','--objects','--no-object-names',tree]).decode().splitlines()
- if len(object_ids)>150000:raise ValueError('Too many dependency objects')
+ if len(object_ids)>${MAX_ENTRIES}:raise ValueError('Too many dependency objects')
  process=subprocess.Popen(command+['cat-file','--batch'],env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
  try:
   for oid in dict.fromkeys(object_ids):
@@ -146,7 +189,7 @@ export async function captureDependencies(store, environment, { signal } = {}) {
         String(store.maxBytes),
         String(store.maxFiles),
       ],
-      { signal, timeout: 30 * 60 * 1000, maxBuffer: 32 * 1024 ** 2 },
+      { signal, timeout: 30 * 60 * 1000, maxBuffer: MAX_MANIFEST },
     )
     generated = JSON.parse(stdout).map((entry) => ({
       ...entry,
@@ -159,7 +202,7 @@ export async function captureDependencies(store, environment, { signal } = {}) {
     if (!stat.isDirectory() || stat.isSymbolicLink())
       throw clusterError('The shared artifact cache must be a real directory.')
     const cache = await captureTree(store, cacheRoot, {
-      kind: 'source',
+      kind: 'dependencies',
       signal,
     })
     generated.push(

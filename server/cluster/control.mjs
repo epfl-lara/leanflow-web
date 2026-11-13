@@ -8,9 +8,10 @@ import { BlobStore, captureTree } from './blobs.mjs'
 import { ClusterController } from './controller.mjs'
 import { readControllerConfig, resolveExecutionProfile } from './config.mjs'
 import { clusterError, digest } from './state.mjs'
+import { capturePreparedDependencies } from './dependencies.mjs'
 
 const usage =
-  'Usage: node server/cluster/control.mjs status|image|prepare|fixture|gc --config /private/controller.json --data /coordinator/data --image sha256:... [--node id] [--archive /image.tar.gz] [--toolchain leanprover/lean4:v...] [--toolchain-dir /pinned/toolchain | --toolchain-manifest sha256] [--operation check.build|check.kernel]'
+  'Usage: node server/cluster/control.mjs status|image|prepare|fixture|gc --config /private/controller.json --data /coordinator/data --image sha256:... [--node id] [--archive /image.tar.gz] [--toolchain leanprover/lean4:v...] [--toolchain-dir /pinned/toolchain | --toolchain-manifest sha256] [--dependency-dir /coordinator/data/runtime/shared-dependencies/DIGEST | --dependencies sha256] [--operation check.build|check.kernel]'
 
 async function fixtureSource(blobs, version) {
   const files = {
@@ -61,6 +62,8 @@ export async function controlMain(argv = process.argv.slice(2)) {
     '--toolchain-dir',
     '--toolchain-manifest',
     '--operation',
+    '--dependency-dir',
+    '--dependencies',
   ])
   const flags = new Map()
   for (let index = 0; index < args.length; index += 2) {
@@ -72,6 +75,12 @@ export async function controlMain(argv = process.argv.slice(2)) {
     if (!flags.has(name)) throw clusterError(usage)
   if (!['status', 'gc'].includes(command) && !flags.has('--node'))
     throw clusterError('Select an enrolled worker with --node.')
+  if (
+    (flags.has('--dependency-dir') || flags.has('--dependencies')) &&
+    (command !== 'prepare' ||
+      (flags.has('--dependency-dir') && flags.has('--dependencies')))
+  )
+    throw clusterError('Use one dependency directory or manifest with prepare.')
   const config = await readControllerConfig(flags.get('--config'))
   if (config.mode !== 'off')
     throw clusterError(
@@ -194,16 +203,26 @@ export async function controlMain(argv = process.argv.slice(2)) {
     }
     const input = { toolchain: { version, manifest: toolchainManifest } }
     if (command === 'prepare') {
+      if (flags.has('--dependencies'))
+        input.dependencies = digest(flags.get('--dependencies'))
+      else if (flags.has('--dependency-dir'))
+        input.dependencies = (
+          await capturePreparedDependencies(
+            blobs,
+            flags.get('--dependency-dir'),
+            {
+              dataDir,
+              version,
+              signal: abort.signal,
+            },
+          )
+        ).hash
       const report = await controller.prepareNode(nodeId, input, {
         certify: true,
         signal: abort.signal,
       })
       process.stdout.write(
-        JSON.stringify(
-          { ...report, bundleDigest, toolchain: input.toolchain },
-          null,
-          2,
-        ) + '\n',
+        JSON.stringify({ ...report, bundleDigest, ...input }, null, 2) + '\n',
       )
       if (!report.ready || !report.capabilities.length) process.exitCode = 2
       return

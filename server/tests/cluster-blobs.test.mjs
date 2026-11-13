@@ -3,7 +3,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { BlobStore, captureTree, validateManifest } from '../cluster/blobs.mjs'
+import {
+  BlobStore,
+  captureTree,
+  validateManifest,
+  MAX_ENTRIES,
+  MAX_MANIFEST,
+} from '../cluster/blobs.mjs'
 import { sha256 } from '../cluster/state.mjs'
 
 async function fixture(t, options = {}) {
@@ -240,6 +246,73 @@ test('manifests reject traversal, secret paths, escaped links and file/link ance
     ),
   )
   assert.equal(validateManifest(manifest([file])).totalBytes, 6)
+})
+
+test('a Mathlib-sized manifest crosses the former entry and byte bounds without removing the new bounds', async (t) => {
+  const { store } = await fixture(t)
+  const empty = await store.put('')
+  const count = 150001
+  const entries = Array.from({ length: count }, (_, index) => ({
+    path:
+      '.lake/packages/mathlib/Mathlib/Analysis/Continuous/Sections/' +
+      'SnapshotBoundaryFixture/Derived/ContinuousFunctions/' +
+      String(index).padStart(6, '0') +
+      '.lean',
+    type: 'file',
+    hash: empty.hash,
+    size: 0,
+    mode: 0o600,
+    mtimeNs: '1730000000000000000',
+  }))
+  const snapshot = await store.seal(entries, 'dependencies')
+  assert(snapshot.size > 32 * 1024 ** 2)
+  assert(snapshot.size <= MAX_MANIFEST)
+  const manifest = await store.manifest(snapshot.hash)
+  assert.equal(manifest.entries.length, count)
+  assert.equal(manifest.totalBytes, 0)
+  assert.equal(await store.manifest(snapshot.hash), manifest)
+  await assert.rejects(store.manifest(snapshot.hash, 'source'))
+  for (const kind of ['source', 'toolchain', 'result'])
+    assert.throws(
+      () => validateManifest({ version: 1, kind, entries }),
+      /Invalid snapshot manifest/,
+    )
+  assert.throws(
+    () =>
+      validateManifest({
+        version: 1,
+        kind: 'dependencies',
+        entries: Array.from({ length: MAX_ENTRIES + 1 }, (_, index) => ({
+          path: 'entry-' + index,
+          type: 'directory',
+        })),
+      }),
+    /Invalid snapshot manifest/,
+  )
+  const emptyManifest = JSON.stringify({
+    version: 1,
+    kind: 'dependencies',
+    entries: [],
+  })
+  const oversized = await store.put(
+    emptyManifest + ' '.repeat(MAX_MANIFEST + 1 - emptyManifest.length),
+  )
+  await assert.rejects(
+    store.manifest(oversized.hash),
+    /Invalid snapshot manifest/,
+  )
+  const sourceManifest = JSON.stringify({
+    version: 1,
+    kind: 'source',
+    entries: [],
+  })
+  const oversizedSource = await store.put(
+    sourceManifest + ' '.repeat(32 * 1024 ** 2 + 1 - sourceManifest.length),
+  )
+  await assert.rejects(
+    store.manifest(oversizedSource.hash),
+    /Invalid snapshot manifest/,
+  )
 })
 
 test('capture excludes private state and generated Lake files when requested', async (t) => {

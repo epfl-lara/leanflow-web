@@ -7,7 +7,11 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { inflateSync } from 'node:zlib'
 import { BlobStore, validateManifest } from '../cluster/blobs.mjs'
-import { captureDependencies } from '../cluster/dependencies.mjs'
+import {
+  captureDependencies,
+  capturePreparedDependencies,
+} from '../cluster/dependencies.mjs'
+import { sharedDependencyCacheSchema } from '../shared-dependencies.mjs'
 
 const execute = promisify(execFile)
 async function fixture(t) {
@@ -139,6 +143,54 @@ test('dependency export rejects mismatched locks, credentialed URLs and Git dire
     'gitdir: ' + path.join(f.root, 'elsewhere'),
   )
   await assert.rejects(captureDependencies(f.store, f.environment))
+})
+
+test('maintenance capture accepts only a current protected cache with the requested toolchain', async (t) => {
+  const f = await fixture(t)
+  const key = 'a'.repeat(64)
+  const root = path.join(f.root, 'runtime/shared-dependencies', key)
+  await fs.mkdir(path.dirname(root), { recursive: true })
+  await fs.rename(f.environment, root)
+  const marker = path.join(root, '.ready.json')
+  const version = 'leanprover/lean4:v4.35.0'
+  await fs.writeFile(path.join(root, 'lean-toolchain'), version + '\n', {
+    mode: 0o600,
+  })
+  const prepare = () =>
+    capturePreparedDependencies(f.store, root, { dataDir: f.root, version })
+  const writeMarker = (schema, markerKey = key) =>
+    fs.writeFile(marker, JSON.stringify({ key: markerKey, schema }), {
+      mode: 0o600,
+    })
+  await writeMarker(sharedDependencyCacheSchema - 1)
+  await assert.rejects(prepare(), /current dependency cache/)
+  await writeMarker(sharedDependencyCacheSchema, 'b'.repeat(64))
+  await assert.rejects(prepare(), /current dependency cache/)
+  await writeMarker(sharedDependencyCacheSchema)
+  await assert.rejects(
+    capturePreparedDependencies(f.store, root, {
+      dataDir: f.root,
+      version: 'leanprover/lean4:v4.34.1',
+    }),
+    /pinned toolchain/,
+  )
+  await assert.rejects(
+    capturePreparedDependencies(f.store, root, {
+      dataDir: path.join(f.root, 'other'),
+      version,
+    }),
+    /server-managed/,
+  )
+  const alias = path.join(path.dirname(root), 'c'.repeat(64))
+  await fs.symlink(root, alias)
+  await assert.rejects(
+    capturePreparedDependencies(f.store, alias, { dataDir: f.root, version }),
+    /server-managed/,
+  )
+  const captured = await prepare()
+  const manifest = await f.store.manifest(captured.hash)
+  assert.equal(manifest.kind, 'dependencies')
+  assert(manifest.entries.some((entry) => entry.path.endsWith('/Example.lean')))
 })
 
 test('only the generated dependency metadata shape can contain Git paths', () => {

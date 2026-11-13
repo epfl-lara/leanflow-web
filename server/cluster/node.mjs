@@ -493,7 +493,7 @@ export class WorkerNode {
               'asset_conflict',
               409,
             )
-          const metadata = await this.blobs.manifest(manifest)
+          const metadata = await this.blobs.manifest(manifest, 'toolchain')
           if (metadata.kind !== 'toolchain')
             throw clusterError('Invalid toolchain manifest kind.')
           await fs.mkdir(path.dirname(destination), {
@@ -525,7 +525,10 @@ export class WorkerNode {
             (await fs.realpath(root).catch(() => null)) === root
           )
             return
-          const metadata = await this.blobs.manifest(value.dependencies)
+          const metadata = await this.blobs.manifest(
+            value.dependencies,
+            'dependencies',
+          )
           if (metadata.kind !== 'dependencies')
             throw clusterError('Invalid dependency manifest kind.')
           await fs.mkdir(path.dirname(root), {
@@ -715,7 +718,7 @@ export class WorkerNode {
     try {
       this.state.transition(value.id, 'starting')
       await fs.mkdir(path.dirname(workspace), { recursive: true, mode: 0o700 })
-      const source = await this.blobs.manifest(value.sourceManifest)
+      const source = await this.blobs.manifest(value.sourceManifest, 'source')
       if (source.kind !== 'source')
         throw clusterError('Invalid source manifest kind.')
       if (source.totalBytes + 16 * 1024 ** 2 > value.resources.scratchBytes)

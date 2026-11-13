@@ -348,6 +348,9 @@ test('workers require enrollment and real certification before starting any oper
     f.rpc.request('hello', { ...f.hello, bundleDigest: sha256('old') }),
     { code: 'release_mismatch' },
   )
+  await assert.rejects(f.rpc.request('hello', { ...f.hello, version: 1 }), {
+    code: 'release_mismatch',
+  })
 })
 
 test('a source-pinned duplicate start executes once and retains the exact result object', async (t) => {

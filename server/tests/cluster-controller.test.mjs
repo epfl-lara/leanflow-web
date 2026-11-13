@@ -423,7 +423,7 @@ test('a check runs remotely and each output event reaches the caller once, in or
     const first = transport.requests.find((entry) => entry.channel === channel)
     assert.equal(first.method, 'hello')
     assert.deepEqual(first.params, {
-      version: 1,
+      version: 2,
       lineage: LINEAGE,
       epoch: 1,
       bundleDigest: BUNDLE,
