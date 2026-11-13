@@ -32,11 +32,19 @@ for (const [name, command, args] of suites) {
     child.once('close', (status) => resolve(status ?? 1))
   })
   if (code !== 0) {
-    const message = (tail || 'The test process exited without diagnostics.')
-      .replaceAll('%', '%25')
-      .replaceAll('\r', '%0D')
-      .replaceAll('\n', '%0A')
-    console.error(`::error title=${name} failed::${message}`)
+    // GitHub truncates large annotations. Stay below its message limit and
+    // per-step annotation count so the final assertion remains accessible.
+    const diagnostics = (
+      tail || 'The test process exited without diagnostics.'
+    ).slice(-24000)
+    for (let offset = 0; offset < diagnostics.length; offset += 3000) {
+      const message = diagnostics
+        .slice(offset, offset + 3000)
+        .replaceAll('%', '%25')
+        .replaceAll('\r', '%0D')
+        .replaceAll('\n', '%0A')
+      console.error(`::error title=${name} failed::${message}`)
+    }
     process.exitCode = code
     break
   }

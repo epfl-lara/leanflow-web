@@ -63,6 +63,16 @@ test('CI streams complete logs while bounding the failure annotation to the diag
   assert(result.stdout.length > 65536)
   assert(result.stderr.length < 34000)
   assert.match(result.stderr, /FAILURE_TAIL%0A/)
+  const annotations = result.stderr.trimEnd().split('\n')
+  assert(annotations.length <= 8)
+  for (const annotation of annotations) {
+    const message = annotation
+      .split('::')[2]
+      .replaceAll('%0A', '\n')
+      .replaceAll('%0D', '\r')
+      .replaceAll('%25', '%')
+    assert(message.length <= 3000)
+  }
 })
 
 test('CI runs the portable fixture tests after application tests succeed', async (t) => {
