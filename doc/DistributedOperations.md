@@ -34,6 +34,10 @@ a one-per-host limit. These are job counts, not simultaneous-user claims.
 Editors, model calls, agent runs and setup have separate coordinator and
 provider limits.
 
+The [ten-user compilation test](releases/2026-11-13-ten-user-compilation.md)
+records 70 successful checks, real browser editing and saving, observed queue
+behavior, and commands for repeating the test with disposable accounts.
+
 Increase a pool only after measuring representative cold and warm projects,
 heavy native checks, cancellation, queue fairness and filesystem headroom.
 Keep daemon and host headroom in addition to container limits. Docker access,
