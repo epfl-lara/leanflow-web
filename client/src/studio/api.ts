@@ -288,6 +288,7 @@ export interface GitPushResult {
 
 export interface FileEntry {
   path: string
+  revision?: string
   size?: number
   readOnly?: boolean
 }

@@ -4240,6 +4240,7 @@ export class WorkspaceStore {
     root,
     {
       dependencies = false,
+      revisions = false,
       dependencyRoot = root,
       includeLinks = false,
       foldersOnly = false,
@@ -4248,6 +4249,7 @@ export class WorkspaceStore {
     } = {},
   ) {
     const result = []
+    let revisionsReliable = true
     const visit = async (directory, prefix = '', depth = 0) => {
       signal?.throwIfAborted()
       if (depth > 64) fail('Project directory nesting exceeds 64 levels', 413)
@@ -4285,6 +4287,7 @@ export class WorkspaceStore {
           const full = path.join(directory, entry.name)
           const anchored = `${anchor}/${entry.name}`
           if (entry.isSymbolicLink()) {
+            revisionsReliable = false
             if (includeLinks)
               result.push({
                 path: relative,
@@ -4305,13 +4308,21 @@ export class WorkspaceStore {
           } else if (!foldersOnly && entry.isFile()) {
             // lstat on the pinned parent cannot expose metadata through a
             // symlink swapped in after readdir returned its directory entries.
-            const stat = await fs.lstat(anchored)
+            const stat = await fs.lstat(anchored, { bigint: revisions })
             if (!stat.isFile())
               fail(
                 'File changed during access. Refresh the file tree and try again.',
                 409,
               )
-            result.push({ path: relative, size: stat.size })
+            result.push({
+              path: relative,
+              size: Number(stat.size),
+              ...(revisions
+                ? {
+                    revision: `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`,
+                  }
+                : {}),
+            })
           }
         }
       } catch (error) {
@@ -4352,6 +4363,10 @@ export class WorkspaceStore {
         }
       }
     }
+    // A bounded or symlink-omitting listing cannot certify all Lean inputs.
+    // Omit revisions so editors keep their conservative invalidation policy.
+    if (revisions && (!revisionsReliable || result.length >= limit))
+      return result.map(({ revision: _revision, ...file }) => file)
     return result
   }
 
@@ -4361,6 +4376,7 @@ export class WorkspaceStore {
       (await this.runtime.dependencyRoot?.(project.root)) || project.root
     const files = await this.#walk(project.root, {
       dependencies: true,
+      revisions: true,
       dependencyRoot,
     })
     return project.accessRole === 'viewer'

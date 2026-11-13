@@ -79,17 +79,23 @@ export async function reconcileMissingBuffers(
 ) {
   if (!store.isCurrent(scope)) return
   const listed = new Set(listedPaths)
-  const candidates = [...store.getSnapshot().buffers.values()].filter(
-    (file) =>
-      !file.unavailable &&
-      !file.path.startsWith('.lake/') &&
-      file.preview !== 'pdf' &&
-      !listed.has(file.path),
-  )
-  for (const previous of candidates) {
+  const snapshot = store.getSnapshot()
+  let expectedOpenPaths = snapshot.openPaths
+  const candidates = [
+    ...new Set([...snapshot.openPaths, ...snapshot.buffers.keys()]),
+  ]
+    .map((path) => ({ path, previous: snapshot.buffers.get(path) }))
+    .filter(
+      ({ path, previous }) =>
+        !previous?.unavailable &&
+        !path.startsWith('.lake/') &&
+        previous?.preview !== 'pdf' &&
+        !listed.has(path),
+    )
+  for (const { path, previous } of candidates) {
     if (!store.isCurrent(scope)) return
     try {
-      await readFile(previous.path)
+      await readFile(path)
     } catch (error) {
       if (
         !(error instanceof ApiError) ||
@@ -97,13 +103,18 @@ export async function reconcileMissingBuffers(
         !store.isCurrent(scope)
       )
         continue
-      const current = store.getSnapshot().buffers.get(previous.path)
+      const latest = store.getSnapshot()
+      const current = latest.buffers.get(path)
       if (
-        current &&
-        current.generation === previous.generation &&
-        current.hash === previous.hash
-      )
-        store.detach(previous.path)
+        previous
+          ? current &&
+            current.generation === previous.generation &&
+            current.hash === previous.hash
+          : !current && latest.openPaths === expectedOpenPaths
+      ) {
+        store.detach(path)
+        expectedOpenPaths = store.getSnapshot().openPaths
+      }
     }
   }
 }

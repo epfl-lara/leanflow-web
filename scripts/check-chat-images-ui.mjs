@@ -220,7 +220,7 @@ try {
     .click()
   await until(
     async () =>
-      (await page.locator('.file-tab').innerText()).includes(
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
         'plots/diagram.svg',
       ),
     'chat image opens project file',
@@ -234,7 +234,9 @@ try {
   await page.locator('.file-item[title="docs/README.md"]').click()
   await until(
     async () =>
-      (await page.locator('.file-tab').innerText()).includes('docs/README.md'),
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+        'docs/README.md',
+      ),
     'Markdown file opens',
   )
   const previewMarkdown = page.getByRole('button', {

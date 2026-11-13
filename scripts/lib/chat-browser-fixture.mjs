@@ -451,11 +451,13 @@ export async function chatBrowserFixture({
     return respond({ error: 'Blocked by isolated chat browser fixture.' }, 409)
   })
   const leanSockets = []
+  const collaborationSockets = []
   report.collaborationSockets = []
   report.collaborationFallbacks = []
   await page.routeWebSocket('**/websocket/**', (socket) => {
     const url = new URL(socket.url())
     if (url.pathname.startsWith('/websocket/collaboration/')) {
+      collaborationSockets.push(socket)
       report.collaborationSockets.push(socket.url())
       // Closed UI fixtures exercise ordinary hash-checked HTTP saving. Use the
       // real capacity-fallback protocol instead of an indefinitely admitting
@@ -607,6 +609,9 @@ export async function chatBrowserFixture({
   const sendLean = (message) => {
     leanSockets.at(-1)?.send(JSON.stringify(message))
   }
+  const sendCollaboration = (message) => {
+    collaborationSockets.at(-1)?.send(JSON.stringify(message))
+  }
   return {
     page,
     browser,
@@ -617,5 +622,6 @@ export async function chatBrowserFixture({
     assertClean,
     closeLean,
     sendLean,
+    sendCollaboration,
   }
 }

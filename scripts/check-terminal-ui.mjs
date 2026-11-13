@@ -464,11 +464,15 @@ try {
   assert.equal(sockets.length, connectionsBeforeScratch)
   await until(
     async () =>
-      (await f.page.locator('.file-tab').innerText()).includes('Main.lean'),
+      (await f.page.locator('.file-tab').getAttribute('aria-label')).includes(
+        'Main.lean',
+      ),
     'Scratch editor shows its actual disk filename',
   )
   assert(
-    !(await f.page.locator('.file-tab').innerText()).includes('Scratch.lean'),
+    !(await f.page.locator('.file-tab').getAttribute('aria-label')).includes(
+      'Scratch.lean',
+    ),
   )
   await f.page.getByRole('button', { name: 'Terminal', exact: true }).click()
   await panel.getByText('Connected', { exact: true }).waitFor()

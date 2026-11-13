@@ -5,14 +5,21 @@ import { Icon } from './Icons'
 export function DraftNavigationDialog({
   files,
   destination,
+  closingFile,
   error,
   saving,
   onClose,
   onDiscard,
   onSave,
 }: {
-  files: readonly { path: string; content: string; readOnly?: boolean }[]
+  files: readonly {
+    path: string
+    content: string
+    readOnly?: boolean
+    unavailable?: boolean
+  }[]
   destination: string
+  closingFile?: string | null
   error: string
   saving: boolean
   onClose: () => void
@@ -32,11 +39,15 @@ export function DraftNavigationDialog({
       busy={saving}
     >
       <p className="dialog-body">
-        {readOnly
-          ? 'Your access has changed. Download your drafts before continuing, or discard these edits.'
-          : destination
-            ? `Save all changed files before opening ${destination}, or discard these edits.`
-            : 'Save all changed files before continuing, or discard these edits.'}
+        {files.some((file) => file.unavailable)
+          ? 'This file was deleted or moved. Download its draft before closing it, or discard its edits.'
+          : readOnly
+            ? 'Your access has changed. Download your drafts before continuing, or discard these edits.'
+            : closingFile
+              ? `Save your changes before closing ${closingFile}, or discard only this file’s edits. Other drafts will be kept.`
+              : destination
+                ? `Save all changed files before opening ${destination}, or discard these edits.`
+                : 'Save all changed files before continuing, or discard these edits.'}
       </p>
       <DraftDownloads files={files} />
       {error && (
@@ -57,7 +68,7 @@ export function DraftNavigationDialog({
           onClick={onDiscard}
           disabled={saving}
         >
-          Discard edits
+          {closingFile ? 'Discard this file' : 'Discard edits'}
         </button>
         {!readOnly && (
           <button className="button primary" onClick={onSave} disabled={saving}>

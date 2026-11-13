@@ -296,8 +296,9 @@ try {
     await item.click()
     await until(
       async () =>
-        (await page.locator('.file-tab').innerText()).includes(filename) &&
-        !(await page.locator('.file-toolbar .spinner').count()),
+        (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+          filename,
+        ) && !(await page.locator('.file-toolbar .spinner').count()),
       `open ${filename}`,
     )
     await page.locator('.editor-loading').waitFor({ state: 'hidden' })
@@ -616,7 +617,9 @@ try {
     .click()
   await until(
     async () =>
-      (await page.locator('.file-tab').innerText()).includes('chapter.tex'),
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+        'chapter.tex',
+      ),
     'diagnostic source navigation',
   )
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })

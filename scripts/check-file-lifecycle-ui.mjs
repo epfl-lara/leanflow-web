@@ -90,8 +90,9 @@ async function append(text) {
 async function opened(name, marker) {
   await until(
     async () =>
-      (await page.locator('.file-tab').innerText()).includes(name) &&
-      (await editorText()).includes(marker),
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+        name,
+      ) && (await editorText()).includes(marker),
     `open ${name}`,
   )
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })

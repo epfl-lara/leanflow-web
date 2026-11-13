@@ -2354,3 +2354,35 @@ test('disconnecting parsed queued saves cannot release their source admission ea
   assert.equal(response.status, 200, await response.text())
   await pending.shift()()
 })
+
+test('file listing revisions stay stable on reads and detect same-size source replacements with restored mtime', async (t) => {
+  const f = await fixture(t)
+  const listing = async () => {
+    const response = await f.request(`/api/projects/${f.project.id}/files`)
+    assert.equal(response.status, 200)
+    return response.json()
+  }
+  const sourcePath = path.join(f.project.root, 'Main.lean')
+  const before = await listing()
+  const main = before.find((entry) => entry.path === 'Main.lean')
+  assert.equal(typeof main.revision, 'string')
+  assert(main.revision.length > 0)
+  assert.deepEqual(await listing(), before)
+  const stat = await fs.stat(sourcePath)
+  const contents = await fs.readFile(sourcePath)
+  await fs.writeFile(sourcePath, Buffer.alloc(contents.length, ' '))
+  await fs.utimes(sourcePath, stat.atime, stat.mtime)
+  const after = (await listing()).find((entry) => entry.path === 'Main.lean')
+  assert.equal(after.size, main.size)
+  assert.notEqual(after.revision, main.revision)
+  await fs.symlink('Main.lean', path.join(f.project.root, 'Linked.lean'))
+  assert(
+    (await listing()).every((entry) => entry.revision === undefined),
+    'Omitted symlink inputs require conservative cache invalidation',
+  )
+  assert.equal(
+    (await f.request(`/api/projects/${f.project.id}/files`, {}, f.otherToken))
+      .status,
+    404,
+  )
+})

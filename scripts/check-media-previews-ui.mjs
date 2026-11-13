@@ -79,7 +79,9 @@ async function select(filename) {
   await fixture.page.locator(`.file-item[title="${filename}"]`).click()
   await until(
     async () =>
-      (await fixture.page.locator('.file-tab').innerText()).includes(filename),
+      (
+        await fixture.page.locator('.file-tab').getAttribute('aria-label')
+      ).includes(filename),
     `selected ${filename}`,
   )
 }
@@ -493,7 +495,9 @@ try {
     .click()
   await until(
     async () =>
-      !(await page.locator('.file-tab').innerText()).includes('delayed.png'),
+      !(await page.locator('.file-tab').getAttribute('aria-label')).includes(
+        'delayed.png',
+      ),
     'project switch clears old selected file',
   )
   delayedResolve()

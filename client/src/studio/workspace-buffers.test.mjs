@@ -319,3 +319,79 @@ test('removing a file or folder keeps unrelated staged buffers and their dirty w
   assert.equal(store.dirty().length, 0)
   assert.equal(store.getSnapshot().buffers.size, 0)
 })
+
+test('file tabs keep visit order without retaining every clean source', () => {
+  const store = new WorkspaceBuffers()
+  store.selectProject('alpha')
+  store.setFile(file('A.lean'))
+  store.setFile(file('B.lean'))
+  store.setFile(file('C.lean'))
+  store.setFile(file('A.lean'))
+  assert.deepEqual(store.getSnapshot().openPaths, [
+    'A.lean',
+    'B.lean',
+    'C.lean',
+  ])
+  assert.equal(store.getSnapshot().buffers.size, 1)
+  store.closeFile('B.lean')
+  assert.equal(store.getSnapshot().file.path, 'A.lean')
+  assert.deepEqual(store.getSnapshot().openPaths, ['A.lean', 'C.lean'])
+  store.closeFile('A.lean')
+  assert.equal(store.getSnapshot().file, null)
+  assert.deepEqual(store.getSnapshot().openPaths, ['C.lean'])
+  store.selectProject('beta')
+  assert.deepEqual(store.getSnapshot().openPaths, [])
+})
+
+test('closing an unsaved or detached tab preserves its source and conflict hash', () => {
+  const store = new WorkspaceBuffers()
+  store.setFile(file('A.lean', 'saved'))
+  store.change('A.lean', 'draft')
+  store.setFile(file('B.lean'))
+  for (const detach of [false, true]) {
+    if (detach) store.detach('A.lean')
+    const before = store.getSnapshot()
+    assert.throws(() => store.closeFile('A.lean'), /Save or discard/)
+    assert.equal(store.getSnapshot(), before)
+    assert.equal(before.buffers.get('A.lean').hash, hashA)
+  }
+})
+
+test('renaming and deleting folders update tabs whose clean buffers were released', () => {
+  const store = new WorkspaceBuffers()
+  store.setFile(file('Old/A.lean'))
+  store.setFile(file('Old/B.lean'))
+  store.setFile(file('Main.lean'))
+  store.move('Old', 'New')
+  assert.deepEqual(store.getSnapshot().openPaths, [
+    'New/A.lean',
+    'New/B.lean',
+    'Main.lean',
+  ])
+  store.remove('New')
+  assert.deepEqual(store.getSnapshot().openPaths, ['Main.lean'])
+  store.setFile(null)
+  assert.deepEqual(store.getSnapshot().openPaths, [])
+})
+
+test('discarding a closing tab preserves other drafts and handles deleted drafts', () => {
+  const store = new WorkspaceBuffers()
+  store.setFile(file('A.lean', 'saved A'))
+  store.change('A.lean', 'draft A')
+  store.setFile(file('B.lean', 'saved B'))
+  store.change('B.lean', 'draft B')
+  store.detach('A.lean')
+  store.discardFile('A.lean', 3)
+  store.closeFile('A.lean')
+  assert.deepEqual(store.getSnapshot().openPaths, ['B.lean'])
+  assert.equal(store.getSnapshot().file.content, 'draft B')
+  assert.equal(store.getSnapshot().file.hash, hashA)
+})
+
+test('discarding a file already saved does not reset its editor generation', () => {
+  const store = new WorkspaceBuffers()
+  store.setFile(file('A.lean', 'saved A'))
+  const before = store.getSnapshot()
+  store.discardFile('A.lean', 3)
+  assert.equal(store.getSnapshot(), before)
+})

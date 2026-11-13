@@ -321,7 +321,9 @@ try {
   const waitFile = async (filename, contentMarker) => {
     await until(
       async () =>
-        (await page.locator('.file-tab').innerText()).includes(filename) &&
+        (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+          filename,
+        ) &&
         !(await page.locator('.file-toolbar .spinner').count()) &&
         (await editorText()).includes(contentMarker),
       `open ${filename} from ${contentMarker}`,
@@ -491,7 +493,9 @@ try {
   await create.waitFor({ state: 'hidden' })
   await until(
     async () =>
-      (await page.locator('.file-tab').innerText()).includes('test.tex'),
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+        'test.tex',
+      ),
     'created TeX file opens',
   )
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })
@@ -746,7 +750,9 @@ try {
   await markdown.getByRole('link', { name: 'PDF file', exact: true }).click()
   await until(
     async () =>
-      (await page.locator('.file-tab').innerText()).includes('paper.pdf'),
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+        'paper.pdf',
+      ),
     'linked PDF file',
   )
   const projectPdf = page.locator('.file-reading-workspace > .pdf-file-viewer')

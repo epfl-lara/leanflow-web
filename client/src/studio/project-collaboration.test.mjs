@@ -343,6 +343,111 @@ test('lost acknowledgements retain the draft and prevent an unsafe fallback save
   assert.equal(store.getSnapshot().file.savedContent, 'base source\n')
 })
 
+test('saving one live file does not inherit another file’s conflict', async (t) => {
+  const { store, socket, hook } = fixture(t)
+  store.change('Main.lean', '-- conflicting draft\nbase source\n')
+  const rejected = hook.flush('Main.lean')
+  const update = socket.sent.findLast((message) => message.type === 'update')
+  socket.receive({
+    type: 'error',
+    path: 'Main.lean',
+    requestId: update.requestId,
+    status: 409,
+    message: 'Main.lean changed on disk.',
+  })
+  await assert.rejects(rejected, /changed on disk/)
+  store.setFile({
+    path: 'Second.lean',
+    content: 'second source\n',
+    savedContent: 'second source\n',
+    hash: hash('second source\n'),
+    generation: 2,
+  })
+  const second = new Y.Doc()
+  t.after(() => second.destroy())
+  second.getText('source').insert(0, 'second source\n')
+  assert.equal(await hook.flush('Second.lean'), true)
+  socket.receive({
+    ...openedWire(second, socket),
+    path: 'Second.lean',
+    documentId: 'document-2',
+  })
+  store.change('Second.lean', 'second source\n-- saved independently\n')
+  const flushing = hook.flush('Second.lean')
+  const request = socket.sent.findLast((message) => message.type === 'update')
+  assert.equal(request.path, 'Second.lean')
+  Y.applyUpdate(second, new Uint8Array(Buffer.from(request.update, 'base64')))
+  socket.receive(
+    wire(second, undefined, {
+      path: 'Second.lean',
+      documentId: 'document-2',
+      ack: request.requestId,
+    }),
+  )
+  assert.equal(await flushing, true)
+  assert.deepEqual(
+    store.dirty().map((file) => file.path),
+    ['Main.lean'],
+  )
+  await assert.rejects(hook.flush(), /changed on disk/)
+})
+
+test('scoped saving still protects its live identity while another offline draft can use REST', async (t) => {
+  const { store, socket, hook } = fixture(t)
+  store.change('Main.lean', '-- awaiting acknowledgement\nbase source\n')
+  const pending = hook.flush('Main.lean')
+  socket.close(1006)
+  await assert.rejects(pending, /interrupted/)
+  store.setFile({
+    path: 'lakefile.lean',
+    content: 'new configuration',
+    savedContent: 'old configuration',
+    hash: hash('old configuration'),
+    generation: 2,
+  })
+  assert.equal(await hook.flush('lakefile.lean'), false)
+  await assert.rejects(hook.flush('Main.lean'), /connection to return/)
+  assert.equal(store.dirty().length, 2)
+})
+
+test('discarding one tab preserves another live document’s unacknowledged edits and identity', async (t) => {
+  const { store, socket, server, hook } = fixture(t)
+  store.change('Main.lean', '-- awaiting acknowledgement\nbase source\n')
+  const flushing = hook.flush('Main.lean')
+  const request = socket.sent.findLast((message) => message.type === 'update')
+  store.setFile({
+    path: 'lakefile.lean',
+    content: 'configuration to discard',
+    savedContent: 'saved configuration',
+    hash: hash('saved configuration'),
+    generation: 2,
+  })
+  store.discardFile('lakefile.lean', 3)
+  assert.equal(await hook.flush('lakefile.lean'), true)
+  assert.equal(
+    socket.sent.filter((message) => message.type === 'open').length,
+    1,
+  )
+  assert.equal(
+    socket.sent.filter((message) => message.type === 'close').length,
+    0,
+  )
+  assert.equal(store.dirty()[0].path, 'Main.lean')
+  Y.applyUpdate(server, new Uint8Array(Buffer.from(request.update, 'base64')))
+  socket.receive(wire(server, undefined, { ack: request.requestId }))
+  assert.equal(await flushing, true)
+  assert.deepEqual(store.dirty(), [])
+  assert.equal(
+    store.getSnapshot().buffers.get('Main.lean').savedContent,
+    '-- awaiting acknowledgement\nbase source\n',
+  )
+  assert.equal(hook.undo('Main.lean'), true)
+  assert.equal(
+    store.getSnapshot().buffers.get('Main.lean').content,
+    'base source\n',
+  )
+})
+
 test('initial live admission waits for the canonical baseline while initialized offline editors remain editable', (t) => {
   const { store, socket, server, hook, rerender } = fixture(
     t,

@@ -138,7 +138,7 @@ test('finishing editor setup respects an open modal and a detached workspace', a
 })
 
 test('finishing editor setup focuses an idle page, the editor, or explicit file navigation', async () => {
-  for (const target of ['idle', 'editor', 'file']) {
+  for (const target of ['idle', 'editor', 'file', 'tab']) {
     const fixture = delayedEditor()
     const loading = fixture.instance.start(
       fixture.host,
@@ -149,9 +149,13 @@ test('finishing editor setup focuses an idle page, the editor, or explicit file 
       fixture.document.activeElement = { matches: () => false }
       fixture.host.contains = () => true
     }
-    if (target === 'file')
+    if (target === 'file' || target === 'tab')
       fixture.document.activeElement = {
-        matches: (selector) => selector === '.file-item',
+        matches: (selector) =>
+          selector
+            .split(',')
+            .map((part) => part.trim())
+            .includes(target === 'file' ? '.file-item' : '.file-tab-button'),
       }
     fixture.release()
     await loading

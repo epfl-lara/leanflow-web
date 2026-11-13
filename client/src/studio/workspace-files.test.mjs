@@ -280,3 +280,42 @@ test('a failed reference refresh reports the file and preserves its editor basel
   assert.deepEqual(result, { pendingPaths: [], failedPaths: ['Main.lean'] })
   assert.equal(store.getSnapshot(), before)
 })
+
+test('confirmed missing clean tabs close even after their source buffer was released', async () => {
+  const store = fixture()
+  store.setFile(file('Old.lean'))
+  store.setFile(file('OtherOld.lean'))
+  store.setFile(file('Main.lean'))
+  await reconcileMissingBuffers(
+    store,
+    store.getSnapshot().scope,
+    ['Main.lean'],
+    async () => {
+      throw new ApiError('Removed', 404)
+    },
+  )
+  assert.deepEqual(store.getSnapshot().openPaths, ['Main.lean'])
+  assert.equal(store.getSnapshot().file.path, 'Main.lean')
+})
+
+test('a delayed missing-file response cannot close a reopened tab', async () => {
+  const store = fixture()
+  store.setFile(file('Old.lean'))
+  store.setFile(file('Main.lean'))
+  let reject
+  const pending = new Promise((_, fail) => {
+    reject = fail
+  })
+  const checking = reconcileMissingBuffers(
+    store,
+    store.getSnapshot().scope,
+    ['Main.lean'],
+    () => pending,
+  )
+  store.closeFile('Old.lean')
+  store.setFile(file('Old.lean', 'restored source', 2))
+  store.setFile(file('Main.lean'))
+  reject(new ApiError('Old missing result', 404))
+  await checking
+  assert.deepEqual(store.getSnapshot().openPaths, ['Main.lean', 'Old.lean'])
+})

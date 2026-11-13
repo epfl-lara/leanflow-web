@@ -215,9 +215,10 @@ async function openFile(file) {
   await fileButton(file).click()
   await until(
     async () =>
-      (await page.locator('.file-toolbar .file-tab').innerText()).includes(
-        file,
-      ) && !(await page.locator('.file-toolbar .spinner').count()),
+      (
+        await page.locator('.file-toolbar .file-tab').getAttribute('aria-label')
+      ).includes(file) &&
+      !(await page.locator('.file-toolbar .spinner').count()),
     `${file} opened`,
   )
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })
@@ -508,7 +509,9 @@ async function markdownFailure() {
     await until(
       async () =>
         (
-          await fallback.page.locator('.file-toolbar .file-tab').innerText()
+          await fallback.page
+            .locator('.file-toolbar .file-tab')
+            .getAttribute('aria-label')
         ).includes('Notes.md') &&
         (await fallbackText()).includes('# Fixture title'),
       'Markdown fallback source displayed',
@@ -723,9 +726,9 @@ try {
     .click()
   await until(
     async () =>
-      (await page.locator('.file-toolbar .file-tab').innerText()).includes(
-        'Main.lean',
-      ),
+      (
+        await page.locator('.file-toolbar .file-tab').getAttribute('aria-label')
+      ).includes('Main.lean'),
     'Lean file after saving Markdown',
   )
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })
@@ -762,9 +765,9 @@ try {
   await preview.getByRole('link', { name: 'Guide file', exact: true }).click()
   await until(
     async () =>
-      (await page.locator('.file-toolbar .file-tab').innerText()).includes(
-        'Guide.markdown',
-      ),
+      (
+        await page.locator('.file-toolbar .file-tab').getAttribute('aria-label')
+      ).includes('Guide.markdown'),
     'relative Markdown file link',
   )
   await openFile('README.md')
@@ -774,9 +777,9 @@ try {
   await preview.getByRole('link', { name: 'PDF file', exact: true }).click()
   await until(
     async () =>
-      (await page.locator('.file-toolbar .file-tab').innerText()).includes(
-        'Paper.PDF',
-      ),
+      (
+        await page.locator('.file-toolbar .file-tab').getAttribute('aria-label')
+      ).includes('Paper.PDF'),
     'relative PDF file link',
   )
   assert.equal(page.url(), readingUrl)

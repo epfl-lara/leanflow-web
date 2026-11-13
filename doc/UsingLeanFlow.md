@@ -121,6 +121,8 @@ Put the root document at the common parent of its inputs and use paths such as `
 
 ## View evaluation results and stop a check
 
+Use the file tabs beside **Save** to return to files opened in this project. Tabs restore the cursor and scroll position. Hover over a tab to see its full path. Focus a tab and press **Delete** to close it with the keyboard. The dot marks unsaved edits; closing that tab first attempts to save just that file and keeps the draft available if saving fails. **Discard this file** discards only the tab being closed. Other drafts stay open, including files with save conflicts or deleted files. Closing a tab does not delete the file. Switching projects clears the tab list.
+
 After 30 minutes without typing, clicking, scrolling, or touch interaction, the Lean editor sleeps to free server memory. Click or type to reconnect. Your open text, cursor, and undo history stay in the browser. Background assistant runs and checks continue while the editor sleeps.
 
 Put the cursor on a completed `#eval` command to see its output in **Goals & diagnostics**. For example:
@@ -250,7 +252,7 @@ Choose **Open locally** to view a module from the project's pinned Lean installa
 
 To jump to a declaration from the editor, hold **Alt** (**Option** on macOS) and click its name. You can also press **F12** or right-click and choose **Go to Definition**. Project files open in the editor; definitions in Lean's installed library open in the scrollable read-only viewer at the position reported by Lean. Pending edits save when navigating away; a save problem keeps your edits open for review. Use **Ctrl+click** (**Cmd+click** on macOS) to add a cursor for editing.
 
-Returning to a recently opened Lean file can reuse its proof-checking state. The editor keeps one recent project source warm for up to a minute. Saving source changes and refreshing file listings invalidate cached imports; switching projects releases the cache. Large files are excluded. While **Terminal** is open, its automatic file refreshes also clear the cache.
+Lean keeps up to three recently visited project sources ready, including the current Lean file. Background sources expire after five minutes, and closing a tab releases its cached work. Unchanged file-list refreshes preserve the cache. Changes to other Lean files invalidate cached work and mark the current goals as potentially out of date. Choose **Refresh imports** in the goals panel to check again; shared typing does not automatically restart your file. Larger files and library sources may need to be checked again when reopened. Cached editor work does not replace **Check Project** or **Check File**. Switching projects releases the cache. Older servers without file revision information still clear the cache when their file lists refresh.
 
 In **Source control → Changes**, save files, review the diff, and enter a commit message. Use **Create branch** if you need a new branch. An import with publishing enabled already has a working branch.
 

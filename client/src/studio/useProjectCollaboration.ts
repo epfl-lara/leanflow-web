@@ -42,7 +42,7 @@ interface LiveDocument {
 interface CollaborationControl {
   move: (move: PathMove) => void
   setSelection: (selection: ProjectSelection | null) => void
-  flush: () => Promise<boolean>
+  flush: (path?: string) => Promise<boolean>
   undo: (path: string) => boolean
   redo: (path: string) => boolean
   manages: (path: string) => boolean
@@ -149,7 +149,7 @@ export function useProjectCollaboration({
     callbacks.current = { onFilesChanged, onFilesMoved, onAccessChanged }
   }, [onFilesChanged, onFilesMoved, onAccessChanged])
   const flush = useCallback(
-    () => control.current?.flush() ?? Promise.resolve(false),
+    (path?: string) => control.current?.flush(path) ?? Promise.resolve(false),
     [],
   )
   const undo = useCallback(
@@ -248,8 +248,16 @@ export function useProjectCollaboration({
       }
       return baseline
     }
-    const blockingFailure = () =>
-      failure || documentFailures.values().next().value || null
+    const blockingFailure = (path?: string) => {
+      const record = path ? documents.get(path) : undefined
+      return (
+        failure ||
+        (path
+          ? record && documentFailures.get(record)
+          : documentFailures.values().next().value) ||
+        null
+      )
+    }
     const clearIssue = () =>
       setIssue(
         blockingFailure()?.message ||
@@ -477,12 +485,13 @@ export function useProjectCollaboration({
       record.openRequestId = ++requestId
       send({ type: 'open', path, requestId: record.openRequestId })
     }
-    const restHandoff = () => {
+    const restHandoff = (path?: string) => {
       // Once flush hands a draft to the HTTP caller, that request can still
       // commit after live admission. Keep its path on version-checked saves for
       // the rest of this visit so the same insertion cannot enter both systems.
       for (const file of store.dirty()) {
         if (
+          (path && file.path !== path) ||
           !liveFile(file.path) ||
           !!file.preview ||
           fallbackPaths.has(file.path)
@@ -504,8 +513,9 @@ export function useProjectCollaboration({
           `Some files use normal version-checked saving for this visit. ${LIVE_EDITING_RECOVERY}`,
         )
       }
-      for (const history of fallbackHistories.values()) history.markSubmitted()
-      return !store.dirty().length
+      for (const [name, history] of fallbackHistories)
+        if (!path || name === path) history.markSubmitted()
+      return !store.dirty().some((file) => !path || file.path === path)
     }
     const replayUpdate = (record: LiveDocument) => {
       // Local undo keeps deleted source alive. A wire-only clone can collect
@@ -589,8 +599,16 @@ export function useProjectCollaboration({
       if (publish) sendDelta(path, record, vector)
       return true
     }
-    const managedDirty = () =>
-      store.dirty().some((file) => documents.has(file.path))
+    const managedDirty = (path?: string) =>
+      store
+        .dirty()
+        .some(
+          (file) => (!path || file.path === path) && documents.has(file.path),
+        )
+    const pendingUpdates = (path?: string) =>
+      [...documents].some(
+        ([name, record]) => (!path || name === path) && record.pending.size,
+      )
 
     function publishLocal() {
       clearTimeout(sendTimer)
@@ -727,7 +745,11 @@ export function useProjectCollaboration({
     const unsubscribe = store.subscribe(schedule)
 
     function detachPaths(paths: readonly string[]) {
-      for (const name of store.getSnapshot().buffers.keys()) {
+      const snapshot = store.getSnapshot()
+      for (const name of new Set([
+        ...snapshot.openPaths,
+        ...snapshot.buffers.keys(),
+      ])) {
         if (!paths.some((path) => name === path || name.startsWith(path + '/')))
           continue
         const record = documents.get(name)
@@ -1338,38 +1360,36 @@ export function useProjectCollaboration({
       },
       undo: (path) => history(path, 'undo'),
       redo: (path) => history(path, 'redo'),
-      flush: async () => {
+      flush: async (path) => {
         if (!current()) return false
         if (!ready) {
           // Initialized live documents must keep using their CRDT identity.
           // A REST save followed by reconnect would import the same local text
           // twice. Keep these drafts local until the live connection returns.
           if (
-            [...documents.values()].some((record) => record.pending.size) ||
+            pendingUpdates(path) ||
             store
               .dirty()
               .some(
                 (file) =>
-                  documents.get(file.path)?.id ||
-                  (managedHistory.has(file.path) &&
-                    !fallbackPaths.has(file.path)),
+                  (!path || file.path === path) &&
+                  (documents.get(file.path)?.id ||
+                    (managedHistory.has(file.path) &&
+                      !fallbackPaths.has(file.path))),
               )
           )
             throw new Error(
               'Wait for the live connection to return before saving. Your edits remain in this tab.',
             )
           publishLocal()
-          restHandoff()
+          restHandoff(path)
           return false
         }
         publishLocal()
-        const message = blockingFailure()
+        const message = blockingFailure(path)
         if (message) throw message
-        if (
-          !managedDirty() &&
-          ![...documents.values()].some((record) => record.pending.size)
-        ) {
-          return restHandoff()
+        if (!managedDirty(path) && !pendingUpdates(path)) {
+          return restHandoff(path)
         }
         await new Promise<void>((resolve, reject) => {
           const timeout = setTimeout(() => {
@@ -1381,7 +1401,7 @@ export function useProjectCollaboration({
             )
           }, 15_000)
           const check = () => {
-            const message = blockingFailure()
+            const message = blockingFailure(path)
             if (!current() || !ready || message) {
               clearTimeout(timeout)
               waiters.delete(check)
@@ -1391,10 +1411,7 @@ export function useProjectCollaboration({
                     'The live connection was interrupted. Your edits remain in this tab.',
                   ),
               )
-            } else if (
-              !managedDirty() &&
-              ![...documents.values()].some((record) => record.pending.size)
-            ) {
+            } else if (!managedDirty(path) && !pendingUpdates(path)) {
               clearTimeout(timeout)
               waiters.delete(check)
               resolve()
@@ -1403,7 +1420,7 @@ export function useProjectCollaboration({
           waiters.add(check)
           check()
         })
-        return restHandoff()
+        return restHandoff(path)
       },
     }
     control.current = controller

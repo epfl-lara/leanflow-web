@@ -15,6 +15,7 @@ import {
 } from 'monaco-editor'
 import {
   useEffect,
+  useCallback,
   useLayoutEffect,
   useRef,
   useState,
@@ -40,6 +41,7 @@ import { CollaboratorCursors } from './collaboratorCursors'
 import { LeanCommentImagePreviews } from './leanCommentImagePreviews'
 import type { ProjectPeer, ProjectSelection } from './projectPresence'
 import { LeanModelCache } from './leanModelCache'
+import { changedLeanFiles } from './leanFileRevisions'
 import type { RenameSource } from './workspaceBuffers'
 import { installLeanRenameMiddleware } from './leanRenameMiddleware'
 import { LEAN_EDIT_DISABLED_MESSAGE } from '../../../shared/lean-edit-policy.mjs'
@@ -205,6 +207,7 @@ interface Runtime {
   visibleReadyPath?: string
   renameModels?: RenameModels
   modelCache: LeanModelCache
+  viewStates: Map<string, monacoEditor.ICodeEditorViewState>
   disabledRenameAction?: { dispose(): void }
   clientLifecycle?: ReturnType<typeof installLeanClientLifecycle>
   idleCleanup?: () => void
@@ -225,6 +228,7 @@ export function LeanWorkspace({
   files,
   file,
   buffers,
+  openPaths,
   bufferDiscardVersion,
   bufferSaveVersion,
   editorImportsVersion,
@@ -256,6 +260,7 @@ export function LeanWorkspace({
   files: readonly FileEntry[]
   file: OpenFile | null
   buffers: ReadonlyMap<string, OpenFile>
+  openPaths: readonly string[]
   bufferDiscardVersion: number
   bufferSaveVersion: number
   editorImportsVersion?: number
@@ -295,9 +300,14 @@ export function LeanWorkspace({
   const editorEl = useRef<HTMLDivElement>(null)
   const infoEl = useRef<HTMLDivElement>(null)
   const runtime = useRef<Runtime | null>(null)
+  const listedFiles = useRef<readonly FileEntry[] | undefined>(undefined)
   const fileRef = useRef(file)
   const joiningRef = useRef(joining)
   joiningRef.current = joining
+  const openPathsRef = useRef(openPaths)
+  useLayoutEffect(() => {
+    openPathsRef.current = openPaths
+  }, [openPaths])
   const buffersRef = useRef(buffers)
   buffersRef.current = buffers
   const syncingContent = useRef(false)
@@ -340,6 +350,14 @@ export function LeanWorkspace({
   const [restarting, setRestarting] = useState(false)
   const [sleeping, setSleeping] = useState(false)
   const [restartIssue, setRestartIssue] = useState('')
+  const [importsStale, setImportsStalePath] = useState<string | null>(null)
+  const importsStaleRef = useRef<string | null>(null)
+  const setImportsStale = useCallback((path: string | null) => {
+    importsStaleRef.current = path
+    setImportsStalePath(path)
+  }, [])
+  const [refreshingImports, setRefreshingImports] = useState(false)
+  const importsRevision = useRef(0)
   const [requestIssue, setRequestIssue] = useState('')
   const [renameIssue, setRenameIssue] = useState('')
   const [loading, setLoading] = useState(true)
@@ -366,6 +384,7 @@ export function LeanWorkspace({
     setConnectionIssue('')
     setRequestIssue('')
     setRestartIssue('')
+    setImportsStale(null)
     setRestarting(false)
     setSleeping(false)
     setRenameIssue('')
@@ -416,6 +435,7 @@ export function LeanWorkspace({
       own = {
         lean,
         virtualFiles: new Set(),
+        viewStates: new Map(),
         modelCache: new LeanModelCache(() => {
           void serialize(async () => {
             if (!cancelled && runtime.current === own)
@@ -681,14 +701,44 @@ export function LeanWorkspace({
   }, [buffers, file?.path])
 
   useLayoutEffect(() => {
-    // Listings refresh after terminal/agent changes, even when the visible
-    // source is unchanged. Their importers must reopen against new sources.
-    runtime.current?.modelCache.clear()
+    const active = runtime.current
+    active?.modelCache.retainOpenPaths(openPaths)
+    if (active)
+      for (const path of active.viewStates.keys())
+        if (!openPaths.includes(path)) active.viewStates.delete(path)
+  }, [openPaths])
+
+  useLayoutEffect(() => {
+    const previous = listedFiles.current
+    const changed = changedLeanFiles(previous, files)
+    listedFiles.current = files
+    if (changed?.length === 0) return
+    const active = runtime.current
+    // Unknown metadata cannot prove that cached imports are still current.
+    // Keep the older-server fallback conservative, including the active cache
+    // reference so revisiting this file reopens its imports.
+    if (changed === null) {
+      active?.modelCache.clear()
+      if (previous && active?.visibleReadyPath?.endsWith('.lean')) {
+        importsRevision.current++
+        setImportsStale(active.visibleReadyPath)
+      }
+      return
+    }
+    if (changed.some((path) => path !== fileRef.current?.path)) {
+      // Do not restart every peer on each shared save. The current worker may
+      // finish, but cannot be reused on a later visit until imports are fresh.
+      active?.modelCache.clear()
+      if (fileRef.current?.path.endsWith('.lean')) {
+        importsRevision.current++
+        setImportsStale(fileRef.current.path)
+      }
+    } else active?.modelCache.invalidate()
   }, [projectId, files])
 
   useLayoutEffect(() => {
     runtime.current?.renameModels?.synchronize(buffersRef.current)
-  }, [bufferDiscardVersion])
+  }, [bufferDiscardVersion, buffers])
 
   useEffect(() => {
     let cancelled = false
@@ -713,8 +763,11 @@ export function LeanWorkspace({
       if (
         path?.endsWith('.lean') &&
         savedPaths.some((saved) => saved.endsWith('.lean') && saved !== path)
-      )
-        return active?.lean.refreshVisibleDocument()
+      ) {
+        active?.modelCache.clear()
+        importsRevision.current++
+        setImportsStale(path)
+      }
     }).catch(() => {
       if (!cancelled)
         setRestartIssue(
@@ -849,7 +902,12 @@ export function LeanWorkspace({
           return
         if (editor.getValue() !== currentFile.content)
           editor.setValue(currentFile.content)
-        if (!snapshot.readOnly) await active.modelCache.retain(uri)
+        const viewState = active.viewStates.get(snapshot.path)
+        if (viewState) editor.restoreViewState(viewState)
+        // An unchanged reload can keep a worker with stale imports alive.
+        // Leave it uncached so switching away closes it before the next visit.
+        if (importsStaleRef.current !== snapshot.path)
+          await active.modelCache.retain(uri)
         if (cancelled || runtime.current !== active) return
         active.visibleReadyPath = snapshot.path
         editor.updateOptions({
@@ -950,8 +1008,16 @@ export function LeanWorkspace({
             snapshot.path,
             (path) => onOpenFileRef.current(path),
           )
+        const openingImportsRevision = importsRevision.current
         await active.lean.showVisibleDocument()
         if (cancelled) return
+        if (
+          importsRevision.current === openingImportsRevision &&
+          importsStaleRef.current !== snapshot.path
+        )
+          // Rebuilding the same editor can reuse an unchanged Lean document.
+          // Only a different file or an explicit import refresh clears its notice.
+          setImportsStale(null)
         // Document symbols and proof selections belong to Lean files. Reading
         // another language must not send Lean requests for that document.
         if (!snapshot.path.endsWith('.lean')) {
@@ -1082,6 +1148,11 @@ export function LeanWorkspace({
     }).catch(() => undefined)
     return () => {
       cancelled = true
+      // Capture before disposal, including scroll and selections. State is
+      // scoped to this project and survives only while its tab stays open.
+      const viewState = ownEditor?.editor?.saveViewState()
+      if (snapshot && viewState && openPathsRef.current.includes(snapshot.path))
+        runtime.current?.viewStates.set(snapshot.path, viewState)
       void serialize(() => {
         if (runtime.current?.editor === ownEditor) {
           runtime.current.subscription?.dispose()
@@ -1403,6 +1474,33 @@ export function LeanWorkspace({
     onProofStateChange,
   ])
 
+  async function refreshImports() {
+    const active = runtime.current
+    const revision = importsRevision.current
+    const path = fileRef.current?.path
+    if (!active || refreshingImports || !path) return
+    setRefreshingImports(true)
+    try {
+      await serialize(async () => {
+        if (runtime.current !== active || fileRef.current?.path !== path) return
+        await active.lean.refreshVisibleDocument()
+        if (importsRevision.current === revision)
+          await active.modelCache.retain(
+            new FileUri('/workspace/' + path).toString(),
+          )
+      })
+      if (runtime.current === active && importsRevision.current === revision)
+        setImportsStale(null)
+    } catch {
+      if (runtime.current === active)
+        setRestartIssue(
+          'Lean could not refresh imports. Use Restart Lean to reconnect.',
+        )
+    } finally {
+      if (runtime.current === active) setRefreshingImports(false)
+    }
+  }
+
   async function restartLean() {
     const active = runtime.current
     const provider = active?.lean.clientProvider
@@ -1435,6 +1533,7 @@ export function LeanWorkspace({
         )
       setRequestIssue('')
       setRestartIssue('')
+      setImportsStale(null)
     } catch (error) {
       if (runtime.current !== active) return
       setRestartIssue(
@@ -1565,6 +1664,18 @@ export function LeanWorkspace({
           </button>
           <span className="caption-hint">Move the cursor to inspect</span>
         </div>
+        {importsStale === file?.path && file?.path.endsWith('.lean') && (
+          <output className="lean-import-notice">
+            Project files changed. These goals may use older imports.
+            <button
+              className="button small secondary"
+              disabled={refreshingImports || loading || sleeping}
+              onClick={() => void refreshImports()}
+            >
+              {refreshingImports ? 'Refreshing…' : 'Refresh imports'}
+            </button>
+          </output>
+        )}
         <div ref={infoEl} className="infoview-host" />
       </section>
     </div>

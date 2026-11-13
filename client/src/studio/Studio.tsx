@@ -39,6 +39,7 @@ import { TrashDialog } from './TrashDialog'
 import { Icon } from './Icons'
 import { ToolbarAction } from './ToolbarAction'
 import { LeanWorkspace } from './LeanWorkspace'
+import { FileTabs } from './FileTabs'
 import { WorkspaceBuffers, type WorkspaceScope } from './workspaceBuffers'
 import { useAutosave } from './useAutosave'
 import { PdfFileViewer } from './PdfFileViewer'
@@ -325,6 +326,7 @@ export function Studio() {
     scope,
     file,
     buffers,
+    openPaths,
     discardVersion,
     saveVersion,
     savedPaths,
@@ -448,6 +450,9 @@ export function Studio() {
   >(null)
   const [navigationError, setNavigationError] = useState('')
   const [navigationTarget, setNavigationTarget] = useState('')
+  const [navigationClosePath, setNavigationClosePath] = useState<string | null>(
+    null,
+  )
   const workspaceInUse = useRef(false)
   const [job, setJob] = useState<Job | null>(null)
   const [jobOpen, setJobOpen] = useState(false)
@@ -1235,7 +1240,10 @@ export function Studio() {
   const flushCollaboration = collaboration.flush
 
   const saveFile = useCallback(
-    async ({ automatic = false } = {}) => {
+    async ({
+      automatic = false,
+      path,
+    }: { automatic?: boolean; path?: string } = {}) => {
       if (savePromise.current) return savePromise.current.promise
       const expected = bufferStore.getSnapshot().scope
       const id = expected.projectId
@@ -1248,14 +1256,16 @@ export function Studio() {
         promise: Promise.resolve()
           .then(async () => {
             if (!bufferStore.isCurrent(expected)) return
-            if (await flushCollaboration()) return
+            if (await flushCollaboration(path)) return
             if (!bufferStore.isCurrent(expected)) return
-            const snapshots = bufferStore.dirty()
+            const snapshots = bufferStore
+              .dirty()
+              .filter((file) => !path || file.path === path)
             const snapshot = snapshots[0]
             if (!snapshot || snapshot.readOnly) return
             if (
               snapshots.length > 1 ||
-              snapshot.path !== fileRef.current?.path
+              (!path && snapshot.path !== fileRef.current?.path)
             ) {
               const value = await api<{
                 applied: number
@@ -1345,26 +1355,37 @@ export function Studio() {
     return () => clearTimeout(timer)
   }, [saveVersion, scope, bufferStore, loadGit])
 
-  const saveCompletely = useCallback(async () => {
-    if (bufferStore.drafts().some((file) => file.readOnly && !file.unavailable))
-      throw new Error(
-        'Your drafts can no longer be saved to this project. Download them before continuing, or discard them.',
-      )
-    const expected = bufferStore.getSnapshot().scope
-    // Saving is optimistic: preserve edits made during the request and save them
-    // before handing a snapshot to an assistant or changing the current file.
-    await saveFile()
-    requireScope(expected)
-    await new Promise<void>((resolve) => setTimeout(resolve, 0))
-    requireScope(expected)
-    if (bufferStore.dirty().length) await saveFile()
-    await new Promise<void>((resolve) => setTimeout(resolve, 0))
-    requireScope(expected)
-    if (bufferStore.drafts().some((file) => !file.unavailable))
-      throw new Error(
-        'Files are still being edited. Save them before continuing.',
-      )
-  }, [saveFile, bufferStore, requireScope])
+  const saveCompletely = useCallback(
+    async (path?: string) => {
+      const drafts = () =>
+        bufferStore.drafts().filter((file) => !path || file.path === path)
+      if (drafts().some((file) => file.readOnly && !file.unavailable))
+        throw new Error(
+          'Your drafts can no longer be saved to this project. Download them before continuing, or discard them.',
+        )
+      const expected = bufferStore.getSnapshot().scope
+      // Saving is optimistic: preserve edits made during the request and save them
+      // before handing a snapshot to an assistant or changing the current file.
+      // A closing tab must not inherit another file's failed in-flight save.
+      // Wait for the shared lock, then save just this path with the same checks.
+      if (path && savePromise.current) {
+        await savePromise.current.promise.catch(() => {})
+        requireScope(expected)
+      }
+      await saveFile({ path })
+      requireScope(expected)
+      await new Promise<void>((resolve) => setTimeout(resolve, 0))
+      requireScope(expected)
+      if (drafts().some((file) => !file.readOnly)) await saveFile({ path })
+      await new Promise<void>((resolve) => setTimeout(resolve, 0))
+      requireScope(expected)
+      if (drafts().some((file) => !file.unavailable))
+        throw new Error(
+          'Files are still being edited. Save them before continuing.',
+        )
+    },
+    [saveFile, bufferStore, requireScope],
+  )
 
   const saveWorkspace = useCallback(async () => {
     requireScope(scope)
@@ -1428,6 +1449,7 @@ export function Studio() {
       action: () => Promise<void>,
       destination = '',
       keepDetachedDrafts = false,
+      closingPath: string | null = null,
     ) => {
       const expected = bufferStore.getSnapshot().scope
       const request = ++navigationRequest.current
@@ -1437,7 +1459,7 @@ export function Studio() {
       return (async () => {
         try {
           if (bufferStore.drafts().length || savePromise.current)
-            await saveCompletely()
+            await saveCompletely(closingPath ?? undefined)
           if (
             request !== navigationRequest.current ||
             openRequest.current !== openingRequest ||
@@ -1447,7 +1469,11 @@ export function Studio() {
           if (
             bufferStore
               .drafts()
-              .some((file) => !keepDetachedDrafts || !file.unavailable)
+              .some((file) =>
+                closingPath
+                  ? file.path === closingPath
+                  : !keepDetachedDrafts || !file.unavailable,
+              )
           )
             throw new Error(
               'Your drafts are still in this tab. Download or save them before continuing, or discard them.',
@@ -1459,8 +1485,13 @@ export function Studio() {
             !bufferStore.isCurrent(expected)
           )
             return
-          if (bufferStore.drafts().length) {
+          if (
+            bufferStore
+              .drafts()
+              .some((file) => !closingPath || file.path === closingPath)
+          ) {
             setNavigationError(errorText(error))
+            setNavigationClosePath(closingPath)
             setPendingAction(() => action)
           } else setError(errorText(error))
           return { error }
@@ -1517,6 +1548,39 @@ export function Studio() {
       }
     },
     [navigate, openFile, bufferStore],
+  )
+
+  const closeFileTab = useCallback(
+    (path: string) => {
+      const expected = bufferStore.getSnapshot().scope
+      const action = async () => {
+        if (!bufferStore.isCurrent(expected) || !expected.projectId) return
+        const current = bufferStore.getSnapshot()
+        if (current.file?.path === path) {
+          const index = current.openPaths.indexOf(path)
+          const next =
+            current.openPaths[index + 1] ?? current.openPaths[index - 1]
+          if (next) {
+            await openFile(expected.projectId, next)
+            // A failed read or newer navigation leaves the old tab available.
+            if (
+              !bufferStore.isCurrent(expected) ||
+              bufferStore.getSnapshot().file?.path !== next
+            )
+              return
+          } else {
+            ++openRequest.current
+            localStorage.removeItem(`lemex-file-${expected.projectId}`)
+          }
+        }
+        bufferStore.closeFile(path)
+      }
+      const buffer = bufferStore.getSnapshot().buffers.get(path)
+      if (buffer && buffer.content !== buffer.savedContent)
+        navigate(action, '', false, path)
+      else void action().catch((error) => setError(errorText(error)))
+    },
+    [bufferStore, navigate, openFile],
   )
 
   function rememberCreatedProject(created: Project) {
@@ -1592,8 +1656,14 @@ export function Studio() {
     if (!pendingAction) return
     setNavigationError('')
     try {
-      if (save) await saveCompletely()
-      else await discardUnsavedEdits()
+      if (save) await saveCompletely(navigationClosePath ?? undefined)
+      else if (navigationClosePath) {
+        if (savePromise.current)
+          throw new Error(
+            'Wait for the current save before discarding this file.',
+          )
+        bufferStore.discardFile(navigationClosePath, ++generation.current)
+      } else await discardUnsavedEdits()
     } catch (error) {
       setNavigationError(errorText(error))
       return
@@ -2437,7 +2507,12 @@ export function Studio() {
 
   const draftNavigationDialog = pendingAction && (
     <DraftNavigationDialog
-      files={dirtyFiles}
+      files={
+        navigationClosePath
+          ? dirtyFiles.filter((file) => file.path === navigationClosePath)
+          : dirtyFiles
+      }
+      closingFile={navigationClosePath}
       destination={navigationTarget}
       error={navigationError}
       saving={saving}
@@ -3450,22 +3525,18 @@ export function Studio() {
               <ProjectSetupPanel project={project} />
             )}
             <div className="file-toolbar">
-              <div className="file-tab">
-                <Icon name="file" size={15} />
-                <span title={file?.path}>{file?.path || 'Choose a file'}</span>
-                {file?.readOnly && <span className="tag">Read only</span>}
-                {file && collaboration.joining(file.path) && (
-                  <span className="tag">Joining live editing…</span>
-                )}
-                {dirty && (
-                  <span
-                    className="dirty-dot"
-                    aria-label="Unsaved changes"
-                    title="Autosave pending"
-                  />
-                )}
-                {opening && <span className="spinner" />}
-              </div>
+              <FileTabs
+                paths={openPaths}
+                file={file}
+                buffers={buffers}
+                opening={opening}
+                joining={!!file && collaboration.joining(file.path)}
+                onSelect={(path) => {
+                  if (bufferStore.isCurrent(scope))
+                    void openFile(project.id, path)
+                }}
+                onClose={closeFileTab}
+              />
               <div className="file-actions">
                 {isMarkdownPath(file?.path) && (
                   <button
@@ -3570,8 +3641,10 @@ export function Studio() {
                     className="button small subtle"
                     disabled={saving || opening}
                     onClick={() => setReloadTarget(file.path)}
+                    aria-label="Reload file"
+                    title="Reload file"
                   >
-                    Reload file
+                    <Icon name="refresh" size={14} />
                   </button>
                 )}
                 <CheckControls
@@ -3594,6 +3667,9 @@ export function Studio() {
             </div>
             <div
               ref={setTexWorkspaceElement}
+              id="file-editor-panel"
+              role="tabpanel"
+              aria-label={file?.path || 'File editor'}
               className={`file-reading-workspace ${readingFile ? 'reading' : ''} ${texVisible ? 'tex-reading' : ''} ${texVisible && texStacked ? 'tex-stacked' : ''}`}
               style={
                 { '--tex-source-size': `${texSourceSize}%` } as CSSProperties
@@ -3607,6 +3683,7 @@ export function Studio() {
                   file={binaryPreview ? null : file}
                   joining={!!file && collaboration.joining(file.path)}
                   buffers={buffers}
+                  openPaths={openPaths}
                   bufferDiscardVersion={discardVersion}
                   bufferSaveVersion={saveVersion}
                   editorImportsVersion={project.editorImportsVersion}

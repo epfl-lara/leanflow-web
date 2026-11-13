@@ -35,16 +35,24 @@ try {
     },
     projects: [
       { id: projectId, name: 'Lean cache fixture', status: 'ready' },
-      { id: otherId, name: 'Other cache fixture', status: 'ready' },
+      {
+        id: otherId,
+        name: 'Other cache fixture',
+        status: 'ready',
+        accessRole: 'viewer',
+      },
     ],
     files: {
       [projectId]: {
         'Main.lean': 'def cachedA : Nat := 1\n#check cachedA\n',
         'Second.lean': 'import Main\ndef cachedB : Nat := cachedA\n',
         'Third.lean': 'def cachedC : Nat := 3\n',
+        'Fourth.lean': 'def cachedD : Nat := 4\n',
+        'Notes.md': '# Notes\n',
       },
       [otherId]: {
         'Main.lean': '-- OTHER_PROJECT_SOURCE\nexample : True := by trivial\n',
+        'View.lean': '-- VIEWER_SECOND_SOURCE\n',
       },
     },
     chats: [
@@ -71,8 +79,8 @@ try {
     if (message.method === 'textDocument/didOpen') {
       if (documents.has(uri)) violations.push('Duplicate didOpen for ' + uri)
       documents.set(uri, message.params.textDocument.version)
-      if (documents.size > 2)
-        violations.push('More than two Lean documents open')
+      if (documents.size > 3)
+        violations.push('More than three Lean documents open')
     } else if (message.method === 'textDocument/didClose') {
       documents.delete(uri)
     } else if (message.method === 'textDocument/didChange') {
@@ -81,6 +89,17 @@ try {
       documents.set(uri, message.params.textDocument.version)
     }
   }
+  await page.route('**/api/projects/*/files', (route) => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    const id = new URL(route.request().url()).pathname.split('/')[3]
+    return route.fulfill({
+      json: Object.entries(state.files[id]).map(([path, content]) => ({
+        path,
+        size: content.length,
+        revision: hash(content),
+      })),
+    })
+  })
   await page.route('**/api/projects/*/file?*', (route) => {
     if (route.request().method() !== 'PUT') return route.fallback()
     const filename = new URL(route.request().url()).searchParams.get('path')
@@ -102,7 +121,9 @@ try {
     await until(
       async () =>
         (await page.locator('.editor-loading').count()) === 0 &&
-        (await page.locator('.file-toolbar').innerText()).includes(filename) &&
+        (await page
+          .getByRole('tab', { name: filename, exact: true })
+          .getAttribute('aria-selected')) === 'true' &&
         (await page.locator('.monaco-editor .view-lines').innerText()).includes(
           marker,
         ),
@@ -111,7 +132,9 @@ try {
     assert.equal(await page.locator('.editor-failure').count(), 0)
   }
   async function visit(filename, marker) {
-    await page.locator(`.file-item[title="${filename}"]`).click()
+    const tab = page.getByRole('tab', { name: filename, exact: true })
+    if (await tab.count()) await tab.click()
+    else await page.locator(`.file-item[title="${filename}"]`).click()
     await opened(filename, marker)
   }
   await fixture.ready()
@@ -133,6 +156,32 @@ try {
   assert.equal(notifications('didChange', 'Main.lean').length, 0)
   report.checks.push(
     'Switching A to B and back preserves A’s Lean worker and model version without a virtual file rewrite.',
+  )
+
+  const protocolCount = () =>
+    messages.filter((message) =>
+      ['textDocument/didOpen', 'textDocument/didClose'].includes(
+        message.method,
+      ),
+    ).length
+  const beforeRefresh = protocolCount()
+  async function refreshListing() {
+    const response = page.waitForResponse((response) =>
+      response.url().endsWith(`/api/projects/${projectId}/files`),
+    )
+    await page
+      .getByRole('button', { name: 'Refresh files', exact: true })
+      .click()
+    await response
+    await page.waitForTimeout(300)
+  }
+  await refreshListing()
+  assert.equal(protocolCount(), beforeRefresh)
+  state.files[projectId]['Notes.md'] += 'Changed notes.\n'
+  await refreshListing()
+  assert.equal(protocolCount(), beforeRefresh)
+  report.checks.push(
+    'Unchanged listings and documentation-only edits preserve Lean workers; revisions, not source sizes, drive invalidation.',
   )
 
   await page.locator('.monaco-editor textarea').first().focus()
@@ -159,6 +208,18 @@ try {
   )
 
   await visit('Third.lean', 'cachedC')
+  const threeOpens = messages.filter(
+    (message) => message.method === 'textDocument/didOpen',
+  ).length
+  await visit('Second.lean', 'cachedB')
+  await visit('Main.lean', 'cachedA')
+  await visit('Third.lean', 'cachedC')
+  assert.equal(
+    messages.filter((message) => message.method === 'textDocument/didOpen')
+      .length,
+    threeOpens,
+  )
+  await visit('Fourth.lean', 'cachedD')
   await until(
     () => notifications('didClose', 'Second.lean').length === 2,
     'least-recent-file eviction',
@@ -169,26 +230,141 @@ try {
     'bounded cached workers',
   )
   report.checks.push(
-    'Visiting a third source evicts the least recently used file and keeps at most two Lean workers per editor connection.',
+    'Three tabs reuse Lean workers without reopening; a fourth evicts the least recently used file, keeping at most three workers per editor connection.',
   )
 
   await visit('Third.lean', 'cachedC')
   const closedSecond = notifications('didClose', 'Second.lean').length
   const openedSecond = notifications('didOpen', 'Second.lean').length
+  const thirdOpens = notifications('didOpen', 'Third.lean').length
   state.files[projectId]['Main.lean'] += '-- EXTERNAL_IMPORT_CHANGE\n'
   await page.getByRole('button', { name: 'Refresh files', exact: true }).click()
   await until(
     () => notifications('didClose', 'Second.lean').length > closedSecond,
     'external import invalidation',
   )
+  const refreshImports = page.getByRole('button', {
+    name: 'Refresh imports',
+    exact: true,
+  })
+  await refreshImports.waitFor()
+  assert.equal(
+    notifications('didOpen', 'Third.lean').length,
+    thirdOpens,
+    'A foreign save must not restart the visible proof',
+  )
+  const reloaded = page.waitForResponse((response) =>
+    response.url().includes('/file?path=Third.lean'),
+  )
+  await page.getByRole('button', { name: 'Reload file', exact: true }).click()
+  await page
+    .getByRole('dialog', { name: 'Reload saved file' })
+    .getByRole('button', { name: 'Reload this file', exact: true })
+    .click()
+  await reloaded
+  await opened('Third.lean', 'cachedC')
+  await page.waitForTimeout(300)
+  assert.equal(
+    await refreshImports.isVisible(),
+    true,
+    'Reloading unchanged source cannot certify that its imports were refreshed',
+  )
+  const beforeStaleReturn = notifications('didOpen', 'Third.lean').length
   await visit('Second.lean', 'cachedB')
   assert.equal(notifications('didOpen', 'Second.lean').length, openedSecond + 1)
+  await visit('Third.lean', 'cachedC')
+  assert.equal(
+    notifications('didOpen', 'Third.lean').length,
+    beforeStaleReturn + 1,
+    'An unchanged reload cannot re-cache a worker with stale imports',
+  )
+  assert.equal(await refreshImports.isVisible(), false)
+  const secondBeforeRefresh = notifications('didOpen', 'Second.lean').length
+  state.files[projectId]['Main.lean'] += '-- ANOTHER_IMPORT_CHANGE\n'
+  await refreshListing()
+  await refreshImports.waitFor()
+  assert.equal(
+    notifications('didOpen', 'Third.lean').length,
+    beforeStaleReturn + 1,
+    'A later foreign edit still must not automatically restart the proof',
+  )
+  const beforeExplicitRefresh = notifications('didOpen', 'Third.lean').length
+  await refreshImports.click()
+  await until(
+    () =>
+      notifications('didOpen', 'Third.lean').length ===
+      beforeExplicitRefresh + 1,
+    'explicit import refresh',
+  )
+  await refreshImports.waitFor({ state: 'hidden' })
+  await visit('Second.lean', 'cachedB')
+  assert.equal(
+    notifications('didOpen', 'Second.lean').length,
+    secondBeforeRefresh + 1,
+  )
   report.checks.push(
-    'Refreshing project sources invalidates cached importers even when the visible file and its own contents did not change.',
+    'Foreign changes mark current goals stale without restarting them; unchanged reloads keep the notice and cannot re-cache stale imports. Revisiting reopens fresh, and Refresh imports rechecks exactly once.',
+  )
+
+  const thirdCloses = notifications('didClose', 'Third.lean').length
+  const secondOpens = notifications('didOpen', 'Second.lean').length
+  await page.getByTitle('Close Third.lean', { exact: true }).click()
+  await until(
+    () => notifications('didClose', 'Third.lean').length > thirdCloses,
+    'closed tab releases its worker',
+  )
+  assert.equal(
+    await page.getByRole('tab', { name: 'Third.lean', exact: true }).count(),
+    0,
+  )
+  assert.equal(notifications('didOpen', 'Second.lean').length, secondOpens)
+  const secondTab = page.getByRole('tab', { name: 'Second.lean', exact: true })
+  await secondTab.focus()
+  await page.keyboard.press('Home')
+  assert.equal(
+    await page
+      .getByRole('tab', { name: 'Main.lean', exact: true })
+      .evaluate((node) => node === document.activeElement),
+    true,
+  )
+  await page.keyboard.press('End')
+  assert.equal(
+    await page
+      .getByRole('tab', { name: 'Fourth.lean', exact: true })
+      .evaluate((node) => node === document.activeElement),
+    true,
+  )
+  report.checks.push(
+    'Closing a background tab releases its Lean worker without rechecking the current file; tab navigation supports keyboard focus.',
   )
 
   await page.locator('.project-item[title="Other cache fixture"]').click()
   await opened('Main.lean', 'OTHER_PROJECT_SOURCE')
+  assert.equal(
+    await page
+      .getByRole('tablist', { name: 'Open files' })
+      .getByRole('tab')
+      .count(),
+    1,
+  )
+  const viewerOpens = () =>
+    messages.filter(
+      (message) =>
+        message.method === 'textDocument/didOpen' &&
+        new URL(message.socket).pathname === '/websocket/' + otherId &&
+        message.params.textDocument.uri.endsWith('/Main.lean'),
+    ).length
+  const viewerBefore = viewerOpens()
+  await visit('View.lean', 'VIEWER_SECOND_SOURCE')
+  await visit('Main.lean', 'OTHER_PROJECT_SOURCE')
+  assert.equal(viewerOpens(), viewerBefore)
+  assert.equal(
+    await page.getByRole('button', { name: 'Save', exact: true }).isEnabled(),
+    false,
+  )
+  report.checks.push(
+    'Viewers of shared projects reuse recent Lean work while their files remain read-only.',
+  )
   await page.locator('.project-item[title="Lean cache fixture"]').click()
   await opened('Second.lean', 'cachedB')
   assert(

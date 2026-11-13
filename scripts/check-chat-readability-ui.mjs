@@ -241,7 +241,9 @@ try {
   await old.getByRole('link', { name: 'the supporting lemma' }).click()
   await until(
     async () =>
-      (await page.locator('.file-tab').innerText()).includes('Helper.lean'),
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+        'Helper.lean',
+      ),
     'file citation navigation',
   )
   assert(

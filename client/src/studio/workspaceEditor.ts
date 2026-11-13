@@ -42,7 +42,7 @@ export class WorkspaceEditor {
         (!focused ||
           focused === document.body ||
           element.contains(focused) ||
-          focused.matches('.file-item'))
+          focused.matches('.file-item, .file-tab-button'))
       )
         this.editor.focus()
     } catch (error) {

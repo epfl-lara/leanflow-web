@@ -295,7 +295,7 @@ try {
   await dialog('file').waitFor({ state: 'hidden' })
   await until(
     async () =>
-      (await page.locator('.file-tab').innerText()).includes(
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
         'Proofs/Nested/Extra.lean',
       ),
     'new file opened',
@@ -359,7 +359,11 @@ try {
     )
     assert(await fileButton('Main.lean').isVisible())
     assert(await folderButton('Main').isVisible())
-    assert((await page.locator('.file-tab').innerText()).includes('Main.lean'))
+    assert(
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+        'Main.lean',
+      ),
+    )
     const unexpectedAlerts = (
       await page.locator('.workspace-alert').allTextContents()
     )

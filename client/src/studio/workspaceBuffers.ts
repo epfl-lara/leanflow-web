@@ -65,6 +65,7 @@ export class WorkspaceBuffers {
     scope: WorkspaceScope
     file: OpenFile | null
     buffers: ReadonlyMap<string, OpenFile>
+    openPaths: readonly string[]
     discardVersion: number
     saveVersion: number
     savedPaths: readonly string[]
@@ -74,6 +75,7 @@ export class WorkspaceBuffers {
     scope: { projectId: null },
     file: null,
     buffers: new Map(),
+    openPaths: [],
     discardVersion: 0,
     saveVersion: 0,
     savedPaths: [],
@@ -88,6 +90,7 @@ export class WorkspaceBuffers {
     this.state = {
       ...this.state,
       scope: { projectId },
+      openPaths: [],
       savedPaths: [],
       removedPaths: [],
     }
@@ -105,7 +108,11 @@ export class WorkspaceBuffers {
     file: OpenFile | null,
     buffers: ReadonlyMap<string, OpenFile>,
   ) {
-    this.state = { ...this.state, file, buffers }
+    const openPaths =
+      file && !this.state.openPaths.includes(file.path)
+        ? [...this.state.openPaths, file.path]
+        : this.state.openPaths
+    this.state = { ...this.state, file, buffers, openPaths }
     for (const listener of this.listeners) listener()
   }
   setFile: Dispatch<SetStateAction<OpenFile | null>> = (update) => {
@@ -113,6 +120,7 @@ export class WorkspaceBuffers {
     const file = typeof update === 'function' ? update(previous) : update
     if (!file) {
       this.retained.clear()
+      this.state = { ...this.state, openPaths: [] }
       this.publish(null, new Map())
       return
     }
@@ -127,6 +135,23 @@ export class WorkspaceBuffers {
       buffers.delete(previous.path)
     buffers.set(file.path, file)
     this.publish(file, buffers)
+  }
+  // Closing a tab is navigation, never a discard or a filesystem deletion.
+  closeFile = (path: string) => {
+    const buffer = this.state.buffers.get(path)
+    if (buffer && buffer.content !== buffer.savedContent)
+      throw new Error('Save or discard this file’s changes before closing it.')
+    const buffers = new Map(this.state.buffers)
+    buffers.delete(path)
+    this.retained.delete(path)
+    this.state = {
+      ...this.state,
+      openPaths: this.state.openPaths.filter((name) => name !== path),
+    }
+    this.publish(
+      this.state.file?.path === path ? null : this.state.file,
+      buffers,
+    )
   }
   register = (sources: RenameSource[]) => {
     // Validate the whole set before registering any buffer. Stale tabs and edits
@@ -264,7 +289,11 @@ export class WorkspaceBuffers {
   }
   detach = (path: string) => {
     const current = this.state.buffers.get(path)
-    if (!current || current.unavailable) return
+    if (!current) {
+      if (this.state.openPaths.includes(path)) this.closeFile(path)
+      return
+    }
+    if (current.unavailable) return
     const file = { ...current, unavailable: true, readOnly: true }
     const buffers = new Map(this.state.buffers)
     buffers.set(path, file)
@@ -286,6 +315,7 @@ export class WorkspaceBuffers {
       ...this.state,
       removeVersion: this.state.removeVersion + 1,
       removedPaths,
+      openPaths: this.state.openPaths.filter((name) => !matches(name)),
     }
     this.publish(
       this.state.file && !matches(this.state.file.path)
@@ -306,7 +336,21 @@ export class WorkspaceBuffers {
     const moving = [...this.state.buffers].filter(
       ([name, file]) => matches(name) && !file.unavailable,
     )
-    if (!moving.length) return
+    const openPaths = [
+      ...new Set(
+        this.state.openPaths.map((name) =>
+          matches(name) && !this.state.buffers.get(name)?.unavailable
+            ? target(name)
+            : name,
+        ),
+      ),
+    ]
+    if (
+      !moving.length &&
+      openPaths.length === this.state.openPaths.length &&
+      openPaths.every((name, index) => name === this.state.openPaths[index])
+    )
+      return
     const movingPaths = new Set(moving.map(([name]) => name))
     const destinations = new Set(moving.map(([name]) => target(name)))
     for (const destination of destinations) {
@@ -355,8 +399,22 @@ export class WorkspaceBuffers {
       ...this.state,
       removeVersion: this.state.removeVersion + 1,
       removedPaths: [...removedPaths],
+      openPaths,
     }
     this.publish(activePath ? (buffers.get(activePath) ?? null) : null, buffers)
+  }
+  discardFile = (path: string, generation: number) => {
+    const current = this.state.buffers.get(path)
+    if (!current || current.content === current.savedContent) return
+    const buffers = new Map(this.state.buffers)
+    const file = { ...current, content: current.savedContent, generation }
+    buffers.set(path, file)
+    // Its new generation resets only this document's history. The workspace
+    // discard version would also retire other files' unacknowledged live edits.
+    this.publish(
+      this.state.file?.path === path ? file : this.state.file,
+      buffers,
+    )
   }
   discard = (generation: number) => {
     const buffers = new Map(

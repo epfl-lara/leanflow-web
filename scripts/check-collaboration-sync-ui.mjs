@@ -239,7 +239,9 @@ const text = (fixture) =>
 async function opened(fixture, filename) {
   await until(
     async () =>
-      (await fixture.page.locator('.file-tab').innerText()).includes(filename),
+      (
+        await fixture.page.locator('.file-tab').getAttribute('aria-label')
+      ).includes(filename),
     `editor opens ${filename}`,
   )
   await fixture.page.locator('.editor-loading').waitFor({ state: 'hidden' })
@@ -262,6 +264,28 @@ async function type(fixture, value) {
 try {
   const owner = await browser('terminal-owner')
   const peer = await browser('terminal-peer')
+  await owner.page.locator('.file-item[title="Other.lean"]').click()
+  await opened(owner, 'Other.lean')
+  await owner.page.getByRole('tab', { name: 'Main.lean', exact: true }).click()
+  await opened(owner, 'Main.lean')
+  const removedSource = sources['Other.lean']
+  delete sources['Other.lean']
+  notify({ paths: ['Other.lean'], removedPaths: ['Other.lean'] })
+  await until(
+    async () =>
+      (await owner.page
+        .getByRole('tab', { name: 'Other.lean', exact: true })
+        .count()) === 0,
+    'a collaborator deletion closes an inactive clean tab',
+  )
+  assert.equal(
+    await owner.page
+      .getByRole('tab', { name: 'Main.lean', exact: true })
+      .getAttribute('aria-selected'),
+    'true',
+  )
+  sources['Other.lean'] = removedSource
+  notify({ paths: ['Other.lean'] })
   await until(
     () =>
       [...documents.documents.values()].some(
@@ -927,6 +951,7 @@ try {
   const report = {
     passed: true,
     checks: [
+      'A collaborator deletion removes a closed-buffer tab without changing the active source; deleted drafts remain recoverable.',
       'Two live editors follow terminal file moves and continue receiving and saving each other’s edits.',
       'Late old-path errors cannot stop destination saves or recreate old files.',
       'Repeated terminal moves keep the editor attached, and unrelated configuration saves still work.',

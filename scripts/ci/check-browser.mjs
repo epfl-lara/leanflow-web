@@ -61,6 +61,7 @@ const workspaceSuites = [
   'editor-sleep',
   'lean-comment-images',
   'file-lifecycle',
+  'file-tabs',
   'file-moves',
   'books',
   'downloads',

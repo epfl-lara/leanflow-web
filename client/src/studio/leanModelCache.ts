@@ -1,6 +1,8 @@
 import { Uri, editor } from 'monaco-editor'
 import { createModelReference } from 'vscode/monaco'
 import type { OpenFile } from './api'
+import { affectsLean } from './leanFileRevisions'
+import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configuration.mjs'
 
 type Reference = Awaited<ReturnType<typeof createModelReference>>
 type Entry = {
@@ -9,16 +11,9 @@ type Entry = {
   source?: OpenFile
   timer?: ReturnType<typeof setTimeout>
 }
-const configurationFiles = new Set([
-  'lean-toolchain',
-  'lakefile.lean',
-  'lakefile.toml',
-  'lake-manifest.json',
-])
-const affectsLean = (path: string) =>
-  path.endsWith('.lean') || configurationFiles.has(path)
+const configurationFiles = new Set<string>(PROJECT_CONFIGURATION_FILES)
 
-// Keep the current model and one recently visited project file alive. Retaining
+// Keep the current model and two recently visited project files alive. Retaining
 // the native document lets Lean keep its elaboration snapshots and versions.
 // Text limits bound retained source size, not Lean's imported environment RAM.
 export class LeanModelCache {
@@ -31,7 +26,11 @@ export class LeanModelCache {
 
   constructor(
     private released: () => void,
-    private options = { idleMs: 60_000, maxTextLength: 256 * 1024 },
+    private options = {
+      idleMs: 5 * 60_000,
+      maxTextLength: 256 * 1024,
+      maxHidden: 2,
+    },
   ) {}
 
   has(uri: string) {
@@ -52,7 +51,6 @@ export class LeanModelCache {
     for (const [key, entry] of this.entries) {
       if (key === uri) continue
       if (
-        !uri ||
         !entry.reference.object.textEditorModel ||
         entry.reference.object.textEditorModel.getValueLength() >
           this.options.maxTextLength
@@ -63,7 +61,11 @@ export class LeanModelCache {
       entry.timer ??= setTimeout(() => this.remove(key), this.options.idleMs)
     }
     const hidden = [...this.entries.keys()].filter((key) => key !== uri)
-    for (const key of hidden.slice(0, -1)) this.remove(key)
+    for (const key of hidden.slice(
+      0,
+      Math.max(0, hidden.length - this.options.maxHidden),
+    ))
+      this.remove(key)
   }
 
   async retain(uri: string) {
@@ -147,10 +149,16 @@ export class LeanModelCache {
       }
     }
     // The app drops clean buffers on a file switch; that is not a deletion.
-    // Keep only the two cached source revisions to recognize later disk changes.
+    // Keep only the cached source revisions to recognize later disk changes.
     for (const entry of this.entries.values())
       entry.source = buffers.get(entry.path) ?? entry.source
     this.buffers = buffers
+  }
+
+  retainOpenPaths(paths: readonly string[]) {
+    const open = new Set(paths)
+    for (const [uri, entry] of this.entries)
+      if (!open.has(entry.path)) this.remove(uri)
   }
 
   removePaths(paths: readonly string[]) {

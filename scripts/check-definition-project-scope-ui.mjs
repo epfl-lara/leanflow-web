@@ -94,7 +94,9 @@ try {
     .click()
   await until(
     async () =>
-      (await page.locator('.file-tab').innerText()).includes('Main.lean'),
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+        'Main.lean',
+      ),
     'alpha Main source',
   )
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })
@@ -106,7 +108,10 @@ try {
     async () =>
       (await page.locator('.workspace-title').innerText()).includes(
         'beta project',
-      ) && (await page.locator('.file-tab').innerText()).includes('Main.lean'),
+      ) &&
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+        'Main.lean',
+      ),
     'beta Main source',
   )
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })
@@ -170,7 +175,9 @@ try {
   await page.keyboard.press('Enter')
   await until(
     async () =>
-      (await page.locator('.file-tab').innerText()).includes('Util.lean') &&
+      (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+        'Util.lean',
+      ) &&
       (await page.locator('.view-lines').innerText()).includes('BETA_PREVIEW'),
     'Beta definition source',
   )

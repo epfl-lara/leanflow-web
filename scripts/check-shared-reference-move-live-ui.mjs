@@ -188,7 +188,9 @@ try {
     await page.locator('.editor-loading').waitFor({ state: 'hidden' })
     await until(
       async () =>
-        (await page.locator('.file-tab').innerText()).includes('Notes.md'),
+        (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+          'Notes.md',
+        ),
       'shared Markdown editor',
     )
     pages.push({ page, account })

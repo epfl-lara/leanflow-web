@@ -115,7 +115,9 @@ try {
       return (
         (await page.locator('.editor-failure').count()) === 0 &&
         (await page.locator('.editor-loading').count()) === 0 &&
-        (await page.locator('.file-toolbar').innerText()).includes(filename) &&
+        (await page
+          .getByRole('tab', { name: filename, exact: true })
+          .getAttribute('aria-selected')) === 'true' &&
         (await page.locator('.monaco-editor .view-lines').innerText()).includes(
           marker,
         )

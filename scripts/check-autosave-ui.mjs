@@ -209,7 +209,9 @@ try {
       .click()
     await until(
       async () =>
-        (await page.locator('.file-tab').innerText()).includes(name) &&
+        (await page.locator('.file-tab').getAttribute('aria-label')).includes(
+          name,
+        ) &&
         (await page.locator('.monaco-editor').innerText()).includes(marker),
       `open ${name}`,
     )

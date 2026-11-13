@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 import ts from 'typescript'
+import { affectsLean } from './leanFileRevisions.ts'
+import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configuration.mjs'
 
 const code = ts.transpileModule(
   fs.readFileSync(new URL('./leanModelCache.ts', import.meta.url), 'utf8'),
@@ -38,6 +40,9 @@ function fixture() {
     module.exports,
     module,
     (name) => {
+      if (name === './leanFileRevisions') return { affectsLean }
+      if (name === '../../../shared/project-configuration.mjs')
+        return { PROJECT_CONFIGURATION_FILES }
       if (name === 'monaco-editor')
         return {
           Uri: {
@@ -119,31 +124,32 @@ test('a recent file retains the same model reference without writing or reopenin
   assert.equal(f.notices.length, 0)
 })
 
-test('only the visible model and one recent project file remain retained', async () => {
+test('three recent project files survive tab switches and non-Lean previews', async () => {
   const f = fixture()
   await f.visit(a)
   await f.visit(b)
   await f.visit(c)
-  assert(!f.cache.has(a) && f.cache.has(b) && f.cache.has(c))
-  assert.deepEqual(f.released, [a])
+  assert(f.cache.has(a) && f.cache.has(b) && f.cache.has(c))
+  assert.deepEqual(f.released, [])
   f.cache.select(uri('Notes.md'))
-  assert(!f.cache.has(b) && f.cache.has(c))
+  assert(!f.cache.has(a) && f.cache.has(b) && f.cache.has(c))
   f.cache.select(null)
-  assert(!f.cache.has(c))
+  assert(f.cache.has(b) && f.cache.has(c))
+  f.cache.retainOpenPaths([])
   assert.deepEqual(f.released, [a, b, c])
   f.cache.dispose()
 })
 
-test('inactive entries expire after a minute while the current file remains retained', async () => {
+test('inactive entries expire after five minutes while the current file remains retained', async () => {
   const f = fixture()
   await f.visit(a)
   f.advance(120_000)
   assert(f.cache.has(a))
   await f.visit(b)
-  f.advance(59_000)
+  f.advance(299_000)
   assert(f.cache.has(a))
   await f.visit(a)
-  f.advance(60_000)
+  f.advance(300_000)
   assert(f.cache.has(a) && !f.cache.has(b))
   assert.deepEqual(f.released, [b])
   f.cache.dispose()
@@ -340,5 +346,33 @@ test('opening a large file releases cached workers before its elaboration starts
     'B.lean',
   )
   assert(!f.cache.has(a))
+  f.cache.dispose()
+})
+
+test('closing a tab releases only its worker without invalidating other recent files', async () => {
+  const f = fixture()
+  await f.visit(a)
+  await f.visit(b)
+  await f.visit(c)
+  f.cache.retainOpenPaths(['A.lean', 'C.lean'])
+  assert(f.cache.has(a) && f.cache.has(c) && !f.cache.has(b))
+  assert.deepEqual(f.released, [b])
+  await f.visit(a)
+  assert.equal(f.requests.length, 3)
+  f.cache.dispose()
+})
+
+test('visiting a fourth source evicts the least recently visited worker', async () => {
+  const f = fixture()
+  const d = uri('D.lean')
+  f.models.set(d, { text: 'fourth' })
+  await f.visit(a)
+  await f.visit(b)
+  await f.visit(c)
+  await f.visit(a)
+  await f.visit(d)
+  assert(f.cache.has(a) && f.cache.has(c) && f.cache.has(d))
+  assert(!f.cache.has(b))
+  assert.deepEqual(f.released, [b])
   f.cache.dispose()
 })

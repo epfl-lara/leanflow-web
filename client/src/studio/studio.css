@@ -813,6 +813,77 @@ textarea {
   gap: 6px;
   flex-shrink: 0;
 }
+.file-tabs {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  flex: 1;
+  overflow-x: auto;
+  gap: 3px;
+  scrollbar-width: thin;
+  align-self: stretch;
+}
+.file-tabs-empty {
+  padding-inline: 5px;
+}
+.file-tab-item {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  border-radius: 5px 5px 0 0;
+  max-width: min(240px, 100%);
+}
+.file-tab-item.active {
+  border-color: var(--border);
+  border-bottom-color: var(--accent);
+  background: var(--surface);
+  color: var(--text);
+}
+.file-tab-button,
+.file-tab-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  min-height: 30px;
+}
+.file-tab-button {
+  min-width: 0;
+  padding: 4px 6px 4px 8px;
+}
+.file-tab-button > svg,
+.file-tab-button .dirty-dot {
+  flex-shrink: 0;
+}
+.file-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-tab-close {
+  flex-shrink: 0;
+  width: 24px;
+  border-radius: 4px;
+}
+.file-tab-button:hover,
+.file-tab-close:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+.file-tab-button:focus-visible,
+.file-tab-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 .file-actions .lean-check-button {
   align-self: center;
   gap: 5px;
@@ -2321,6 +2392,7 @@ textarea {
     padding: 7px;
     font-size: 10px;
   }
+  .file-tabs,
   .file-tab {
     font-size: 10px;
   }
@@ -3371,4 +3443,16 @@ body.panel-resizing iframe {
   .project-sharing select {
     min-height: 44px;
   }
+}
+
+.lean-import-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 11px;
 }
