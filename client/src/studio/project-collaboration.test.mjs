@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { ProjectDocuments } from '../../../server/project-documents.mjs'
 import {
   replaceDocumentText,
+  documentTextEdits,
   documentTextEdit,
   documentOffsetAfterEdit,
 } from '../../../shared/document-text.mjs'
@@ -39,6 +40,9 @@ function transpile(name, imports = {}) {
 }
 const { WorkspaceBuffers } = transpile('./workspaceBuffers.ts')
 const { ApiError } = transpile('./api.ts')
+const { refreshChangedBuffers } = transpile('./workspaceFiles.ts', {
+  './api': { ApiError },
+})
 const { LocalDocumentHistory } = transpile('./localDocumentHistory.ts', {
   yjs: Y,
   '../../../shared/document-text.mjs': { documentTextEdit },
@@ -147,6 +151,9 @@ function fixture(t, initial = 'base source\n', options = {}) {
       react,
       yjs: Y,
       './localDocumentHistory': { LocalDocumentHistory },
+      './movedDocumentText': transpile('./movedDocumentText.ts', {
+        '../../../shared/document-text.mjs': { documentTextEdits },
+      }),
       './projectPresence': transpile('./projectPresence.ts'),
       './projectPaths': transpile('./projectPaths.ts', {
         '../../../shared/source-limits.mjs': { MAX_PROJECT_FILES },
@@ -1972,6 +1979,396 @@ test('a peer move carries unacknowledged typing to the destination without faili
     ),
     'nothing is ever written to the old path',
   )
+})
+
+test('a moved draft merges rewritten references and private Undo keeps the saved reference changes', async (t) => {
+  const baseline = '/-!\n![Figure](assets/Figure.svg)\n-/\n'
+  const saved = baseline.replace('assets/', '../assets/')
+  const { store, socket, hook, rerender } = fixture(t, baseline)
+  store.change('Main.lean', baseline + '-- local typing\n')
+  socket.receive({
+    type: 'files',
+    paths: ['Main.lean', 'Archive/Main.lean'],
+    removedPaths: ['Main.lean'],
+    moves: [{ from: 'Main.lean', to: 'Archive/Main.lean' }],
+  })
+  const flushing = hook.flush()
+  const opened = socket.sent.filter((message) => message.type === 'open').at(-1)
+  const destination = new Y.Doc()
+  t.after(() => destination.destroy())
+  destination.getText('source').insert(0, saved)
+  const identity = { path: 'Archive/Main.lean', documentId: 'moved-references' }
+  socket.receive(
+    wire(destination, undefined, {
+      ...identity,
+      openRequestId: opened.requestId,
+    }),
+  )
+  const update = lastDocumentUpdate(socket)
+  assert.equal(update.path, identity.path)
+  Y.applyUpdate(
+    destination,
+    new Uint8Array(Buffer.from(update.update, 'base64')),
+  )
+  assert.equal(
+    destination.getText('source').toString(),
+    saved + '-- local typing\n',
+  )
+  socket.receive(
+    wire(destination, undefined, { ...identity, ack: update.requestId }),
+  )
+  assert.equal(await flushing, true)
+  assert.equal(rerender().issue, null)
+  assert.equal(hook.undo(identity.path), true)
+  assert.equal(store.getSnapshot().file.content, saved)
+  const undo = lastDocumentUpdate(socket)
+  Y.applyUpdate(destination, new Uint8Array(Buffer.from(undo.update, 'base64')))
+  socket.receive(
+    wire(destination, undefined, { ...identity, ack: undo.requestId }),
+  )
+  assert.equal(await hook.flush(), true)
+  assert.equal(destination.getText('source').toString(), saved)
+  assert(
+    !socket.sent.some(
+      (message) => message.type === 'update' && message.path === 'Main.lean',
+    ),
+  )
+})
+
+test('overlapping moved references keep the local draft and explain how to combine it safely', async (t) => {
+  const baseline = '![Figure](assets/Figure.svg)\n'
+  const local = '![Figure](assets/Local.svg)\n'
+  const { store, socket, hook, rerender } = fixture(t, baseline)
+  store.change('Main.lean', local)
+  socket.receive({
+    type: 'files',
+    paths: [],
+    moves: [{ from: 'Main.lean', to: 'Moved.lean' }],
+  })
+  const rejection = assert.rejects(
+    hook.flush(),
+    /saved updates overlap your typing/,
+  )
+  const opened = socket.sent.filter((message) => message.type === 'open').at(-1)
+  const destination = new Y.Doc()
+  t.after(() => destination.destroy())
+  destination.getText('source').insert(0, '![Figure](../images/Remote.svg)\n')
+  socket.receive(
+    wire(destination, undefined, {
+      path: 'Moved.lean',
+      documentId: 'moved-overlap',
+      openRequestId: opened.requestId,
+    }),
+  )
+  await rejection
+  assert.equal(store.getSnapshot().file.content, local)
+  assert.equal(store.getSnapshot().file.savedContent, baseline)
+  assert.match(rerender().issue, /Copy or download it, then reload/)
+  assert(!socket.sent.some((message) => message.type === 'update'))
+})
+
+test('quick consecutive moves keep the original draft baseline until the final destination opens', async (t) => {
+  const baseline = 'import Examples.Helper\n-- proof\n'
+  const saved = 'import Archive.Final.Helper\n-- proof\n'
+  const { store, socket, hook } = fixture(t, baseline)
+  store.change('Main.lean', baseline + '-- local typing\n')
+  socket.receive({
+    type: 'files',
+    paths: [],
+    moves: [{ from: 'Main.lean', to: 'Stage/Main.lean' }],
+  })
+  const firstFlush = hook.flush()
+  const intermediate = socket.sent
+    .filter((message) => message.type === 'open')
+    .at(-1)
+  socket.receive({
+    type: 'files',
+    paths: [],
+    moves: [{ from: 'Stage', to: 'Archive/Final' }],
+  })
+  const finalFlush = hook.flush()
+  const final = socket.sent.filter((message) => message.type === 'open').at(-1)
+  assert.equal(final.path, 'Archive/Final/Main.lean')
+  const destination = new Y.Doc()
+  t.after(() => destination.destroy())
+  destination.getText('source').insert(0, saved)
+  socket.receive(
+    wire(destination, undefined, {
+      path: intermediate.path,
+      documentId: 'obsolete-stage',
+      openRequestId: intermediate.requestId,
+    }),
+  )
+  assert.equal(store.getSnapshot().file.path, final.path)
+  const identity = { path: final.path, documentId: 'final-moved-document' }
+  socket.receive(
+    wire(destination, undefined, {
+      ...identity,
+      openRequestId: final.requestId,
+    }),
+  )
+  const update = lastDocumentUpdate(socket)
+  assert.equal(update.path, final.path)
+  Y.applyUpdate(
+    destination,
+    new Uint8Array(Buffer.from(update.update, 'base64')),
+  )
+  socket.receive(
+    wire(destination, undefined, { ...identity, ack: update.requestId }),
+  )
+  assert.equal(await firstFlush, true)
+  assert.equal(await finalFlush, true)
+  assert.equal(store.getSnapshot().file.content, saved + '-- local typing\n')
+})
+
+test('an own move receipt preserves its baseline before the live announcement arrives', async (t) => {
+  const baseline = 'import Examples.Helper\n'
+  const saved = 'import Archive.Helper\n'
+  const { store, socket, hook, rerender } = fixture(t, baseline)
+  store.change('Main.lean', baseline + '-- typed during request\n')
+  hook.move({ from: 'Main.lean', to: 'Archive/Main.lean' })
+  // Studio still applies its normal buffer update after the hook handles the receipt.
+  store.move('Main.lean', 'Archive/Main.lean', 9)
+  assert.equal(hook.manages('Archive/Main.lean'), true)
+  const refreshed = await refreshChangedBuffers(
+    store,
+    store.getSnapshot().scope,
+    ['Archive/Main.lean'],
+    async () => assert.fail('The pending live move owns the reference refresh'),
+    hook.manages,
+  )
+  assert.deepEqual(refreshed, { pendingPaths: [], failedPaths: [] })
+  const flushing = hook.flush()
+  const opened = socket.sent.filter((message) => message.type === 'open').at(-1)
+  socket.receive({
+    type: 'files',
+    paths: [],
+    moves: [{ from: 'Main.lean', to: opened.path }],
+  })
+  const destination = new Y.Doc()
+  t.after(() => destination.destroy())
+  destination.getText('source').insert(0, saved)
+  const identity = { path: opened.path, documentId: 'own-moved-document' }
+  socket.receive(
+    wire(destination, undefined, {
+      ...identity,
+      openRequestId: opened.requestId,
+    }),
+  )
+  const update = lastDocumentUpdate(socket)
+  Y.applyUpdate(
+    destination,
+    new Uint8Array(Buffer.from(update.update, 'base64')),
+  )
+  socket.receive(
+    wire(destination, undefined, { ...identity, ack: update.requestId }),
+  )
+  assert.equal(await flushing, true)
+  assert.equal(rerender().issue, null)
+  assert.deepEqual([...store.getSnapshot().buffers.keys()], [opened.path])
+  assert.equal(
+    store.getSnapshot().file.content,
+    saved + '-- typed during request\n',
+  )
+})
+
+test('a reload generation cannot reuse an earlier move to merge a divergent saved baseline', async (t) => {
+  const baseline = 'import Examples.Helper\n'
+  const { store, socket, hook } = fixture(t, baseline)
+  store.change('Main.lean', baseline + '-- local typing\n')
+  hook.move({ from: 'Main.lean', to: 'Moved.lean' })
+  store.setFile({ ...store.getSnapshot().file, generation: 20 })
+  const rejection = assert.rejects(hook.flush(), /changed while disconnected/)
+  const opened = socket.sent.filter((message) => message.type === 'open').at(-1)
+  const destination = new Y.Doc()
+  t.after(() => destination.destroy())
+  destination.getText('source').insert(0, 'import Archive.Helper\n')
+  socket.receive(
+    wire(destination, undefined, {
+      path: opened.path,
+      documentId: 'reloaded-moved-document',
+      openRequestId: opened.requestId,
+    }),
+  )
+  await rejection
+  assert.equal(store.getSnapshot().file.content, baseline + '-- local typing\n')
+  assert(!socket.sent.some((message) => message.type === 'update'))
+})
+
+for (const replacement of ['generation', 'hash'])
+  test(`a move cannot trust a live source whose buffer ${replacement} changed before its debounce`, async (t) => {
+    const baseline = 'import Examples.Helper\n'
+    const { store, socket, hook } = fixture(t, baseline)
+    const saved =
+      replacement === 'hash' ? baseline + '-- saved refresh\n' : baseline
+    const local = saved + '-- local typing\n'
+    store.setFile({
+      ...store.getSnapshot().file,
+      content: local,
+      savedContent: saved,
+      hash: hash(saved),
+      generation: replacement === 'generation' ? 20 : 1,
+    })
+    hook.move({ from: 'Main.lean', to: 'Moved.lean' })
+    const rejection = assert.rejects(hook.flush(), /changed while disconnected/)
+    const opened = socket.sent
+      .filter((message) => message.type === 'open')
+      .at(-1)
+    const destination = new Y.Doc()
+    t.after(() => destination.destroy())
+    destination
+      .getText('source')
+      .insert(0, saved.replace('Examples.Helper', 'Archive.Helper'))
+    socket.receive(
+      wire(destination, undefined, {
+        path: opened.path,
+        documentId: 'moved-stale-source',
+        openRequestId: opened.requestId,
+      }),
+    )
+    await rejection
+    assert.equal(store.getSnapshot().file.content, local)
+    assert(!socket.sent.some((message) => message.type === 'update'))
+  })
+
+for (const timing of ['before-move', 'after-move'])
+  test(`a disconnect ${timing} preserves a divergent moved draft instead of rebasing into a replacement`, async (t) => {
+    const baseline = 'import Examples.Helper\n'
+    const { store, socket, hook, rerender } = fixture(t, baseline)
+    const local = baseline + '-- local typing\n'
+    store.change('Main.lean', local)
+    if (timing === 'before-move') socket.close()
+    hook.move({ from: 'Main.lean', to: 'Moved.lean' })
+    if (timing === 'after-move') {
+      const interrupted = assert.rejects(
+        hook.flush(),
+        /connection was interrupted/,
+      )
+      socket.close()
+      await interrupted
+    }
+    await new Promise((resolve) => setTimeout(resolve, 550))
+    const reopened = Socket.instances.at(-1)
+    assert.notEqual(reopened, socket)
+    reopened.receive({ type: 'ready' })
+    const opened = reopened.sent
+      .filter((message) => message.type === 'open')
+      .at(-1)
+    assert.equal(opened.path, 'Moved.lean')
+    const replacement = new Y.Doc()
+    t.after(() => replacement.destroy())
+    replacement
+      .getText('source')
+      .insert(0, 'import Archive.Helper\n-- saved replacement\n')
+    reopened.receive(
+      wire(replacement, undefined, {
+        path: opened.path,
+        documentId: 'replacement-after-disconnect',
+        openRequestId: opened.requestId,
+      }),
+    )
+    assert.equal(store.getSnapshot().file.content, local)
+    assert.match(rerender().issue, /changed while disconnected/)
+    assert(!reopened.sent.some((message) => message.type === 'update'))
+    await assert.rejects(hook.flush(), /changed while disconnected/)
+  })
+
+test('a moved baseline cannot publish a draft after the buffer loses editing access', async (t) => {
+  const baseline = 'import Examples.Helper\n'
+  const { store, socket, hook, rerender } = fixture(t, baseline)
+  store.change('Main.lean', baseline + '-- local typing\n')
+  hook.move({ from: 'Main.lean', to: 'Moved.lean' })
+  store.permissions(true)
+  await hook.flush()
+  const opened = socket.sent.filter((message) => message.type === 'open').at(-1)
+  const destination = new Y.Doc()
+  t.after(() => destination.destroy())
+  destination.getText('source').insert(0, 'import Archive.Helper\n')
+  socket.receive(
+    wire(destination, undefined, {
+      path: opened.path,
+      documentId: 'read-only-moved-document',
+      openRequestId: opened.requestId,
+    }),
+  )
+  assert.equal(store.getSnapshot().file.content, baseline + '-- local typing\n')
+  assert.equal(store.getSnapshot().file.readOnly, true)
+  assert.match(rerender().issue, /draft is kept/)
+  assert(!socket.sent.some((message) => message.type === 'update'))
+})
+
+test('a move permits only its first destination admission to reconcile divergent saved contents', async (t) => {
+  const baseline = 'import Examples.Helper\n'
+  const saved = 'import Archive.Helper\n'
+  const { store, socket, hook, rerender } = fixture(t, baseline)
+  store.change('Main.lean', baseline + '-- first local typing\n')
+  hook.move({ from: 'Main.lean', to: 'Moved.lean' })
+  const flushing = hook.flush()
+  const opened = socket.sent.filter((message) => message.type === 'open').at(-1)
+  const destination = new Y.Doc()
+  t.after(() => destination.destroy())
+  destination.getText('source').insert(0, saved)
+  const identity = { path: opened.path, documentId: 'first-moved-document' }
+  socket.receive(
+    wire(destination, undefined, {
+      ...identity,
+      openRequestId: opened.requestId,
+    }),
+  )
+  const update = lastDocumentUpdate(socket)
+  Y.applyUpdate(
+    destination,
+    new Uint8Array(Buffer.from(update.update, 'base64')),
+  )
+  socket.receive(
+    wire(destination, undefined, { ...identity, ack: update.requestId }),
+  )
+  assert.equal(await flushing, true)
+  const local = store.getSnapshot().file.content + '-- later local typing\n'
+  store.change(opened.path, local)
+  const replacement = new Y.Doc()
+  t.after(() => replacement.destroy())
+  replacement
+    .getText('source')
+    .insert(
+      0,
+      '-- later external edit\n' + destination.getText('source').toString(),
+    )
+  socket.receive(
+    wire(replacement, undefined, {
+      path: opened.path,
+      documentId: 'unrelated-new-identity',
+    }),
+  )
+  assert.equal(store.getSnapshot().file.content, local)
+  assert.match(rerender().issue, /changed while disconnected/)
+  await assert.rejects(hook.flush(), /changed while disconnected/)
+})
+
+test('HTTP fallback retires a pending move baseline before a late live admission', async (t) => {
+  const baseline = 'import Examples.Helper\n'
+  const { store, socket, hook } = fixture(t, baseline, { deferReady: true })
+  store.change('Main.lean', baseline + '-- local typing\n')
+  hook.move({ from: 'Main.lean', to: 'Moved.lean' })
+  assert.equal(await hook.flush(), false)
+  assert.equal(hook.manages('Moved.lean'), false)
+  socket.receive({ type: 'ready' })
+  assert(
+    !socket.sent.some(
+      (message) => message.type === 'open' && message.path === 'Moved.lean',
+    ),
+  )
+  const destination = new Y.Doc()
+  t.after(() => destination.destroy())
+  destination.getText('source').insert(0, 'import Archive.Helper\n')
+  socket.receive(
+    wire(destination, undefined, {
+      path: 'Moved.lean',
+      documentId: 'late-live-admission',
+    }),
+  )
+  assert.equal(store.getSnapshot().file.content, baseline + '-- local typing\n')
+  assert.equal(store.getSnapshot().file.savedContent, baseline)
 })
 
 test('leaving a removed clean document releases its failure before saving configuration', async (t) => {

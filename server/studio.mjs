@@ -331,6 +331,11 @@ export async function createStudio({
     runtime,
     setupBuildTimeoutMs: capacity.setupBuildTimeoutMs,
     storage,
+    referenceUpdateCapacity: {
+      maxConcurrent: capacity.sourceRequests ?? 2,
+      maxPerUser: capacity.sourceRequestsPerUser ?? 1,
+      maxQueued: capacity.workerQueue ?? 24,
+    },
     gitCredentials: (owner, repository) =>
       gitConnections.credentials(owner, repository),
   })

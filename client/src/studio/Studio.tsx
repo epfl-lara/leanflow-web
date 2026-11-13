@@ -1972,6 +1972,7 @@ export function Studio() {
       // path; later saves then target the new file, never the removed one. A
       // live broadcast of this same move may already have done so.
       ++openRequest.current
+      collaboration.move({ from, to })
       bufferStore.move(from, to, ++generation.current)
       // Drafts, proof focus and the remembered file follow the move too.
       handleFilesMoved({ from, to })

@@ -23,6 +23,8 @@ const sources = {
   'Notes.lean': '-- another file\n',
   'Other.lean': '-- independent saved file\n',
   'RestOnly.lean': '-- capacity fallback fixture\n',
+  'Linked/Helper.lean': 'theorem helper : True := by trivial\n',
+  'Linked/Proof.lean': 'import Linked.Helper\n\nexample : True := by trivial\n',
 }
 const fixtures = []
 const releaseReads = []
@@ -360,6 +362,62 @@ try {
       .click()
     await opened(fixture, path.posix.basename(filename))
   }
+
+  for (const fixture of [owner, peer]) {
+    await fixture.page
+      .locator('.folder-toggle')
+      .and(fixture.page.getByTitle('Linked', { exact: true }))
+      .click()
+    await select(fixture, 'Linked/Proof.lean')
+  }
+  const movedDraft = holdWrite('DRAFT_DURING_REFERENCE_MOVE')
+  await type(peer, '\n-- DRAFT_DURING_REFERENCE_MOVE\n')
+  await until(
+    () => movedDraft.entered,
+    'a peer has unpublished typing inside the folder being moved',
+  )
+  sources['Archive/Proof.lean'] = sources['Linked/Proof.lean'].replace(
+    'Linked.Helper',
+    'Archive.Helper',
+  )
+  sources['Archive/Helper.lean'] = sources['Linked/Helper.lean']
+  delete sources['Linked/Proof.lean']
+  delete sources['Linked/Helper.lean']
+  notify({
+    paths: ['Linked', 'Archive', 'Archive/Proof.lean'],
+    removedPaths: ['Linked'],
+    moves: [{ from: 'Linked', to: 'Archive' }],
+  })
+  movedDraft.release()
+  await until(
+    () =>
+      sources['Archive/Proof.lean'].includes('DRAFT_DURING_REFERENCE_MOVE') &&
+      sources['Archive/Proof.lean'].includes('Archive.Helper'),
+    'moved-file imports and pending typing save together',
+  )
+  await until(
+    async () =>
+      (await text(owner)).includes('Archive.Helper') &&
+      (await text(peer)).includes('Archive.Helper'),
+    'both editors show the rewritten import at the new path',
+  )
+  await type(owner, '\n-- OWNER_AFTER_REFERENCE_MOVE\n')
+  await until(
+    async () =>
+      (await text(owner)).includes('DRAFT_DURING_REFERENCE_MOVE') &&
+      (await text(peer)).includes('OWNER_AFTER_REFERENCE_MOVE') &&
+      sources['Archive/Proof.lean'].includes('OWNER_AFTER_REFERENCE_MOVE'),
+    'both editors continue collaborating after a move rewrites imports',
+  )
+  assert(!Object.hasOwn(sources, 'Linked/Proof.lean'))
+  for (const fixture of [owner, peer])
+    assert(
+      !(await fixture.page.locator('[role="alert"]').allTextContents()).some(
+        (message) => /changed while disconnected/.test(message),
+      ),
+      'an announced move with disjoint edits must not leave autosave blocked',
+    )
+
   await select(owner, 'Notes.lean')
   await select(peer, 'Notes.lean')
   const orphanedSave = holdWrite('KEEP_DELETED_DRAFT')
@@ -872,6 +930,7 @@ try {
       'Two live editors follow terminal file moves and continue receiving and saving each other’s edits.',
       'Late old-path errors cannot stop destination saves or recreate old files.',
       'Repeated terminal moves keep the editor attached, and unrelated configuration saves still work.',
+      'Moving a folder while rewriting imports preserves a peer’s unpublished typing and both editors continue saving at the new path.',
       'Terminal startup waits for durable browser saves before taking its working copy.',
       'Terminal reconnect also waits for durable browser saves before opening another private copy.',
       'A deletion with unacknowledged typing preserves the draft and lets unrelated live and HTTP saves continue.',

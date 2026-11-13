@@ -36,6 +36,8 @@ Agent and terminal changes enter through checked file transactions and then upda
 
 Open editors follow terminal moves when an unchanged file can be identified uniquely. For moves involving several identical files, use the file browser's **Rename** or **Move to folder** action. If an old file still has a draft, download it before discarding it and open the file at its new location.
 
+Connected editors also follow file-browser moves that update imports and links. Unpublished typing merges automatically when it affects different text from the saved updates. If the edits overlap, the draft stays in the tab with a message asking you to copy or download it before reloading. A lost connection keeps the usual version checks; an old draft cannot automatically attach to a replacement file.
+
 If a saved file disappears, its unsaved draft stays in a read-only view. Other files can still save and receive collaborators' changes. Choose **Download draft** or **Save a copy** to recover the draft under a new name. Saving a copy never replaces a different existing file. This also applies when the deletion happened while your connection was interrupted. Leaving the project still asks you to keep or discard remaining drafts.
 
 Large batches hold the write queue for that project until they finish. Another save in the same project can wait for the batch; your local draft remains editable and other projects keep responding. Keep the tab open until saving is confirmed. Replacing an existing file preserves its name throughout the replacement, so readers see complete old or new contents rather than a temporarily missing file.

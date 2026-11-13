@@ -229,6 +229,19 @@ test('Lean string interpolation cannot create fake comments or imports', () => {
   )
 })
 
+test('combined Lean import modifiers retain their scope while the module path follows a move', () => {
+  const rewrite = createReferenceRewriter({
+    from: 'Examples/Proof.lean',
+    to: 'Proofs/Proof.lean',
+    files: ['Examples/Proof.lean'],
+  })
+  const content = 'module\npublic meta import Examples.Proof\n'
+  assert.deepEqual(rewrite(content, 'Main.lean'), {
+    content: 'module\npublic meta import Proofs.Proof\n',
+    count: 1,
+  })
+})
+
 test('TeX commands update figures, inputs and bibliography paths with optional and omitted extensions', () => {
   const move = {
     from: 'assets',
@@ -389,6 +402,23 @@ test('new percent and delimiter characters stay encoded as part of Markdown file
   })
   assert.deepEqual(rewrite('[a](a.svg)', 'README.md'), {
     content: '[a](100%25done%281%29%232.svg)',
+    count: 1,
+  })
+})
+
+test('Lean imports never rewrite a supported substring of a distinct Unicode module', () => {
+  const rewrite = createReferenceRewriter({
+    from: 'A.lean',
+    to: 'Archive/A.lean',
+    files: ['A.lean', 'A℃.lean', '℃A.lean', 'A/℃.lean', 'A᾽.lean'],
+  })
+  const source = 'import A℃ ℃A «A».℃ A᾽ A\n'
+  assert.deepEqual(rewrite(source, 'Main.lean'), {
+    content: 'import A℃ ℃A «A».℃ A᾽ Archive.A\n',
+    count: 1,
+  })
+  assert.deepEqual(rewrite('import «A℃» «℃A» «A».«℃» A\n', 'Main.lean'), {
+    content: 'import «A℃» «℃A» «A».«℃» Archive.A\n',
     count: 1,
   })
 })

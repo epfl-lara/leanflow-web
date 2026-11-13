@@ -540,12 +540,20 @@ export function createReferenceRewriter({ from, to, files }) {
             link,
           )
         const imports =
-          /^(?:[ \t]*(?:public|private|meta)[ \t]+)?[ \t]*import[ \t]+([^\r\n]*)/gm
+          /^[ \t]*(?:(?:public|private|meta)[ \t]+)*import[ \t]+([^\r\n]*)/gm
         for (const statement of code.matchAll(imports)) {
           const start =
             statement.index + statement[0].length - statement[1].length
           moduleToken.lastIndex = 0
           for (const token of statement[1].matchAll(moduleToken)) {
+            const end = token.index + token[0].length
+            // An unsupported identifier may contain a supported-looking prefix
+            // or suffix. Rewrite only an entire import, including quoted parts.
+            if (
+              (token.index > 0 && !/\s/.test(statement[1][token.index - 1])) ||
+              (end < statement[1].length && !/\s/.test(statement[1][end]))
+            )
+              continue
             const segments = token[0].match(/«[^»\r\n]+»|[^.]+/g)
             const original =
               segments

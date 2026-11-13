@@ -13,6 +13,7 @@ import { WebSocket } from 'ws'
 import * as Y from 'yjs'
 import { createStudio } from '../studio.mjs'
 import { JobManager } from '../events.mjs'
+import { ReferenceUpdateAdmission } from '../reference-update-admission.mjs'
 import { assertMovePaths, parseMoveRequest } from '../workspace-moves.mjs'
 
 const TOOLCHAIN = 'leanprover/lean4:v4.34.1'
@@ -129,6 +130,58 @@ async function fixture(t) {
 
 const write = (f, name, content = '-- ' + name + '\n') =>
   f.store.writeFile(f.project.id, 'owner', name, content, null)
+
+function holdReferenceDiscovery(t, f) {
+  let enter,
+    release,
+    queued,
+    held = false,
+    scans = 0,
+    requests = 0
+  const entered = new Promise((resolve) => {
+    enter = resolve
+  })
+  const secondQueued = new Promise((resolve) => {
+    queued = resolve
+  })
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const open = fs.open,
+    readdir = fs.readdir,
+    admission = f.store.referenceUpdateAdmission,
+    run = admission.run.bind(admission)
+  t.mock.method(admission, 'run', (...args) => {
+    if (++requests === 2) queued()
+    return run(...args)
+  })
+  t.mock.method(fs, 'readdir', async (filename, ...args) => {
+    if ((await fs.realpath(filename)) === f.project.root) scans++
+    return readdir(filename, ...args)
+  })
+  t.mock.method(fs, 'open', async (filename, ...args) => {
+    if (
+      !held &&
+      String(filename) === path.join(f.project.root, 'Reference.md')
+    ) {
+      held = true
+      enter()
+      await gate
+    }
+    return open(filename, ...args)
+  })
+  syncBuiltinESMExports()
+  return {
+    entered,
+    secondQueued,
+    release,
+    scans: () => scans,
+    restore: () => {
+      t.mock.restoreAll()
+      syncBuiltinESMExports()
+    },
+  }
+}
 
 async function sharedClient(t, f, actor) {
   const ws = new WebSocket(
@@ -787,6 +840,195 @@ test('reference discovery lets unrelated editor saves complete while a reference
     (await f.store.readFile(f.project.id, 'owner', 'Reference.md')).content,
     '![Figure](B.svg)\n',
   )
+})
+
+test('invalid moves reject before reading reference files', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'A.svg', '<svg/>\n')
+  await write(f, 'Existing.svg', '<svg/>\n')
+  await write(f, 'Reference.md', '![Figure](A.svg)\n')
+  await fs.mkdir(path.join(f.project.root, 'Protected'))
+  await fs.writeFile(path.join(f.project.root, 'Protected/.env'), 'PRIVATE=1\n')
+  const open = fs.open
+  let reads = 0
+  t.mock.method(fs, 'open', async (filename, ...args) => {
+    if (String(filename) === path.join(f.project.root, 'Reference.md')) reads++
+    return open(filename, ...args)
+  })
+  syncBuiltinESMExports()
+  try {
+    for (const [from, to, status] of [
+      ['A.svg', 'Existing.svg', 409],
+      ['A.svg', 'Missing/A.svg', 404],
+      ['Missing.svg', 'B.svg', 404],
+      ['Protected', 'MovedProtected', 403],
+    ]) {
+      const response = await f.move({ from, to, updateReferences: true })
+      assert.equal(response.status, status, `${from} -> ${to}`)
+      assert.equal(reads, 0)
+    }
+    f.store.jobs.set(f.project.id, Promise.resolve())
+    try {
+      const response = await f.move({
+        from: 'A.svg',
+        to: 'B.svg',
+        updateReferences: true,
+      })
+      assert.equal(response.status, 409)
+      assert.match((await response.json()).error, /preparation/)
+      assert.equal(reads, 0)
+    } finally {
+      f.store.jobs.delete(f.project.id)
+    }
+    f.store.db
+      .prepare(
+        "UPDATE projects SET data=json_set(data,'$.kind','single-file') WHERE id=?",
+      )
+      .run(f.project.id)
+    const playground = await f.move({
+      from: 'A.svg',
+      to: 'B.svg',
+      updateReferences: true,
+    })
+    assert.equal(playground.status, 409)
+    assert.match((await playground.json()).error, /Convert the playground/)
+    assert.equal(reads, 0)
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+})
+
+test('shared reference moves wait per project while ordinary saves and moves continue', async (t) => {
+  const f = await fixture(t)
+  for (const filename of ['A.svg', 'C.svg', 'Plain.svg'])
+    await write(f, filename, '<svg/>\n')
+  await write(f, 'Reference.md', '![A](A.svg) ![C](C.svg)\n')
+  await write(f, 'Other.lean', '-- saved\n')
+  const other = await f.store.readFile(f.project.id, 'owner', 'Other.lean')
+  const discovery = holdReferenceDiscovery(t, f)
+  const first = f.move({ from: 'A.svg', to: 'B.svg', updateReferences: true })
+  let second, responses
+  try {
+    await discovery.entered
+    second = f.move(
+      { from: 'C.svg', to: 'D.svg', updateReferences: true },
+      'editor',
+    )
+    await discovery.secondQueued
+    assert.equal(discovery.scans(), 1)
+    await f.store.writeFile(
+      f.project.id,
+      'owner',
+      'Other.lean',
+      '-- saved while a scan and move are waiting\n',
+      other.hash,
+    )
+    const ordinary = await f.move({
+      from: 'Plain.svg',
+      to: 'MovedPlain.svg',
+      updateReferences: false,
+    })
+    assert.equal(ordinary.status, 200)
+    assert.equal(discovery.scans(), 1)
+  } finally {
+    discovery.release()
+    try {
+      responses = await Promise.all([first, second].filter(Boolean))
+    } finally {
+      discovery.restore()
+    }
+  }
+  assert.equal(responses.length, 2)
+  for (const response of responses) {
+    assert.equal(response.status, 200)
+    const { references } = await response.json()
+    assert.equal(references.updatedFiles, 1)
+    assert.equal(references.skippedFiles, 0)
+  }
+  assert.equal(discovery.scans(), 2)
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'Reference.md')).content,
+    '![A](B.svg) ![C](D.svg)\n',
+  )
+})
+
+for (const change of ['access revoked', 'destination created'])
+  test(`a waiting reference move rechecks ${change} before scanning`, async (t) => {
+    const f = await fixture(t)
+    for (const filename of ['A.svg', 'C.svg'])
+      await write(f, filename, '<svg/>\n')
+    await write(f, 'Reference.md', '![A](A.svg) ![C](C.svg)\n')
+    const discovery = holdReferenceDiscovery(t, f)
+    const first = f.move({ from: 'A.svg', to: 'B.svg', updateReferences: true })
+    let second, responses
+    try {
+      await discovery.entered
+      second = f.move(
+        { from: 'C.svg', to: 'D.svg', updateReferences: true },
+        'editor',
+      )
+      await discovery.secondQueued
+      if (change === 'access revoked')
+        await f.store.setMember(f.project.id, 'owner', 'editor', 'viewer')
+      else await write(f, 'D.svg', '<svg><!-- existing destination --></svg>\n')
+    } finally {
+      discovery.release()
+      try {
+        responses = await Promise.all([first, second].filter(Boolean))
+      } finally {
+        discovery.restore()
+      }
+    }
+    assert.equal(responses[0].status, 200)
+    assert.equal(responses[1].status, change === 'access revoked' ? 403 : 409)
+    assert.equal(discovery.scans(), 1)
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'owner', 'C.svg')).content,
+      '<svg/>\n',
+    )
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'owner', 'Reference.md')).content,
+      '![A](B.svg) ![C](C.svg)\n',
+    )
+  })
+
+test('a timed-out queued reference move never executes after capacity returns', async (t) => {
+  const f = await fixture(t)
+  f.store.referenceUpdateAdmission = new ReferenceUpdateAdmission({
+    maxWaitMs: 25,
+  })
+  for (const filename of ['A.svg', 'C.svg'])
+    await write(f, filename, '<svg/>\n')
+  await write(f, 'Reference.md', '![A](A.svg) ![C](C.svg)\n')
+  const discovery = holdReferenceDiscovery(t, f)
+  const first = f.move({ from: 'A.svg', to: 'B.svg', updateReferences: true })
+  let response, firstResponse
+  try {
+    await discovery.entered
+    response = await f.move(
+      { from: 'C.svg', to: 'D.svg', updateReferences: true },
+      'editor',
+    )
+    assert.equal(response.status, 429)
+    assert.match((await response.json()).error, /reference updates are busy/)
+  } finally {
+    discovery.release()
+    try {
+      firstResponse = await first
+    } finally {
+      discovery.restore()
+    }
+  }
+  assert.equal(firstResponse.status, 200)
+  assert.equal(discovery.scans(), 1)
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'C.svg')).content,
+    '<svg/>\n',
+  )
+  await assert.rejects(fs.stat(path.join(f.project.root, 'D.svg')), {
+    code: 'ENOENT',
+  })
 })
 
 test('a failed reference transaction rolls back its edits and still reports the committed move', async (t) => {

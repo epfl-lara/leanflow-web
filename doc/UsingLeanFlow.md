@@ -52,9 +52,11 @@ To rename or move a project file or folder, right-click it in the file sidebar o
 
 Choose the parent under **Destination folder**. To move `figures` to `Problems/figures`, choose `Problems`. Change **Name** to rename it in the same move. Check **New path** before confirming.
 
-Keep **Update imports and file links** selected to update recognized references automatically. It is on by default. This covers Lean imports, Markdown links and images (including Lean comments), and common TeX commands such as `\includegraphics` and `\input`. Relative links inside moved documents follow their new location. The result shows how many references changed. Paths built in code and unsupported or ambiguous references need a manual update.
+Keep **Update imports and file links** selected to update recognized references automatically. It is on by default. This covers Lean imports, Markdown links and images (including Lean comments), and common TeX commands such as `\includegraphics` and `\input`. Relative links inside moved documents follow their new location. The result shows how many references changed. Paths built in code and unsupported or ambiguous references need a manual update. Check HTML image tags, deeply indented Markdown links, folder links, and imports using custom Lean source directories manually.
 
 Reference discovery runs locally without holding the file-save queue. It excludes dependencies and protected files and uses a 32 MiB, five-second scan budget. Only files that still match their scanned version are updated. The move completes even if a reference update cannot be saved; a warning tells you to review the remaining imports and links. Newer editor drafts stay intact.
+
+Simultaneous reference updates wait briefly for capacity while unrelated editing stays available. If the queue is busy, retry the move shortly. Turning off **Update imports and file links** skips that queue; update the references manually afterward.
 
 You can move files while checks, assistant runs, PDF builds and terminals stay open. Wait for setup or a Git operation to finish first. If an assistant or terminal later tries to update the old path, its conflicting update is kept in its private copy. A Lean check that sees changed files asks you to run it again. Project setup files stay in place. Open files, chat attachments and focused proofs follow the new paths while you are connected. If you were offline, refresh the file list and reopen the file at its new path.
 
@@ -178,6 +180,15 @@ To formalize a document, open its PDF, TeX, Markdown, plain text, or other reada
 Ask Lemex to fix project configuration when needed, including registering a new Lean module in `lakefile.toml`. Requested configuration edits are allowed in every mode and receive build checks. Existing Lean versions and dependency revisions are preserved unless you ask to change them. Installed dependency sources and credentials stay protected.
 
 In live editing, configuration edits save together after checks finish; in review-first mode, choose **Apply changes**. After saving configuration changes, use **Retry setup** to prepare the updated environment.
+
+## Give Lemex project instructions
+
+Add `AGENTS.md` at the project root to give Lemex project conventions. Lemex loads
+it automatically when a new assistant run starts. For work in a subdirectory,
+Lemex is instructed to read applicable nested `AGENTS.md` files first. A nested
+file overrides ancestor guidance only for its own directory and descendants.
+Dependency instructions do not govern your project. Your explicit requests take
+precedence; credential protections and independent proof checks still apply.
 
 ## Follow and steer a chat
 

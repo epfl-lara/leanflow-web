@@ -1,6 +1,7 @@
 import { removeDisposableTree } from './temporary-workspaces.mjs'
 import { durableSourceWrite } from './durable-source-write.mjs'
 import { SaveEvents } from './save-events.mjs'
+import { ReferenceUpdateAdmission } from './reference-update-admission.mjs'
 import { storageFailure } from './storage-capacity.mjs'
 import { ProjectMemberships } from './project-memberships.mjs'
 import {
@@ -793,12 +794,16 @@ export class WorkspaceStore {
     setupRepair,
     setupBuildTimeoutMs = 1800000,
     storage,
+    referenceUpdateCapacity,
   }) {
     if (!dataDir || !runtime)
       throw new Error('WorkspaceStore requires dataDir and runtime')
     this.dataDir = path.resolve(dataDir)
     this.runtime = runtime
     this.storage = storage
+    this.referenceUpdateAdmission = new ReferenceUpdateAdmission(
+      referenceUpdateCapacity,
+    )
     this.setupBuildTimeoutMs = validateSetupBuildTimeout(setupBuildTimeoutMs)
     this.resolveHost = resolveHost
     this.gitCredentials = gitCredentials
@@ -4412,6 +4417,63 @@ export class WorkspaceStore {
     })
   }
 
+  #moveEntryProject(id, owner, assertIdle) {
+    const project = this.requireEditor(id, owner)
+    this.#ready(project)
+    if (project.kind === 'single-file')
+      fail(
+        'Convert the playground to a project before renaming or moving files.',
+        409,
+      )
+    if (this.jobs.has(id))
+      fail(
+        'Wait for project preparation to finish before renaming or moving files.',
+        409,
+      )
+    assertIdle()
+    return project
+  }
+
+  async #moveEntryState(
+    id,
+    owner,
+    from,
+    to,
+    assertIdle,
+    { verifyTree = false } = {},
+  ) {
+    const project = this.#moveEntryProject(id, owner, assertIdle)
+    const source = await guarded(project.root, from, { write: true })
+    const stat = await exists(source)
+    if (!stat) fail('File or folder not found. Refresh the file tree.', 404)
+    if (!stat.isFile() && !stat.isDirectory())
+      fail('Only regular files and folders can be moved.', 403)
+    const kind = stat.isDirectory() ? 'folder' : 'file'
+    const destination = await guarded(project.root, to, { write: true })
+    if (await exists(destination))
+      fail(
+        'A file or folder with this name already exists at the destination. Choose another name or location.',
+        409,
+      )
+    const parentStat = await exists(path.dirname(destination))
+    if (!parentStat?.isDirectory())
+      fail(
+        'The destination folder does not exist. Create it first or choose an existing folder.',
+        404,
+      )
+    if (verifyTree && kind === 'folder')
+      await assertMovableTree(source, { isSecret }).catch((error) => {
+        throw error instanceof MoveError
+          ? new WorkspaceError(error.message, error.status)
+          : error
+      })
+    return {
+      project: this.#moveEntryProject(id, owner, assertIdle),
+      stat,
+      kind,
+    }
+  }
+
   /** Renames or moves a project file or folder without overwriting anything. */
   async moveEntry(id, owner, input, { assertIdle = () => {} } = {}) {
     this.requireEditor(id, owner)
@@ -4424,13 +4486,89 @@ export class WorkspaceStore {
         'Project setup files cannot be renamed or moved. Edit them in place instead.',
         403,
       )
-    let referencePlan
-    if (request.updateReferences) {
-      const project = this.requireEditor(id, owner)
-      this.#ready(project)
-      assertIdle()
-      if (!(await exists(await guarded(project.root, from, { write: true }))))
-        fail('File or folder not found. Refresh the file tree.', 404)
+    const commit = (referencePlan) =>
+      this.#locked(id, async () => {
+        const { project, stat, kind } = await this.#moveEntryState(
+          id,
+          owner,
+          from,
+          to,
+          assertIdle,
+          { verifyTree: true },
+        )
+        const fromParent = await writeParent(project.root, from)
+        try {
+          const toParent = await writeParent(project.root, to)
+          try {
+            const anchored = `${fromParent.anchor}/${fromParent.name}`
+            const current = await fs.lstat(anchored)
+            if (
+              current.isSymbolicLink() ||
+              current.dev !== stat.dev ||
+              current.ino !== stat.ino
+            )
+              fail(
+                'File or folder changed during the move. Refresh the file tree and try again.',
+                409,
+              )
+            assertIdle()
+            if (this.jobs.has(id))
+              fail(
+                'Wait for project preparation to finish before renaming or moving files.',
+                409,
+              )
+            try {
+              await moveWithoutReplacing(fromParent, toParent, kind)
+            } catch (error) {
+              throw error instanceof MoveError
+                ? new WorkspaceError(error.message, error.status)
+                : error
+            }
+            await fromParent.handle.sync().catch(() => {})
+            await toParent.handle.sync().catch(() => {})
+          } finally {
+            await toParent.handle.close()
+          }
+        } finally {
+          await fromParent.handle.close()
+        }
+        // The rename is committed. An audit-log failure must not turn it into an
+        // error response or keep collaborators from learning about it.
+        try {
+          this.#optionalEvent(project, 'saved', `Moved ${from} to ${to}.\n`)
+        } finally {
+          this.#changed(id, [from, to], 'files', [from], [{ from, to }])
+        }
+        const references = referencePlan
+          ? await applyReferenceUpdates(referencePlan, {
+              readFile: async (filename) =>
+                textFile(
+                  await guarded(project.root, filename, { write: true }),
+                ),
+              apply: (changes) =>
+                this.#applyLocked(project, changes, 'saved', () => {
+                  this.requireEditor(id, owner)
+                  assertIdle()
+                }),
+            })
+          : undefined
+        return { from, to, kind, ...(references ? { references } : {}) }
+      })
+    if (!request.updateReferences) return commit()
+
+    // Reject invalid destinations before admission, and recheck after waiting.
+    // No workspace write lock is held while the bounded scan queue is pending.
+    await this.#moveEntryState(id, owner, from, to, assertIdle)
+    return this.referenceUpdateAdmission.run(id, owner, async () => {
+      const { project } = await this.#moveEntryState(
+        id,
+        owner,
+        from,
+        to,
+        assertIdle,
+        { verifyTree: true },
+      )
+      let referencePlan
       try {
         const signal = AbortSignal.timeout(5000)
         const files = await this.#walk(project.root, {
@@ -4457,101 +4595,9 @@ export class WorkspaceStore {
         // editing lock or turn a supported move into a refusal.
         referencePlan = { updates: [], skippedFiles: 1 }
       }
-    }
-    return this.#locked(id, async () => {
-      const project = this.requireEditor(id, owner)
-      this.#ready(project)
-      if (project.kind === 'single-file')
-        fail(
-          'Convert the playground to a project before renaming or moving files.',
-          409,
-        )
-      if (this.jobs.has(id))
-        fail(
-          'Wait for project preparation to finish before renaming or moving files.',
-          409,
-        )
-      assertIdle()
-      const source = await guarded(project.root, from, { write: true })
-      const stat = await exists(source)
-      if (!stat) fail('File or folder not found. Refresh the file tree.', 404)
-      if (!stat.isFile() && !stat.isDirectory())
-        fail('Only regular files and folders can be moved.', 403)
-      const kind = stat.isDirectory() ? 'folder' : 'file'
-      if (kind === 'folder')
-        await assertMovableTree(source, { isSecret }).catch((error) => {
-          throw error instanceof MoveError
-            ? new WorkspaceError(error.message, error.status)
-            : error
-        })
-      const destination = await guarded(project.root, to, { write: true })
-      if (await exists(destination))
-        fail(
-          'A file or folder with this name already exists at the destination. Choose another name or location.',
-          409,
-        )
-      const destinationParent = path.dirname(destination)
-      const parentStat = await exists(destinationParent)
-      if (!parentStat?.isDirectory())
-        fail(
-          'The destination folder does not exist. Create it first or choose an existing folder.',
-          404,
-        )
-      const fromParent = await writeParent(project.root, from)
-      try {
-        const toParent = await writeParent(project.root, to)
-        try {
-          const anchored = `${fromParent.anchor}/${fromParent.name}`
-          const current = await fs.lstat(anchored)
-          if (
-            current.isSymbolicLink() ||
-            current.dev !== stat.dev ||
-            current.ino !== stat.ino
-          )
-            fail(
-              'File or folder changed during the move. Refresh the file tree and try again.',
-              409,
-            )
-          assertIdle()
-          if (this.jobs.has(id))
-            fail(
-              'Wait for project preparation to finish before renaming or moving files.',
-              409,
-            )
-          try {
-            await moveWithoutReplacing(fromParent, toParent, kind)
-          } catch (error) {
-            throw error instanceof MoveError
-              ? new WorkspaceError(error.message, error.status)
-              : error
-          }
-          await fromParent.handle.sync().catch(() => {})
-          await toParent.handle.sync().catch(() => {})
-        } finally {
-          await toParent.handle.close()
-        }
-      } finally {
-        await fromParent.handle.close()
-      }
-      // The rename is committed. An audit-log failure must not turn it into an
-      // error response or keep collaborators from learning about it.
-      try {
-        this.#optionalEvent(project, 'saved', `Moved ${from} to ${to}.\n`)
-      } finally {
-        this.#changed(id, [from, to], 'files', [from], [{ from, to }])
-      }
-      const references = referencePlan
-        ? await applyReferenceUpdates(referencePlan, {
-            readFile: async (filename) =>
-              textFile(await guarded(project.root, filename, { write: true })),
-            apply: (changes) =>
-              this.#applyLocked(project, changes, 'saved', () => {
-                this.requireEditor(id, owner)
-                assertIdle()
-              }),
-          })
-        : undefined
-      return { from, to, kind, ...(references ? { references } : {}) }
+      // Retain the scan slot through the checked write, including any queued
+      // commit, so prepared text cannot accumulate outside the memory budget.
+      return commit(referencePlan)
     })
   }
 

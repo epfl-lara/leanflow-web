@@ -15,6 +15,7 @@ const liveFile = (path: string) =>
 import type { WorkspaceBuffers, WorkspaceScope } from './workspaceBuffers'
 import { ApiError, sessionBoundUrl, type OpenFile } from './api'
 import { LocalDocumentHistory } from './localDocumentHistory'
+import { mergeMovedDocumentText } from './movedDocumentText'
 import { pathMoves, remapMovedPath, type PathMove } from './projectPaths'
 import {
   projectPeers,
@@ -39,6 +40,7 @@ interface LiveDocument {
   failedLocalContent?: string
 }
 interface CollaborationControl {
+  move: (move: PathMove) => void
   setSelection: (selection: ProjectSelection | null) => void
   flush: () => Promise<boolean>
   undo: (path: string) => boolean
@@ -123,6 +125,10 @@ export function useProjectCollaboration({
   }>({ scope, value: null })
   const [, refreshAdmission] = useState(0)
   const control = useRef<CollaborationControl | null>(null)
+  const move = useCallback(
+    (entry: PathMove) => control.current?.move(entry),
+    [],
+  )
   const setSelection = useCallback(
     (value: ProjectSelection | null) => {
       selection.current = { scope, value }
@@ -182,6 +188,15 @@ export function useProjectCollaboration({
         restPaths: new Set<string>(),
       }
     const documents = new Map<string, LiveDocument>()
+    const movedBaselines = new Map<
+      string,
+      {
+        savedContent: string
+        hash: string
+        generation: number
+        discardVersion: number
+      }
+    >()
     const documentFailures = new Map<LiveDocument, ApiError>()
     const hasDocumentFailure = () =>
       documentFailures.size > 0 ||
@@ -211,6 +226,28 @@ export function useProjectCollaboration({
     let lastPresence = ''
     const waiters = new Set<() => void>()
     const current = () => !disposed && store.isCurrent(scope)
+    const currentMovedBaseline = (path: string) => {
+      const baseline = movedBaselines.get(path)
+      if (!baseline) return
+      const state = store.getSnapshot()
+      const file = state.buffers.get(path)
+      if (
+        !current() ||
+        !ready ||
+        socket?.readyState !== WebSocket.OPEN ||
+        !file ||
+        file.unavailable ||
+        file.generation !== baseline.generation ||
+        file.hash !== baseline.hash ||
+        file.savedContent !== baseline.savedContent ||
+        state.discardVersion !== baseline.discardVersion ||
+        fallbackPaths.has(path)
+      ) {
+        movedBaselines.delete(path)
+        return
+      }
+      return baseline
+    }
     const blockingFailure = () =>
       failure || documentFailures.values().next().value || null
     const clearIssue = () =>
@@ -364,6 +401,7 @@ export function useProjectCollaboration({
       } else destroyRecord(record)
       documentFailures.delete(record)
       documents.delete(path)
+      movedBaselines.delete(path)
       fallbackPaths.add(path)
       if (!hasDocumentFailure()) failure = null
       setIssue(
@@ -421,6 +459,7 @@ export function useProjectCollaboration({
           documents.delete(path)
         }
         fallbackPaths.add(path)
+        movedBaselines.delete(path)
         const local = localDocument()
         local.doc.getText('source').insert(0, currentFile.savedContent)
         retainHistory(path, local.doc, local.undo, currentFile)
@@ -457,6 +496,7 @@ export function useProjectCollaboration({
           documents.delete(file.path)
         }
         fallbackPaths.add(file.path)
+        movedBaselines.delete(file.path)
         const local = localDocument()
         local.doc.getText('source').insert(0, file.savedContent)
         retainHistory(file.path, local.doc, local.undo, file)
@@ -557,6 +597,7 @@ export function useProjectCollaboration({
       if (!current() || applying) return
       const state = store.getSnapshot()
       const buffers = state.buffers
+      for (const path of movedBaselines.keys()) currentMovedBaseline(path)
       if (state.file) awaitAdmission(state.file)
       for (const [path, history] of fallbackHistories) {
         const file = buffers.get(path)
@@ -696,17 +737,24 @@ export function useProjectCollaboration({
           documents.delete(name)
         }
         store.detach(name)
+        movedBaselines.delete(name)
       }
       clearIssue()
       notify()
       schedule()
     }
 
-    // The file's bytes did not change, so buffers (including unacknowledged
-    // typing) move to the destination and publish there as a new live document.
+    // Keep the saved baseline when a move starts a new live document. Automatic
+    // reference updates can change its text while a peer still has local typing.
     // Calling this twice for the same move, as the mover does when its HTTP
     // receipt follows the broadcast, finds nothing left to move.
     function applyMove({ from, to }: PathMove) {
+      const beforeMove = store.getSnapshot()
+      const uninterrupted = ready && socket?.readyState === WebSocket.OPEN
+      const moving = [...store.getSnapshot().buffers].filter(
+        ([path, file]) =>
+          !file.unavailable && remapMovedPath(path, from, to) !== null,
+      )
       // Validate destination drafts before releasing any live document state.
       try {
         store.move(from, to)
@@ -724,6 +772,36 @@ export function useProjectCollaboration({
             : 'The moved file conflicts with a local draft. Your drafts are preserved; download or discard them, then reopen the moved file.',
         )
         return
+      }
+      const state = store.getSnapshot()
+      for (const [path, before] of moving) {
+        const destination = remapMovedPath(path, from, to)
+        if (destination === null) continue
+        const file = state.buffers.get(destination)
+        const previous = movedBaselines.get(path)
+        const admitted = documents.get(path)
+        const continuingMove =
+          previous?.generation === before.generation &&
+          previous.hash === before.hash &&
+          previous.savedContent === before.savedContent &&
+          previous.discardVersion === beforeMove.discardVersion
+        const canMerge =
+          uninterrupted &&
+          (continuingMove ||
+            (admitted?.id &&
+              admitted.opened &&
+              admitted.generation === before.generation &&
+              admitted.bufferHash === before.hash &&
+              !admitted.blocked &&
+              !admitted.sourceLimitFailure))
+        movedBaselines.delete(path)
+        if (canMerge && file && !file.preview && liveFile(destination))
+          movedBaselines.set(destination, {
+            savedContent: before.savedContent,
+            hash: file.hash,
+            generation: file.generation,
+            discardVersion: state.discardVersion,
+          })
       }
       for (const [path, record] of [...documents]) {
         if (remapMovedPath(path, from, to) === null) continue
@@ -865,6 +943,7 @@ export function useProjectCollaboration({
           !record.pending.size
         ) {
           fallbackPaths.add(path)
+          movedBaselines.delete(path)
           send({ type: 'close', path })
           destroyRecord(record)
           documents.delete(path)
@@ -937,6 +1016,49 @@ export function useProjectCollaboration({
       const savedOwnSource = submittedSources.includes(savedContent)
       if (message.content !== undefined && message.content !== savedContent)
         throw new Error('Invalid canonical document state.')
+      let localContent = file.content
+      let mergedMovedDraft = false
+      const movedBaseline = currentMovedBaseline(message.path)
+      if (!sameIdentity && movedBaseline) {
+        movedBaselines.delete(message.path)
+        if (
+          dirty &&
+          canEdit &&
+          !file.readOnly &&
+          file.savedContent !== savedContent &&
+          file.content !== savedContent &&
+          !savedOwnSource
+        ) {
+          try {
+            const merged = mergeMovedDocumentText(
+              movedBaseline.savedContent,
+              file.content,
+              savedContent,
+            )
+            if (merged === null)
+              throw new Error(
+                `${message.path} moved, but its saved updates overlap your typing. Your draft is kept in this tab. Copy or download it, then reload the saved file to combine the changes.`,
+              )
+            if (!sourceFits(message.path, merged))
+              throw new Error(
+                `${message.path} moved, but the combined edits exceed the file size limit. Your draft is kept in this tab. Copy or download it, then reduce the file before saving.`,
+              )
+            localContent = merged
+            mergedMovedDraft = true
+          } catch (error) {
+            record.id = message.documentId
+            record.opened = true
+            record.blocked = true
+            fail(
+              error instanceof Error
+                ? error.message
+                : `${message.path} moved, but its saved updates could not be combined safely. Your draft is kept in this tab. Copy or download it before reloading.`,
+              record,
+            )
+            return
+          }
+        }
+      }
       // Reconnecting after an evicted document cannot safely replay operations
       // against new identities. Keep the draft and require an explicit reload if
       // both the durable baseline and the local source changed while offline.
@@ -945,7 +1067,8 @@ export function useProjectCollaboration({
         dirty &&
         file.savedContent !== savedContent &&
         file.content !== savedContent &&
-        !savedOwnSource
+        !savedOwnSource &&
+        !mergedMovedDraft
       ) {
         record.id = message.documentId
         record.opened = true
@@ -1016,12 +1139,14 @@ export function useProjectCollaboration({
       if (
         !sameIdentity &&
         dirty &&
-        (file.savedContent === savedContent || savedOwnSource) &&
+        (file.savedContent === savedContent ||
+          savedOwnSource ||
+          mergedMovedDraft) &&
         canEdit &&
         !file.readOnly
       ) {
         try {
-          captureLocal(message.path, record, file.content)
+          captureLocal(message.path, record, localContent)
         } catch (error) {
           if (diffLimitFallback(message.path, record, error)) return
           record.blocked = true
@@ -1094,6 +1219,7 @@ export function useProjectCollaboration({
       })
       socket.addEventListener('close', (event) => {
         ready = false
+        movedBaselines.clear()
         if (!current()) return
         lastPresence = ''
         setPresence({ scope, peers: [] })
@@ -1193,8 +1319,12 @@ export function useProjectCollaboration({
       return true
     }
     const controller: CollaborationControl = {
+      move: (entry) => {
+        if (current()) applyMove(entry)
+      },
       setSelection: () => schedulePresence(),
-      manages: (path) => current() && documents.has(path),
+      manages: (path) =>
+        current() && (documents.has(path) || !!currentMovedBaseline(path)),
       joining: (path) => {
         if (!current()) return true
         if (fallbackPaths.has(path)) return false
@@ -1305,6 +1435,7 @@ export function useProjectCollaboration({
     connected: enabled && connected,
     issue: enabled ? issue : null,
     flush,
+    move,
     undo,
     redo,
     manages,
