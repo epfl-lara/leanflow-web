@@ -301,6 +301,7 @@ async function checkTypes(theme) {
       bg = luminance(style.background)
     assert((Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05) >= 4.5)
   }
+  const viewport = page.viewportSize()
   const cdp = await page.context().newCDPSession(page)
   try {
     await cdp.send('DOM.enable')
@@ -314,49 +315,70 @@ async function checkTypes(theme) {
       nodeId,
       forcedPseudoClasses: ['autofill'],
     })
-    await query.focus()
-    const bar = await query.evaluate((element) => {
-      const input = getComputedStyle(element)
-      const form = element.closest('form')
-      const container = getComputedStyle(form)
-      return {
-        autofill: element.matches(':autofill'),
-        fill: input.boxShadow,
-        text: input.webkitTextFillColor,
-        color: container.color,
-        background: container.backgroundColor,
-        fieldHeight: element.getBoundingClientRect().height,
-        innerHeight:
-          form.getBoundingClientRect().height -
-          parseFloat(container.borderTopWidth) -
-          parseFloat(container.borderBottomWidth),
-        fieldOutline: input.outlineStyle,
-        barOutline: container.outlineStyle,
-      }
-    })
-    assert.equal(bar.autofill, true)
-    assert(bar.fill.includes(bar.background), JSON.stringify(bar))
-    assert.equal(bar.text, bar.color)
-    assert.equal(bar.fieldHeight, bar.innerHeight)
-    assert.equal(bar.fieldOutline, 'none')
-    assert.equal(bar.barOutline, 'solid')
-    await page.screenshot({
-      path: path.join(output, `search-bar-autofill-${theme}.png`),
-      clip: await page.locator('.workbench-header').boundingBox(),
-    })
+    for (const width of [1600, 390]) {
+      await page.setViewportSize({ width, height: 1000 })
+      await query.focus()
+      const bar = await query.evaluate((element) => {
+        const input = getComputedStyle(element)
+        const form = element.closest('form')
+        const container = getComputedStyle(form)
+        // CSSOM may serialize equivalent colors as rgb() or color(srgb).
+        // Compare the actual sRGB pixels instead of their string spelling.
+        const canvas = document.createElement('canvas')
+        canvas.width = canvas.height = 1
+        const context = canvas.getContext('2d')
+        const pixel = (color) => {
+          context.clearRect(0, 0, 1, 1)
+          context.fillStyle = color
+          context.fillRect(0, 0, 1, 1)
+          return [...context.getImageData(0, 0, 1, 1).data]
+        }
+        const shadow = input.boxShadow.match(
+          /(?:rgba?|color|lab|lch|oklab|oklch)\([^)]*\)/,
+        )?.[0]
+        return {
+          autofill: element.matches(':autofill'),
+          fill: input.boxShadow,
+          background: container.backgroundColor,
+          fillPixel: shadow ? pixel(shadow) : null,
+          backgroundPixel: pixel(container.backgroundColor),
+          textPixel: pixel(input.webkitTextFillColor),
+          colorPixel: pixel(container.color),
+          fieldHeight: element.getBoundingClientRect().height,
+          innerHeight:
+            form.getBoundingClientRect().height -
+            parseFloat(container.borderTopWidth) -
+            parseFloat(container.borderBottomWidth),
+          fieldOutline: input.outlineStyle,
+          barOutline: container.outlineStyle,
+        }
+      })
+      const details = JSON.stringify({ theme, width, ...bar })
+      assert.equal(bar.autofill, true)
+      assert.deepEqual(bar.fillPixel, bar.backgroundPixel, details)
+      assert.deepEqual(bar.textPixel, bar.colorPixel, details)
+      assert.equal(bar.fieldHeight, bar.innerHeight)
+      assert.equal(bar.fieldOutline, 'none')
+      assert.equal(bar.barOutline, 'solid')
+      await page.screenshot({
+        path: path.join(output, `search-bar-autofill-${theme}-${width}.png`),
+        clip: await page.locator('.workbench-header').boundingBox(),
+      })
+    }
     await cdp.send('CSS.forcePseudoState', {
       nodeId,
       forcedPseudoClasses: [],
     })
   } finally {
     await cdp.detach()
+    if (viewport) await page.setViewportSize(viewport)
   }
   await page.screenshot({ path: path.join(output, `search-${theme}.png`) })
   report.checks.push(
     `${theme}: readable types and Markdown docs, inline/display math with local fonts, contained wide equations, literal Lean code, lists, tables, wrapping, contrast, safe links and no injected HTML`,
   )
   report.checks.push(
-    `${theme}: browser-autofilled query blends into the bar, fills its height, keeps readable text and uses the bar's shared focus outline`,
+    `${theme}: browser-autofilled query blends into compact desktop and mobile bars, fills their height, keeps readable text and uses the bar's shared focus outline`,
   )
 }
 try {
@@ -564,8 +586,19 @@ try {
     'Wide search box and scrollable results stay inside the viewport at desktop, tablet and phone sizes',
   )
 
+  const workspaceUrl = page.url()
+  // Unload the current project before changing the account fixture so its
+  // pending reads cannot race the empty-project welcome-screen scenario.
+  const unloadedUrl = new URL('/search-fixture-unloaded', workspaceUrl).href
+  await page.route(unloadedUrl, (route) =>
+    route.fulfill({
+      contentType: 'text/html',
+      body: '<title>Fixture reset</title>',
+    }),
+  )
+  await page.goto(unloadedUrl)
   fixture.state.projects = []
-  await page.reload()
+  await page.goto(workspaceUrl)
   await page.locator('.welcome-state').waitFor()
   await submit('without-project')
   await card('Monotone.map_le').waitFor()

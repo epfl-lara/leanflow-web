@@ -39,12 +39,13 @@
 }
 
 .workspace-search-form {
+  --search-background: var(--surface);
   display: flex;
   align-items: center;
   height: 36px;
   border: 1px solid var(--border);
   border-radius: 7px;
-  background: var(--surface);
+  background: var(--search-background);
 }
 
 .workspace-search-form:focus-within {
@@ -74,7 +75,7 @@
 }
 
 .workspace-search-form input:autofill {
-  box-shadow: 0 0 0 1000px var(--surface) inset;
+  box-shadow: 0 0 0 1000px var(--search-background) inset;
   -webkit-text-fill-color: var(--text);
   caret-color: var(--text);
 }

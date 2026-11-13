@@ -48,6 +48,7 @@ let failSession = 0
 let failAfterProvider = false
 let providerSaves = 0
 let failLogout = false
+let releaseLogout
 await page.route('**/api/**', async (route) => {
   const request = route.request()
   const endpoint = new URL(request.url()).pathname
@@ -64,6 +65,9 @@ await page.route('**/api/**', async (route) => {
   }
   if (endpoint === '/api/logout' && failLogout) {
     failLogout = false
+    await new Promise((resolve) => {
+      releaseLogout = resolve
+    })
     return respond({ error: 'Could not sign out. Please try again.' }, 503)
   }
   if (endpoint === '/api/admin/users') {
@@ -221,6 +225,14 @@ try {
     .waitFor()
   failLogout = true
   await page.getByRole('button', { name: 'Sign out', exact: true }).click()
+  await until(() => !!releaseLogout, 'pending sign-out request')
+  assert.equal(
+    await page
+      .getByRole('button', { name: 'Signing out…', exact: true })
+      .isDisabled(),
+    true,
+  )
+  releaseLogout()
   await page
     .getByRole('alert')
     .filter({ hasText: 'Could not sign out. Please try again.' })
@@ -232,7 +244,7 @@ try {
     true,
   )
   report.checks.push(
-    'Onboarding reports a failed sign-out request and keeps the account setup available to retry',
+    'Onboarding blocks repeated sign-out while the request is pending, reports its failure, and keeps the account setup available to retry',
   )
   holdProvider = true
   releaseProvider = undefined
@@ -275,6 +287,7 @@ try {
 } finally {
   releaseAccount?.()
   releaseProvider?.()
+  releaseLogout?.()
   await fs.writeFile(
     new URL('report.json', directory),
     JSON.stringify(report, null, 2) + '\n',

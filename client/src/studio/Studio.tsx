@@ -1430,7 +1430,7 @@ export function Studio() {
       const openingRequest = openRequest.current
       setNavigationError('')
       setNavigationTarget(destination)
-      void (async () => {
+      return (async () => {
         try {
           if (bufferStore.drafts().length || savePromise.current)
             await saveCompletely()
@@ -1459,6 +1459,7 @@ export function Studio() {
             setNavigationError(errorText(error))
             setPendingAction(() => action)
           } else setError(errorText(error))
+          return { error }
         }
       })()
     },
@@ -2465,7 +2466,10 @@ export function Studio() {
             void loadSession()
           }}
           onProfileSaved={acceptProfile}
-          onLogout={async () => navigate(logout)}
+          onLogout={async () => {
+            const result = await navigate(logout)
+            if (result) throw result.error
+          }}
           invitationNotice={invitationNotice}
           viewerProjects={
             session.user.profileComplete === false

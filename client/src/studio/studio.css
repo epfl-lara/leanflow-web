@@ -2134,9 +2134,10 @@ textarea {
   }
   .workbench-header .workspace-search-form,
   .workbench-header .workspace-docs-action {
+    --search-background: color-mix(in srgb, var(--surface) 65%, var(--bg));
     height: 32px;
     border-radius: 5px;
-    background: color-mix(in srgb, var(--surface) 65%, var(--bg));
+    background: var(--search-background);
   }
   .workbench-header .workspace-search-form input,
   .workbench-header .workspace-search-form select {
