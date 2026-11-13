@@ -1041,8 +1041,10 @@ export async function createStudio({
   app.post('/api/projects/:id/move', async (req, res) => {
     const { id } = req.params
     const actor = req.user.id
-    const assertIdle = () =>
-      requireNoActiveWork(id, actor, { action: 'renaming or moving files' })
+    // Ordinary moves share the workspace write lock with saves and private-copy
+    // publication. Stale writes conflict at their old paths; an open terminal
+    // or an active run does not need to block the whole project.
+    const assertIdle = () => requireNoGit(id, actor)
     assertIdle()
     res.json(await workspaces.moveEntry(id, actor, req.body, { assertIdle }))
   })

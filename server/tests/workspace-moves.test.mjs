@@ -1,12 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import * as fs from 'node:fs/promises'
+import fs from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import childProcess from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
+import { syncBuiltinESMExports } from 'node:module'
+import { WebSocket } from 'ws'
+import * as Y from 'yjs'
 import { createStudio } from '../studio.mjs'
+import { JobManager } from '../events.mjs'
 import { assertMovePaths, parseMoveRequest } from '../workspace-moves.mjs'
 
 const TOOLCHAIN = 'leanprover/lean4:v4.34.1'
@@ -37,17 +43,23 @@ class FakeRuntime {
     }
     return { code: 0, stdout: '', stderr: '' }
   }
-  spawn() {
+  async spawn(root) {
     const child = new EventEmitter()
     child.stdin = new PassThrough()
     child.stdout = new PassThrough()
     child.stderr = new PassThrough()
-    child.kill = () =>
+    child.workerHome = await fs.mkdtemp(
+      path.join(path.dirname(root), 'terminal-home-'),
+    )
+    child.kill = () => {
+      if (child.killed) return
+      child.killed = true
       queueMicrotask(() => {
         child.stdout.end()
         child.stderr.end()
         child.emit('close', 0)
       })
+    }
     return child
   }
   async shutdown() {}
@@ -110,22 +122,116 @@ async function fixture(t) {
     move,
     dataDir,
     runtime,
+    url,
+    tokens,
   }
 }
 
 const write = (f, name, content = '-- ' + name + '\n') =>
   f.store.writeFile(f.project.id, 'owner', name, content, null)
 
+async function sharedClient(t, f, actor) {
+  const ws = new WebSocket(
+    `${f.url.replace('http:', 'ws:')}/websocket/collaboration/${f.project.id}`,
+    { headers: { Authorization: `Bearer ${f.tokens[actor]}` } },
+  )
+  const packets = [],
+    documents = new Map(),
+    allDocuments = []
+  let requestId = 0,
+    socketError
+  ws.on('error', (error) => {
+    socketError = error
+  })
+  ws.on('message', (data) => {
+    const packet = JSON.parse(data.toString())
+    packets.push(packet)
+    if (packet.type !== 'document') return
+    let document = documents.get(packet.path)
+    if (document?.id !== packet.documentId) {
+      document = { id: packet.documentId, doc: new Y.Doc() }
+      documents.set(packet.path, document)
+      allDocuments.push(document.doc)
+    }
+    Y.applyUpdate(
+      document.doc,
+      new Uint8Array(Buffer.from(packet.update, 'base64')),
+    )
+  })
+  t.after(() => {
+    ws.terminate()
+    for (const document of allDocuments) document.destroy()
+  })
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve)
+    ws.once('error', reject)
+  })
+  const wait = async (predicate, description) => {
+    for (let attempt = 0; attempt < 400; attempt++) {
+      if (socketError) throw socketError
+      const result = predicate()
+      if (result) return result
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.fail(`Timed out waiting for ${description}`)
+  }
+  const text = (filename) =>
+    documents.get(filename)?.doc.getText('source').toString()
+  const open = async (filename) => {
+    const id = ++requestId
+    ws.send(JSON.stringify({ type: 'open', path: filename, requestId: id }))
+    await wait(
+      () =>
+        packets.find(
+          (packet) => packet.type === 'document' && packet.openRequestId === id,
+        ),
+      `shared file ${filename}`,
+    )
+    return documents.get(filename)
+  }
+  const edit = (filename, content) => {
+    const document = documents.get(filename)
+    const vector = Y.encodeStateVector(document.doc)
+    const source = document.doc.getText('source')
+    source.insert(source.length, content)
+    return {
+      type: 'update',
+      path: filename,
+      documentId: document.id,
+      requestId: ++requestId,
+      update: Buffer.from(Y.encodeStateAsUpdate(document.doc, vector)).toString(
+        'base64',
+      ),
+    }
+  }
+  const send = (packet) => ws.send(JSON.stringify(packet))
+  return { ws, packets, documents, wait, text, open, edit, send }
+}
+
 test('request parsing and path rules reject malformed and self-containing moves', () => {
   assert.deepEqual(parseMoveRequest({ from: 'a', to: 'b' }), {
     from: 'a',
     to: 'b',
   })
+  for (const updateReferences of [true, false])
+    assert.deepEqual(
+      parseMoveRequest({ from: 'a', to: 'b', updateReferences }),
+      {
+        from: 'a',
+        to: 'b',
+        updateReferences,
+      },
+    )
   for (const body of [null, [], {}, { from: 'a' }, { from: 1, to: 'b' }])
     assert.throws(() => parseMoveRequest(body), { status: 400 })
   assert.throws(() => parseMoveRequest({ from: 'a', to: 'b', force: true }), {
     status: 400,
   })
+  for (const updateReferences of [null, 0, 'true', {}, []])
+    assert.throws(
+      () => parseMoveRequest({ from: 'a', to: 'b', updateReferences }),
+      { status: 400 },
+    )
   assert.throws(() => assertMovePaths('A', 'A'), { status: 400 })
   assert.throws(() => assertMovePaths('A', 'A/B'), { status: 400 })
   assert.doesNotThrow(() => assertMovePaths('A', 'AB/C'))
@@ -187,6 +293,558 @@ test('renaming a folder moves every descendant, including binary data', async (t
   })
 })
 
+test('one request can change both the folder and name of a file or folder', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'Source/Old.lean', '-- moved file\n')
+  await write(f, 'Source/Examples/Child.lean', '-- moved folder\n')
+  await fs.mkdir(path.join(f.project.root, 'Destination'))
+  for (const [from, to, kind, filename, content] of [
+    ['Source/Old.lean', 'Destination/New.lean', 'file', '', '-- moved file\n'],
+    [
+      'Source/Examples',
+      'Destination/Archive',
+      'folder',
+      '/Child.lean',
+      '-- moved folder\n',
+    ],
+  ]) {
+    const response = await f.move({ from, to })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { from, to, kind })
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'owner', to + filename)).content,
+      content,
+    )
+    await assert.rejects(fs.stat(path.join(f.project.root, from)), {
+      code: 'ENOENT',
+    })
+  }
+})
+
+test('moving an asset can update Lean documentation, Markdown and TeX references', async (t) => {
+  const f = await fixture(t)
+  const asset = '<svg><!-- preserve image bytes --></svg>\n'
+  await write(f, 'Problems/Figure.svg', asset)
+  await write(f, 'Problems/Problem.lean', '/-!\n![Figure](Figure.svg)\n-/\n')
+  await write(f, 'README.md', '![Figure](Problems/Figure.svg)\n')
+  await write(f, 'Notes.tex', '\\includegraphics{Problems/Figure.svg}\n')
+  await fs.mkdir(path.join(f.project.root, 'Problems/figures'))
+  await fs.chmod(path.join(f.project.root, 'Problems/Figure.svg'), 0o640)
+  const before = await fs.stat(path.join(f.project.root, 'Problems/Figure.svg'))
+  const notifications = []
+  f.store.subscribeChanges((event) => notifications.push(event))
+  const response = await f.move({
+    from: 'Problems/Figure.svg',
+    to: 'Problems/figures/Figure.svg',
+    updateReferences: true,
+  })
+  assert.equal(response.status, 200)
+  const moved = await response.json()
+  assert.deepEqual(moved.references, {
+    updatedFiles: 3,
+    updatedReferences: 3,
+    updatedPaths: ['Notes.tex', 'Problems/Problem.lean', 'README.md'],
+    skippedFiles: 0,
+  })
+  for (const filename of moved.references.updatedPaths)
+    assert(
+      notifications.some((event) => event.paths.includes(filename)),
+      `Live editors must learn about the changed reference in ${filename}`,
+    )
+  assert(
+    notifications.some((event) =>
+      event.moves?.some(
+        (move) => move.from === moved.from && move.to === moved.to,
+      ),
+    ),
+  )
+  const after = await fs.stat(
+    path.join(f.project.root, 'Problems/figures/Figure.svg'),
+  )
+  assert.equal(after.ino, before.ino)
+  assert.equal(after.mode & 0o777, 0o640)
+  for (const [filename, content] of [
+    ['Problems/Problem.lean', '/-!\n![Figure](figures/Figure.svg)\n-/\n'],
+    ['README.md', '![Figure](Problems/figures/Figure.svg)\n'],
+    ['Notes.tex', '\\includegraphics{Problems/figures/Figure.svg}\n'],
+    ['Problems/figures/Figure.svg', asset],
+  ])
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'owner', filename)).content,
+      content,
+      filename,
+    )
+})
+
+test('a shared editor asset move broadcasts reference updates and preserves another client’s unacknowledged typing', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'Problems/Figure.svg', '<svg/>\n')
+  await write(f, 'Problems/Problem.lean', '/-!\n![Figure](Figure.svg)\n-/\n')
+  await fs.mkdir(path.join(f.project.root, 'Problems/figures'))
+  const owner = await sharedClient(t, f, 'owner')
+  const editor = await sharedClient(t, f, 'editor')
+  for (const client of [owner, editor])
+    await client.open('Problems/Problem.lean')
+  const pending = owner.edit(
+    'Problems/Problem.lean',
+    '-- owner is still typing\n',
+  )
+  const response = await f.move(
+    {
+      from: 'Problems/Figure.svg',
+      to: 'Problems/figures/Figure.svg',
+      updateReferences: true,
+    },
+    'editor',
+  )
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).references.updatedFiles, 1)
+  for (const client of [owner, editor])
+    await client.wait(
+      () =>
+        client.text('Problems/Problem.lean')?.includes('](figures/Figure.svg)'),
+      'the updated shared image reference',
+    )
+  assert.match(owner.text('Problems/Problem.lean'), /owner is still typing/)
+  assert(!owner.packets.some((packet) => packet.ack === pending.requestId))
+  owner.send(pending)
+  await owner.wait(
+    () => owner.packets.find((packet) => packet.ack === pending.requestId),
+    'the acknowledgement of the preserved local edit',
+  )
+  const expected =
+    '/-!\n![Figure](figures/Figure.svg)\n-/\n-- owner is still typing\n'
+  for (const client of [owner, editor])
+    await client.wait(
+      () => client.text('Problems/Problem.lean') === expected,
+      'both shared clients to converge',
+    )
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'Problems/Problem.lean'))
+      .content,
+    expected,
+  )
+  assert.equal(owner.ws.readyState, WebSocket.OPEN)
+  assert.equal(editor.ws.readyState, WebSocket.OPEN)
+})
+
+test('shared folder moves retire stale documents, merge pending reference edits and reject revoked writers', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'Examples/Helper.lean', '-- helper\n')
+  await write(f, 'Examples/Proof.lean', 'import Examples.Helper\n')
+  await write(f, 'Outside.lean', 'import Examples.Proof\n')
+  await fs.mkdir(path.join(f.project.root, 'Archive'))
+  const owner = await sharedClient(t, f, 'owner')
+  const editor = await sharedClient(t, f, 'editor')
+  await owner.open('Outside.lean')
+  await editor.open('Examples/Proof.lean')
+  const pending = owner.edit('Outside.lean', '-- owner pending\n')
+  const stale = editor.edit('Examples/Proof.lean', '-- stale old path\n')
+  const response = await f.move(
+    {
+      from: 'Examples',
+      to: 'Archive/Renamed',
+      updateReferences: true,
+    },
+    'editor',
+  )
+  assert.equal(response.status, 200)
+  for (const client of [owner, editor])
+    await client.wait(
+      () =>
+        client.packets.some((packet) =>
+          packet.moves?.some(
+            (move) => move.from === 'Examples' && move.to === 'Archive/Renamed',
+          ),
+        ),
+      'the shared folder move announcement',
+    )
+  await owner.wait(
+    () => owner.text('Outside.lean')?.includes('import Archive.Renamed.Proof'),
+    'the rewritten shared import',
+  )
+  owner.send(pending)
+  await owner.wait(
+    () => owner.packets.find((packet) => packet.ack === pending.requestId),
+    'the pending shared edit acknowledgement',
+  )
+  editor.send(stale)
+  const rejected = await editor.wait(
+    () =>
+      editor.packets.find(
+        (packet) =>
+          packet.type === 'error' && packet.requestId === stale.requestId,
+      ),
+    'the retired document rejection',
+  )
+  assert.equal(rejected.status, 409)
+  const current = await editor.open('Archive/Renamed/Proof.lean')
+  assert.notEqual(current.id, stale.documentId)
+  assert.equal(
+    editor.text('Archive/Renamed/Proof.lean'),
+    'import Archive.Renamed.Helper\n',
+  )
+  const revoked = editor.edit(
+    'Archive/Renamed/Proof.lean',
+    '-- revoked write\n',
+  )
+  const record = f.projectDocuments.documents.get(
+    f.projectDocuments.key(f.project.id, 'Archive/Renamed/Proof.lean'),
+  )
+  let release
+  const held = f.projectDocuments.queue(
+    record,
+    () =>
+      new Promise((resolve) => {
+        release = resolve
+      }),
+  )
+  try {
+    await editor.wait(() => release, 'the held shared document queue')
+    editor.send(revoked)
+    await editor.wait(() => record.pending >= 2, 'the queued editor update')
+    await f.store.removeMember(f.project.id, 'owner', 'editor')
+    await editor.wait(
+      () => editor.ws.readyState === WebSocket.CLOSED,
+      'the revoked socket closure',
+    )
+  } finally {
+    release?.()
+    await held
+  }
+  await owner.wait(
+    () => record.pending === 0,
+    'the revoked update to be checked',
+  )
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'Outside.lean')).content,
+    'import Archive.Renamed.Proof\n-- owner pending\n',
+  )
+  assert.equal(
+    (
+      await f.store.readFile(
+        f.project.id,
+        'owner',
+        'Archive/Renamed/Proof.lean',
+      )
+    ).content,
+    'import Archive.Renamed.Helper\n',
+  )
+  await assert.rejects(fs.stat(path.join(f.project.root, 'Examples')), {
+    code: 'ENOENT',
+  })
+  assert.equal(
+    (
+      await f.move(
+        { from: 'Archive/Renamed', to: 'Examples', updateReferences: true },
+        'editor',
+      )
+    ).status,
+    404,
+  )
+  assert.equal(owner.ws.readyState, WebSocket.OPEN)
+})
+
+test('folder moves update module imports and rebase references inside and outside the folder', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'assets/plot.svg', '<svg/>\n')
+  await write(f, 'Examples/Helper.lean', '-- helper\n')
+  await write(
+    f,
+    'Examples/Proof.lean',
+    'import Examples.Helper\n/-!\n![Plot](../assets/plot.svg)\n[Notes](Notes.md)\n-/\n',
+  )
+  await write(
+    f,
+    'Examples/Notes.md',
+    '![Plot](../assets/plot.svg)\n[Proof](Proof.lean)\n',
+  )
+  await write(f, 'Outside.lean', 'import Examples.Proof\n')
+  await write(f, 'README.md', '[Notes](Examples/Notes.md)\n')
+  await write(f, 'Examples/Document.tex', 'A moved document.\n')
+  await write(f, 'Notes.tex', '\\input{Examples/Document}\n')
+  await fs.mkdir(path.join(f.project.root, 'Archive'))
+  const response = await f.move({
+    from: 'Examples',
+    to: 'Archive/Renamed',
+    updateReferences: true,
+  })
+  assert.equal(response.status, 200)
+  const moved = await response.json()
+  assert.equal(moved.kind, 'folder')
+  assert.deepEqual(moved.references, {
+    updatedFiles: 5,
+    updatedReferences: 6,
+    updatedPaths: [
+      'Archive/Renamed/Notes.md',
+      'Archive/Renamed/Proof.lean',
+      'Notes.tex',
+      'Outside.lean',
+      'README.md',
+    ],
+    skippedFiles: 0,
+  })
+  for (const [filename, content] of [
+    [
+      'Archive/Renamed/Proof.lean',
+      'import Archive.Renamed.Helper\n/-!\n![Plot](../../assets/plot.svg)\n[Notes](Notes.md)\n-/\n',
+    ],
+    [
+      'Archive/Renamed/Notes.md',
+      '![Plot](../../assets/plot.svg)\n[Proof](Proof.lean)\n',
+    ],
+    ['Outside.lean', 'import Archive.Renamed.Proof\n'],
+    ['README.md', '[Notes](Archive/Renamed/Notes.md)\n'],
+    ['Notes.tex', '\\input{Archive/Renamed/Document}\n'],
+  ])
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'owner', filename)).content,
+      content,
+      filename,
+    )
+})
+
+test('reference updates are opt-in for API callers and opting out preserves every reference', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'A.svg', '<svg/>\n')
+  await write(f, 'README.md', '![Figure](A.svg)\n')
+  for (const option of [{}, { updateReferences: false }]) {
+    const response = await f.move({ from: 'A.svg', to: 'B.svg', ...option })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), {
+      from: 'A.svg',
+      to: 'B.svg',
+      kind: 'file',
+    })
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'owner', 'README.md')).content,
+      '![Figure](A.svg)\n',
+    )
+    assert.equal((await f.move({ from: 'B.svg', to: 'A.svg' })).status, 200)
+  }
+})
+
+test('reference updates leave secret, dependency, setup and linked files untouched', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'A.svg', '<svg/>\n')
+  await write(f, 'Normal.md', '![Figure](A.svg)\n')
+  await fs.mkdir(path.join(f.project.root, 'Figures'))
+  const protectedFiles = [
+    '.git/Notes.md',
+    '.lake/packages/dep/README.md',
+    'node_modules/pkg/README.md',
+    '.config/Notes.md',
+    '.env.notes.md',
+    'lakefile.lean',
+  ]
+  for (const filename of protectedFiles) {
+    await fs.mkdir(path.dirname(path.join(f.project.root, filename)), {
+      recursive: true,
+    })
+    await fs.writeFile(
+      path.join(f.project.root, filename),
+      '/-!\n![Figure](A.svg)\n-/\n',
+    )
+  }
+  const outside = path.join(f.dataDir, 'outside.md')
+  await fs.writeFile(outside, '![Figure](A.svg)\n')
+  await fs.symlink(outside, path.join(f.project.root, 'Linked.md'))
+  const response = await f.move({
+    from: 'A.svg',
+    to: 'Figures/A.svg',
+    updateReferences: true,
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual((await response.json()).references.updatedPaths, [
+    'Normal.md',
+  ])
+  for (const filename of protectedFiles)
+    assert.equal(
+      await fs.readFile(path.join(f.project.root, filename), 'utf8'),
+      '/-!\n![Figure](A.svg)\n-/\n',
+      filename,
+    )
+  assert.equal(await fs.readFile(outside, 'utf8'), '![Figure](A.svg)\n')
+})
+
+test('a reference edited after scanning is preserved while unchanged references are updated', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'A.svg', '<svg/>\n')
+  await write(f, 'Changed.md', '![Figure](A.svg)\n')
+  await write(f, 'Unchanged.md', '![Figure](A.svg)\n')
+  const spawn = childProcess.spawn
+  let changed = false
+  const userEdit = '![Figure](A.svg)\nKeep this newer edit.\n'
+  t.mock.method(childProcess, 'spawn', (command, args, options) => {
+    if (!changed && command === 'python3' && args[2]?.includes('renameat2')) {
+      changed = true
+      writeFileSync(path.join(f.project.root, 'Changed.md'), userEdit)
+    }
+    return spawn(command, args, options)
+  })
+  const response = await f.move({
+    from: 'A.svg',
+    to: 'B.svg',
+    updateReferences: true,
+  })
+  assert.equal(response.status, 200)
+  assert.equal(changed, true)
+  const { references } = await response.json()
+  assert.equal(references.updatedFiles, 1)
+  assert.equal(references.updatedReferences, 1)
+  assert.deepEqual(references.updatedPaths, ['Unchanged.md'])
+  assert.equal(references.skippedFiles, 1)
+  assert.equal(typeof references.warning, 'string')
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'Changed.md')).content,
+    userEdit,
+  )
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'Unchanged.md')).content,
+    '![Figure](B.svg)\n',
+  )
+})
+
+test('reference discovery lets unrelated editor saves complete while a reference read is pending', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'A.svg', '<svg/>\n')
+  await write(f, 'Reference.md', '![Figure](A.svg)\n')
+  await write(f, 'Other.lean', '-- before\n')
+  const original = await f.store.readFile(f.project.id, 'owner', 'Other.lean')
+  let enterScan,
+    releaseScan,
+    held = false,
+    released = false,
+    timer
+  const entered = new Promise((resolve) => {
+    enterScan = resolve
+  })
+  const gate = new Promise((resolve) => {
+    releaseScan = () => {
+      released = true
+      resolve()
+    }
+  })
+  const open = fs.open
+  t.mock.method(fs, 'open', async (filename, ...args) => {
+    if (
+      !held &&
+      String(filename) === path.join(f.project.root, 'Reference.md')
+    ) {
+      held = true
+      enterScan()
+      await gate
+    }
+    return open(filename, ...args)
+  })
+  syncBuiltinESMExports()
+  const moving = f.move({ from: 'A.svg', to: 'B.svg', updateReferences: true })
+  let saving, response
+  try {
+    await Promise.race([
+      entered,
+      moving.then(() => {
+        throw new Error('Move completed without reaching reference discovery')
+      }),
+    ])
+    saving = f.store.writeFile(
+      f.project.id,
+      'owner',
+      'Other.lean',
+      '-- saved during reference discovery\n',
+      original.hash,
+    )
+    await Promise.race([
+      saving,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(new Error('Reference discovery blocked an unrelated save')),
+          2000,
+        )
+      }),
+    ])
+    assert.equal(
+      released,
+      false,
+      'The save must finish before discovery resumes',
+    )
+  } finally {
+    clearTimeout(timer)
+    releaseScan()
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+    response = await moving
+    await saving
+  }
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).references.updatedFiles, 1)
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'Other.lean')).content,
+    '-- saved during reference discovery\n',
+  )
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'Reference.md')).content,
+    '![Figure](B.svg)\n',
+  )
+})
+
+test('a failed reference transaction rolls back its edits and still reports the committed move', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'A.svg', '<svg/>\n')
+  for (const filename of ['First.md', 'Second.md'])
+    await write(f, filename, '![Figure](A.svg)\n')
+  const rename = fs.rename
+  let failed = false
+  t.mock.method(fs, 'rename', async (from, to) => {
+    if (String(from).includes('/staged/1')) {
+      failed = true
+      throw new Error('Fixture reference write failure')
+    }
+    return rename(from, to)
+  })
+  syncBuiltinESMExports()
+  let response
+  try {
+    response = await f.move({
+      from: 'A.svg',
+      to: 'B.svg',
+      updateReferences: true,
+    })
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+  assert.equal(failed, true)
+  assert.equal(response.status, 200)
+  const moved = await response.json()
+  assert.equal(moved.from, 'A.svg')
+  assert.equal(moved.to, 'B.svg')
+  assert.equal(moved.references.updatedFiles, 0)
+  assert.equal(moved.references.updatedReferences, 0)
+  assert.deepEqual(moved.references.updatedPaths, [])
+  assert.equal(typeof moved.references.warning, 'string')
+  for (const filename of ['First.md', 'Second.md'])
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'owner', filename)).content,
+      '![Figure](A.svg)\n',
+    )
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'B.svg')).content,
+    '<svg/>\n',
+  )
+  await assert.rejects(fs.stat(path.join(f.project.root, 'A.svg')), {
+    code: 'ENOENT',
+  })
+  assert.equal(
+    f.store.db
+      .prepare('SELECT COUNT(*) AS count FROM pending_project_transactions')
+      .get().count,
+    0,
+  )
+  assert.equal(f.store.get(f.project.id, 'owner').status, 'ready')
+})
+
 test('moves never overwrite an existing file or folder', async (t) => {
   const f = await fixture(t)
   await write(f, 'A.lean', '-- A\n')
@@ -238,6 +896,15 @@ test('invalid, same-path, self-descendant and missing-destination moves fail cle
   for (const [body, status] of cases) {
     const response = await f.move(body)
     assert.equal(response.status, status, JSON.stringify(body))
+    assert.equal(typeof (await response.json()).error, 'string')
+  }
+  for (const updateReferences of [null, 0, 'true', {}, []]) {
+    const response = await f.move({
+      from: 'A.lean',
+      to: 'B.lean',
+      updateReferences,
+    })
+    assert.equal(response.status, 400)
     assert.equal(typeof (await response.json()).error, 'string')
   }
   assert.equal(
@@ -376,6 +1043,27 @@ test('a project being prepared refuses moves until preparation finishes', async 
   )
 })
 
+test('moves wait for an active Git operation without changing project files', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'A.lean')
+  f.publisher.busy.add(f.project.id)
+  try {
+    const response = await f.move({ from: 'A.lean', to: 'B.lean' })
+    assert.equal(response.status, 409)
+    assert.match((await response.json()).error, /Git operation/)
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'owner', 'A.lean')).content,
+      '-- A.lean\n',
+    )
+    await assert.rejects(fs.stat(path.join(f.project.root, 'B.lean')), {
+      code: 'ENOENT',
+    })
+  } finally {
+    f.publisher.busy.delete(f.project.id)
+  }
+  assert.equal((await f.move({ from: 'A.lean', to: 'B.lean' })).status, 200)
+})
+
 test('a playground refuses moves with a conversion hint and keeps its file', async (t) => {
   const f = await fixture(t)
   // Preparing a real playground needs a prepared Mathlib template, so mark this
@@ -395,30 +1083,230 @@ test('a playground refuses moves with a conversion hint and keeps its file', asy
   )
 })
 
-test('active checks and Lemex runs block moves without being stopped', async (t) => {
+test('file and folder moves leave active owner and collaborator jobs running', async (t) => {
   const f = await fixture(t)
   await write(f, 'A.lean')
-  for (const kind of ['agent', 'check']) {
-    const job = f.events.create('owner', { projectId: f.project.id, kind })
-    const response = await f.move({ from: 'A.lean', to: 'B.lean' })
-    assert.equal(response.status, 409, kind)
-    assert.match((await response.json()).error, /renaming or moving files/)
-    // The refusal does not cancel the run.
-    assert.notEqual(f.events.getMetadata(job.id).status, 'cancelled')
-    f.events.update(job.id, { status: 'cancelled' })
+  await write(f, 'Folder/Child.lean')
+  const states = [
+    'queued',
+    'starting',
+    'running',
+    'stopping',
+    'verifying',
+    'preparing',
+  ]
+  for (const owner of ['owner', 'editor']) {
+    for (const kind of ['agent', 'check', 'tex']) {
+      for (const status of states) {
+        const job = f.events.create(owner, { projectId: f.project.id, kind })
+        f.events.update(job.id, { status })
+        const before = f.events.getMetadata(job.id)
+        const folder = status === 'running' || status === 'verifying'
+        const from = folder ? 'Folder' : 'A.lean'
+        const to = folder ? 'MovedFolder' : 'B.lean'
+        try {
+          const response = await f.move({ from, to })
+          assert.equal(response.status, 200, `${owner} ${kind} ${status}`)
+          assert.deepEqual(f.events.getMetadata(job.id), before)
+          assert.equal((await f.move({ from: to, to: from })).status, 200)
+        } finally {
+          f.events.update(job.id, { status: 'cancelled' })
+        }
+      }
+    }
   }
-  const other = f.events.create('editor', {
+  const cleanup = f.events.create('editor', {
     projectId: f.project.id,
     kind: 'agent',
   })
-  const collaborator = await f.move({ from: 'A.lean', to: 'B.lean' })
-  assert.equal(collaborator.status, 409)
-  f.events.update(other.id, { status: 'cancelled' })
+  f.events.update(cleanup.id, { status: 'failed', cleanupFailed: true })
+  const before = f.events.getMetadata(cleanup.id)
+  assert.equal((await f.move({ from: 'A.lean', to: 'B.lean' })).status, 200)
+  assert.deepEqual(f.events.getMetadata(cleanup.id), before)
+  f.events.update(cleanup.id, { cleanupFailed: false })
+})
+
+test('owner and collaborator terminals stay open while project files move', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'A.lean')
+  for (const actor of ['owner', 'editor']) {
+    const ws = new WebSocket(
+      `${f.url.replace('http:', 'ws:')}/websocket/terminal/${f.project.id}`,
+      { headers: { Authorization: `Bearer ${f.tokens[actor]}` } },
+    )
+    const ready = new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('Terminal startup timed out')),
+        5000,
+      )
+      ws.on('message', (data, binary) => {
+        if (binary && data.toString().includes('Private working copy.')) {
+          clearTimeout(timer)
+          resolve()
+        }
+      })
+      ws.once('error', (error) => {
+        clearTimeout(timer)
+        reject(error)
+      })
+    })
+    t.after(() => ws.terminate())
+    try {
+      await ready
+      const response = await f.move(
+        { from: 'A.lean', to: 'B.lean' },
+        actor === 'owner' ? 'editor' : 'owner',
+      )
+      assert.equal(response.status, 200, actor)
+      assert.equal(ws.readyState, WebSocket.OPEN)
+      assert.equal((await f.move({ from: 'B.lean', to: 'A.lean' })).status, 200)
+    } finally {
+      const response = await fetch(
+        `${f.url}/api/projects/${f.project.id}/terminal/stop`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${f.tokens[actor]}`,
+            'Content-Type': 'application/json',
+          },
+          body: '{}',
+        },
+      )
+      assert.equal(response.status, 200)
+    }
+  }
+})
+
+test('moving source during a Lean check marks its result outdated without cancelling it', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'A.lean')
+  let release, entered, options
+  const running = new Promise((resolve) => {
+    entered = resolve
+  })
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const run = f.runtime.run.bind(f.runtime)
+  f.runtime.run = async (root, args, settings) => {
+    if (args[0] === 'lake' && args[1] === 'build') {
+      options = settings
+      entered()
+      await gate
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    return run(root, args, settings)
+  }
+  const manager = new JobManager({
+    events: f.events,
+    runtime: f.runtime,
+    workspaces: f.store,
+  })
+  const job = manager.check('editor', f.project.id)
+  const finished = manager.active.get(job.id)
+  try {
+    await running
+    assert.equal(options.readOnlyWorkspace, true)
+    assert.equal((await f.move({ from: 'A.lean', to: 'B.lean' })).status, 200)
+    assert.equal(f.events.getMetadata(job.id).status, 'running')
+    assert.equal(options.signal.aborted, false)
+  } finally {
+    release()
+    await finished
+  }
+  const result = f.events.getMetadata(job.id)
+  assert.equal(result.status, 'failed')
+  assert.equal(result.result.sourceChanged, true)
+  assert.match(result.error, /Project files changed during this check/)
   assert.equal(
-    (await f.store.readFile(f.project.id, 'owner', 'A.lean')).content,
+    (await f.store.readFile(f.project.id, 'owner', 'B.lean')).content,
     '-- A.lean\n',
   )
+})
+
+test('terminal edits publish unrelated files after a move and reject stale source paths', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'Figures/A.svg', '<svg><!-- original --></svg>\n')
+  await write(f, 'Other.lean', '-- original\n')
+  const snapshot = await f.store.terminalSnapshot(
+    f.project.id,
+    'editor',
+    'move-terminal',
+  )
+  try {
+    assert.equal(
+      (await f.move({ from: 'Figures', to: 'MovedFigures' })).status,
+      200,
+    )
+    await fs.writeFile(
+      path.join(snapshot.root, 'Other.lean'),
+      '-- private edit\n',
+    )
+    const published = await f.store.syncTerminal(snapshot)
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'owner', 'Other.lean')).content,
+      '-- private edit\n',
+    )
+    const stale = '<svg><!-- private edit --></svg>\n'
+    await fs.writeFile(path.join(snapshot.root, 'Figures/A.svg'), stale)
+    await assert.rejects(f.store.syncTerminal(snapshot, published), {
+      status: 409,
+    })
+    await assert.rejects(fs.stat(path.join(f.project.root, 'Figures')), {
+      code: 'ENOENT',
+    })
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'owner', 'MovedFigures/A.svg'))
+        .content,
+      '<svg><!-- original --></svg>\n',
+    )
+    assert.equal(
+      await fs.readFile(path.join(snapshot.root, 'Figures/A.svg'), 'utf8'),
+      stale,
+    )
+  } finally {
+    await f.store.cleanupTerminalSnapshot(snapshot, { finalize: true })
+  }
+})
+
+test('agent updates survive unrelated moves and cannot update or undo moved source paths', async (t) => {
+  const f = await fixture(t)
+  await write(f, 'A.lean', '-- A\n')
+  await write(f, 'Other.lean', '-- original\n')
+  const original = await f.store.readFile(f.project.id, 'owner', 'Other.lean')
+  const snapshot = await f.store.snapshot(f.project.id, 'editor', 'move-agent')
   assert.equal((await f.move({ from: 'A.lean', to: 'B.lean' })).status, 200)
+  const change = {
+    path: 'Other.lean',
+    before: original.content,
+    beforeHash: original.hash,
+    after: '-- agent edit\n',
+  }
+  const published = await f.store.syncLive(snapshot, [change])
+  assert.equal(
+    (await f.move({ from: 'Other.lean', to: 'Moved.lean' })).status,
+    200,
+  )
+  await assert.rejects(
+    f.store.syncLive(
+      snapshot,
+      [{ ...change, after: '-- later edit\n' }],
+      published,
+    ),
+    { status: 409 },
+  )
+  await assert.rejects(f.store.undoLive(snapshot, published), { status: 409 })
+  await assert.rejects(
+    f.store.applyChanges(f.project.id, 'editor', [change], { snapshot }),
+    { status: 409 },
+  )
+  await assert.rejects(fs.stat(path.join(f.project.root, 'Other.lean')), {
+    code: 'ENOENT',
+  })
+  assert.equal(
+    (await f.store.readFile(f.project.id, 'owner', 'Moved.lean')).content,
+    change.after,
+  )
 })
 
 test('moves notify live editors for both paths and old-path saves cannot recreate the file', async (t) => {

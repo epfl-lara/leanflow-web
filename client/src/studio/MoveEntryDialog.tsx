@@ -27,13 +27,14 @@ export function MoveEntryDialog({
   projectName: string
   folders: string[]
   existing: ReadonlySet<string>
-  onSubmit: (to: string) => Promise<void>
+  onSubmit: (to: string, updateReferences: boolean) => Promise<void>
   onClose: () => void
 }) {
   const currentName = baseName(subject.path)
   const currentParent = parentOf(subject.path)
   const [name, setName] = useState(currentName)
   const [parent, setParent] = useState(CHOOSE)
+  const [updateReferences, setUpdateReferences] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const destinations = folders.filter(
@@ -44,24 +45,20 @@ export function MoveEntryDialog({
   )
   const canChooseRoot = currentParent !== ''
   const trimmed = name.trim()
+  const targetParent = mode === 'rename' ? currentParent : parent
   const target =
-    mode === 'rename'
-      ? !trimmed
-        ? ''
-        : currentParent
-          ? `${currentParent}/${trimmed}`
-          : trimmed
-      : parent === CHOOSE
-        ? ''
-        : parent
-          ? `${parent}/${currentName}`
-          : currentName
-  const problem =
-    mode === 'rename' && trimmed.includes('/')
+    !trimmed || targetParent === CHOOSE
+      ? ''
+      : targetParent
+        ? `${targetParent}/${trimmed}`
+        : trimmed
+  const problem = trimmed.includes('/')
+    ? mode === 'rename'
       ? 'A name cannot contain /. Use Move to choose another folder.'
-      : target
-        ? moveProblem(subject, target, existing)
-        : ''
+      : 'A name cannot contain /. Choose the destination folder above.'
+    : target
+      ? moveProblem(subject, target, existing)
+      : ''
   const unchanged = mode === 'rename' ? trimmed === currentName : false
 
   useEffect(() => {
@@ -84,7 +81,7 @@ export function MoveEntryDialog({
     setBusy(true)
     setError('')
     try {
-      await onSubmit(target)
+      await onSubmit(target, updateReferences)
       onClose()
     } catch (failure) {
       setError(errorText(failure))
@@ -102,35 +99,10 @@ export function MoveEntryDialog({
       busy={busy}
     >
       <form onSubmit={submit}>
-        {mode === 'rename' ? (
-          <>
-            <label className="field-label" htmlFor="move-entry-name">
-              New name
-            </label>
-            <input
-              id="move-entry-name"
-              autoFocus
-              value={name}
-              onChange={(event) => {
-                setName(event.target.value)
-                setError('')
-              }}
-              onFocus={(event) => {
-                const dot = currentName.lastIndexOf('.')
-                if (subject.kind === 'file' && dot > 0)
-                  event.currentTarget.setSelectionRange(0, dot)
-                else event.currentTarget.select()
-              }}
-              aria-describedby="move-entry-help move-entry-preview"
-              aria-invalid={!!problem}
-              required
-              disabled={busy}
-            />
-          </>
-        ) : (
+        {mode === 'move' && (
           <>
             <label className="field-label" htmlFor="move-entry-parent">
-              Move to
+              Destination folder
             </label>
             <select
               id="move-entry-parent"
@@ -140,7 +112,7 @@ export function MoveEntryDialog({
                 setParent(event.target.value)
                 setError('')
               }}
-              aria-describedby="move-entry-help move-entry-preview"
+              aria-describedby="move-entry-parent-help move-entry-preview"
               disabled={busy}
             >
               <option value={CHOOSE} disabled>
@@ -155,6 +127,11 @@ export function MoveEntryDialog({
                 </option>
               ))}
             </select>
+            <p className="field-help" id="move-entry-parent-help">
+              {subject.kind === 'folder'
+                ? 'Moves this folder and all its contents inside the destination folder.'
+                : 'Moves this file inside the destination folder.'}
+            </p>
             {!canChooseRoot && !destinations.length && (
               <p className="field-help">
                 There is no other folder to move this into. Create a folder
@@ -163,17 +140,47 @@ export function MoveEntryDialog({
             )}
           </>
         )}
+        <label className="field-label" htmlFor="move-entry-name">
+          {mode === 'rename' ? 'New name' : 'Name'}
+        </label>
+        <input
+          id="move-entry-name"
+          autoFocus={mode === 'rename'}
+          value={name}
+          onChange={(event) => {
+            setName(event.target.value)
+            setError('')
+          }}
+          onFocus={(event) => {
+            const dot = event.currentTarget.value.lastIndexOf('.')
+            if (subject.kind === 'file' && dot > 0)
+              event.currentTarget.setSelectionRange(0, dot)
+            else event.currentTarget.select()
+          }}
+          aria-describedby="move-entry-help move-entry-preview"
+          aria-invalid={!!problem}
+          required
+          disabled={busy}
+        />
         <p className="field-help" id="move-entry-help">
-          {mode === 'rename'
-            ? 'Contents are kept. Lean imports that use the old name are not updated; fix them after renaming.'
-            : 'Contents are kept. Lean imports that use the old location are not updated; fix them after moving.'}{' '}
           Unsaved edits are saved first. Existing files are never overwritten.
         </p>
+        <label className="setup-repair-choice">
+          <input
+            type="checkbox"
+            checked={updateReferences}
+            onChange={(event) => setUpdateReferences(event.target.checked)}
+            aria-describedby="move-entry-references-help"
+            disabled={busy}
+          />
+          Update imports and file links
+        </label>
+        <p className="field-help" id="move-entry-references-help">
+          Updates Lean imports, Markdown links and images, and common TeX file
+          paths. Other references may need a manual update.
+        </p>
         <p className="field-help entry-path-preview" id="move-entry-preview">
-          New path:{' '}
-          <strong>
-            {projectName} / {target || '…'}
-          </strong>
+          New path: <strong>{target || '…'}</strong>
         </p>
         {(error || (problem && !unchanged && trimmed !== '')) && (
           <p className="error-message" role="alert">

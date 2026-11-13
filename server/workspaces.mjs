@@ -94,6 +94,10 @@ import {
   parseMoveRequest,
   unchangedFileMoves,
 } from './workspace-moves.mjs'
+import {
+  prepareReferenceUpdates,
+  applyReferenceUpdates,
+} from './workspace-reference-scan.mjs'
 import { validatePdfBytes } from './pdf-preview.mjs'
 import { validateBinaryAsset } from './binary-assets.mjs'
 import {
@@ -4420,6 +4424,40 @@ export class WorkspaceStore {
         'Project setup files cannot be renamed or moved. Edit them in place instead.',
         403,
       )
+    let referencePlan
+    if (request.updateReferences) {
+      const project = this.requireEditor(id, owner)
+      this.#ready(project)
+      assertIdle()
+      if (!(await exists(await guarded(project.root, from, { write: true }))))
+        fail('File or folder not found. Refresh the file tree.', 404)
+      try {
+        const signal = AbortSignal.timeout(5000)
+        const files = await this.#walk(project.root, {
+          limit: MAX_FILES + 1,
+          signal,
+        })
+        referencePlan = await prepareReferenceUpdates({
+          from,
+          to,
+          files: files.slice(0, MAX_FILES),
+          readFile: async (filename) => {
+            this.requireEditor(id, owner)
+            return textFile(
+              await guarded(project.root, filename, { write: true }),
+            )
+          },
+          signal,
+          isProtected: (filename) =>
+            filename.split('/').some((part) => CONFIGURATION_FILES.has(part)),
+        })
+        if (files.length > MAX_FILES) referencePlan.skippedFiles++
+      } catch {
+        // Reference discovery is optional. It must not bring back a global
+        // editing lock or turn a supported move into a refusal.
+        referencePlan = { updates: [], skippedFiles: 1 }
+      }
+    }
     return this.#locked(id, async () => {
       const project = this.requireEditor(id, owner)
       this.#ready(project)
@@ -4502,7 +4540,18 @@ export class WorkspaceStore {
       } finally {
         this.#changed(id, [from, to], 'files', [from], [{ from, to }])
       }
-      return { from, to, kind }
+      const references = referencePlan
+        ? await applyReferenceUpdates(referencePlan, {
+            readFile: async (filename) =>
+              textFile(await guarded(project.root, filename, { write: true })),
+            apply: (changes) =>
+              this.#applyLocked(project, changes, 'saved', () => {
+                this.requireEditor(id, owner)
+                assertIdle()
+              }),
+          })
+        : undefined
+      return { from, to, kind, ...(references ? { references } : {}) }
     })
   }
 

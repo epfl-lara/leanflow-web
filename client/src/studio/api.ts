@@ -291,6 +291,18 @@ export interface FileEntry {
   size?: number
   readOnly?: boolean
 }
+export interface MoveEntryResult {
+  from: string
+  to: string
+  kind: 'file' | 'folder'
+  references?: {
+    updatedFiles: number
+    updatedReferences: number
+    updatedPaths: string[]
+    skippedFiles: number
+    warning?: string
+  }
+}
 export interface OpenFile {
   path: string
   content: string

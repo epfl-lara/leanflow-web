@@ -54,14 +54,24 @@ export function parseMoveRequest(input) {
     !input ||
     typeof input !== 'object' ||
     Array.isArray(input) ||
-    Object.keys(input).some((key) => key !== 'from' && key !== 'to') ||
+    Object.keys(input).some(
+      (key) => !['from', 'to', 'updateReferences'].includes(key),
+    ) ||
     typeof input.from !== 'string' ||
-    typeof input.to !== 'string'
+    typeof input.to !== 'string' ||
+    (input.updateReferences !== undefined &&
+      typeof input.updateReferences !== 'boolean')
   )
     throw new MoveError(
       'Choose the file or folder to move and its new path (from and to).',
     )
-  return { from: input.from, to: input.to }
+  return {
+    from: input.from,
+    to: input.to,
+    ...(input.updateReferences === undefined
+      ? {}
+      : { updateReferences: input.updateReferences }),
+  }
 }
 
 /** Rejects no-op and self-containing moves for already normalized paths. */

@@ -50,7 +50,13 @@ Use **Refresh setup** in an open project to recheck its environment. Valid compi
 
 To rename or move a project file or folder, right-click it in the file sidebar or open its **⋯** menu. Choose **Rename** or **Move to folder…**. Unsaved edits are saved first, and existing destinations are never overwritten.
 
-Finish active checks, assistant runs, PDF builds and setup, and close the project terminal before moving files. Project setup files stay in place. Open files, chat attachments and focused proofs follow the new paths while you are connected. If you were offline, refresh the file list and reopen the file at its new path. Update Lean imports that used the old name or location.
+Choose the parent under **Destination folder**. To move `figures` to `Problems/figures`, choose `Problems`. Change **Name** to rename it in the same move. Check **New path** before confirming.
+
+Keep **Update imports and file links** selected to update recognized references automatically. It is on by default. This covers Lean imports, Markdown links and images (including Lean comments), and common TeX commands such as `\includegraphics` and `\input`. Relative links inside moved documents follow their new location. The result shows how many references changed. Paths built in code and unsupported or ambiguous references need a manual update.
+
+Reference discovery runs locally without holding the file-save queue. It excludes dependencies and protected files and uses a 32 MiB, five-second scan budget. Only files that still match their scanned version are updated. The move completes even if a reference update cannot be saved; a warning tells you to review the remaining imports and links. Newer editor drafts stay intact.
+
+You can move files while checks, assistant runs, PDF builds and terminals stay open. Wait for setup or a Git operation to finish first. If an assistant or terminal later tries to update the old path, its conflicting update is kept in its private copy. A Lean check that sees changed files asks you to run it again. Project setup files stay in place. Open files, chat attachments and focused proofs follow the new paths while you are connected. If you were offline, refresh the file list and reopen the file at its new path.
 
 ## Share a project
 

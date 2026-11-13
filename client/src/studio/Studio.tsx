@@ -20,6 +20,7 @@ import {
   SESSION_RESTORED_EVENT,
   type Account,
   type FileEntry,
+  type MoveEntryResult,
   type GitInfo,
   type Project,
   type Preset,
@@ -85,7 +86,10 @@ import { setRunEventTransport } from './runEventTransport'
 import { FileBrowser } from './FileBrowser'
 import { CreateEntryDialog, type EntryKind } from './CreateEntryDialog'
 import { DetachedDraftNotice } from './DetachedDraftNotice'
-import { reconcileMissingBuffers } from './workspaceFiles'
+import {
+  reconcileMissingBuffers,
+  refreshChangedBuffers,
+} from './workspaceFiles'
 import { MoveEntryDialog } from './MoveEntryDialog'
 import {
   moveRequestCurrent,
@@ -1927,7 +1931,12 @@ export function Studio() {
       setMoveTarget(null)
   }, [moveTarget, projectId, session?.user.id])
 
-  async function moveEntry(targetProjectId: string, from: string, to: string) {
+  async function moveEntry(
+    targetProjectId: string,
+    from: string,
+    to: string,
+    updateReferences: boolean,
+  ) {
     // The request is bound to the project that opened the dialog; a project
     // or account switch in between must never retarget a same-named path.
     if (!projectId || projectId !== targetProjectId)
@@ -1943,8 +1952,8 @@ export function Studio() {
       )
     setOpening(true)
     try {
-      // Moves keep file bytes, so saved edits follow the file. Never move while
-      // an edit is unsaved: saving first means the server always sees the text.
+      // Save drafts before the server prepares reference updates. Text typed
+      // during the request remains in its buffer and follows the moved path.
       await saveCompletely()
       requireScope(expected)
       if (savePromise.current)
@@ -1954,9 +1963,9 @@ export function Studio() {
       const ownKey = `${from}\0${to}`
       ownMoves.current.add(ownKey)
       setTimeout(() => ownMoves.current.delete(ownKey), 15_000)
-      const moved = await post<{ kind: 'file' | 'folder' }>(
+      const moved = await post<MoveEntryResult>(
         `/api/projects/${encodeURIComponent(projectId)}/move`,
-        { from, to },
+        { from, to, updateReferences },
       )
       if (!bufferStore.isCurrent(expected)) return
       // Re-key open buffers (and any text typed during the request) to the new
@@ -1974,17 +1983,48 @@ export function Studio() {
             ? to.slice(0, to.lastIndexOf('/'))
             : null,
       )
+      const warnings: string[] = []
+      if (moved.references?.warning) warnings.push(moved.references.warning)
       try {
+        const refreshed = await refreshChangedBuffers(
+          bufferStore,
+          expected,
+          moved.references?.updatedPaths || [],
+          (path) =>
+            api<{ content: string; hash: string }>(
+              `/api/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}`,
+            ),
+          collaboration.manages,
+        )
+        if (!bufferStore.isCurrent(expected)) return
+        const activePath = bufferStore.getSnapshot().file?.path
+        if (activePath && refreshed.pendingPaths.includes(activePath))
+          setAgentPendingFile(activePath)
+        if (refreshed.pendingPaths.length)
+          warnings.push(
+            'References were updated in the saved files. Newer editor drafts were kept; keep or download those drafts before using Reload file.',
+          )
+        if (refreshed.failedPaths.length)
+          warnings.push(
+            'Some open files could not refresh. Use Reload file to see the saved reference updates; your editor drafts are kept.',
+          )
         await loadFiles(projectId)
         if (!bufferStore.isCurrent(expected)) return
         void loadGit(projectId)
       } catch {
         if (!bufferStore.isCurrent(expected)) return
-        setError(
-          `Moved ${from} to ${to}, but the file list could not refresh. Use Refresh files to try again.`,
+        warnings.push(
+          'The file list could not refresh. Use Refresh files to try again.',
         )
       }
-      setNotice(`Moved to ${to}`)
+      if (warnings.length) setError(`Moved to ${to}. ${warnings.join(' ')}`)
+      const updated = moved.references?.updatedReferences || 0
+      const updatedFiles = moved.references?.updatedFiles || 0
+      setNotice(
+        updated
+          ? `Moved to ${to}; updated ${updated} ${updated === 1 ? 'reference' : 'references'} in ${updatedFiles} ${updatedFiles === 1 ? 'file' : 'files'}`
+          : `Moved to ${to}`,
+      )
     } finally {
       if (bufferStore.isCurrent(expected)) setOpening(false)
     }
@@ -4279,8 +4319,13 @@ export function Studio() {
             existing={
               new Set([...files.map((entry) => entry.path), ...folders])
             }
-            onSubmit={(to) =>
-              moveEntry(moveTarget.projectId, moveTarget.path, to)
+            onSubmit={(to, updateReferences) =>
+              moveEntry(
+                moveTarget.projectId,
+                moveTarget.path,
+                to,
+                updateReferences,
+              )
             }
             onClose={() => setMoveTarget(null)}
           />

@@ -37,6 +37,10 @@ try {
         'Destination/Keep.lean': '-- Destination fixture\n',
         'Nested/Child.lean':
           '-- Nested fixture\nexample : True := by trivial\n',
+        'figures/diagram.svg': '<svg><!-- source diagram --></svg>\n',
+        'Destination/figures/keep.svg':
+          '<svg><!-- existing diagram --></svg>\n',
+        'Reference.md': '![Diagram](figures/diagram.svg)\n',
       },
     },
     chats: [{ id: 'file-moves-chat', projectId, title: 'Fixture' }],
@@ -46,6 +50,7 @@ try {
   const moves = [],
     order = []
   let failMove = false
+  let warnReferences = false
   state.onSave = ({ save }) => {
     order.push('save')
     return save()
@@ -60,7 +65,8 @@ try {
       return route.fulfill({
         status: 409,
         json: {
-          error: 'Finish the active proof run before renaming or moving files.',
+          error:
+            'Wait for the current Git operation before starting other project work.',
         },
       })
     }
@@ -78,7 +84,40 @@ try {
       files[body.to + name.slice(body.from.length)] = files[name]
       delete files[name]
     }
-    return route.fulfill({ json: { ...body, kind } })
+    const updatedPaths = []
+    if (body.updateReferences && body.from === 'figures') {
+      files['Reference.md'] =
+        '![Diagram](Destination/ImportedFigures/diagram.svg)\n'
+      updatedPaths.push('Reference.md')
+    }
+    if (body.updateReferences && body.from === 'Reference.md') {
+      files['Destination/Guide.md'] =
+        '![Diagram](ImportedFigures/diagram.svg)\n'
+      updatedPaths.push('Destination/Guide.md')
+    }
+    return route.fulfill({
+      json: {
+        from: body.from,
+        to: body.to,
+        kind,
+        ...(body.updateReferences
+          ? {
+              references: {
+                updatedFiles: updatedPaths.length,
+                updatedReferences: updatedPaths.length,
+                updatedPaths,
+                skippedFiles: warnReferences ? 1 : 0,
+                ...(warnReferences
+                  ? {
+                      warning:
+                        'The move completed. Some files changed or could not be scanned, so their references were left unchanged. Review imports and links that use the old path.',
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+      },
+    })
   })
   const editor = () => page.locator('.monaco-editor textarea').first()
   const editorText = () =>
@@ -107,14 +146,28 @@ try {
     await input.press('ControlOrMeta+A')
     await page.keyboard.insertText(value)
   }
-  async function move(name, parent, kind = 'file') {
+  async function move(name, parent, kind = 'file', newName) {
     await actions(name, kind)
     await page
       .getByRole('menuitem', { name: 'Move to folder…', exact: true })
       .click()
     await dialog(`Move ${kind}`)
-      .getByLabel('Move to', { exact: true })
+      .getByLabel('Destination folder', { exact: true })
       .selectOption(parent)
+    if (newName) {
+      const input = dialog(`Move ${kind}`).getByLabel('Name', {
+        exact: true,
+      })
+      await input.click()
+      await input.fill(newName)
+      await until(
+        async () =>
+          (await dialog(`Move ${kind}`)
+            .locator('#move-entry-preview')
+            .innerText()) === `New path: ${parent}/${newName}`,
+        'move preview uses the chosen name',
+      )
+    }
     await dialog(`Move ${kind}`)
       .getByRole('button', { name: `Move ${kind}`, exact: true })
       .click()
@@ -271,7 +324,7 @@ try {
   await dialog('Rename file').getByRole('alert').waitFor()
   assert.match(
     await dialog('Rename file').getByRole('alert').innerText(),
-    /Finish the active proof run/,
+    /Wait for the current Git operation/,
   )
   assert.equal(
     state.files[projectId]['Destination/RenamedFolder/Child.lean'],
@@ -286,7 +339,7 @@ try {
     0,
   )
   report.checks.push(
-    'Busy-work refusals keep the file and editor intact, show an actionable error, and never stop a proof run.',
+    'Git-operation refusals keep the file and editor intact and show an actionable error.',
   )
 
   let submitted
@@ -296,7 +349,7 @@ try {
       id: 'moved-files-request',
       projectId,
       chatId: chat.id,
-      status: 'completed',
+      status: 'running',
       mode: body.mode,
       prompt: body.prompt,
       message: 'Fixture request accepted.',
@@ -318,6 +371,119 @@ try {
     'Sending with Enter uses the renamed attachments and focused proof, so the next request has no stale source paths.',
   )
 
+  await page.getByRole('button', { name: 'Stop', exact: true }).waitFor()
+  await move('Notes.lean', 'Destination', 'file', 'Reference.lean')
+  assert.equal(
+    state.files[projectId]['Destination/Reference.lean'],
+    '-- Existing file must be kept\n',
+  )
+  assert(!Object.hasOwn(state.files[projectId], 'Notes.lean'))
+  assert.equal(state.runs.at(-1).status, 'running')
+  assert.equal(
+    report.requests.filter((request) => request.endpoint.endsWith('/stop'))
+      .length,
+    0,
+  )
+  report.checks.push(
+    'Files can move and rename together during an active assistant run without stopping it.',
+  )
+
+  await file('Reference.md').click()
+  await opened('Reference.md', 'figures/diagram.svg')
+  await actions('figures', 'folder')
+  await page
+    .getByRole('menuitem', { name: 'Move to folder…', exact: true })
+    .click()
+  await dialog('Move folder')
+    .getByLabel('Destination folder', { exact: true })
+    .selectOption('Destination')
+  assert.match(
+    await dialog('Move folder').getByRole('alert').innerText(),
+    /Destination\/figures already exists/,
+  )
+  assert.equal(
+    await dialog('Move folder')
+      .getByRole('button', { name: 'Move folder', exact: true })
+      .isDisabled(),
+    true,
+  )
+  await dialog('Move folder')
+    .getByLabel('Name', { exact: true })
+    .fill('ImportedFigures')
+  assert.equal(
+    await dialog('Move folder')
+      .getByRole('checkbox', { name: 'Update imports and file links' })
+      .isChecked(),
+    true,
+  )
+  assert.equal(await dialog('Move folder').getByRole('alert').count(), 0)
+  assert.match(
+    await dialog('Move folder').locator('#move-entry-preview').innerText(),
+    /Destination\/ImportedFigures/,
+  )
+  await dialog('Move folder').screenshot({
+    path: path.join(output, 'move-folder.png'),
+  })
+  await dialog('Move folder')
+    .getByRole('button', { name: 'Move folder', exact: true })
+    .click()
+  await dialog('Move folder').waitFor({ state: 'hidden' })
+  assert.equal(
+    state.files[projectId]['Destination/ImportedFigures/diagram.svg'],
+    '<svg><!-- source diagram --></svg>\n',
+  )
+  assert.equal(
+    state.files[projectId]['Destination/figures/keep.svg'],
+    '<svg><!-- existing diagram --></svg>\n',
+  )
+  assert(!Object.hasOwn(state.files[projectId], 'figures/diagram.svg'))
+  await opened('Reference.md', 'Destination/ImportedFigures/diagram.svg')
+  assert.equal(moves.at(-1).updateReferences, true)
+  report.checks.push(
+    'Folder collisions can be resolved by renaming during the move; automatic reference updates are on by default and refresh an open referencing document.',
+  )
+
+  await move('Reference.md', 'Destination', 'file', 'Guide.md')
+  await opened('Destination/Guide.md', 'ImportedFigures/diagram.svg')
+  assert.equal(
+    state.files[projectId]['Destination/Guide.md'],
+    '![Diagram](ImportedFigures/diagram.svg)\n',
+  )
+  report.checks.push(
+    'A moved document follows its new path and refreshes rewritten relative links without needing a reload.',
+  )
+
+  await rename('Destination/Guide.md', 'Manual.md')
+  await dialog('Rename file')
+    .getByRole('checkbox', { name: 'Update imports and file links' })
+    .uncheck()
+  await dialog('Rename file')
+    .getByRole('button', { name: 'Rename file', exact: true })
+    .click()
+  await dialog('Rename file').waitFor({ state: 'hidden' })
+  await opened('Destination/Manual.md', 'ImportedFigures/diagram.svg')
+  assert.equal(moves.at(-1).updateReferences, false)
+  report.checks.push(
+    'Automatic reference updates can be turned off for a move or rename.',
+  )
+
+  warnReferences = true
+  await rename('Destination/Manual.md', 'Review.md')
+  await dialog('Rename file')
+    .getByRole('button', { name: 'Rename file', exact: true })
+    .click()
+  await dialog('Rename file').waitFor({ state: 'hidden' })
+  await opened('Destination/Review.md', 'ImportedFigures/diagram.svg')
+  await page
+    .getByText(
+      'Moved to Destination/Review.md. The move completed. Some files changed or could not be scanned, so their references were left unchanged. Review imports and links that use the old path.',
+      { exact: true },
+    )
+    .waitFor()
+  report.checks.push(
+    'A partial reference update leaves a persistent actionable warning after the move dialog closes.',
+  )
+
   await actions('lakefile.toml')
   for (const name of ['Rename', 'Move to folder…'])
     assert.equal(
@@ -329,10 +495,12 @@ try {
     'Project setup files show disabled rename and move actions.',
   )
 
+  await file('Destination/Reference.lean').click()
+  await opened('Destination/Reference.lean', 'kept')
   state.projects[0].accessRole = 'viewer'
   await page.reload()
   await fixture.ready()
-  await file('Notes.lean').click({ button: 'right' })
+  await file('Destination/Reference.lean').click({ button: 'right' })
   assert.equal(
     await page.getByRole('menuitem', { name: 'Rename', exact: true }).count(),
     0,
@@ -348,7 +516,7 @@ try {
   state.projects[0].accessRole = 'editor'
   state.projects[0].kind = 'single-file'
   await page.reload()
-  await file('Notes.lean').click({ button: 'right' })
+  await file('Destination/Reference.lean').click({ button: 'right' })
   for (const name of ['Rename', 'Move to folder…'])
     assert.equal(
       await page.getByRole('menuitem', { name, exact: true }).isDisabled(),

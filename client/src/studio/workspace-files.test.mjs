@@ -26,9 +26,12 @@ function load(name, imports = {}) {
 }
 const { ApiError } = load('./api.ts')
 const { WorkspaceBuffers } = load('./workspaceBuffers.ts')
-const { reconcileMissingBuffers } = load('./workspaceFiles.ts', {
-  './api': { ApiError },
-})
+const { reconcileMissingBuffers, refreshChangedBuffers } = load(
+  './workspaceFiles.ts',
+  {
+    './api': { ApiError },
+  },
+)
 const file = (
   path,
   content = 'saved',
@@ -123,4 +126,157 @@ test('storage and access errors never masquerade as a deleted file', async () =>
     })
     assert.equal(store.getSnapshot(), before)
   }
+})
+
+test('reference updates refresh clean active and retained buffers without opening other files', async () => {
+  const store = fixture()
+  store.register(
+    ['Main.lean', 'Notes.md', 'Unrelated.lean'].map((path) => ({
+      uri: `file:///workspace/${path}`,
+      path,
+      content: 'saved',
+      hash: 'a'.repeat(64),
+      unsaved: false,
+    })),
+  )
+  store.setFile(file('Main.lean'))
+  const reads = []
+  const result = await refreshChangedBuffers(
+    store,
+    store.getSnapshot().scope,
+    ['Main.lean', 'Notes.md', 'Closed.md'],
+    async (path) => {
+      reads.push(path)
+      return { content: 'updated ' + path, hash: 'b'.repeat(64) }
+    },
+  )
+  assert.deepEqual(reads, ['Main.lean', 'Notes.md'])
+  assert.deepEqual(result, { pendingPaths: [], failedPaths: [] })
+  assert.equal(store.getSnapshot().file.path, 'Main.lean')
+  for (const path of reads) {
+    const current = store.getSnapshot().buffers.get(path)
+    assert.equal(current.content, 'updated ' + path)
+    assert.equal(current.savedContent, current.content)
+    assert.equal(current.hash, 'b'.repeat(64))
+  }
+  assert.equal(
+    store.getSnapshot().buffers.get('Unrelated.lean').content,
+    'saved',
+  )
+})
+
+test('reference refresh preserves existing drafts and typing that arrives during its read', async () => {
+  const store = fixture()
+  store.setFile(file('Main.lean'))
+  store.change('Main.lean', 'draft before refresh')
+  const baseline = store.getSnapshot().file
+  const result = await refreshChangedBuffers(
+    store,
+    store.getSnapshot().scope,
+    ['Main.lean'],
+    async () => {
+      assert.fail('Dirty files must not be replaced by a reference refresh')
+    },
+  )
+  assert.deepEqual(result.pendingPaths, ['Main.lean'])
+  assert.equal(store.getSnapshot().file, baseline)
+
+  store.setFile(file('Main.lean'))
+  let finish
+  const reading = new Promise((resolve) => {
+    finish = resolve
+  })
+  const refreshing = refreshChangedBuffers(
+    store,
+    store.getSnapshot().scope,
+    ['Main.lean'],
+    () => reading,
+  )
+  store.change('Main.lean', 'typed during refresh')
+  finish({ content: 'updated references', hash: 'b'.repeat(64) })
+  assert.deepEqual((await refreshing).pendingPaths, ['Main.lean'])
+  assert.equal(store.getSnapshot().file.content, 'typed during refresh')
+  assert.equal(store.getSnapshot().file.savedContent, 'saved')
+  assert.equal(store.getSnapshot().file.hash, 'a'.repeat(64))
+})
+
+for (const replacement of ['visit', 'reload', 'save', 'move'])
+  test(`a delayed reference refresh cannot replace a newer ${replacement}`, async () => {
+    const store = fixture()
+    store.setFile(file('Main.lean'))
+    let finish
+    const reading = new Promise((resolve) => {
+      finish = resolve
+    })
+    const refreshing = refreshChangedBuffers(
+      store,
+      store.getSnapshot().scope,
+      ['Main.lean'],
+      () => reading,
+    )
+    if (replacement === 'visit') {
+      store.selectProject('other')
+      store.selectProject('shared')
+    }
+    if (replacement === 'move') store.move('Main.lean', 'Moved.lean')
+    const path = replacement === 'move' ? 'Moved.lean' : 'Main.lean'
+    store.setFile(
+      file(
+        path,
+        'new saved source',
+        replacement === 'reload' ? 2 : 1,
+        replacement === 'save' ? 'c'.repeat(64) : 'a'.repeat(64),
+      ),
+    )
+    finish({ content: 'older reference response', hash: 'b'.repeat(64) })
+    await refreshing
+    assert.equal(store.getSnapshot().file.path, path)
+    assert.equal(store.getSnapshot().file.content, 'new saved source')
+    assert.equal(store.getSnapshot().file.savedContent, 'new saved source')
+  })
+
+test('live-managed files stay with collaboration even when admission changes during a read', async () => {
+  const store = fixture()
+  store.setFile(file('Main.lean'))
+  const before = store.getSnapshot()
+  await refreshChangedBuffers(
+    store,
+    before.scope,
+    ['Main.lean'],
+    async () => assert.fail('The live document owns this refresh'),
+    () => true,
+  )
+  assert.equal(store.getSnapshot(), before)
+  let finish,
+    managed = false
+  const refreshing = refreshChangedBuffers(
+    store,
+    before.scope,
+    ['Main.lean'],
+    () =>
+      new Promise((resolve) => {
+        finish = resolve
+      }),
+    () => managed,
+  )
+  managed = true
+  finish({ content: 'updated references', hash: 'b'.repeat(64) })
+  await refreshing
+  assert.equal(store.getSnapshot(), before)
+})
+
+test('a failed reference refresh reports the file and preserves its editor baseline', async () => {
+  const store = fixture()
+  store.setFile(file('Main.lean'))
+  const before = store.getSnapshot()
+  const result = await refreshChangedBuffers(
+    store,
+    before.scope,
+    ['Main.lean'],
+    async () => {
+      throw new ApiError('Unavailable', 503)
+    },
+  )
+  assert.deepEqual(result, { pendingPaths: [], failedPaths: ['Main.lean'] })
+  assert.equal(store.getSnapshot(), before)
 })
