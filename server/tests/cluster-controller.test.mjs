@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { BlobStore } from '../cluster/blobs.mjs'
+import { BlobStore, captureTree } from '../cluster/blobs.mjs'
 import {
   ClusterController,
   SSH_BINARY,
@@ -212,7 +212,11 @@ async function cluster(t, settings = {}) {
     for (const { worker } of workers.values()) await worker.close()
     await fsp.rm(root, { recursive: true, force: true })
   })
-  const local = await new BlobStore(path.join(root, 'local')).init()
+  const assetDataDir = settings.backedAssets ? path.join(root, 'managed') : null
+  if (assetDataDir) await fsp.mkdir(assetDataDir, { mode: 0o700 })
+  const local = await new BlobStore(path.join(root, 'local'), {
+    assetDataDir,
+  }).init()
   t.after(() => local.close())
   for (const spec of nodes) workers.set(spec.id, await startWorker(root, spec))
   const transport = {
@@ -269,6 +273,24 @@ async function cluster(t, settings = {}) {
   const controller = make()
   await controller.init()
   const input = await snapshot(local, files)
+  if (assetDataDir) {
+    const toolchain = path.join(
+      assetDataDir,
+      'runtime/elan/toolchains',
+      VERSION.replace('/', '--').replace(':', '---'),
+    )
+    await fsp.mkdir(path.join(toolchain, 'bin'), {
+      recursive: true,
+      mode: 0o700,
+    })
+    await fsp.writeFile(path.join(toolchain, 'bin/lean'), '#!/bin/sh\n', {
+      mode: 0o700,
+    })
+    input.toolchain.manifest = (
+      await captureTree(local, toolchain, { kind: 'toolchain' })
+    ).hash
+    await local.trimAssetCopies()
+  }
   const ready = (count = nodes.length) =>
     until(() => controller.status().ready === count)
   return {
@@ -692,6 +714,38 @@ test('mode off and reserve workers make no connections unless reserve use is exp
   await allowed.ready()
   const result = await allowed.controller.run(allowed.input, options())
   assert.equal(result.code, 0)
+})
+
+test('evicted coordinator asset payloads transfer again after worker cache loss without recreating local copies', async (t) => {
+  const { controller, workers, input, ready, blobs, make, transport } =
+    await cluster(t, { backedAssets: true })
+  const hash = sha256('#!/bin/sh\n')
+  await assert.rejects(fsp.stat(blobs.object(hash)), { code: 'ENOENT' })
+  await ready()
+  assert.equal((await controller.run(input, options())).code, 0)
+  const { worker } = workers.get('node-a')
+  assert.equal((await worker.blobs.read(hash)).toString(), '#!/bin/sh\n')
+  await controller.shutdown()
+  await worker.blobs.reset()
+  const restarted = make()
+  await restarted.init()
+  await until(() => restarted.status().ready === 1)
+  assert.equal(
+    (await restarted.run(input, options({ jobId: 'after-worker-cache-loss' })))
+      .code,
+    0,
+  )
+  assert.equal((await worker.blobs.read(hash)).toString(), '#!/bin/sh\n')
+  await assert.rejects(fsp.stat(blobs.object(hash)), { code: 'ENOENT' })
+  assert.equal(
+    transport.requests.filter(
+      (entry) =>
+        entry.method === 'objects.put' &&
+        entry.params.hash === hash &&
+        entry.params.final,
+    ).length,
+    2,
+  )
 })
 
 test('uploads resume from the worker offset in bulk-channel chunks', async (t) => {

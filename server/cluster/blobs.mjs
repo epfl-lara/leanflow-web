@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { clusterError, digest, identifier, sha256 } from './state.mjs'
 import { ObjectBudget, pythonBudget } from './budget.mjs'
+import { AssetSources, pythonAssetSources } from './asset-sources.mjs'
 
 const execute = promisify(execFile)
 const MAX_CHUNK = 256 * 1024
@@ -197,6 +198,7 @@ export class BlobStore {
       reserveBytes = 1024 ** 3,
       maxBytes = 128 * 1024 ** 3,
       maxFiles = 500000,
+      assetDataDir = null,
     } = {},
   ) {
     this.directory = path.resolve(directory)
@@ -215,6 +217,18 @@ export class BlobStore {
     this.maxFiles = maxFiles
     this.manifestCache = new Map()
     this.manifestCacheBytes = 0
+    this.assetSources = assetDataDir
+      ? new AssetSources(this.directory, assetDataDir, maxFiles, (relative) => {
+          try {
+            return !isPrivatePath(contentPath(relative))
+          } catch {
+            return false
+          }
+        })
+      : null
+    this.captures = 0
+    this.readers = 0
+    this.trimming = false
   }
 
   async init() {
@@ -235,6 +249,7 @@ export class BlobStore {
       path.join(this.directory, 'budget.sqlite'),
       this,
     )
+    await this.assetSources?.init()
     for (const directory of [this.objects, this.partial])
       for (const name of await fs.readdir(directory)) {
         const stat = await fs.lstat(path.join(directory, name))
@@ -256,7 +271,7 @@ export class BlobStore {
   }
 
   async reset() {
-    if (this.writes.size)
+    if (this.writes.size || this.captures || this.readers || this.trimming)
       throw clusterError(
         'Drain object writes before clearing the cache.',
         'worker_busy',
@@ -268,11 +283,13 @@ export class BlobStore {
     this.budget.reset()
     this.manifestCache.clear()
     this.manifestCacheBytes = 0
+    this.assetSources?.reset()
   }
 
   close() {
     this.budget?.close()
     this.budget = null
+    this.assetSources?.close()
   }
 
   object(hash) {
@@ -280,12 +297,18 @@ export class BlobStore {
   }
 
   async verify(hash) {
-    if ((await this.#fileDigest(this.object(hash))) !== hash)
-      throw clusterError(
-        'Worker object checksum mismatch.',
-        'digest_mismatch',
-        409,
-      )
+    const source = await this.#openObject(hash)
+    try {
+      if ((await this.#handleDigest(source.handle)) !== hash)
+        throw clusterError(
+          'Worker object checksum mismatch.',
+          'digest_mismatch',
+          409,
+        )
+      await source.validate()
+    } finally {
+      await source.close()
+    }
   }
 
   async putFile(filename, { signal } = {}) {
@@ -378,7 +401,14 @@ export class BlobStore {
             throw clusterError('Invalid stored worker object.')
           return hash
         } catch (error) {
-          if (error.code === 'ENOENT') return null
+          if (error.code === 'ENOENT') {
+            const source = await this.assetSources?.open(hash)
+            if (source) {
+              await source.handle.close()
+              return hash
+            }
+            return null
+          }
           throw error
         }
       }),
@@ -413,6 +443,8 @@ export class BlobStore {
   }
 
   async writeChunk(request) {
+    if (this.trimming)
+      throw clusterError('Object maintenance is running.', 'worker_busy', 409)
     digest(request?.hash)
     const prior = this.writes.get(request.hash) || Promise.resolve()
     const current = prior.catch(() => {}).then(() => this.#writeChunk(request))
@@ -449,13 +481,18 @@ export class BlobStore {
     )
       throw clusterError('Invalid worker object chunk bounds.')
     if ((await this.has([hash])).length) {
-      const stat = await fs.stat(this.object(hash))
-      if (stat.size !== totalBytes)
-        throw clusterError(
-          'Worker object size mismatch.',
-          'digest_mismatch',
-          409,
-        )
+      const source = await this.#openObject(hash)
+      try {
+        if (source.size !== totalBytes)
+          throw clusterError(
+            'Worker object size mismatch.',
+            'digest_mismatch',
+            409,
+          )
+        await source.validate()
+      } finally {
+        await source.close()
+      }
       return { offset: totalBytes, complete: true }
     }
     const space = await fs.statfs(this.directory)
@@ -542,10 +579,8 @@ export class BlobStore {
       length > MAX_CHUNK
     )
       throw clusterError('Invalid worker object read.')
-    const handle = await fs.open(
-      this.object(hash),
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    )
+    const source = await this.#openObject(hash)
+    const { handle } = source
     try {
       const stat = await handle.stat()
       if (
@@ -557,6 +592,7 @@ export class BlobStore {
         throw clusterError('Invalid worker object.')
       const buffer = Buffer.alloc(Math.min(length, stat.size - offset))
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset)
+      await source.validate()
       return {
         data: buffer.subarray(0, bytesRead).toString('base64'),
         offset: offset + bytesRead,
@@ -564,20 +600,19 @@ export class BlobStore {
         complete: offset + bytesRead === stat.size,
       }
     } finally {
-      await handle.close()
+      await source.close()
     }
   }
 
   async read(hash, maxBytes = MAX_MANIFEST) {
-    const handle = await fs.open(
-      this.object(hash),
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    )
+    const source = await this.#openObject(hash)
+    const { handle } = source
     try {
       const stat = await handle.stat()
       if (!stat.isFile() || stat.nlink !== 1 || stat.size > maxBytes)
         throw clusterError('Worker object exceeds its read limit.')
       const data = await handle.readFile()
+      await source.validate()
       if (data.length > maxBytes || sha256(data) !== hash)
         throw clusterError(
           'Worker object checksum mismatch.',
@@ -586,7 +621,7 @@ export class BlobStore {
         )
       return data
     } finally {
-      await handle.close()
+      await source.close()
     }
   }
 
@@ -667,17 +702,29 @@ export class BlobStore {
         if (entry.type !== 'file') continue
         const output = path.join(destination, entry.path)
         await fs.mkdir(path.dirname(output), { recursive: true, mode: 0o700 })
-        if ((await this.#fileDigest(this.object(entry.hash))) !== entry.hash)
-          throw clusterError(
-            'Worker object checksum mismatch.',
-            'digest_mismatch',
-            409,
+        const source = await this.#openObject(entry.hash)
+        try {
+          if ((await this.#handleDigest(source.handle)) !== entry.hash)
+            throw clusterError(
+              'Worker object checksum mismatch.',
+              'digest_mismatch',
+              409,
+            )
+          await fs.copyFile(
+            source.filename,
+            output,
+            constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE,
           )
-        await fs.copyFile(
-          this.object(entry.hash),
-          output,
-          constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE,
-        )
+          await source.validate()
+          if (source.backed && (await this.#fileDigest(output)) !== entry.hash)
+            throw clusterError(
+              'Worker object checksum mismatch.',
+              'digest_mismatch',
+              409,
+            )
+        } finally {
+          await source.close()
+        }
         await fs.chmod(output, entry.mode)
         if (entry.mtimeNs !== undefined)
           await fs.utimes(
@@ -754,15 +801,195 @@ export class BlobStore {
       await file.close()
     }
   }
+
+  async #handleDigest(file) {
+    const buffer = Buffer.allocUnsafe(1024 * 1024),
+      hash = createHash('sha256')
+    let position = 0
+    while (true) {
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, position)
+      if (!bytesRead) break
+      hash.update(buffer.subarray(0, bytesRead))
+      position += bytesRead
+    }
+    return hash.digest('hex')
+  }
+
+  async #openObject(hash) {
+    if (this.trimming)
+      throw clusterError('Object maintenance is running.', 'worker_busy', 409)
+    this.readers++
+    let source
+    try {
+      source = await this.#resolveObject(hash)
+    } catch (error) {
+      this.readers--
+      throw error
+    }
+    let closed = false
+    return {
+      ...source,
+      close: async () => {
+        if (closed) return
+        closed = true
+        try {
+          await source.handle.close()
+        } finally {
+          this.readers--
+        }
+      },
+    }
+  }
+
+  async #resolveObject(hash) {
+    const filename = this.object(hash)
+    let handle
+    try {
+      handle = await fs.open(
+        filename,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      )
+      const before = await handle.stat({ bigint: true })
+      if (
+        !before.isFile() ||
+        before.nlink !== 1n ||
+        before.size > BigInt(MAX_FILE)
+      )
+        throw clusterError('Invalid stored worker object.')
+      const validate = async () => {
+        const after = await handle.stat({ bigint: true })
+        if (
+          after.nlink !== 1n ||
+          before.size !== after.size ||
+          before.mtimeNs !== after.mtimeNs ||
+          before.ctimeNs !== after.ctimeNs
+        )
+          throw clusterError('Worker object changed during inspection.')
+      }
+      return {
+        handle,
+        filename,
+        size: Number(before.size),
+        backed: false,
+        validate,
+      }
+    } catch (error) {
+      await handle?.close()
+      if (error.code !== 'ENOENT') throw error
+      const source = await this.assetSources?.open(hash)
+      if (source) return source
+      throw clusterError(
+        'The requested runtime asset is unavailable.',
+        'asset_missing',
+        409,
+      )
+    }
+  }
+
+  // Idle coordinator maintenance holds the exclusive controller lock. A valid
+  // durable source reference always precedes unlinking its duplicate payload.
+  async trimAssetCopies({ signal } = {}) {
+    if (!this.assetSources)
+      throw clusterError('Managed asset references are not enabled.')
+    if (this.writes.size || this.captures || this.readers || this.trimming)
+      throw clusterError(
+        'Drain object writes before trimming.',
+        'worker_busy',
+        409,
+      )
+    this.trimming = true
+    try {
+      let files = 0,
+        bytes = 0,
+        released = 0,
+        skipped = 0,
+        batch = []
+      const hashes = this.assetSources.hashes()
+      let failed = false,
+        firstError
+      const releaseBatch = async () => {
+        const pending = batch
+        batch = []
+        await syncDirectory(this.objects)
+        released += this.budget.release(pending)
+      }
+      const trim = async (hash) => {
+        const source = await this.assetSources.open(hash)
+        if (!source) {
+          skipped++
+          return
+        }
+        try {
+          try {
+            await fs.lstat(path.join(this.partial, hash))
+            skipped++
+            return
+          } catch (error) {
+            if (error.code !== 'ENOENT') throw error
+          }
+          try {
+            const stat = await fs.lstat(this.object(hash))
+            if (!stat.isFile() || stat.nlink !== 1 || stat.size !== source.size)
+              throw clusterError('Invalid duplicate runtime object.')
+            await source.validate()
+            await fs.unlink(this.object(hash))
+            files++
+            bytes += stat.size
+          } catch (error) {
+            if (error.code !== 'ENOENT') throw error
+          }
+          batch.push(hash)
+          if (batch.length === 2048) {
+            await releaseBatch()
+          }
+        } finally {
+          await source.handle.close()
+        }
+      }
+      try {
+        await Promise.all(
+          Array.from({ length: 8 }, async () => {
+            while (!failed) {
+              const next = hashes.next()
+              if (next.done) return
+              try {
+                signal?.throwIfAborted()
+                await trim(next.value)
+              } catch (error) {
+                failed = true
+                firstError ??= error
+              }
+            }
+          }),
+        )
+      } finally {
+        hashes.return()
+      }
+      if (failed) throw firstError
+      await releaseBatch()
+      return {
+        files,
+        bytes,
+        released,
+        skipped,
+        store: this.usage(),
+        sources: this.assetSources.usage(),
+      }
+    } finally {
+      this.trimming = false
+    }
+  }
 }
 
 const captureScript = String.raw`
 import hashlib,json,os,signal,stat,sys,tempfile
-root,objects,kind,ignore_lake,reserve,budget_filename,max_bytes,max_files,max_entries=sys.argv[1:]
+root,objects,kind,ignore_lake,reserve,budget_filename,max_bytes,max_files,max_entries,sources_filename,max_sources=sys.argv[1:]
 ignore_lake=ignore_lake=='1'
 reserve=int(reserve)
 max_bytes=int(max_bytes);max_files=int(max_files);max_entries=int(max_entries)
+max_sources=int(max_sources)
 ${pythonBudget}
+${pythonAssetSources}
 def interrupted(signum,frame):raise InterruptedError('Snapshot stopped')
 signal.signal(signal.SIGTERM,interrupted)
 secret={'.git','.lemex','.codex','.ssh','.aws','.azure','.config','.netrc','.npmrc','.pypirc','credentials','credentials.json','auth.json'}
@@ -809,8 +1036,9 @@ def walk(fd,prefix=''):
     total+=size
     if total>512*1024**3:raise ValueError('Snapshot exceeds limit')
     target=os.path.join(objects,h.hexdigest())
-    reserve_blob(h.hexdigest(),size)
-    if not os.path.exists(target):
+    referenced=reference_source(relative,actual,h.hexdigest(),size)
+    if not referenced:reserve_blob(h.hexdigest(),size)
+    if not referenced and not os.path.exists(target):
      out,temporary=tempfile.mkstemp(prefix='.capture-',dir=objects)
      os.lseek(source,0,os.SEEK_SET);copied=hashlib.sha256()
      while True:
@@ -835,6 +1063,7 @@ def walk(fd,prefix=''):
 fd=os.open(root,flags|os.O_DIRECTORY)
 try:walk(fd)
 finally:os.close(fd)
+publish_sources()
 print(json.dumps(dict(version=1,kind=kind,entries=entries),separators=(',',':'),ensure_ascii=True))
 `
 
@@ -844,28 +1073,42 @@ export async function captureTree(
   { kind = 'source', ignoreLake = false, signal } = {},
 ) {
   signal?.throwIfAborted()
-  const { stdout } = await execute(
-    'python3',
-    [
-      '-I',
-      '-c',
-      captureScript,
-      root,
-      store.objects,
-      kind,
-      ignoreLake ? '1' : '0',
-      String(store.reserveBytes),
-      store.budget.filename,
-      String(store.maxBytes),
-      String(store.maxFiles),
-      String(manifestLimits(kind).entries),
-    ],
-    { signal, maxBuffer: manifestLimits(kind).bytes, timeout: 30 * 60 * 1000 },
-  )
-  const manifest = validateManifest(JSON.parse(stdout))
-  await syncDirectory(store.objects)
-  const sealed = await store.seal(manifest.entries, kind)
-  return { ...sealed, manifest }
+  if (store.trimming)
+    throw clusterError('Object maintenance is running.', 'worker_busy', 409)
+  store.captures++
+  try {
+    const sources = await store.assetSources?.captureRoot(root, kind)
+    const { stdout } = await execute(
+      'python3',
+      [
+        '-I',
+        '-c',
+        captureScript,
+        root,
+        store.objects,
+        kind,
+        ignoreLake ? '1' : '0',
+        String(store.reserveBytes),
+        store.budget.filename,
+        String(store.maxBytes),
+        String(store.maxFiles),
+        String(manifestLimits(kind).entries),
+        sources || '',
+        String(store.maxFiles),
+      ],
+      {
+        signal,
+        maxBuffer: manifestLimits(kind).bytes,
+        timeout: 30 * 60 * 1000,
+      },
+    )
+    const manifest = validateManifest(JSON.parse(stdout))
+    await syncDirectory(store.objects)
+    const sealed = await store.seal(manifest.entries, kind)
+    return { ...sealed, manifest }
+  } finally {
+    store.captures--
+  }
 }
 
 export function snapshotDirectory(base, id) {

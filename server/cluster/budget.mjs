@@ -78,6 +78,21 @@ export class ObjectBudget {
   reset() {
     this.db.exec('DELETE FROM reservations; PRAGMA wal_checkpoint(TRUNCATE);')
   }
+  release(hashes) {
+    if (!Array.isArray(hashes) || hashes.length > 2048)
+      throw clusterError('Invalid object reservation release.')
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const remove = this.db.prepare('DELETE FROM reservations WHERE hash=?')
+      let count = 0
+      for (const hash of hashes) count += remove.run(hash).changes
+      this.db.exec('COMMIT')
+      return count
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
   close() {
     this.db.close()
   }

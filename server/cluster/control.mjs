@@ -11,7 +11,7 @@ import { clusterError, digest } from './state.mjs'
 import { capturePreparedDependencies } from './dependencies.mjs'
 
 const usage =
-  'Usage: node server/cluster/control.mjs status|image|prepare|fixture|gc --config /private/controller.json --data /coordinator/data --image sha256:... [--node id] [--archive /image.tar.gz] [--toolchain leanprover/lean4:v...] [--toolchain-dir /pinned/toolchain | --toolchain-manifest sha256] [--dependency-dir /coordinator/data/runtime/shared-dependencies/DIGEST | --dependencies sha256] [--operation check.build|check.kernel]'
+  'Usage: node server/cluster/control.mjs status|image|prepare|fixture|gc|trim --config /private/controller.json --data /coordinator/data --image sha256:... [--node id] [--archive /image.tar.gz] [--toolchain leanprover/lean4:v...] [--toolchain-dir /pinned/toolchain | --toolchain-manifest sha256] [--dependency-dir /coordinator/data/runtime/shared-dependencies/DIGEST | --dependencies sha256] [--operation check.build|check.kernel]'
 
 async function fixtureSource(blobs, version) {
   const files = {
@@ -48,7 +48,9 @@ export async function controlMain(argv = process.argv.slice(2)) {
   }
   const [command, ...args] = argv
   if (
-    !['status', 'image', 'prepare', 'fixture', 'gc'].includes(command) ||
+    !['status', 'image', 'prepare', 'fixture', 'gc', 'trim'].includes(
+      command,
+    ) ||
     args.length % 2
   )
     throw clusterError(usage)
@@ -73,7 +75,7 @@ export async function controlMain(argv = process.argv.slice(2)) {
   }
   for (const name of ['--config', '--data', '--image'])
     if (!flags.has(name)) throw clusterError(usage)
-  if (!['status', 'gc'].includes(command) && !flags.has('--node'))
+  if (!['status', 'gc', 'trim'].includes(command) && !flags.has('--node'))
     throw clusterError('Select an enrolled worker with --node.')
   if (
     (flags.has('--dependency-dir') || flags.has('--dependencies')) &&
@@ -101,6 +103,7 @@ export async function controlMain(argv = process.argv.slice(2)) {
     maxBytes: config.maxStoreBytes,
     maxFiles: config.maxStoreFiles,
     reserveBytes: config.reserveBytes,
+    assetDataDir: dataDir,
   })
   const { bundleDigest } = await resolveExecutionProfile(
     config,
@@ -122,7 +125,11 @@ export async function controlMain(argv = process.argv.slice(2)) {
   if (nodeId && !selected.length)
     throw clusterError('This worker is not enrolled.')
   const controller = new ClusterController({
-    config: { ...config, mode: 'shadow', nodes: selected },
+    config: {
+      ...config,
+      mode: 'shadow',
+      nodes: command === 'trim' ? [] : selected,
+    },
     dataDir: directory,
     blobs,
     bundleDigest,
@@ -136,6 +143,16 @@ export async function controlMain(argv = process.argv.slice(2)) {
   try {
     await controller.init()
     await blobs.init()
+    if (command === 'trim') {
+      process.stdout.write(
+        JSON.stringify(
+          await blobs.trimAssetCopies({ signal: abort.signal }),
+          null,
+          2,
+        ) + '\n',
+      )
+      return
+    }
     if (command === 'gc') {
       process.stdout.write(
         JSON.stringify(await controller.compactCaches({ nodeId }), null, 2) +
@@ -155,8 +172,18 @@ export async function controlMain(argv = process.argv.slice(2)) {
         await delay(100)
       }
       process.stdout.write(
-        JSON.stringify({ bundleDigest, ...controller.status() }, null, 2) +
-          '\n',
+        JSON.stringify(
+          {
+            bundleDigest,
+            ...controller.status(),
+            cache: {
+              objects: blobs.usage(),
+              assets: blobs.assetSources?.usage() || null,
+            },
+          },
+          null,
+          2,
+        ) + '\n',
       )
       return
     }

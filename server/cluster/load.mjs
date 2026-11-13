@@ -26,6 +26,7 @@ export async function loadClusterChecks({
     maxBytes: config.maxStoreBytes,
     maxFiles: config.maxStoreFiles,
     reserveBytes: config.reserveBytes,
+    assetDataDir: dataDir,
   })
   const { ClusterController } = await import('./controller.mjs')
   const executionProfile = await resolveExecutionProfile(config, imageDigest)
