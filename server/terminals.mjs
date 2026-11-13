@@ -447,6 +447,10 @@ export class Terminals {
               home: child.workerHome,
               owner: actor,
               connections: this.gitConnections,
+              assertAuthorized: () => {
+                assertAuthenticated()
+                this.workspaces?.requireEditor?.(project.id, actor)
+              },
             })
           }
           const identity = this.gitIdentity

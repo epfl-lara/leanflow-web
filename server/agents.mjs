@@ -26,6 +26,7 @@ import { createAgentActivityHandler } from './agent-activity.mjs'
 import { createNativeDiagnosticHandler } from './native-diagnostics.mjs'
 import { createHoverLookupGuard } from './agent-hover-guard.mjs'
 import { LiveMirror } from './agent-live.mjs'
+import { configureAgentGit } from './terminal-git.mjs'
 import {
   createTexAgentTools,
   texAgentToolSpecs,
@@ -124,6 +125,8 @@ export class AgentManager {
     chats,
     books,
     texBuilds,
+    gitConnections,
+    gitIdentity,
     assertCanStart = () => {},
     optimizationMeasure = async (...args) =>
       (await import('./optimization.mjs')).measureOptimization(...args),
@@ -139,6 +142,8 @@ export class AgentManager {
       chats,
       books,
       texBuilds,
+      gitConnections,
+      gitIdentity,
       assertCanStart,
       optimizationMeasure,
       maxConcurrent,
@@ -846,6 +851,25 @@ export class AgentManager {
           )
       }
       const home = await this.runtime.home(snapshot.root)
+      if (this.gitConnections) {
+        const project = this.#editableProject(job.projectId, job.owner)
+        active.gitBroker = await configureAgentGit({
+          home,
+          owner: job.owner,
+          connections: this.gitConnections,
+          identity: await this.gitIdentity(job.owner),
+          assertAuthorized: () => {
+            active.controller.signal.throwIfAborted()
+            this.#editableProject(job.projectId, job.owner)
+          },
+        })
+        contextSections.push({
+          kind: 'git',
+          repository: project.repository || null,
+          sourceRevision: snapshot.sourceRevision,
+          savedCredentialsAvailable: true,
+        })
+      }
       const bookInstructions = this.books
         ? await this.books.prepareAgent(home)
         : ''
@@ -924,7 +948,10 @@ export class AgentManager {
         snapshot.root,
         ['lemex', 'app-server', '--stdio', '--strict-config'],
         {
-          env: provider,
+          env: {
+            ...provider,
+            ...(this.gitConnections ? { GIT_TERMINAL_PROMPT: '0' } : {}),
+          },
           network: 'bridge',
           workload: 'batch',
           ...(this.runtime.spawnAgentWhenAvailable
@@ -1226,6 +1253,7 @@ export class AgentManager {
       active.rpc = null
       await active.childClosed
       await active.workerStopped
+      await this.#closeGit(id, active)
       await active.mirror?.stop({ flush: result.status === 'completed' })
       if (active.controller.signal.aborted) return
       if (result.status !== 'completed')
@@ -1411,6 +1439,7 @@ export class AgentManager {
       this.#emit(id, 'verification', verification)
     } finally {
       clearTimeout(active.timeout)
+      await this.#closeGit(id, active)
       active.accepting = false
       active.rpc?.close()
       await active.texTools?.dispose()
@@ -1448,6 +1477,17 @@ export class AgentManager {
         this.active.delete(id)
         active.resolveDone()
       }
+    }
+  }
+  async #closeGit(id, active) {
+    const broker = active.gitBroker
+    active.gitBroker = null
+    try {
+      await broker?.close()
+    } catch {
+      // Credential requests are already disabled. A failed socket unlink must
+      // not skip worker shutdown, verification cleanup or active-run release.
+      this.#log(id, 'Temporary Git cleanup could not finish.\n')
     }
   }
   async #cleanupVerification(id, snapshot) {

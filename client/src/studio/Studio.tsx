@@ -1992,7 +1992,7 @@ export function Studio() {
   const refreshLiveFiles = useCallback(
     async (
       paths: string[],
-      source: 'agent' | 'terminal' = 'agent',
+      source: 'agent' | 'terminal' | 'git' = 'agent',
       expected = bufferStore.getSnapshot().scope,
     ) => {
       if (!bufferStore.isCurrent(expected)) return
@@ -2001,7 +2001,7 @@ export function Studio() {
       const current = bufferStore.getSnapshot().file
       const [, updated] = await Promise.all([
         loadFiles(id),
-        source === 'agent'
+        source !== 'terminal'
           ? api<Project>(`/api/projects/${encodeURIComponent(id)}`)
           : Promise.resolve(null),
       ])
@@ -2010,7 +2010,7 @@ export function Studio() {
         setProjects((previous) =>
           previous.map((item) => (item.id === id ? updated : item)),
         )
-      if (source === 'agent') void loadGit(id)
+      if (source !== 'terminal') void loadGit(id)
       if (!current || (paths.length && !paths.includes(current.path))) return
       const selected = bufferStore.getSnapshot().file
       if (
@@ -2100,7 +2100,9 @@ export function Studio() {
       setNotice(
         source === 'terminal'
           ? 'Terminal edits refreshed'
-          : 'Agent edits updated live',
+          : source === 'git'
+            ? 'Pulled files refreshed'
+            : 'Agent edits updated live',
       )
     },
     [bufferStore, loadFiles, loadGit, openFile, setFile, collaboration.manages],
@@ -4184,6 +4186,12 @@ export function Studio() {
           }
           onSave={saveCompletely}
           onUpdated={acceptGit}
+          onPulled={async (result) => {
+            await Promise.all([
+              loadProjects(),
+              refreshLiveFiles(result.paths || [], 'git', scope),
+            ])
+          }}
           onClose={() => setGitOpen(null)}
           onOpenConnections={() => setGitConnectionsOpen(true)}
         />

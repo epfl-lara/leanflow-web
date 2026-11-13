@@ -213,6 +213,7 @@ export interface GitInfo {
   revision?: string | null
   head?: string | null
   remoteUrl?: string | null
+  pullBranch?: string | null
   publishingEnabled?: boolean
   provider?: GitProvider
   suggestedBranch?: string
@@ -228,6 +229,16 @@ export interface GitInfo {
 }
 
 export type GitProvider = 'github' | 'gitlab' | 'other'
+
+export interface GitPullResult {
+  pulled: boolean
+  updated: boolean
+  branch: string
+  remoteUrl: string
+  needsPreparation: boolean
+  paths: string[]
+  removedPaths: string[]
+}
 
 export interface GitConnection {
   host: string

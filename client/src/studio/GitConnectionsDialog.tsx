@@ -85,8 +85,8 @@ export function GitConnectionsDialog({
         action === 'Removing connection'
           ? 'Connection removed. Future Git commands will require another connection or token.'
           : action === 'Saving author'
-            ? 'Commit author saved for Source control and the terminal.'
-            : 'Connection saved for imports, publishing and terminal Git commands.',
+            ? 'Commit author saved for Source control, terminals and agents.'
+            : 'Connection saved for imports, pulls, pushes, terminals and agents.',
       )
     } catch (error) {
       setError(errorText(error))
@@ -111,17 +111,17 @@ export function GitConnectionsDialog({
   return (
     <Dialog
       title="Git connections"
-      subtitle="One account setup for the interface and project terminal."
+      subtitle="One account setup for Source control, terminals and agents."
       onClose={onClose}
       busy={!!busy}
     >
       <div className="git-workbench git-connections">
         <p className="field-help">
           Connect the Git host you use, then clone, commit and publish from
-          LeanFlow. The terminal uses the same saved connections for standard
-          HTTPS Git commands. Run terminal commands only when you trust them to
-          use that access. Tokens saved during import or publishing apply only
-          to that repository and take priority over a host connection.
+          LeanFlow. Terminals and agents use the same saved connections for
+          standard HTTPS Git commands. Tokens saved during import or publishing
+          apply only to that repository and take priority over a host
+          connection.
         </p>
         {!loaded && <p className="field-help">Loading connections…</p>}
         {loaded && !data && !loadError && (

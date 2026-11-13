@@ -9,8 +9,97 @@ import { AgentManager } from '../agents.mjs'
 import { EventStore } from '../events.mjs'
 import { WorkspaceStore } from '../workspaces.mjs'
 import { Runtime } from '../runtime.mjs'
+import net from 'node:net'
 
 const toolchain = 'leanprover/lean4:v4.34.1'
+
+test('a Git socket cleanup failure still closes the agent and releases its active run', async (t) => {
+  const f = await fixture(t)
+  f.manager.gitConnections = { credentials: async () => null }
+  f.manager.gitIdentity = async () => ({
+    name: 'Alice',
+    email: 'alice@example.test',
+  })
+  const remove = fs.rm
+  let attempted = false
+  t.mock.method(fs, 'rm', async (filename, options) => {
+    if (String(filename).endsWith('/.git-credentials.sock')) {
+      attempted = true
+      throw new Error('Fixture unlink failure')
+    }
+    return remove(filename, options)
+  })
+  const job = await f.execute('Explain this project.')
+  assert.equal(job.status, 'completed')
+  assert.equal(attempted, true)
+  assert.equal(f.manager.active.size, 0)
+  const home = await f.runtime.home()
+  await assert.rejects(
+    new Promise((resolve, reject) => {
+      const socket = net.createConnection(
+        path.join(home, '.git-credentials.sock'),
+      )
+      socket.on('error', reject)
+      socket.on('connect', () => {
+        socket.destroy()
+        resolve()
+      })
+    }),
+  )
+})
+
+test('agents reuse the initiating account Git connection and close it at completion', async (t) => {
+  let f
+  let home
+  const token = 'fixture-agent-repository-token'
+  const lookups = []
+  f = await fixture(t, async () => {
+    const answer = await new Promise((resolve, reject) => {
+      const socket = net.createConnection(
+        path.join(home, '.git-credentials.sock'),
+      )
+      let output = ''
+      socket.on('error', reject)
+      socket.on('connect', () =>
+        socket.write(
+          JSON.stringify({
+            protocol: 'https',
+            host: 'github.com',
+            path: 'team/repo.git',
+          }) + '\n',
+        ),
+      )
+      socket.on('data', (chunk) => {
+        output += chunk
+      })
+      socket.on('end', () => resolve(JSON.parse(output)))
+    })
+    assert.equal(answer.token, token)
+  })
+  home = await f.runtime.home()
+  f.manager.gitConnections = {
+    async credentials(owner, repository) {
+      lookups.push({ owner, repository })
+      return { username: 'alice', token }
+    },
+  }
+  f.manager.gitIdentity = async () => ({
+    name: 'Alice',
+    email: 'alice@example.test',
+  })
+  const job = await f.execute('Push my requested edits to the repository.')
+  assert.equal(job.status, 'completed')
+  assert.deepEqual(lookups, [
+    { owner: 'alice', repository: 'https://github.com/team/repo.git' },
+  ])
+  await assert.rejects(fs.stat(path.join(home, '.git-credentials.sock')), {
+    code: 'ENOENT',
+  })
+  assert(!JSON.stringify(f.requests).includes(token))
+  assert(!JSON.stringify(job).includes(token))
+  const turn = f.requests.find((request) => request.method === 'turn/start')
+  assert.match(JSON.stringify(turn), /savedCredentialsAvailable/)
+})
 const auditEnv = {
   LEAN_SYSROOT: '/opt/lean-toolchains/leanprover--lean4---v4.34.1',
   LEAN_PATH:

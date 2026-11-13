@@ -4,14 +4,17 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { GitConnections } from '../git-connections.mjs'
 import { validateRepository } from '../workspaces.mjs'
 import {
   createTerminalGitBroker,
   terminalGitEnvironment,
+  configureAgentGit,
 } from '../terminal-git.mjs'
 
-async function fixture(t, owner = 'alice', { lookup } = {}) {
+async function fixture(t, owner = 'alice', { lookup, assertAuthorized } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'terminal-git-'))
   const home = path.join(directory, 'h'.repeat(100))
   await fs.mkdir(home)
@@ -24,6 +27,7 @@ async function fixture(t, owner = 'alice', { lookup } = {}) {
   const broker = await createTerminalGitBroker({
     home,
     owner,
+    assertAuthorized,
     connections: {
       async credentials(user, value) {
         const host = new URL(value).hostname
@@ -56,6 +60,93 @@ async function fixture(t, owner = 'alice', { lookup } = {}) {
     })
   return { home, broker, credentials, calls, request, address }
 }
+
+test('Git brokers stop supplying credentials when project access changes during lookup', async (t) => {
+  let authorized = true
+  const credentials = { username: 'alice', token: 'fixture-revoked-token' }
+  const f = await fixture(t, 'alice', {
+    assertAuthorized() {
+      if (!authorized) throw new Error('Project access removed')
+    },
+    lookup() {
+      authorized = false
+      return credentials
+    },
+  })
+  assert.deepEqual(
+    await f.request({
+      protocol: 'https',
+      host: 'github.com',
+      path: 'team/repo.git',
+    }),
+    {},
+  )
+  assert.equal(credentials.token, '')
+  assert.deepEqual(
+    await f.request({
+      protocol: 'https',
+      host: 'github.com',
+      path: 'team/repo.git',
+    }),
+    {},
+  )
+  assert.equal(f.calls.length, 1)
+})
+
+test('agent Git config survives filtered shell environments without storing a token', async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-git-config-'))
+  t.after(() => fs.rm(home, { recursive: true, force: true }))
+  const token = 'fixture-agent-token'
+  const broker = await configureAgentGit({
+    home,
+    owner: 'alice',
+    connections: { credentials: async () => ({ username: 'alice', token }) },
+    identity: { name: 'Alice "Example"', email: 'alice@example.test' },
+  })
+  t.after(() => broker.close())
+  const execute = promisify(execFile)
+  const env = {
+    PATH: process.env.PATH,
+    HOME: home,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_TERMINAL_PROMPT: '0',
+  }
+  const config = await fs.readFile(path.join(home, '.gitconfig'), 'utf8')
+  assert(!config.includes(token))
+  assert.equal(
+    (
+      await execute('git', ['config', '--global', 'user.name'], { env })
+    ).stdout.trim(),
+    'Alice "Example"',
+  )
+  const helper = (
+    await execute(
+      'git',
+      ['config', '--global', '--get-all', 'credential.helper'],
+      { env },
+    )
+  ).stdout
+  assert.match(helper, /AF_UNIX/)
+  // Map the fixed container home to this offline fixture's home.
+  await fs.writeFile(
+    path.join(home, '.gitconfig'),
+    config.replaceAll('/home/worker', home),
+  )
+  const { spawn } = await import('node:child_process')
+  const child = spawn('git', ['credential', 'fill'], { env, cwd: home })
+  let output = ''
+  child.stdout.on('data', (chunk) => {
+    output += chunk
+  })
+  child.stdin.end('protocol=https\nhost=github.com\npath=team/repo.git\n\n')
+  const code = await new Promise((resolve) => child.once('close', resolve))
+  assert.equal(code, 0)
+  assert(output.includes('password=' + token))
+  await broker.close()
+  await assert.rejects(fs.stat(path.join(home, '.git-credentials.sock')), {
+    code: 'ENOENT',
+  })
+})
 
 async function until(check) {
   for (let attempt = 0; attempt < 200; attempt++) {

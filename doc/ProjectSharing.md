@@ -54,6 +54,8 @@ Choose **Choose individual files** if the ZIP is too large. Downloads allow up t
 
 Terminal Git metadata is local to the private copy. Use **Source control** for the saved project's history and publication. Terminal Git requests use the current account's saved Git connection. Build output, secret paths, dependency caches, and Git metadata are not copied into shared source files. Generated binary or oversized files stay in the private copy for recovery and explicit upload. Other text files continue publishing. A temporarily invalid text file keeps its last published version until it becomes editable again.
 
+Agents also use the initiating account's saved Git connections for HTTPS commands in separate checkouts. Project access is checked again for each credential request. A saved token is never shared with another member. Ask an agent to reconcile or publish changes when needed; use **Source control → Pull** after the run to update the saved project's history. Pull waits for active project work to finish and refuses to overwrite local edits or merge diverging commits automatically.
+
 ## Concurrency and hosting
 
 Opening a terminal saves pending browser edits before creating its private copy. Later browser edits do not update an already open terminal. If those edits conflict with a terminal command, a persistent notice explains how to recover the private files and start a new terminal from the latest saved project. Brief file changes during a terminal scan retry automatically; actual version conflicts still preserve the private copy.

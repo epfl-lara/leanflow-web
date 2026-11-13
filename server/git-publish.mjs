@@ -5,6 +5,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { validateRepository } from './workspaces.mjs'
 import { validateGitBranch } from './git-branches.mjs'
+import { pullProjectGit } from './git-pull.mjs'
 import {
   cleanupGitWorkerHome,
   clearGitCredentials,
@@ -578,6 +579,10 @@ export class GitPublisher {
     return {
       ...status,
       remoteUrl,
+      pullBranch:
+        namedBranch(remembered?.lastPublished?.branch) ||
+        namedBranch(project.publishingBaseBranch) ||
+        namedBranch(status.branch),
       publishingEnabled: project.publishingEnabled !== false,
       provider: gitReviewProvider(remoteUrl, remembered?.provider),
       baseBranch: Object.hasOwn(remembered || {}, 'baseBranch')
@@ -857,6 +862,44 @@ export class GitPublisher {
           await fs.rm(root, { recursive: true, force: true })
           throw error
         }
+      },
+      { workspaceLock: false },
+    )
+  }
+  async pull(owner, projectId, input = {}) {
+    return this.withProject(
+      owner,
+      projectId,
+      async (project) => {
+        const previous = this.workspaces.configurationFingerprint(
+          projectId,
+          owner,
+        )
+        const result = await pullProjectGit({
+          owner,
+          project,
+          input,
+          source: await this.#source(project),
+          directory: this.dir,
+          runtime: this.runtime,
+          dataDir: this.dataDir,
+          metadata: (options) =>
+            this.metadata(owner, projectId, undefined, options),
+          destination: (value) => this.#destination(value),
+          credentialsFor: this.gitCredentials,
+          run: (...args) => this.#run(...args),
+          locked: (action) => this.#locked(projectId, action),
+          assertIdle: () => this.#assertIdle(projectId, owner),
+          copy: safeCopy,
+        })
+        const needsPreparation =
+          await this.workspaces.refreshExternalConfiguration(
+            projectId,
+            owner,
+            previous,
+            result,
+          )
+        return { ...result, needsPreparation }
       },
       { workspaceLock: false },
     )

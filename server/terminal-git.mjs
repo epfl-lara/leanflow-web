@@ -89,7 +89,12 @@ function requestUrl(request) {
   }
 }
 
-export async function createTerminalGitBroker({ home, owner, connections }) {
+export async function createTerminalGitBroker({
+  home,
+  owner,
+  connections,
+  assertAuthorized = () => {},
+}) {
   const directory = await fs.open(
     home,
     constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
@@ -128,7 +133,9 @@ export async function createTerminalGitBroker({ home, owner, connections }) {
           if (url && !closing && !failed && lookups < maxConnections) {
             ++lookups
             try {
+              assertAuthorized()
               credentials = await connections.credentials(owner, url)
+              assertAuthorized()
             } finally {
               --lookups
             }
@@ -163,14 +170,58 @@ export async function createTerminalGitBroker({ home, owner, connections }) {
         closing = true
         for (const socket of sockets) socket.destroy()
         await new Promise((resolve) => server.close(resolve))
-        await fs.rm(address, { force: true })
-        await directory.close()
+        try {
+          await fs.rm(address, { force: true })
+        } finally {
+          await directory.close()
+        }
       },
     }
   } catch (error) {
     closing = true
     if (server?.listening) await new Promise((resolve) => server.close(resolve))
     await directory.close()
+    throw error
+  }
+}
+
+// Native agents filter shell environment variables, including GIT_CONFIG_KEY_*.
+// Keep the non-secret helper and public identity in their private Git config so
+// every shell command uses the same broker, including newly cloned repositories.
+export async function configureAgentGit({
+  home,
+  owner,
+  connections,
+  identity,
+  assertAuthorized,
+}) {
+  const broker = await createTerminalGitBroker({
+    home,
+    owner,
+    connections,
+    assertAuthorized,
+  })
+  try {
+    await fs.writeFile(
+      path.join(home, '.gitconfig'),
+      [
+        '[credential]',
+        '\thelper =',
+        `\thelper = ${JSON.stringify(terminalGitHelper)}`,
+        '\tuseHttpPath = true',
+        '[http]',
+        '\tfollowRedirects = false',
+        '\tsslVerify = true',
+        '[user]',
+        `\tname = ${JSON.stringify(identity.name)}`,
+        `\temail = ${JSON.stringify(identity.email)}`,
+        '',
+      ].join('\n'),
+      { mode: 0o600 },
+    )
+    return broker
+  } catch (error) {
+    await broker.close()
     throw error
   }
 }

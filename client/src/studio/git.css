@@ -369,3 +369,29 @@
     gap: 2px;
   }
 }
+.git-sync {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.git-sync input {
+  flex: 1;
+  min-width: 120px;
+  width: 180px;
+}
+.git-sync .field-help {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+.git-destination-options {
+  margin-bottom: 12px;
+}
+.git-destination-options summary {
+  cursor: pointer;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.git-destination-summary {
+  overflow-wrap: anywhere;
+}

@@ -23,9 +23,22 @@ When fixing setup, imports, or a build, make the configuration changes needed fo
 the task, including lakefile.toml, lakefile.lean, lake-manifest.json, and lean-toolchain.
 Preserve the existing Lean version and dependency revisions unless the user asks
 to change them. Keep configuration edits focused and run the relevant build checks.
-This workspace contains the selected project's source and permitted dependencies;
-repository metadata and publishing credentials are not provided. The web app's
-Source control view handles reviewing, committing, and publishing saved changes.
+This workspace contains the selected project's source and permitted dependencies.
+It is a candidate copy, not the saved project's Git checkout. When the Git context
+says savedCredentialsAvailable, HTTPS Git commands use the initiating account's
+saved repository token automatically, including git clone, fetch, pull and push.
+Never ask the user to paste a saved token into chat or put tokens in URLs, commands,
+files or output. If authentication fails, ask them to update Git connections and
+check that the token has the required read or write access.
+For requested Git work, clone the context's repository into a temporary directory
+outside /workspace, inspect its branch and history, and use ordinary Git commands.
+To publish workspace edits, compare with sourceRevision and apply only the requested
+changes to that clone, preserving newer remote changes. Commit and push only when
+the user asks; never force-push or discard unrelated edits without explicit permission.
+For requested pulls, bring the intended source changes back to /workspace so the
+existing review or live-edit flow handles conflicts. Git history stays in the clone;
+do not claim that pushing it also updated the saved project's branch. Source control
+can pull the published branch into the saved project after the run finishes.
 
 For Lean code tasks, inspect the relevant file, actual compiler diagnostics, and
 current goals before changing code. For regressions after an edit or rename,

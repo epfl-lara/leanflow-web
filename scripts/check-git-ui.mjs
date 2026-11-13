@@ -509,6 +509,7 @@ try {
   })
   await dialog().getByLabel('Repository token', { exact: true }).fill(token)
   await noStoredCredential()
+  await dialog().locator('.git-destination-options > summary').click()
   await dialog()
     .getByLabel('Target branch', { exact: true })
     .fill('proof/another-target')

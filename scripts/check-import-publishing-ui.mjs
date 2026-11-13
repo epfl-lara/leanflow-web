@@ -78,6 +78,11 @@ const gitButton = (name) =>
   gitDialog().getByRole('button', { name, exact: true })
 const publishedLinks = () =>
   gitDialog().getByRole('link', { name: /Open (pull|merge) request/ })
+async function editDestination() {
+  const options = gitDialog().locator('.git-destination-options')
+  if (!(await options.evaluate((element) => element.open)))
+    await options.locator('summary').click()
+}
 
 await page.route('**/*', async (route) => {
   const address = new URL(route.request().url())
@@ -285,6 +290,7 @@ async function reviewedPublish({
   result,
   closeWhilePending = false,
 }) {
+  await editDestination()
   await gitDialog()
     .getByLabel('Repository URL', { exact: true })
     .fill(repository)
@@ -614,14 +620,15 @@ try {
     async () =>
       (await gitDialog()
         .getByLabel('Target branch', { exact: true })
-        .inputValue()) !== 'main',
-    'enabled publishing suggests a separate branch',
+        .inputValue()) === 'main',
+    'enabled publishing uses the current branch',
   )
   assert.equal(
     await gitDialog().getByLabel('Target branch', { exact: true }).inputValue(),
-    infos.get('publishing-import-3').suggestedBranch,
+    'main',
   )
   const fork = 'https://code.example.invalid/my-space/publishing.git'
+  await editDestination()
   await gitDialog().getByLabel('Repository URL', { exact: true }).fill(fork)
   await gitDialog()
     .getByLabel('Repository host', { exact: true })
@@ -670,7 +677,7 @@ try {
     'release/stable',
   )
   report.checks.push(
-    'Later enabled publishing suggests a new branch; creating a local branch preserves an entered self-hosted fork, provider and merge target',
+    'Publishing defaults to the current branch; creating a local branch preserves an entered self-hosted fork, provider and merge target',
   )
   await reviewedPublish({
     repository: 'https://git.example.invalid/fixture/publishing.git',

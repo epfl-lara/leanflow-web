@@ -4710,10 +4710,16 @@ export class WorkspaceStore {
     return configurationDigest(readDependencyConfiguration(project.root))
   }
 
-  async refreshExternalConfiguration(id, owner, previous) {
+  async refreshExternalConfiguration(
+    id,
+    owner,
+    previous,
+    { paths = [], removedPaths = [] } = {},
+  ) {
     this.get(id, owner)
     return this.#locked(id, () => {
       const project = this.get(id, owner)
+      if (paths.length) this.#changed(id, paths, 'files', removedPaths)
       if (project.status === 'preparing') return false
       let current
       try {

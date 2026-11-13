@@ -57,6 +57,7 @@ try {
     identity: { name: 'Fixture owner', email: 'fixture@example.invalid' },
   }
   const imports = [],
+    pulls = [],
     pushes = [],
     prepares = [],
     external = []
@@ -68,6 +69,7 @@ try {
   const git = {
     repository: true,
     branch: 'proof/common',
+    pullBranch: 'main',
     revision: 'a'.repeat(40),
     changes: [],
     diff: '',
@@ -80,6 +82,8 @@ try {
     baseBranch: 'main',
   }
   let reviewed
+  let failRefreshAfterPull = false
+  let failGitStatus = false
   await page.route('**/*', async (route) => {
     const address = new URL(route.request().url())
     if (/^https?:$/.test(address.protocol) && address.origin !== base) {
@@ -184,8 +188,34 @@ try {
     return route.fulfill({ json: project })
   })
   await page.route('**/api/projects/*/git', async (route) => {
+    if (route.request().method() === 'GET' && failGitStatus)
+      return route.fulfill({
+        status: 503,
+        json: { error: 'Fixture Git status refresh unavailable.' },
+      })
     if (route.request().method() === 'GET') return route.fulfill({ json: git })
     const body = route.request().postDataJSON()
+    if (body.action === 'pull') {
+      assert.equal(body.reviewToken, git.reviewToken)
+      assert.equal(body.token, undefined)
+      assert.equal(body.username, undefined)
+      pulls.push(body)
+      failGitStatus = failRefreshAfterPull
+      const projectId = new URL(route.request().url()).pathname.split('/')[3]
+      state.files[projectId]['Main.lean'] =
+        'example : True := by trivial\n-- PULLED_REMOTE_FILE\n'
+      return route.fulfill({
+        json: {
+          pulled: true,
+          updated: true,
+          branch: body.branch,
+          remoteUrl: body.remoteUrl,
+          needsPreparation: false,
+          paths: ['Main.lean'],
+          removedPaths: [],
+        },
+      })
+    }
     if (body.action === 'preview-push') {
       reviewed = {
         previewId: randomUUID(),
@@ -236,6 +266,11 @@ try {
       name: 'Publish reviewed commit',
       exact: true,
     })
+  const editDestination = async () => {
+    const options = source().locator('.git-destination-options')
+    if (!(await options.evaluate((element) => element.open)))
+      await options.locator('summary').click()
+  }
   await fixture.ready()
   await page
     .getByRole('button', { name: 'Git connections', exact: true })
@@ -366,6 +401,44 @@ try {
   )
 
   await page.getByRole('button', { name: 'Publish', exact: true }).click()
+  await source().getByRole('button', { name: 'Pull', exact: true }).click()
+  await source().getByText('Pulled main.', { exact: true }).waitFor()
+  await until(
+    async () =>
+      (await page.locator('.view-lines').innerText()).includes(
+        'PULLED_REMOTE_FILE',
+      ),
+    'pulled file refreshed in the editor',
+  )
+  assert.equal(pulls.length, 1)
+  assert.equal(pulls[0].branch, 'main')
+  assert.equal(
+    await source()
+      .locator('.git-destination-options')
+      .evaluate((element) => element.open),
+    false,
+    'Routine publishing should not require destination settings',
+  )
+  report.checks.push(
+    'Pull is visible without opening a separate workflow and reuses the saved connection without a token prompt.',
+  )
+  failRefreshAfterPull = true
+  await source().getByRole('button', { name: 'Pull', exact: true }).click()
+  await source()
+    .getByRole('alert')
+    .filter({ hasText: 'Pulled successfully.' })
+    .waitFor()
+  assert.equal(
+    await source().getByText('Pulled main.', { exact: true }).count(),
+    1,
+  )
+  assert.equal(pulls.length, 2, 'A failed refresh must not repeat the pull')
+  failRefreshAfterPull = false
+  failGitStatus = false
+  await source().getByRole('button', { name: 'Refresh', exact: true }).click()
+  report.checks.push(
+    'A failed status refresh preserves confirmed pull success and never retries the remote operation automatically.',
+  )
   await preview()
   await source()
     .getByRole('heading', { name: 'Review before publishing' })
@@ -386,6 +459,7 @@ try {
     'Publishing uses the same connection after review, and a confirmed push exposes the GitHub request form.',
   )
 
+  await editDestination()
   await source()
     .getByLabel('Repository URL', { exact: true })
     .fill('https://gitlab.com/fixture/common.git')
@@ -523,6 +597,8 @@ try {
   for (let visit = 0; visit < 2; visit++) {
     if (visit) await page.reload()
     await page.getByRole('button', { name: 'Publish', exact: true }).click()
+    await source().getByRole('button', { name: 'Pull', exact: true }).click()
+    await source().getByText('Pulled main.', { exact: true }).waitFor()
     await preview()
     await source()
       .getByText(`Uses your saved token for ${repository}.`, { exact: false })
@@ -536,6 +612,26 @@ try {
     if (!visit)
       await source().getByRole('button', { name: 'Close', exact: true }).click()
   }
+  failMetadata = true
+  await source().getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('button', { name: 'Publish', exact: true }).click()
+  await source()
+    .getByText(/Git will still try your saved connection/)
+    .waitFor()
+  await preview()
+  assert.equal(await publish().isDisabled(), false)
+  await publish().click()
+  await source()
+    .getByRole('link', { name: 'Open pull request on GitHub', exact: true })
+    .waitFor()
+  assert.equal(pushes.at(-1).token, undefined)
+  failMetadata = false
+  await source().getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('button', { name: 'Publish', exact: true }).click()
+  report.checks.push(
+    'A temporary connection-list failure still lets the server reuse the saved token instead of requiring it again.',
+  )
+  await editDestination()
   await source()
     .getByLabel('Repository URL', { exact: true })
     .fill('https://github.com/fixture/another.git')

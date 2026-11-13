@@ -15,6 +15,266 @@ import { Runtime } from '../runtime.mjs'
 
 const execute = promisify(execFile)
 const DEST = 'https://git.example.invalid/alice/proofs.git'
+
+async function pullFixture(t) {
+  const f = await fixture(t)
+  await f.git('add', '-A')
+  if ((await f.git('diff', '--cached', '--name-only')).stdout.trim())
+    await f.git(
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@example.test',
+      'commit',
+      '-m',
+      'Prepared environment',
+    )
+  await f.git('push', f.target, 'HEAD:refs/heads/main')
+  const peer = path.join(f.dataDir, 'peer')
+  await execute('git', ['clone', '--branch', 'main', f.target, peer])
+  const peerGit = (...args) =>
+    execute(
+      'git',
+      [
+        '-c',
+        'user.name=Remote fixture',
+        '-c',
+        'user.email=remote@example.test',
+        ...args,
+      ],
+      { cwd: peer },
+    )
+  const advance = async (
+    filename = 'Remote.md',
+    contents = 'Remote update\n',
+  ) => {
+    await fs.writeFile(path.join(peer, filename), contents)
+    await peerGit('add', '--', filename)
+    await peerGit('commit', '-m', 'Remote update')
+    await peerGit('push', 'origin', 'main')
+    return (await peerGit('rev-parse', 'HEAD')).stdout.trim()
+  }
+  f.remotes.set(DEST, 'file://' + f.target)
+  const pull = async (input = {}) => {
+    const info = await (await f.request(undefined, 'GET')).json()
+    return f.request({
+      action: 'pull',
+      remoteUrl: DEST,
+      branch: 'main',
+      reviewToken: info.reviewToken,
+      ...input,
+    })
+  }
+  return { ...f, peer, peerGit, advance, pull }
+}
+
+test('pull fast-forwards with the same saved repository token as push and cleans its export', async (t) => {
+  const f = await pullFixture(t)
+  const token = 'fixture-shared-pull-push-token'
+  await f.gitConnections.connect('owner', { repository: DEST, token })
+  const preview = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: DEST,
+    branch: 'main',
+  })
+  await f.publisher.push('owner', f.project.id, {
+    previewId: preview.previewId,
+  })
+  assert.equal(f.sent[0].credentials.token, token)
+  const head = await f.advance()
+  const response = await f.pull()
+  assert.equal(response.status, 200, await response.clone().text())
+  const result = await response.json()
+  assert.equal(result.updated, true)
+  assert.equal(result.needsPreparation, false)
+  assert.equal((await f.git('rev-parse', 'HEAD')).stdout.trim(), head)
+  assert.equal(
+    await fs.readFile(path.join(f.root, 'Remote.md'), 'utf8'),
+    'Remote update\n',
+  )
+  const fetch = f.calls.find(
+    (call) =>
+      call.args.includes(gitCredentialsRunner) && call.args.includes('fetch'),
+  )
+  assert.equal(JSON.parse(fetch.options.input).token, token)
+  assert(!JSON.stringify(fetch.args).includes(token))
+  assert(!JSON.stringify(fetch.env).includes(token))
+  assert(!fetch.root.startsWith(f.root + path.sep))
+  assert.equal((await f.pull()).status, 200)
+  assert.equal(
+    (await fs.readdir(path.join(f.dataDir, 'git-publish'))).filter(
+      (name) => name !== 'destinations.json',
+    ).length,
+    0,
+  )
+  assert(
+    !(await fs.readdir(path.join(f.root, '.git'))).some((name) =>
+      name.startsWith('leanflow-pull-'),
+    ),
+  )
+})
+
+test('pull preserves different local edits and rejects stale reviews', async (t) => {
+  const f = await pullFixture(t)
+  await f.advance()
+  const info = await (await f.request(undefined, 'GET')).json()
+  await fs.appendFile(path.join(f.root, 'Main.lean'), '-- local edit\n')
+  let response = await f.pull()
+  assert.equal(response.status, 409)
+  assert.match((await response.json()).error, /local changes/)
+  response = await f.pull({ reviewToken: info.reviewToken })
+  assert.equal(response.status, 409)
+  assert.match((await response.json()).error, /changed/)
+  assert.equal(
+    f.calls.filter((call) => call.args.includes(gitCredentialsRunner)).length,
+    1,
+    'Stale review must fail before a second fetch',
+  )
+  assert.match(
+    await fs.readFile(path.join(f.root, 'Main.lean'), 'utf8'),
+    /local edit/,
+  )
+})
+
+test('pull preserves ignored local files that the incoming commit would overwrite', async (t) => {
+  const f = await pullFixture(t)
+  const head = (await f.git('rev-parse', 'HEAD')).stdout.trim()
+  await fs.appendFile(path.join(f.root, '.git/info/exclude'), '\nRemote.md\n')
+  await fs.writeFile(path.join(f.root, 'Remote.md'), 'Private ignored notes\n')
+  assert.equal((await f.git('status', '--porcelain')).stdout, '')
+  await f.advance()
+  const response = await f.pull()
+  assert.equal(response.status, 409)
+  assert.equal(
+    await fs.readFile(path.join(f.root, 'Remote.md'), 'utf8'),
+    'Private ignored notes\n',
+  )
+  assert.equal((await f.git('rev-parse', 'HEAD')).stdout.trim(), head)
+})
+
+test('pull adopts an agent-published commit when saved live edits already match it', async (t) => {
+  const f = await pullFixture(t)
+  const head = await f.advance(
+    'Main.lean',
+    'example : True := by trivial\n-- published live edit\n',
+  )
+  await fs.copyFile(
+    path.join(f.peer, 'Main.lean'),
+    path.join(f.root, 'Main.lean'),
+  )
+  const response = await f.pull()
+  assert.equal(response.status, 200, await response.clone().text())
+  assert.equal((await response.json()).updated, true)
+  assert.equal((await f.git('rev-parse', 'HEAD')).stdout.trim(), head)
+  assert.equal((await f.git('status', '--porcelain')).stdout, '')
+})
+
+test('pull recognizes published new files but preserves different staged edits', async (t) => {
+  const f = await pullFixture(t)
+  const head = await f.advance()
+  await fs.copyFile(
+    path.join(f.peer, 'Remote.md'),
+    path.join(f.root, 'Remote.md'),
+  )
+  await fs.writeFile(path.join(f.root, 'Main.lean'), '-- staged private work\n')
+  await f.git('add', 'Main.lean')
+  await fs.copyFile(
+    path.join(f.peer, 'Main.lean'),
+    path.join(f.root, 'Main.lean'),
+  )
+  let response = await f.pull()
+  assert.equal(response.status, 409)
+  assert.match(
+    (await f.git('show', ':Main.lean')).stdout,
+    /staged private work/,
+  )
+  await f.git('reset', 'HEAD', '--', 'Main.lean')
+  response = await f.pull()
+  assert.equal(response.status, 200, await response.clone().text())
+  assert.equal((await f.git('rev-parse', 'HEAD')).stdout.trim(), head)
+  assert.equal((await f.git('status', '--porcelain')).stdout, '')
+})
+
+test('pull rechecks files after fetching and preserves concurrent saves', async (t) => {
+  const f = await pullFixture(t)
+  await f.advance()
+  const run = f.runtime.run.bind(f.runtime)
+  f.runtime.run = async (root, args, options) => {
+    const result = await run(root, args, options)
+    if (args.includes(gitCredentialsRunner) && args.includes('fetch'))
+      await f.workspaces.writeFile(
+        f.project.id,
+        'owner',
+        'Main.lean',
+        'example : True := by trivial\n-- newer editor save\n',
+      )
+    return result
+  }
+  const response = await f.pull()
+  assert.equal(response.status, 409)
+  assert.match(
+    await fs.readFile(path.join(f.root, 'Main.lean'), 'utf8'),
+    /newer editor save/,
+  )
+  await assert.rejects(fs.stat(path.join(f.root, 'Remote.md')), {
+    code: 'ENOENT',
+  })
+})
+
+test('pull refuses divergent history without resetting local commits', async (t) => {
+  const f = await pullFixture(t)
+  await f.advance()
+  await fs.writeFile(path.join(f.root, 'Local.md'), 'Keep this local commit\n')
+  await f.git('add', 'Local.md')
+  await f.git(
+    '-c',
+    'user.name=Fixture',
+    '-c',
+    'user.email=fixture@example.test',
+    'commit',
+    '-m',
+    'Local work',
+  )
+  const head = (await f.git('rev-parse', 'HEAD')).stdout.trim()
+  const response = await f.pull()
+  assert.equal(response.status, 409)
+  assert.match((await response.json()).error, /diverged/)
+  assert.equal((await f.git('rev-parse', 'HEAD')).stdout.trim(), head)
+  await assert.rejects(fs.stat(path.join(f.root, 'Remote.md')), {
+    code: 'ENOENT',
+  })
+})
+
+test('pull marks changed Lean configuration for preparation and announces file updates', async (t) => {
+  const f = await pullFixture(t)
+  const updates = []
+  f.workspaces.changeListeners.add((event) => updates.push(event))
+  await f.advance('lean-toolchain', 'leanprover/lean4:v4.35.0\n')
+  const response = await f.pull()
+  assert.equal(response.status, 200, await response.clone().text())
+  assert.equal((await response.json()).needsPreparation, true)
+  assert.equal(f.workspaces.get(f.project.id, 'owner').needsPreparation, true)
+  assert(updates.some((event) => event.paths.includes('lean-toolchain')))
+})
+
+test('pull refuses protected paths and links before changing the saved branch', async (t) => {
+  const f = await pullFixture(t)
+  const head = (await f.git('rev-parse', 'HEAD')).stdout.trim()
+  await f.advance('.env', 'fixture-only=value\n')
+  let response = await f.pull()
+  assert.equal(response.status, 409)
+  assert.match((await response.json()).error, /protected project path/)
+  assert.equal((await f.git('rev-parse', 'HEAD')).stdout.trim(), head)
+  await assert.rejects(fs.stat(path.join(f.root, '.env')), { code: 'ENOENT' })
+  await f.peerGit('reset', '--hard', head)
+  await fs.symlink('/etc/passwd', path.join(f.peer, 'Linked.md'))
+  await f.peerGit('add', 'Linked.md')
+  await f.peerGit('commit', '-m', 'Fixture link')
+  await f.peerGit('push', '--force', 'origin', 'main')
+  response = await f.pull()
+  assert.equal(response.status, 409)
+  assert.match((await response.json()).error, /links or submodules/)
+  assert.equal((await f.git('rev-parse', 'HEAD')).stdout.trim(), head)
+})
 async function fixture(t) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-publish-'))
   const calls = [],

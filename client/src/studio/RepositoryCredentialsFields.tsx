@@ -25,7 +25,7 @@ export function RepositoryTokenSaveChoice({
       </label>
       <p className="field-help">
         {remember
-          ? 'Saved for your account and reused for imports, pulls and pushes to this repository. Manage saved tokens in Git connections.'
+          ? 'Saved for your account and reused for this repository in imports, pulls, pushes, terminals and agents. Manage saved tokens in Git connections.'
           : 'Used once for this operation, then cleared.'}
       </p>
     </>

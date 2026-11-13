@@ -15,7 +15,7 @@ export function GitConnectionStatus({
         ? connection.repository
           ? `Uses your saved token for ${connection.repository}.`
           : `Uses your saved connection to ${connection.host}.`
-        : 'Connect an account to share Git access between projects and the terminal.'}{' '}
+        : 'Save a token once in Git connections to use it for imports, pulls, pushes, terminals and agents.'}{' '}
       {onOpenConnections && (
         <button
           type="button"

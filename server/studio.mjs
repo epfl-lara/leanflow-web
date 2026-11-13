@@ -369,6 +369,8 @@ export async function createStudio({
   })
   await texBuilds.init()
   const agents = new AgentManager({
+    gitConnections,
+    gitIdentity,
     texBuilds,
     runtime,
     workspaces,
@@ -1252,6 +1254,10 @@ export async function createStudio({
     if (action === 'push')
       return res.json(
         await publisher.push(req.user.id, req.params.id, req.body),
+      )
+    if (action === 'pull')
+      return res.json(
+        await publisher.pull(req.user.id, req.params.id, req.body),
       )
     if (action === 'enable-publishing') {
       await workspaces.enablePublishing(req.params.id, req.user.id, {
