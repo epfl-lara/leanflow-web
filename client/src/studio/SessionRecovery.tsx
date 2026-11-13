@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, errorText, markSessionRestored, post, type Session } from './api'
+import { EntraButton } from './EntraButton'
 
 /** Keep the workspace mounted so unsaved editor text and chat drafts survive. */
 export function SessionRecovery({ user }: { user: Session['user'] }) {
@@ -21,6 +22,14 @@ export function SessionRecovery({ user }: { user: Session['user'] }) {
     }
   }, [])
 
+  async function restoreSession() {
+    const renewed = await api<Session>('/api/session')
+    if (renewed.user.id !== user.id)
+      throw new Error(`Sign in as ${user.name} to continue in this workspace.`)
+    setToken('')
+    markSessionRestored()
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (busy) return
@@ -28,11 +37,7 @@ export function SessionRecovery({ user }: { user: Session['user'] }) {
     setError('')
     try {
       await post('/api/login', { token: token.trim(), expectedUserId: user.id })
-      const renewed = await api<Session>('/api/session')
-      if (renewed.user.id !== user.id)
-        throw new Error('Use the access token for this workspace account.')
-      setToken('')
-      markSessionRestored()
+      await restoreSession()
     } catch (error) {
       setError(errorText(error))
     } finally {
@@ -60,6 +65,12 @@ export function SessionRecovery({ user }: { user: Session['user'] }) {
         Your session expired. Your unsaved edits and chat draft are still here.
         Sign in as {user.name} to continue.
       </p>
+      <EntraButton
+        expectedUserId={user.id}
+        disabled={busy}
+        onBusyChange={setBusy}
+        onComplete={restoreSession}
+      />
       <form onSubmit={submit}>
         <label className="field-label" htmlFor="recovery-access-token">
           Access token

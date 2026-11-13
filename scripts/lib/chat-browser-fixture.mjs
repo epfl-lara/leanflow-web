@@ -282,6 +282,7 @@ export async function chatBrowserFixture({
         body: JSON.stringify(value),
       })
     if (method === 'GET') {
+      if (endpoint === '/api/auth/entra') return respond({ enabled: false })
       if (endpoint === '/api/templates')
         return respond(state.session.templates || [])
       if (endpoint === '/api/session') return respond(state.session)

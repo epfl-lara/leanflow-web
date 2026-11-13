@@ -107,6 +107,10 @@ Model and effort choices apply while the assistant is open. Reopening a project 
 
 ## Accounts and personal API keys
 
+EPFL Microsoft Entra sign-in is optional and disabled by default. See
+[EPFL sign-in](EPFLSignIn.md) for app registration, linking existing accounts,
+and a staged rollout. Invitation tokens continue to work.
+
 The initial owner is also an administrator. In **Assistant settings → Accounts**, the owner can create user or admin accounts. Admins can create user accounts. Regular users cannot administer accounts. Share each generated sign-in token privately; the app shows it once. Projects, chats, and provider keys remain account-scoped, including for admins.
 
 At first sign-in, enter your own Lemex API key. The server checks access with a non-inference `/models` request before saving it. Later, use **Assistant settings → Your Lemex API key** to replace it. A failed validation preserves the previous key. Running requests keep their current credential; new requests use the replacement.

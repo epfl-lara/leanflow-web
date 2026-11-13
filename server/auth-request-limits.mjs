@@ -6,7 +6,9 @@ export const MAX_AUTH_JSON_BYTES = 16 * 1024
 export function isPublicAuthRequest(request) {
   return (
     request.method === 'POST' &&
-    /^\/api\/(?:login|logout)\/?$/i.test((request.baseUrl || '') + request.path)
+    /^\/api\/(?:login|logout|auth\/entra\/(?:start|link))\/?$/i.test(
+      (request.baseUrl || '') + request.path,
+    )
   )
 }
 

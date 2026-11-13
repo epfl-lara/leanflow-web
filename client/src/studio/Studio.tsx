@@ -104,6 +104,7 @@ import { GitModal } from './GitModal'
 import { GitConnectionsDialog } from './GitConnectionsDialog'
 import { ResizeHandle } from './ResizeHandle'
 import { SessionRecovery } from './SessionRecovery'
+import { EntraButton } from './EntraButton'
 import { useSessionActivity } from './useSessionActivity'
 import type {
   EditorProofState,
@@ -151,20 +152,26 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
   const [token, setToken] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  async function acceptSignIn(expectedUserId?: string) {
+    bindSessionUser(expectedUserId ?? null)
+    const session = await api<Session>('/api/session')
+    bindSessionUser(session.user.id)
+    setRunEventTransport(session.eventTransport)
+    markSessionRestored()
+    onSession(session)
+  }
   async function submit(event: FormEvent) {
     event.preventDefault()
+    if (busy) return
     setBusy(true)
     setError('')
     try {
       const signedIn = await post<{ user: Account }>('/api/login', {
         token: token.trim(),
       })
-      bindSessionUser(signedIn.user.id)
-      const session = await api<Session>('/api/session')
-      setRunEventTransport(session.eventTransport)
-      markSessionRestored()
-      onSession(session)
+      await acceptSignIn(signedIn.user.id)
     } catch (error) {
+      bindSessionUser(null)
       setError(errorText(error))
       setBusy(false)
     }
@@ -179,6 +186,11 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
           with a proof partner.
         </h1>
         <p>Sign in to open projects, inspect goals, and work with Lemex.</p>
+        <EntraButton
+          disabled={busy}
+          onBusyChange={setBusy}
+          onComplete={() => acceptSignIn()}
+        />
         <form onSubmit={submit}>
           <label className="field-label" htmlFor="access-token">
             Access token

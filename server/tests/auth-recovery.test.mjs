@@ -11,6 +11,7 @@ async function fixture(t) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-auth-'))
   const studio = await createStudio({
     dataDir,
+    entraConfig: null,
     runtime: {
       async init() {},
       async shutdown() {},
@@ -62,6 +63,40 @@ async function fixture(t) {
     })
   return { studio, request, login, token, otherToken, expiredCookie }
 }
+
+test('disabled EPFL sign-in is public only at its own routes and keeps token sessions working', async (t) => {
+  const { request, login, token } = await fixture(t)
+  const status = await request('/api/auth/entra')
+  assert.equal(status.status, 200)
+  assert.equal(status.headers.get('cache-control'), 'no-store')
+  assert.deepEqual(await status.json(), { enabled: false })
+  const start = await request('/api/auth/entra/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  assert.equal(start.status, 404)
+  assert.equal(start.headers.get('set-cookie'), null)
+  const callback = await request('/api/auth/entra/callback?state=fixture')
+  assert.equal(callback.status, 404)
+  assert.equal(callback.headers.get('set-cookie'), null)
+  assert.equal((await request('/api/auth/entra/private')).status, 401)
+  const crossOrigin = await request('/api/auth/entra/start', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: 'https://untrusted.example',
+    },
+    body: '{}',
+  })
+  assert.equal(crossOrigin.status, 403)
+  const signedIn = await login({ token })
+  assert.equal(signedIn.status, 200)
+  const session = await request('/api/session', {
+    headers: { Cookie: signedIn.headers.get('set-cookie').split(';')[0] },
+  })
+  assert.equal((await session.json()).user.id, 'owner')
+})
 
 test('session recovery renews an expired cookie only for the expected workspace account', async (t) => {
   const { request, login, token, expiredCookie } = await fixture(t)

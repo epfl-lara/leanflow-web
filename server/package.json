@@ -18,6 +18,7 @@
     "ip-anonymize": "^0.1.0",
     "memfs": "^4.80.0",
     "nocache": "^4.0.0",
+    "openid-client": "^6.8.9",
     "parse5": "7.3.0",
     "vscode": "npm:@codingame/monaco-vscode-api@8.0.4",
     "ws": "^8.22.0",
