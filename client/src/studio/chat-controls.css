@@ -74,12 +74,12 @@
 .chat-picker-delete {
   width: 30px;
   padding: 6px;
-  color: var(--muted);
+  color: var(--icon);
 }
 .chat-picker-rename {
   width: 30px;
   padding: 6px;
-  color: var(--muted);
+  color: var(--icon);
 }
 .chat-rename-form {
   flex-basis: 100%;

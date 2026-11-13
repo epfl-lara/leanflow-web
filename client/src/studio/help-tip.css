@@ -9,7 +9,7 @@
   border: 0;
   border-radius: 50%;
   background: transparent;
-  color: var(--muted);
+  color: var(--icon);
   vertical-align: middle;
 }
 .help-tip:hover,

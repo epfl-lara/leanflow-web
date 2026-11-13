@@ -16,6 +16,7 @@
   --border: #e6e9ef;
   --text: #222b3d;
   --muted: #6f7a8b;
+  --icon: #526178;
   --accent: #335cce;
   --accent-soft: #eef3fc;
   --success: #20865c;
@@ -37,6 +38,7 @@
   --border: #293141;
   --text: #e2e7f2;
   --muted: #97a3b8;
+  --icon: #b7c4d8;
   --accent: #8bafff;
   --accent-soft: #202d43;
   --success: #72d1a3;
@@ -235,14 +237,15 @@ textarea {
 .icon-button {
   border: 0;
   background: transparent;
-  color: var(--muted);
+  color: var(--icon);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 6px;
   border-radius: 6px;
 }
-.icon-button:hover:not(:disabled) {
+.icon-button:hover:not(:disabled),
+.icon-button:focus-visible {
   background: var(--surface-hover);
   color: var(--text);
 }
@@ -2789,7 +2792,7 @@ body.panel-resizing iframe {
 .file-delete {
   flex-shrink: 0;
   opacity: 0;
-  color: var(--muted);
+  color: var(--icon);
 }
 .project-row:hover .project-delete,
 .project-row:focus-within .project-delete,

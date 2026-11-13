@@ -89,6 +89,10 @@
   opacity: 0;
   pointer-events: none;
 }
+.row-menu-button[aria-expanded='true'] {
+  color: var(--text);
+  background: var(--surface-hover);
+}
 .file-row > .file-delete,
 .project-actions > .icon-button {
   width: 24px;

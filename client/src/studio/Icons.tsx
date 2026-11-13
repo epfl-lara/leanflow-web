@@ -28,7 +28,6 @@ const paths = {
   sun: 'M12 3V1M12 23v-2M3 12H1M23 12h-2M5.6 5.6 1.4 1.4M18.4 18.4l1.4 1.4M5.6 18.4l-1.4 1.4M18.4 5.6l1.4-1.4M17 12a5 5 0 1 1-10 0 5 5 0 0 1 10 0',
   moon: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z',
   menu: 'M3 6h18M3 12h18M3 18h18',
-  more: 'M5 12h.01M12 12h.01M19 12h.01',
   chevron: 'm9 5 7 7-7 7',
   bot: 'M8 4h8M12 4V1M5 8h14v12H5ZM2 12h3M19 12h3M8 13h1M15 13h1M9 17h6',
   log: 'M4 5h16M4 10h16M4 15h10M4 20h10',
@@ -45,7 +44,7 @@ export function Icon({
   size = 18,
   style,
 }: {
-  name: keyof typeof paths
+  name: keyof typeof paths | 'more'
   size?: number
   style?: CSSProperties
 }) {
@@ -56,13 +55,26 @@ export function Icon({
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.7"
+      strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
       style={style}
     >
-      <path d={paths[name]} />
+      {name === 'more' ? (
+        [5, 12, 19].map((cx) => (
+          <circle
+            key={cx}
+            cx={cx}
+            cy="12"
+            r="1.75"
+            fill="currentColor"
+            stroke="none"
+          />
+        ))
+      ) : (
+        <path d={paths[name]} />
+      )}
     </svg>
   )
 }
