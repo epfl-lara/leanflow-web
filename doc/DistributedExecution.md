@@ -11,6 +11,9 @@ remain on the coordinator. Moving those workloads requires a separate ownership
 and publication protocol. Adding workers does not make the coordinator highly
 available.
 
+Use the [operations guide](DistributedOperations.md) for storage layout, scaling,
+cache maintenance, rollout acceptance and rollback.
+
 ```mermaid
 flowchart LR
   Browser --> Coordinator[Coordinator: HTTPS, accounts, saved files, SQLite]

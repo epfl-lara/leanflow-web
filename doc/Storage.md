@@ -87,8 +87,8 @@ node server/cluster/control.mjs trim --config /private/controller.json --data /c
 
 The `trim` command requires cluster mode `off` and exclusive controller-state
 ownership. It does not connect to workers. It removes only duplicate payloads
-with valid source references. It preserves manifests, unindexed objects, partial uploads and every
-original asset. An interruption leaves conservative quota charges; rerunning it
+with valid source references. It preserves manifests, unindexed objects, partial
+uploads and every original asset. An interruption leaves conservative quota charges; rerunning it
 finishes those releases. `status` reports both physically charged objects and
 indexed source bytes. Existing copies without a verified index entry are kept.
 Do not delete, move, chmod or hardlink indexed managed files to free disk space.
@@ -99,3 +99,7 @@ Keep saved projects and databases on the coordinator until a separate durable
 storage migration is implemented. Moving retained work to execution PCs needs
 independent replicas, verification and backup recovery; disposable worker caches
 do not provide that durability.
+
+See [distributed operations](DistributedOperations.md) for the maintenance and
+rollback procedure and the [13 November rollout report](releases/2026-11-13-distributed-storage.md)
+for measured recovery and live verification.

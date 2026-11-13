@@ -10,6 +10,11 @@ Expanding an existing filesystem makes its extra space available automatically. 
 
 To add Linux machines for pure project checks, follow [Add execution workers](DistributedExecution.md). The coordinator retains saved files and interactive workloads. Certify each worker and measure representative load before enabling remote traffic.
 
+Use [distributed operations](DistributedOperations.md) for scaling, worker disk
+usage, cache maintenance, acceptance and rollback. The
+[November 2026 storage rollout](releases/2026-11-13-distributed-storage.md)
+records the initial cache-recovery result.
+
 Keep editors responsive during checks by reserving worker capacity in both directions. `STUDIO_RESERVED_INTERACTIVE_WORKERS=1` keeps one slot available for editors and private terminals; `STUDIO_RESERVED_BATCH_WORKERS=3` keeps three slots available for setup, agents, and full checks. Both use the same total worker count and memory allowance. With seven effective slots, these defaults allow up to four interactive sessions and six batch slots, subject to the shared total. Close unused editors or terminals if interactive capacity is full. Reservations shrink on smaller servers; a single-slot server cannot run interactive work and checks simultaneously.
 
 Full checks keep their priority as slots become available. While open editors or agents prevent a full check from starting, bounded jobs can use the otherwise idle slots. New agents cannot use that exception. An assistant’s LaTeX compiler has a protected shared slot and inherits its parent’s priority, so a waiting check cannot block the compiler that lets the assistant finish. Cancelling queued work releases its place without stopping unrelated work. Capacity status reports effective class limits and active and queued slots. Before a larger rollout, run concurrent project checks on representative Lean projects with the intended hardware and provider limits; the deterministic worker-load regressions validate admission and cancellation, not a hardware sizing guarantee.

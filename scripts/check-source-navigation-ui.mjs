@@ -130,14 +130,14 @@ async function definition(locations) {
   )
 }
 
-async function identifierPoint(name = 'localValue') {
+async function identifierTarget(name = 'localValue') {
   const line = page
     .locator('.monaco-editor .view-lines .view-line')
     .filter({ hasText: '#check' })
     .filter({ hasText: name })
     .first()
   await line.waitFor()
-  return line.evaluate((element, name) => {
+  const position = await line.evaluate((element, name) => {
     const start = element.textContent.indexOf(name)
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
     const range = document.createRange()
@@ -153,12 +153,19 @@ async function identifierPoint(name = 'localValue') {
       if (found && start + name.length <= end) {
         range.setEnd(node, start + name.length - offset)
         const box = range.getBoundingClientRect()
-        return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+        const lineBox = element.getBoundingClientRect()
+        return {
+          x: box.x - lineBox.x + box.width / 2,
+          y: box.y - lineBox.y + box.height / 2,
+        }
       }
       offset = end
     }
     throw new Error('Identifier text is not visible')
   }, name)
+  // Notices can move the editor after measuring the token. Locator actions
+  // wait for a stable line and resolve its current position before input.
+  return { line, position }
 }
 
 async function altDefinition(
@@ -170,18 +177,18 @@ async function altDefinition(
   await editor().focus()
   state.definitionLocations = locations
   const previous = report.requests.filter((r) => r.method === 'LSP').length
-  const point = await identifierPoint(name)
+  const target = await identifierTarget(name)
   await page.mouse.move(0, 0)
   await page.keyboard.down('Alt')
   try {
-    await page.mouse.move(point.x, point.y)
+    await target.line.hover({ position: target.position })
     await until(
       () => report.requests.filter((r) => r.method === 'LSP').length > previous,
       'Alt-hover requests a Lean definition',
     )
     if (locations.length && previewAvailable)
       await page.locator('.goto-definition-link').waitFor()
-    await page.mouse.click(point.x, point.y)
+    await target.line.click({ position: target.position })
   } finally {
     await page.keyboard.up('Alt')
   }
@@ -211,9 +218,9 @@ try {
     'F12 within a project file jumps to the definition and preserves unsaved edits',
   )
 
-  const plainPoint = await identifierPoint()
+  const plainTarget = await identifierTarget()
   const beforeClick = report.requests.filter((r) => r.method === 'LSP').length
-  await page.mouse.click(plainPoint.x, plainPoint.y)
+  await plainTarget.line.click({ position: plainTarget.position })
   await until(
     async () =>
       (
@@ -255,14 +262,14 @@ try {
     'Alt-click on a name without a definition leaves the file unchanged and does not add a cursor',
   )
 
-  const cursorPoint = await identifierPoint()
+  const cursorTarget = await identifierTarget()
   await page.keyboard.press(
     process.platform === 'darwin' ? 'Meta+ArrowUp' : 'Control+Home',
   )
   const multiCursorKey = process.platform === 'darwin' ? 'Meta' : 'Control'
   await page.keyboard.down(multiCursorKey)
   try {
-    await page.mouse.click(cursorPoint.x, cursorPoint.y)
+    await cursorTarget.line.click({ position: cursorTarget.position })
   } finally {
     await page.keyboard.up(multiCursorKey)
   }
@@ -309,8 +316,11 @@ try {
   )
 
   state.definitionLocations = location('file:///workspace/Main.lean', 1)
-  const menuPoint = await identifierPoint()
-  await page.mouse.click(menuPoint.x, menuPoint.y, { button: 'right' })
+  const menuTarget = await identifierTarget()
+  await menuTarget.line.click({
+    position: menuTarget.position,
+    button: 'right',
+  })
   await page.getByRole('menuitem', { name: /^Go to Definition/ }).hover()
   await page.keyboard.press('Enter')
   await until(
