@@ -723,6 +723,163 @@ test('uploads resume from the worker offset in bulk-channel chunks', async (t) =
   assert.deepEqual(await worker.blobs.has([hash]), [hash])
 })
 
+test('independent concurrent checks pipeline objects within one shared connection limit', async (t) => {
+  const files = (prefix) =>
+    Object.fromEntries(
+      Array.from({ length: 12 }, (_, index) => [
+        `${prefix}${index}.lean`,
+        `-- ${prefix}${index}\nexample : True := by trivial\n`,
+      ]),
+    )
+  const firstFiles = files('First'),
+    secondFiles = files('Second')
+  const { controller, workers, transport, input, blobs, ready } = await cluster(
+    t,
+    { files: firstFiles },
+  )
+  const other = await snapshot(blobs, secondFiles)
+  const hashes = new Set(
+    Object.values({ ...firstFiles, ...secondFiles }).map((text) =>
+      sha256(Buffer.from(text)),
+    ),
+  )
+  const secondHashes = new Set(
+    Object.values(secondFiles).map((text) => sha256(Buffer.from(text))),
+  )
+  const gate = Promise.withResolvers()
+  let active = 0,
+    peak = 0,
+    secondStarted = false
+  const offsets = new Map()
+  transport.hook = async ({ method, params, options, request }) => {
+    if (
+      method === 'objects.has' &&
+      params.hashes.some((hash) => secondHashes.has(hash))
+    )
+      secondStarted = true
+    if (method === 'objects.offset' && hashes.has(params.hash)) {
+      active++
+      peak = Math.max(peak, active)
+      offsets.set(params.hash, (offsets.get(params.hash) || 0) + 1)
+      await gate.promise
+    }
+    const reply = await request(method, params, options)
+    if (method === 'objects.put' && params.final && hashes.has(params.hash))
+      active--
+    return reply
+  }
+  await ready()
+  const first = controller.run(input, options())
+  const second = controller.run(
+    other,
+    options({ actor: 'bob', jobId: 'job-2' }),
+  )
+  first.catch(() => {})
+  second.catch(() => {})
+  try {
+    await until(() => active === 4 && secondStarted)
+    await delay(30)
+    assert.equal(active, 4)
+    assert.equal(peak, 4)
+    assert.equal(workers.get('node-a').runtime.runs.length, 0)
+  } finally {
+    gate.resolve()
+  }
+  assert.deepEqual(
+    (await Promise.all([first, second])).map((result) => result.code),
+    [0, 0],
+  )
+  assert.equal(peak, 4)
+  assert.equal(active, 0)
+  assert.equal(offsets.size, 24)
+  assert([...offsets.values()].every((count) => count === 1))
+  const { worker } = workers.get('node-a')
+  for (const text of [
+    firstFiles['First0.lean'],
+    secondFiles['Second11.lean'],
+  ]) {
+    assert.equal(
+      (await worker.blobs.read(sha256(Buffer.from(text)))).toString(),
+      text,
+    )
+  }
+})
+
+test('a failed pipelined object drains active transfers without sending the whole manifest or starting a check', async (t) => {
+  const files = Object.fromEntries(
+    Array.from({ length: 24 }, (_, index) => [
+      `File${index}.lean`,
+      `-- ${index}\nexample : True := by trivial\n`,
+    ]),
+  )
+  const { controller, workers, transport, input, ready } = await cluster(t, {
+    files,
+  })
+  const hashes = new Set(
+    Object.values(files).map((text) => sha256(Buffer.from(text))),
+  )
+  const gate = Promise.withResolvers()
+  let firstHash = null,
+    rejected = false
+  const touched = new Set()
+  transport.hook = async ({ method, params, options, request }) => {
+    if (method === 'objects.offset' && hashes.has(params.hash)) {
+      touched.add(params.hash)
+      firstHash ??= params.hash
+      if (params.hash !== firstHash) await gate.promise
+    }
+    const reply = await request(method, params, options)
+    if (method === 'objects.put' && params.hash === firstHash) {
+      rejected = true
+      return { ...reply, offset: reply.offset + 1 }
+    }
+    return reply
+  }
+  await ready()
+  const run = controller.run(input, options())
+  const stopped = assert.rejects(run, { code: 'worker_upload_failed' })
+  try {
+    await until(() => rejected)
+    await delay(30)
+    assert(touched.size <= 4)
+    assert.equal(workers.get('node-a').runtime.runs.length, 0)
+  } finally {
+    gate.resolve()
+  }
+  await stopped
+  assert(touched.size <= 4)
+  assert(!transport.requests.some((entry) => entry.method === 'attempt.start'))
+  assert.deepEqual(counts(controller.status()), {
+    active: 0,
+    held: 0,
+    queued: 0,
+  })
+  let active = 0,
+    peak = 0
+  transport.hook = async ({ method, params, options, request }) => {
+    if (method !== 'objects.offset' || !hashes.has(params.hash))
+      return request(method, params, options)
+    active++
+    peak = Math.max(peak, active)
+    try {
+      await delay(10)
+      return await request(method, params, options)
+    } finally {
+      active--
+    }
+  }
+  assert.equal(
+    (await controller.run(input, options({ jobId: 'after-upload-failure' })))
+      .code,
+    0,
+  )
+  assert.equal(
+    peak,
+    4,
+    'A failed transfer must release every slot on the same connection',
+  )
+})
+
 test('concurrent checks share an input upload even when one waiting check is cancelled', async (t) => {
   const content = 'x'.repeat(600 * 1024),
     hash = sha256(content)
@@ -845,6 +1002,105 @@ test('a worker with another release or image is never used', async (t) => {
     () => image.controller.status().workers[0].error === 'release_mismatch',
   )
   assert.equal(await image.controller.run(image.input, options()), null)
+})
+
+test('losing bulk while independent uploads have active and queued transfers permits a fresh four-way upload', async (t) => {
+  const files = (prefix) =>
+    Object.fromEntries(
+      Array.from({ length: 12 }, (_, index) => [
+        `${prefix}${index}.lean`,
+        `-- ${prefix}${index}\nexample : True := by trivial\n`,
+      ]),
+    )
+  const firstFiles = files('First'),
+    secondFiles = files('Second')
+  const { controller, workers, transport, input, blobs, ready } = await cluster(
+    t,
+    { files: firstFiles },
+  )
+  const other = await snapshot(blobs, secondFiles)
+  const hashes = new Set(
+    Object.values({ ...firstFiles, ...secondFiles }).map((text) =>
+      sha256(Buffer.from(text)),
+    ),
+  )
+  const secondHash = sha256(Buffer.from(secondFiles['Second0.lean']))
+  const { worker, runtime } = workers.get('node-a')
+  const offset = worker.blobs.offset.bind(worker.blobs)
+  const gate = Promise.withResolvers()
+  let active = 0,
+    peak = 0
+  worker.blobs.offset = async (hash) => {
+    if (!hashes.has(hash)) return offset(hash)
+    active++
+    peak = Math.max(peak, active)
+    try {
+      await gate.promise
+      return await offset(hash)
+    } finally {
+      active--
+    }
+  }
+  await ready()
+  const first = controller.run(input, options())
+  const second = controller.run(
+    other,
+    options({ actor: 'bob', jobId: 'other-upload' }),
+  )
+  const stopped = [first, second].map((run) =>
+    assert.rejects(run, { code: 'worker_upload_failed' }),
+  )
+  try {
+    await until(
+      () =>
+        active === 4 &&
+        transport.requests.some(
+          (entry) =>
+            entry.method === 'objects.has' &&
+            entry.params.hashes.includes(secondHash),
+        ),
+    )
+    await delay(30)
+    assert.equal(peak, 4)
+    closeChannel(transport, 'node-a', 'bulk')
+    await Promise.all(stopped)
+    assert.equal(runtime.runs.length, 0)
+  } finally {
+    gate.resolve()
+  }
+  await until(() => active === 0)
+  assert.deepEqual(counts(controller.status()), {
+    active: 0,
+    held: 0,
+    queued: 0,
+  })
+  assert.equal(controller.status().ready, 1)
+  peak = 0
+  worker.blobs.offset = async (hash) => {
+    if (!hashes.has(hash)) return offset(hash)
+    active++
+    peak = Math.max(peak, active)
+    try {
+      await delay(10)
+      return await offset(hash)
+    } finally {
+      active--
+    }
+  }
+  assert.equal(
+    (
+      await controller.run(
+        input,
+        options({ jobId: 'after-mid-upload-bulk-loss' }),
+      )
+    ).code,
+    0,
+  )
+  assert.equal(peak, 4)
+  assert.equal(
+    transport.opened.filter((entry) => entry.channel === 'bulk').length,
+    2,
+  )
 })
 
 test('losing the bulk channel keeps leases and cancellation on the control channel', async (t) => {

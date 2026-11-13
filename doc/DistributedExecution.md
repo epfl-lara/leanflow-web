@@ -194,6 +194,9 @@ manifest. Both paths transfer and install all assets before checks need them.
 Check object-count and byte usage on both hosts: their budgets cover all
 toolchains, source snapshots and cached environments together. Leave room for
 several versions, rather than matching the object budget to one manifest's cap.
+Bulk uploads pipeline at most four objects per worker connection, shared across
+concurrent checks. Each chunk remains bounded to 256 KiB. Transfer concurrency
+does not increase the worker's CPU, memory or running-check limits.
 
 Start with `shadow`, which starts the local authoritative check immediately and
 runs a bounded remote comparison in the background. The local result never

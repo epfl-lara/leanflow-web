@@ -29,6 +29,9 @@ const MAX_DIAGNOSTIC = 2048
 
 const GIB = 1024 ** 3
 const CHUNK_BYTES = 256 * 1024
+// Four chunk requests fit below the bulk channel's 4 MiB output queue.
+// Share this ceiling across concurrent checks using the same connection.
+const UPLOAD_CONCURRENCY = 4
 const HAS_BATCH = 2048
 const RENEW_BATCH = 128
 const MIN_SCRATCH_BYTES = 16 * GIB
@@ -383,6 +386,7 @@ export class ClusterController {
   #shutdown = null
   #resultNodes = new WeakMap()
   #uploads = new WeakMap()
+  #uploadSlots = new WeakMap()
 
   constructor({
     config,
@@ -1589,8 +1593,28 @@ export class ClusterController {
     for (const entry of manifest.entries)
       if (entry.type === 'file') sizes.set(entry.hash, entry.size)
     const hashes = [...new Set([...sizes.keys(), hash])]
-    for (const object of await this.#missing(bulk, hashes, signal))
-      await this.#send(bulk, object, sizes.get(object), signal)
+    const missing = await this.#missing(bulk, hashes, signal)
+    let next = 0,
+      failed = false,
+      uploadError
+    await Promise.all(
+      Array.from(
+        { length: Math.min(UPLOAD_CONCURRENCY, missing.length) },
+        async () => {
+          while (!failed && next < missing.length) {
+            const object = missing[next++]
+            try {
+              await this.#send(bulk, object, sizes.get(object), signal)
+            } catch (error) {
+              failed = true
+              uploadError ??= error
+            }
+          }
+        },
+      ),
+    )
+    if (failed) throw uploadError
+    signal?.throwIfAborted()
     if ((await this.#missing(bulk, hashes, signal)).length)
       throw clusterError('The worker lost an input.', 'upload_failed', 502)
     this.#remember(node, nodeEpoch, key)
@@ -1648,12 +1672,26 @@ export class ClusterController {
   }
 
   async #sendBlob(bulk, hash, size) {
+    let slots = this.#uploadSlots.get(bulk)
+    if (!slots) {
+      slots = { active: 0, waiting: [] }
+      this.#uploadSlots.set(bulk, slots)
+    }
+    if (slots.active >= UPLOAD_CONCURRENCY)
+      await new Promise((resolve) => slots.waiting.push(resolve))
+    else slots.active++
     try {
-      return await this.#sendFrom(bulk, hash, size)
-    } catch (error) {
-      // Another writer moved the partial object; resume once from its offset.
-      if (error?.code !== 'offset_conflict') throw error
-      return this.#sendFrom(bulk, hash, size)
+      try {
+        return await this.#sendFrom(bulk, hash, size)
+      } catch (error) {
+        // Another writer moved the partial object; resume once from its offset.
+        if (error?.code !== 'offset_conflict') throw error
+        return await this.#sendFrom(bulk, hash, size)
+      }
+    } finally {
+      const resume = slots.waiting.shift()
+      if (resume) resume()
+      else slots.active--
     }
   }
 
