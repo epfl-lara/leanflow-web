@@ -15,18 +15,23 @@ const expiredError =
   'This EPFL sign-in expired. Close this window and try again.'
 const hash = (value) => createHash('sha256').update(value).digest()
 
-function displayName(value) {
-  if (typeof value !== 'string') return 'EPFL user'
-  return (
-    value
+function displayName(claims) {
+  const fullName = [claims.given_name, claims.family_name]
+    .filter((value) => typeof value === 'string')
+    .join(' ')
+  for (const value of [claims.name, fullName]) {
+    if (typeof value !== 'string') continue
+    const name = value
       .normalize('NFC')
       .replace(/[^\p{L}\p{M}\p{N} ._'’-]/gu, ' ')
       .replace(/\s+/gu, ' ')
       .trim()
       .slice(0, 80)
       .replace(/\p{Cs}/gu, '')
-      .trim() || 'EPFL user'
-  )
+      .trim()
+    if (name) return name
+  }
+  return 'EPFL user'
 }
 
 export function loadEntraConfig(env = process.env) {
@@ -381,7 +386,7 @@ export function installEntraAuthRoutes(
       identity = {
         tenantId: config.tenantId,
         objectId: claims.oid.toLowerCase(),
-        name: displayName(claims.name),
+        name: displayName(claims),
       }
     } catch {
       response.append('Set-Cookie', cookie('', 0))

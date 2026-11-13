@@ -45,6 +45,25 @@ patterns. Microsoft's guidance covers
 [authorization code flow](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow),
 and [user assignments](https://learn.microsoft.com/en-us/entra/identity-platform/howto-restrict-your-app-to-a-set-of-users).
 
+### Confirm the ID-token claims
+
+Keep the standard Entra `tid` (tenant ID) and `oid` (user object ID) claims in
+the **OIDC ID token**, alongside EPFL's additional claims. LeanFlow identifies
+an account by the verified tenant and object IDs. Missing or invalid IDs stop
+sign-in; SCIPER, GASPAR and email claims do not replace them.
+
+EPFL can also provide `uniqueid` (SCIPER), `gaspar`, `given_name`,
+`family_name`, and `mail`. For the initial display name, LeanFlow uses `name`
+when available, then the given and family names, then `EPFL user`. Users can
+confirm or change that name during account setup. The other EPFL claims are
+not used to grant access or automatically link existing accounts.
+
+Ask the administrator to confirm these are ID-token claims, rather than only
+SAML attributes or access-token claims. The pilot must verify the actual
+returned token; public discovery alone cannot confirm app assignments,
+consent, credentials, or user claims. See Microsoft's
+[ID-token claims reference](https://learn.microsoft.com/en-us/entra/identity-platform/id-token-claims-reference).
+
 ## Configure a linked-account pilot
 
 For a later test deployment, add these settings to its private environment

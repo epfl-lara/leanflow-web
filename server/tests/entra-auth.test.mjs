@@ -385,6 +385,38 @@ test('unusual or long Microsoft display names cannot prevent an otherwise valid 
   }
 })
 
+test('EPFL name claims supply display names while tenant and object IDs remain the account identity', async (t) => {
+  const { start, callback, calls } = await fixture(t)
+  const epflClaims = {
+    given_name: 'John',
+    family_name: 'Doe',
+    uniqueid: '123456',
+    gaspar: 'jdoe',
+    mail: 'john.doe@example.org',
+  }
+  for (const name of [undefined, '', '  ', null, 42, ['Wrong name'], '😃']) {
+    const response = await callback(await start(), {
+      claims: { ...epflClaims, name },
+    })
+    assert.match(await response.text(), /"ok":true/)
+    assert.deepEqual(calls.signIn.at(-1).identity, {
+      tenantId,
+      objectId,
+      name: 'John Doe',
+    })
+  }
+  for (const [claims, expected] of [
+    [{ ...epflClaims, name: 'Preferred Name' }, 'Preferred Name'],
+    [{ name: undefined, given_name: 'John', family_name: 42 }, 'John'],
+    [{ name: undefined, given_name: {}, family_name: 'Doe' }, 'Doe'],
+    [{ name: undefined, given_name: [], family_name: null }, 'EPFL user'],
+  ]) {
+    const response = await callback(await start(), { claims })
+    assert.match(await response.text(), /"ok":true/)
+    assert.equal(calls.signIn.at(-1).identity.name, expected)
+  }
+})
+
 test('provider failures return actionable errors without exposing provider details or credentials', async (t) => {
   const unavailable = await fixture(t, { failDiscovery: true })
   const started = await unavailable.start()
@@ -416,7 +448,9 @@ test('invalid signature, issuer, audience, expiration, nonce, tenant, or object 
     { claims: { exp: Math.floor(Date.now() / 1000) - 3600 } },
     { claims: { nonce: 'wrong-nonce' } },
     { claims: { tid: '44444444-4444-4444-4444-444444444444' } },
+    { claims: { tid: undefined } },
     { claims: { oid: 'not-an-object-id' } },
+    { claims: { oid: undefined } },
   ]
   for (const options of invalid) {
     const { start, callback, calls } = await fixture(t)
