@@ -153,6 +153,7 @@ async function startWorker(root, spec) {
       memoryBudget,
       parentMemoryMax: '8g',
       maxCpus: 8,
+      parentMaxCpus: 8,
       workerCpus: 1,
       leaseMs: 5000,
     },

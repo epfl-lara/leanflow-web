@@ -4,6 +4,28 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { slicePath, inspectBoundary } from '../cluster/boundary.mjs'
+import { nodeConfig } from '../cluster/config.mjs'
+
+test('explicit worker CPU budgets stay independent of the coordinator host', (t) => {
+  t.mock.method(os, 'availableParallelism', () => 2)
+  const config = {
+    version: 1,
+    nodeId: 'fixture-worker',
+    controllerLineage: 'fixture-controller',
+    dataDir: path.join(os.tmpdir(), 'fixture-worker'),
+    image: 'sha256:' + 'a'.repeat(64),
+    maxCpus: 8,
+    workerCpus: 1,
+  }
+  assert.throws(() => nodeConfig(config), /CPU budget does not fit/)
+  const explicit = nodeConfig({ ...config, parentMaxCpus: 8 })
+  assert.equal(explicit.parentMaxCpus, 8)
+  assert.equal(explicit.maxCpus, 8)
+  assert.throws(
+    () => nodeConfig({ ...config, parentMaxCpus: 4 }),
+    /CPU budget does not fit/,
+  )
+})
 
 test('worker slices resolve systemd hierarchy and exclude broad host slices', () => {
   assert.equal(

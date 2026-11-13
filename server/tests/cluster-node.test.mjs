@@ -69,6 +69,7 @@ async function fixture(t, run) {
       image,
       engineKind: 'docker',
       maxCpus: 8,
+      parentMaxCpus: 8,
       workerMemory: '6g',
       memoryBudget: '24g',
     },
