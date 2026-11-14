@@ -500,6 +500,15 @@ export function Studio() {
     >
   } | null>(null)
   const openRequest = useRef(0)
+  const pendingSidebarOpen = useRef<{
+    scope: WorkspaceScope
+    path: string
+    preview: boolean
+  } | null>(null)
+  const [sidebarOpeningPath, setSidebarOpeningPath] = useState<{
+    scope: WorkspaceScope
+    path: string
+  } | null>(null)
   const pendingFileOpen = useRef<{
     request: number
     scope: WorkspaceScope
@@ -1218,6 +1227,11 @@ export function Studio() {
         movedFile?.generation ?? 0,
       )
       const opening = pendingFileOpen.current
+      const sidebar = pendingSidebarOpen.current
+      if (sidebar && bufferStore.isCurrent(sidebar.scope)) {
+        sidebar.path = rekey(sidebar.path)
+        setSidebarOpeningPath({ scope: sidebar.scope, path: sidebar.path })
+      }
       if (opening && bufferStore.isCurrent(opening.scope)) {
         const destination = remapMovedPath(opening.path, from, to)
         if (destination)
@@ -1561,10 +1575,28 @@ export function Studio() {
     (path: string) => {
       const id = projectIdRef.current
       if (id) {
-        const action = () => openFile(id, path)
+        const selection = {
+          scope: bufferStore.getSnapshot().scope,
+          path,
+          preview: true,
+        }
+        pendingSidebarOpen.current = selection
+        setSidebarOpeningPath({ scope: selection.scope, path })
+        const action = () =>
+          openFile(id, selection.path, undefined, undefined, {
+            preview: selection.preview,
+          })
+        const finish = () => {
+          if (pendingSidebarOpen.current === selection) {
+            pendingSidebarOpen.current = null
+            setSidebarOpeningPath(null)
+          }
+        }
         if (bufferStore.getSnapshot().buffers.has(path))
-          void action().catch((error) => setError(errorText(error)))
-        else navigate(action, '', true)
+          void action()
+            .catch((error) => setError(errorText(error)))
+            .finally(finish)
+        else void navigate(action, '', true).finally(finish)
       }
     },
     [navigate, openFile, bufferStore],
@@ -1573,6 +1605,9 @@ export function Studio() {
   const keepFileOpen = useCallback(
     (path: string) => {
       bufferStore.keepOpen(path)
+      const sidebar = pendingSidebarOpen.current
+      if (sidebar?.path === path && bufferStore.isCurrent(sidebar.scope))
+        sidebar.preview = false
       const pending = pendingFileOpen.current
       if (pending?.path === path && bufferStore.isCurrent(pending.scope))
         pending.preview = false
@@ -2416,7 +2451,13 @@ export function Studio() {
         const remaining = await loadProjects()
         if (active) setProjectId(remaining[0]?.id || null)
       } else if (active) {
-        const current = fileRef.current
+        const before = bufferStore.getSnapshot()
+        const current = before.file
+        const index = current ? before.openPaths.indexOf(current.path) : -1
+        const neighbors = [
+          ...before.openPaths.slice(index + 1),
+          ...before.openPaths.slice(0, index).reverse(),
+        ]
         const removed =
           !!current &&
           (current.path === target.path ||
@@ -2430,13 +2471,40 @@ export function Studio() {
         ) {
           const remaining = await loadFiles(target.projectId)
           await loadGit(target.projectId)
-          if (removed) {
-            const next =
-              bufferStore.getSnapshot().openPaths[0] ??
-              remaining.find(
-                (item) => !item.readOnly && item.path.endsWith('.lean'),
-              )?.path
+          if (
+            removed &&
+            bufferStore.isCurrent(before.scope) &&
+            !bufferStore.getSnapshot().file
+          ) {
+            const snapshot = bufferStore.getSnapshot()
+            const next = neighbors.find((path) => {
+              const draft = snapshot.buffers.get(path)
+              return (
+                snapshot.openPaths.includes(path) &&
+                (remaining.some((item) => item.path === path) ||
+                  (draft && draft.content !== draft.savedContent))
+              )
+            })
             if (next) await openFile(target.projectId, next)
+            if (
+              bufferStore.isCurrent(before.scope) &&
+              !bufferStore.getSnapshot().file
+            ) {
+              const fallback = remaining.find(
+                (item) =>
+                  !item.readOnly &&
+                  item.path.endsWith('.lean') &&
+                  item.path !== next,
+              )
+              if (fallback)
+                await openFile(
+                  target.projectId,
+                  fallback.path,
+                  undefined,
+                  undefined,
+                  { preview: !snapshot.openPaths.length },
+                )
+            }
           }
         }
       }
@@ -2805,7 +2873,12 @@ export function Studio() {
                   projectName={project?.name}
                   revealFolder={createdFolder}
                   selectedPath={file?.path}
-                  openingPath={pendingFileOpen.current?.path}
+                  openingPath={
+                    pendingFileOpen.current?.path ??
+                    (sidebarOpeningPath?.scope === scope
+                      ? sidebarOpeningPath.path
+                      : undefined)
+                  }
                   dirty={dirty}
                   dirtyPaths={dirtyPaths}
                   disabled={opening || saving}
@@ -3576,6 +3649,24 @@ export function Studio() {
                 onKeepOpen={keepFileOpen}
               />
               <div className="file-actions">
+                {previewPath && previewPath === file?.path && (
+                  <button
+                    className="icon-button"
+                    aria-label={`Keep ${previewPath} open`}
+                    title="Keep open"
+                    onClick={(event) => {
+                      event.currentTarget
+                        .closest('.file-toolbar')
+                        ?.querySelector<HTMLButtonElement>(
+                          '[role="tab"][aria-selected="true"]',
+                        )
+                        ?.focus()
+                      keepFileOpen(previewPath)
+                    }}
+                  >
+                    <Icon name="pin" size={15} />
+                  </button>
+                )}
                 {isMarkdownPath(file?.path) && (
                   <button
                     className="button small secondary"

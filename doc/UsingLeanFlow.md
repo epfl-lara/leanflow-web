@@ -123,7 +123,7 @@ Put the root document at the common parent of its inputs and use paths such as `
 
 ## View evaluation results and stop a check
 
-Click a file to open it in a preview tab beside **Save**. Its italic name marks it as temporary: viewing another file replaces that preview. Editing keeps the tab open, even after saving or undoing the edit. Use the tab's **Keep open** pin button, double-click its tab or sidebar entry, or focus the tab and press **Enter** to keep it open without editing. New files and recovered drafts also stay open. **Go to Definition** keeps the source tab open so you can return to it.
+Click a file to open it in a preview tab beside **Save**. Its italic name marks it as temporary: viewing another file replaces that preview. Editing keeps the tab open, even after saving or undoing the edit. Use **Keep open** (the pin beside **Save**), double-click its tab or sidebar entry, or focus the tab and press **Enter** to keep it open without editing. New files and recovered drafts also stay open. **Go to Definition** keeps the source tab open so you can return to it.
 
 Use the tabs to return to files kept open in this project. Tabs restore the cursor and scroll position. Hover over a tab to see its full path. Focus a tab and press **Delete** to close it with the keyboard. The dot marks unsaved edits; closing that tab first attempts to save just that file and keeps the draft available if saving fails. **Discard this file** discards only the tab being closed. Other drafts stay open, including files with save conflicts or deleted files. Closing a tab does not delete the file. Switching projects clears the tab list.
 

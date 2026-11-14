@@ -71,8 +71,8 @@ export function FileTabs({
                 preview ? `${path} — Preview. Double-click to keep open.` : path
               }
               aria-disabled={opening}
-              onClick={() => {
-                if (!opening) onSelect(path)
+              onClick={(event) => {
+                if (!opening && event.detail < 2) onSelect(path)
               }}
               onDoubleClick={() => onKeepOpen(path)}
               onKeyDown={(event) => {
@@ -136,21 +136,6 @@ export function FileTabs({
                 <Icon name="close" size={12} />
               </span>
             </button>
-            {preview && (
-              <button
-                className="file-tab-keep"
-                aria-label={`Keep ${path} open`}
-                title="Keep open"
-                onClick={(event) => {
-                  event.currentTarget.parentElement
-                    ?.querySelector<HTMLButtonElement>('[role="tab"]')
-                    ?.focus()
-                  onKeepOpen(path)
-                }}
-              >
-                <Icon name="pin" size={14} />
-              </button>
-            )}
             <span id={`${descriptionId}-${index}`} className="sr-only">
               {preview
                 ? 'Preview. Use Keep open, double-click, or press Enter to keep open. '

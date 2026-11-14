@@ -117,6 +117,14 @@ try {
   await expect(tab('Third.lean')).not.toHaveAccessibleDescription(/Preview/)
   await visit('Main.lean', false)
   await expect(tab('Main.lean')).toHaveAccessibleDescription(/Preview/)
+  assert.equal(
+    await page
+      .getByRole('tablist', { name: 'Open files' })
+      .getByRole('button')
+      .count(),
+    0,
+    'The tablist contains only tabs; Keep open is a separate toolbar action',
+  )
   await page
     .getByRole('button', { name: 'Keep Main.lean open', exact: true })
     .click()
@@ -150,8 +158,30 @@ try {
   )
   await close('Second.lean').click()
   await ready('Main.lean')
+  const normalSave = state.onSave
+  let releaseSave
+  state.onSave = ({ save }) =>
+    new Promise((resolve) => {
+      releaseSave = async () => {
+        await save()
+        resolve()
+      }
+    })
+  await source().focus()
+  await page.keyboard.insertText('-- PIN_WHILE_SAVING\n')
+  await page.locator('.file-item[title="Second.lean"]').dblclick()
+  await until(
+    () => !!releaseSave,
+    'sidebar double-click while the previous draft saves',
+  )
+  await releaseSave()
+  state.onSave = normalSave
+  await ready('Second.lean')
+  await expect(tab('Second.lean')).not.toHaveAccessibleDescription(/Preview/)
+  await close('Second.lean').click()
+  await ready('Main.lean')
   report.checks.push(
-    'Browsing replaces one italic preview; editing pins it through autosave, and Enter or double-click keeps a preview open without editing.',
+    'Browsing replaces one italic preview; editing pins it through autosave. Keyboard, Keep open and sidebar double-click work, including during source reads and draft saves.',
   )
   await visit('Second.lean')
   await visit('Third.lean')
@@ -375,6 +405,7 @@ try {
   await visit('Third.lean')
   const composer = page.getByLabel('Message Lemex')
   await composer.fill('Preserve this chat draft')
+  await visit('Main.lean', false)
 
   for (const [width, height] of [
     [1440, 900],
@@ -439,7 +470,7 @@ try {
   report.checks.push(
     'Tabs scroll within the existing toolbar at desktop, tablet and phone widths, without overlapping actions or changing the chat draft.',
   )
-  for (const name of ['Notes.txt', 'Notes.md', 'Third.lean']) {
+  for (const name of ['Notes.txt', 'Notes.md', 'Third.lean', 'Main.lean']) {
     await close(name).click()
     await until(async () => (await tab(name).count()) === 0, `closed ${name}`)
   }
@@ -456,18 +487,21 @@ try {
     'Closing the last tab leaves an empty editor; reopening from the file tree works.',
   )
   await tab('Main.lean').dblclick()
+  await visit('Notes.md')
   await visit('Notes.txt', false)
   await tab('Main.lean').click()
   await ready('Main.lean')
+  delete state.files[projectId]['Notes.md']
   await page.route(`**/api/projects/${projectId}/trash`, async (route) => {
-    assert.equal(route.request().postDataJSON().path, 'Main.lean')
-    delete state.files[projectId]['Main.lean']
+    const deleted = route.request().postDataJSON().path
+    assert(['Main.lean', 'Notes.txt'].includes(deleted))
+    delete state.files[projectId][deleted]
     await route.fulfill({
       json: {
         trashId: 'fixture-trash-main',
         kind: 'file',
         projectId,
-        path: 'Main.lean',
+        path: deleted,
         deletedAt: new Date().toISOString(),
       },
     })
@@ -481,9 +515,36 @@ try {
     .click()
   await ready('Notes.txt')
   await expect(tab('Notes.txt')).toHaveAccessibleDescription(/Preview/)
+  if (await tab('Notes.md').count()) await close('Notes.md').click()
   assert.equal(await page.getByRole('tab').count(), 1)
   report.checks.push(
-    'Deleting the active file selects the remaining preview without replacing it with an unrelated file.',
+    'Deleting the active file selects the remaining preview, skipping stale tabs without replacing the preview with an unrelated file.',
+  )
+  await tab('Notes.txt').dblclick()
+  await visit('Third.lean', false)
+  await tab('Notes.txt').click()
+  await ready('Notes.txt')
+  state.files[projectId]['Fallback.lean'] =
+    '-- Fallback after a failed neighbor read\n'
+  await page.route(
+    `**/api/projects/${projectId}/file?path=Third.lean`,
+    rejectNext,
+  )
+  await page
+    .getByRole('button', { name: 'Move file Notes.txt to trash', exact: true })
+    .click()
+  await page
+    .getByRole('dialog', { name: 'Delete file?', exact: true })
+    .getByRole('button', { name: 'Move to Trash', exact: true })
+    .click()
+  await ready('Fallback.lean')
+  await expect(tab('Third.lean')).toHaveAccessibleDescription(/Preview/)
+  await page.unroute(
+    `**/api/projects/${projectId}/file?path=Third.lean`,
+    rejectNext,
+  )
+  report.checks.push(
+    'When a neighboring tab fails to load after deletion, an available file opens and the preview tab stays available for retry.',
   )
   fixture.assertClean()
   report.ok = true
