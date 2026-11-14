@@ -1360,6 +1360,12 @@ export function Studio() {
     [loadGit, loadProjects, bufferStore, projectCanEdit, flushCollaboration],
   )
 
+  const saveManually = useCallback(() => {
+    const current = bufferStore.getSnapshot().file
+    if (current) bufferStore.keepOpen(current.path)
+    return saveFile()
+  }, [bufferStore, saveFile])
+
   const automaticSave = useCallback(
     () => saveFile({ automatic: true }),
     [saveFile],
@@ -1455,7 +1461,7 @@ export function Studio() {
     const keydown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault()
-        void saveFile().catch((error) => setError(errorText(error)))
+        void saveManually().catch((error) => setError(errorText(error)))
       }
     }
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -1470,7 +1476,7 @@ export function Studio() {
       window.removeEventListener('keydown', keydown)
       window.removeEventListener('beforeunload', beforeUnload)
     }
-  }, [saveFile, bufferStore])
+  }, [saveManually, bufferStore])
 
   useEffect(() => {
     if (!notice) return
@@ -3747,7 +3753,9 @@ export function Studio() {
                 <button
                   className="button small secondary"
                   onClick={() =>
-                    void saveFile().catch((error) => setError(errorText(error)))
+                    void saveManually().catch((error) =>
+                      setError(errorText(error)),
+                    )
                   }
                   disabled={
                     !projectCanEdit ||
@@ -3756,7 +3764,7 @@ export function Studio() {
                     opening ||
                     file?.readOnly
                   }
-                  title="Autosave is enabled. Save now with Ctrl+S or ⌘S."
+                  title="Autosave is enabled. Ctrl+S or ⌘S saves now and keeps this tab open."
                 >
                   <Icon name="save" size={14} />
                   {saving

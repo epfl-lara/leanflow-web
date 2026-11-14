@@ -133,6 +133,34 @@ try {
   // Restore the original order for the independent close/conflict checks.
   await close('Second.lean').click()
   await close('Third.lean').click()
+  for (const shortcut of ['Control+s', 'Meta+s']) {
+    await visit('Second.lean', false)
+    await expect(tab('Second.lean')).toHaveAccessibleDescription(/Preview/)
+    const savedSource = state.files[projectId]['Second.lean']
+    await source().focus()
+    await page.keyboard.press(shortcut)
+    await expect(tab('Second.lean')).not.toHaveAccessibleDescription(/Preview/)
+    await expect(source()).toBeFocused()
+    assert.equal(state.files[projectId]['Second.lean'], savedSource)
+    await visit('Third.lean', false)
+    assert.equal(await tab('Second.lean').count(), 1)
+    await visit('Second.lean', false)
+    await source().focus()
+    const marker = `-- SAVED_WITH_${shortcut}\n`
+    await page.keyboard.insertText(marker)
+    await page.keyboard.press(shortcut)
+    await until(
+      () => state.files[projectId]['Second.lean'].includes(marker),
+      `${shortcut} saves source changes`,
+    )
+    await expect(source()).toBeFocused()
+    await close('Third.lean').click()
+    await close('Second.lean').click()
+    await ready('Main.lean')
+  }
+  report.checks.push(
+    'Ctrl+S and Cmd+S keep an unedited preview tab open, save source changes, and preserve keyboard focus in the editor.',
+  )
   let releaseRead
   const holdSecond = async (route) => {
     await new Promise((resolve) => {
