@@ -60,13 +60,99 @@ try {
       `selected ${name}`,
     )
   }
-  async function visit(name) {
+  async function visit(name, keep = true) {
     if (await tab(name).count()) await tab(name).click()
     else await page.locator(`.file-item[title="${name}"]`).click()
     await ready(name)
+    if (keep) await tab(name).dblclick()
   }
   await fixture.ready()
   await ready('Main.lean')
+  await expect(tab('Main.lean')).toHaveAccessibleDescription(/Preview/)
+  await visit('Second.lean', false)
+  assert.equal(await page.getByRole('tab').count(), 1)
+  assert.equal(await tab('Main.lean').count(), 0)
+  const failedPreview = (route) =>
+    route.fulfill({
+      status: 503,
+      json: { error: 'Fixture preview is unavailable.' },
+    })
+  await page.route(
+    `**/api/projects/${projectId}/file?path=Third.lean`,
+    failedPreview,
+  )
+  await page.locator('.file-item[title="Third.lean"]').click()
+  await page
+    .getByText('Fixture preview is unavailable.', { exact: true })
+    .waitFor()
+  await expect(tab('Second.lean')).toHaveAccessibleDescription(/Preview/)
+  assert.equal(await tab('Second.lean').getAttribute('aria-selected'), 'true')
+  assert.equal(await page.getByRole('tab').count(), 1)
+  await page.unroute(
+    `**/api/projects/${projectId}/file?path=Third.lean`,
+    failedPreview,
+  )
+  await expect(tab('Second.lean').locator('.file-tab-name')).toHaveCSS(
+    'font-style',
+    'italic',
+  )
+  await source().focus()
+  await page.keyboard.insertText('-- PIN_ON_EDIT\n')
+  await expect(tab('Second.lean')).not.toHaveAccessibleDescription(/Preview/)
+  await until(
+    () => state.files[projectId]['Second.lean'].includes('PIN_ON_EDIT'),
+    'preview edit saved',
+  )
+  await expect(tab('Second.lean')).not.toHaveAccessibleDescription(/Preview/)
+  await visit('Main.lean', false)
+  await visit('Third.lean', false)
+  assert.equal(await tab('Second.lean').count(), 1)
+  assert.equal(await tab('Main.lean').count(), 0)
+  assert.equal(await page.getByRole('tab').count(), 2)
+  await page
+    .locator('.file-toolbar')
+    .screenshot({ path: path.join(output, 'preview-toolbar.png') })
+  await tab('Third.lean').focus()
+  await page.keyboard.press('Enter')
+  await expect(tab('Third.lean')).not.toHaveAccessibleDescription(/Preview/)
+  await visit('Main.lean', false)
+  await expect(tab('Main.lean')).toHaveAccessibleDescription(/Preview/)
+  await page
+    .getByRole('button', { name: 'Keep Main.lean open', exact: true })
+    .click()
+  await expect(tab('Main.lean')).not.toHaveAccessibleDescription(/Preview/)
+  await expect(tab('Main.lean')).toBeFocused()
+  // Restore the original order for the independent close/conflict checks.
+  await close('Second.lean').click()
+  await close('Third.lean').click()
+  let releaseRead
+  const holdSecond = async (route) => {
+    await new Promise((resolve) => {
+      releaseRead = resolve
+    })
+    await route.fallback()
+  }
+  await page.route(
+    `**/api/projects/${projectId}/file?path=Second.lean`,
+    holdSecond,
+  )
+  await page.locator('.file-item[title="Second.lean"]').dblclick()
+  await until(
+    () => !!releaseRead,
+    'sidebar double-click while source is loading',
+  )
+  releaseRead()
+  await ready('Second.lean')
+  await expect(tab('Second.lean')).not.toHaveAccessibleDescription(/Preview/)
+  await page.unroute(
+    `**/api/projects/${projectId}/file?path=Second.lean`,
+    holdSecond,
+  )
+  await close('Second.lean').click()
+  await ready('Main.lean')
+  report.checks.push(
+    'Browsing replaces one italic preview; editing pins it through autosave, and Enter or double-click keeps a preview open without editing.',
+  )
   await visit('Second.lean')
   await visit('Third.lean')
   await visit('Main.lean')
@@ -74,12 +160,30 @@ try {
   await page.keyboard.press('Control+Home')
   for (let i = 0; i < 55; i++) await page.keyboard.press('ArrowDown')
   await page.keyboard.press('End')
+  await until(
+    () =>
+      page
+        .locator('.monaco-editor .cursor')
+        .first()
+        .evaluate((node) => node.style.left !== '0px'),
+    'cursor painted at the end of the line',
+  )
   const position = await page
     .locator('.monaco-editor .cursor')
     .first()
     .evaluate((node) => [node.style.left, node.style.top])
   await visit('Second.lean')
   await visit('Main.lean')
+  await until(
+    async () =>
+      JSON.stringify(
+        await page
+          .locator('.monaco-editor .cursor')
+          .first()
+          .evaluate((node) => [node.style.left, node.style.top]),
+      ) === JSON.stringify(position),
+    'restored cursor painted',
+  )
   assert.deepEqual(
     await page
       .locator('.monaco-editor .cursor')
@@ -350,6 +454,36 @@ try {
   await ready('Main.lean')
   report.checks.push(
     'Closing the last tab leaves an empty editor; reopening from the file tree works.',
+  )
+  await tab('Main.lean').dblclick()
+  await visit('Notes.txt', false)
+  await tab('Main.lean').click()
+  await ready('Main.lean')
+  await page.route(`**/api/projects/${projectId}/trash`, async (route) => {
+    assert.equal(route.request().postDataJSON().path, 'Main.lean')
+    delete state.files[projectId]['Main.lean']
+    await route.fulfill({
+      json: {
+        trashId: 'fixture-trash-main',
+        kind: 'file',
+        projectId,
+        path: 'Main.lean',
+        deletedAt: new Date().toISOString(),
+      },
+    })
+  })
+  await page
+    .getByRole('button', { name: 'Move file Main.lean to trash', exact: true })
+    .click()
+  await page
+    .getByRole('dialog', { name: 'Delete file?', exact: true })
+    .getByRole('button', { name: 'Move to Trash', exact: true })
+    .click()
+  await ready('Notes.txt')
+  await expect(tab('Notes.txt')).toHaveAccessibleDescription(/Preview/)
+  assert.equal(await page.getByRole('tab').count(), 1)
+  report.checks.push(
+    'Deleting the active file selects the remaining preview without replacing it with an unrelated file.',
   )
   fixture.assertClean()
   report.ok = true

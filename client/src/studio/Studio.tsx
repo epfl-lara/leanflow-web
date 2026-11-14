@@ -327,6 +327,8 @@ export function Studio() {
     file,
     buffers,
     openPaths,
+    previewPath,
+    recentPreviewPaths,
     discardVersion,
     saveVersion,
     savedPaths,
@@ -334,6 +336,10 @@ export function Studio() {
     removedPaths,
   } = useSyncExternalStore(bufferStore.subscribe, bufferStore.getSnapshot)
   const setFile = bufferStore.setFile
+  const retainedPaths = useMemo(
+    () => [...openPaths, ...recentPreviewPaths],
+    [openPaths, recentPreviewPaths],
+  )
   const [markdownPreview, setMarkdownPreview] = useState(false)
   const [markupPreview, setMarkupPreview] = useState(true)
   const [previewBusy, setPreviewBusy] = useState(false)
@@ -501,6 +507,7 @@ export function Studio() {
     line?: number
     column?: number
     reload: boolean
+    preview: boolean
   } | null>(null)
   const pendingReload = useRef<{
     scope: WorkspaceScope
@@ -959,13 +966,21 @@ export function Studio() {
       path: string,
       line?: number,
       column?: number,
-      { reload = false }: { reload?: boolean } = {},
+      {
+        reload = false,
+        preview = true,
+      }: { reload?: boolean; preview?: boolean } = {},
     ) => {
       const expected = bufferStore.getSnapshot().scope
       if (expected.projectId !== id) return
       const request = ++openRequest.current
       pendingFileOpen.current = null
+      const previewRequested = () =>
+        pendingFileOpen.current?.request === request
+          ? pendingFileOpen.current.preview
+          : preview
       const revealCurrent = () => {
+        if (!previewRequested()) bufferStore.keepOpen(path)
         if (line)
           setRevealPosition({
             id: ++proofRequestId.current,
@@ -996,6 +1011,7 @@ export function Studio() {
         line,
         column,
         reload,
+        preview,
       }
       setError('')
       try {
@@ -1037,24 +1053,27 @@ export function Studio() {
           revealCurrent()
           return
         }
-        setFile({
-          path,
-          content: value.content,
-          savedContent:
-            latest && value === latest ? latest.savedContent : value.content,
-          hash: value.hash,
-          unavailable:
-            latest && value === latest ? latest.unavailable : undefined,
-          generation: ++generation.current,
-          readOnly:
-            projectAccessRef.current === 'viewer' ||
-            value.readOnly ||
-            path.startsWith('.lake/packages/') ||
-            filesRef.current.find((item) => item.path === path)?.readOnly,
-          line,
-          column,
-          preview: pdf ? 'pdf' : binary ? 'image' : undefined,
-        })
+        bufferStore.openFile(
+          {
+            path,
+            content: value.content,
+            savedContent:
+              latest && value === latest ? latest.savedContent : value.content,
+            hash: value.hash,
+            unavailable:
+              latest && value === latest ? latest.unavailable : undefined,
+            generation: ++generation.current,
+            readOnly:
+              projectAccessRef.current === 'viewer' ||
+              value.readOnly ||
+              path.startsWith('.lake/packages/') ||
+              filesRef.current.find((item) => item.path === path)?.readOnly,
+            line,
+            column,
+            preview: pdf ? 'pdf' : binary ? 'image' : undefined,
+          },
+          { preview: previewRequested() },
+        )
         localStorage.setItem(`lemex-file-${id}`, path)
         setSidebarOpen(false)
       } catch (error) {
@@ -1065,7 +1084,7 @@ export function Studio() {
         if (request === openRequest.current) setOpening(false)
       }
     },
-    [bufferStore, setFile],
+    [bufferStore],
   )
 
   useEffect(() => {
@@ -1204,6 +1223,7 @@ export function Studio() {
         if (destination)
           void openFile(id, destination, opening.line, opening.column, {
             reload: opening.reload,
+            preview: opening.preview,
           })
       }
       const active = movedFile?.path
@@ -1550,6 +1570,16 @@ export function Studio() {
     [navigate, openFile, bufferStore],
   )
 
+  const keepFileOpen = useCallback(
+    (path: string) => {
+      bufferStore.keepOpen(path)
+      const pending = pendingFileOpen.current
+      if (pending?.path === path && bufferStore.isCurrent(pending.scope))
+        pending.preview = false
+    },
+    [bufferStore],
+  )
+
   const closeFileTab = useCallback(
     (path: string) => {
       const expected = bufferStore.getSnapshot().scope
@@ -1840,7 +1870,9 @@ export function Studio() {
         else {
           await loadFiles(projectId)
           if (!bufferStore.isCurrent(expected)) return
-          await openFile(projectId, path)
+          await openFile(projectId, path, undefined, undefined, {
+            preview: false,
+          })
         }
       } catch {
         if (!bufferStore.isCurrent(expected)) return
@@ -1893,7 +1925,7 @@ export function Studio() {
       )
     await loadFiles(id)
     requireScope(expected)
-    await openFile(id, path)
+    await openFile(id, path, undefined, undefined, { preview: false })
     requireScope(expected)
     const latest = bufferStore.getSnapshot().buffers.get(draft.path)
     const copied = bufferStore.getSnapshot().buffers.get(path)
@@ -2399,10 +2431,12 @@ export function Studio() {
           const remaining = await loadFiles(target.projectId)
           await loadGit(target.projectId)
           if (removed) {
-            const next = remaining.find(
-              (item) => !item.readOnly && item.path.endsWith('.lean'),
-            )
-            if (next) await openFile(target.projectId, next.path)
+            const next =
+              bufferStore.getSnapshot().openPaths[0] ??
+              remaining.find(
+                (item) => !item.readOnly && item.path.endsWith('.lean'),
+              )?.path
+            if (next) await openFile(target.projectId, next)
           }
         }
       }
@@ -2771,6 +2805,7 @@ export function Studio() {
                   projectName={project?.name}
                   revealFolder={createdFolder}
                   selectedPath={file?.path}
+                  openingPath={pendingFileOpen.current?.path}
                   dirty={dirty}
                   dirtyPaths={dirtyPaths}
                   disabled={opening || saving}
@@ -2778,6 +2813,7 @@ export function Studio() {
                   ready={workspaceEditable}
                   writable={projectCanEdit}
                   onSelect={chooseFile}
+                  onKeepOpen={keepFileOpen}
                   onDownload={(path) =>
                     project && void downloadFile(project, path)
                   }
@@ -3527,6 +3563,7 @@ export function Studio() {
             <div className="file-toolbar">
               <FileTabs
                 paths={openPaths}
+                previewPath={previewPath}
                 file={file}
                 buffers={buffers}
                 opening={opening}
@@ -3536,6 +3573,7 @@ export function Studio() {
                     void openFile(project.id, path)
                 }}
                 onClose={closeFileTab}
+                onKeepOpen={keepFileOpen}
               />
               <div className="file-actions">
                 {isMarkdownPath(file?.path) && (
@@ -3683,7 +3721,7 @@ export function Studio() {
                   file={binaryPreview ? null : file}
                   joining={!!file && collaboration.joining(file.path)}
                   buffers={buffers}
-                  openPaths={openPaths}
+                  retainedPaths={retainedPaths}
                   bufferDiscardVersion={discardVersion}
                   bufferSaveVersion={saveVersion}
                   editorImportsVersion={project.editorImportsVersion}
@@ -3731,6 +3769,8 @@ export function Studio() {
                   }}
                   onOpenFile={(path, line, column) => {
                     if (!bufferStore.isCurrent(scope)) return
+                    const source = bufferStore.getSnapshot().file?.path
+                    if (source && source !== path) bufferStore.keepOpen(source)
                     const action = () =>
                       openFile(project.id, path, line, column)
                     if (bufferStore.getSnapshot().buffers.has(path))

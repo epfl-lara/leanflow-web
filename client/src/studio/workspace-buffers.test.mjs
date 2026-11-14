@@ -395,3 +395,128 @@ test('discarding a file already saved does not reset its editor generation', () 
   store.discardFile('A.lean', 3)
   assert.equal(store.getSnapshot(), before)
 })
+
+test('browsing replaces one preview and keeps only bounded cache metadata', () => {
+  const store = new WorkspaceBuffers()
+  store.selectProject('preview')
+  for (const path of ['A.lean', 'B.lean', 'C.lean', 'D.lean'])
+    store.openFile(file(path))
+  assert.deepEqual(store.getSnapshot().openPaths, ['D.lean'])
+  assert.equal(store.getSnapshot().previewPath, 'D.lean')
+  assert.deepEqual(store.getSnapshot().recentPreviewPaths, ['B.lean', 'C.lean'])
+  assert.deepEqual([...store.getSnapshot().buffers.keys()], ['D.lean'])
+  store.openFile(file('C.lean'))
+  assert.deepEqual(store.getSnapshot().recentPreviewPaths, ['B.lean', 'D.lean'])
+  store.closeFile('D.lean')
+  store.closeFile('B.lean')
+  assert.deepEqual(store.getSnapshot().recentPreviewPaths, [])
+  store.selectProject('another')
+  assert.equal(store.getSnapshot().previewPath, null)
+  assert.deepEqual(store.getSnapshot().openPaths, [])
+})
+
+test('local edits pin a preview permanently through autosave and undo', () => {
+  const store = new WorkspaceBuffers()
+  store.openFile(file('A.lean', 'original'))
+  store.change('A.lean', 'draft')
+  assert.equal(store.getSnapshot().previewPath, null)
+  const draft = store.getSnapshot().file
+  store.saved([draft], [{ path: 'A.lean', hash: hashB }])
+  store.change('A.lean', 'original')
+  store.change('A.lean', 'draft')
+  store.openFile(file('B.lean'))
+  store.openFile(file('C.lean'))
+  assert.deepEqual(store.getSnapshot().openPaths, ['A.lean', 'C.lean'])
+  assert.equal(store.getSnapshot().previewPath, 'C.lean')
+})
+
+test('keeping a tab open preserves the editor identity and an existing preview', () => {
+  const store = new WorkspaceBuffers()
+  const a = file('A.lean')
+  store.openFile(a)
+  store.keepOpen('A.lean')
+  assert.equal(store.getSnapshot().file, a)
+  store.openFile(file('B.lean'))
+  store.openFile(a)
+  assert.equal(store.getSnapshot().previewPath, 'B.lean')
+  store.openFile(file('C.lean'))
+  assert.deepEqual(store.getSnapshot().openPaths, ['A.lean', 'C.lean'])
+  store.openFile(file('New.lean'), { preview: false })
+  assert.deepEqual(store.getSnapshot().openPaths, [
+    'A.lean',
+    'C.lean',
+    'New.lean',
+  ])
+  assert.equal(store.getSnapshot().previewPath, 'C.lean')
+  store.openFile(file('C.lean'), { preview: false })
+  assert.equal(store.getSnapshot().previewPath, null)
+})
+
+test('shared saved changes keep a preview temporary but pending local edits pin it', () => {
+  const store = new WorkspaceBuffers()
+  store.openFile(file('A.lean'))
+  store.collaborated('A.lean', 'remote saved', 'remote saved', hashB)
+  assert.equal(store.getSnapshot().previewPath, 'A.lean')
+  store.openFile(file('B.lean'))
+  assert.deepEqual(store.getSnapshot().openPaths, ['B.lean'])
+  store.collaborated('B.lean', 'local + remote', 'remote saved', hashC)
+  assert.equal(store.getSnapshot().previewPath, null)
+  store.permissions(true)
+  store.openFile(file('C.lean'))
+  assert.equal(
+    store.getSnapshot().buffers.get('B.lean').content,
+    'local + remote',
+  )
+  assert.deepEqual(store.getSnapshot().openPaths, ['B.lean', 'C.lean'])
+})
+
+test('read-only previews are replaceable and rename sources are pinned', () => {
+  const store = new WorkspaceBuffers()
+  store.openFile({ ...file('A.lean'), readOnly: true })
+  store.openFile(file('B.lean'))
+  assert.deepEqual(store.getSnapshot().openPaths, ['B.lean'])
+  store.register([source('B.lean', store.getSnapshot().file.content)])
+  store.openFile(file('C.lean'))
+  assert.deepEqual(store.getSnapshot().openPaths, ['B.lean', 'C.lean'])
+  assert(store.getSnapshot().buffers.has('B.lean'))
+})
+
+test('preview identity follows moves and clears on deletion, closure and reset', () => {
+  const store = new WorkspaceBuffers()
+  store.openFile(file('Old/A.lean'))
+  store.openFile(file('Old/B.lean'))
+  store.move('Old', 'New')
+  assert.equal(store.getSnapshot().previewPath, 'New/B.lean')
+  assert.deepEqual(store.getSnapshot().recentPreviewPaths, [])
+  store.openFile(file('C.lean'))
+  assert.deepEqual(store.getSnapshot().openPaths, ['C.lean'])
+  store.remove('New')
+  assert.deepEqual(store.getSnapshot().recentPreviewPaths, [])
+  store.closeFile('C.lean')
+  assert.equal(store.getSnapshot().previewPath, null)
+  store.openFile(file('D.lean'))
+  store.openFile(file('E.lean'))
+  store.setFile(null)
+  assert.equal(store.getSnapshot().previewPath, null)
+  assert.deepEqual(store.getSnapshot().recentPreviewPaths, [])
+})
+
+test('a moved preview cannot demote a pinned destination or overwrite a draft', () => {
+  const store = new WorkspaceBuffers()
+  store.openFile(file('Pinned.lean'), { preview: false })
+  store.openFile(file('Preview.lean'))
+  store.move('Preview.lean', 'Pinned.lean')
+  assert.equal(store.getSnapshot().previewPath, null)
+  store.openFile(file('Next.lean'))
+  store.change('Next.lean', 'keep this draft')
+  store.openFile(file('Preview.lean'))
+  assert.throws(
+    () => store.move('Preview.lean', 'Next.lean'),
+    /draft already uses/,
+  )
+  assert.equal(store.getSnapshot().previewPath, 'Preview.lean')
+  assert.equal(
+    store.getSnapshot().buffers.get('Next.lean').content,
+    'keep this draft',
+  )
+})

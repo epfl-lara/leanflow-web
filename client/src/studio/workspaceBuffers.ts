@@ -66,6 +66,8 @@ export class WorkspaceBuffers {
     file: OpenFile | null
     buffers: ReadonlyMap<string, OpenFile>
     openPaths: readonly string[]
+    previewPath: string | null
+    recentPreviewPaths: readonly string[]
     discardVersion: number
     saveVersion: number
     savedPaths: readonly string[]
@@ -76,6 +78,8 @@ export class WorkspaceBuffers {
     file: null,
     buffers: new Map(),
     openPaths: [],
+    previewPath: null,
+    recentPreviewPaths: [],
     discardVersion: 0,
     saveVersion: 0,
     savedPaths: [],
@@ -91,6 +95,8 @@ export class WorkspaceBuffers {
       ...this.state,
       scope: { projectId },
       openPaths: [],
+      previewPath: null,
+      recentPreviewPaths: [],
       savedPaths: [],
       removedPaths: [],
     }
@@ -112,20 +118,70 @@ export class WorkspaceBuffers {
       file && !this.state.openPaths.includes(file.path)
         ? [...this.state.openPaths, file.path]
         : this.state.openPaths
-    this.state = { ...this.state, file, buffers, openPaths }
+    const preview = this.state.previewPath
+    const previewBuffer = preview ? buffers.get(preview) : undefined
+    // Pin on the first local change, before autosave can make the buffer clean.
+    const previewPath =
+      preview &&
+      (this.retained.has(preview) ||
+        (previewBuffer && previewBuffer.content !== previewBuffer.savedContent))
+        ? null
+        : preview
+    this.state = { ...this.state, file, buffers, openPaths, previewPath }
     for (const listener of this.listeners) listener()
   }
   setFile: Dispatch<SetStateAction<OpenFile | null>> = (update) => {
     const previous = this.state.file
     const file = typeof update === 'function' ? update(previous) : update
+    this.selectFile(file)
+  }
+  openFile = (file: OpenFile, { preview = true } = {}) => {
+    this.selectFile(file, preview)
+  }
+  keepOpen = (path: string) => {
+    if (this.state.previewPath !== path) return
+    this.state = { ...this.state, previewPath: null }
+    this.publish(this.state.file, this.state.buffers)
+  }
+  private selectFile(file: OpenFile | null, preview?: boolean) {
+    const previous = this.state.file
+    if (file && file === previous && preview === undefined) return
     if (!file) {
       this.retained.clear()
-      this.state = { ...this.state, openPaths: [] }
+      this.state = {
+        ...this.state,
+        openPaths: [],
+        previewPath: null,
+        recentPreviewPaths: [],
+      }
       this.publish(null, new Map())
       return
     }
-    if (file === previous) return
     const buffers = new Map(this.state.buffers)
+    let { openPaths, previewPath, recentPreviewPaths } = this.state
+    recentPreviewPaths = recentPreviewPaths.filter((path) => path !== file.path)
+    if (preview === false && previewPath === file.path) previewPath = null
+    if (preview === true && !openPaths.includes(file.path)) {
+      if (previewPath) {
+        const replaced = previewPath
+        const buffer = buffers.get(replaced)
+        if (
+          !this.retained.has(replaced) &&
+          (!buffer || buffer.content === buffer.savedContent)
+        ) {
+          openPaths = openPaths.map((path) =>
+            path === replaced ? file.path : path,
+          )
+          buffers.delete(replaced)
+          // Keep only enough metadata to reuse the bounded Lean/view-state cache.
+          recentPreviewPaths = [
+            ...recentPreviewPaths.filter((path) => path !== replaced),
+            replaced,
+          ].slice(-2)
+        }
+      }
+      previewPath = file.path
+    }
     if (
       previous &&
       previous.path !== file.path &&
@@ -134,6 +190,7 @@ export class WorkspaceBuffers {
     )
       buffers.delete(previous.path)
     buffers.set(file.path, file)
+    this.state = { ...this.state, openPaths, previewPath, recentPreviewPaths }
     this.publish(file, buffers)
   }
   // Closing a tab is navigation, never a discard or a filesystem deletion.
@@ -147,6 +204,11 @@ export class WorkspaceBuffers {
     this.state = {
       ...this.state,
       openPaths: this.state.openPaths.filter((name) => name !== path),
+      previewPath:
+        this.state.previewPath === path ? null : this.state.previewPath,
+      recentPreviewPaths: this.state.recentPreviewPaths.filter(
+        (name) => name !== path,
+      ),
     }
     this.publish(
       this.state.file?.path === path ? null : this.state.file,
@@ -316,6 +378,13 @@ export class WorkspaceBuffers {
       removeVersion: this.state.removeVersion + 1,
       removedPaths,
       openPaths: this.state.openPaths.filter((name) => !matches(name)),
+      previewPath:
+        this.state.previewPath && matches(this.state.previewPath)
+          ? null
+          : this.state.previewPath,
+      recentPreviewPaths: this.state.recentPreviewPaths.filter(
+        (name) => !matches(name),
+      ),
     }
     this.publish(
       this.state.file && !matches(this.state.file.path)
@@ -345,8 +414,12 @@ export class WorkspaceBuffers {
         ),
       ),
     ]
+    const recentPreviewPaths = this.state.recentPreviewPaths.filter(
+      (name) => !matches(name),
+    )
     if (
       !moving.length &&
+      recentPreviewPaths.length === this.state.recentPreviewPaths.length &&
       openPaths.length === this.state.openPaths.length &&
       openPaths.every((name, index) => name === this.state.openPaths[index])
     )
@@ -400,6 +473,15 @@ export class WorkspaceBuffers {
       removeVersion: this.state.removeVersion + 1,
       removedPaths: [...removedPaths],
       openPaths,
+      previewPath:
+        this.state.previewPath &&
+        matches(this.state.previewPath) &&
+        !this.state.buffers.get(this.state.previewPath)?.unavailable
+          ? this.state.openPaths.includes(target(this.state.previewPath))
+            ? null
+            : target(this.state.previewPath)
+          : this.state.previewPath,
+      recentPreviewPaths,
     }
     this.publish(activePath ? (buffers.get(activePath) ?? null) : null, buffers)
   }

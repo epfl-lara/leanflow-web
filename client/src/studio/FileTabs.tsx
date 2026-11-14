@@ -4,20 +4,24 @@ import { Icon } from './Icons'
 
 export function FileTabs({
   paths,
+  previewPath,
   file,
   buffers,
   opening,
   joining,
   onSelect,
   onClose,
+  onKeepOpen,
 }: {
   paths: readonly string[]
+  previewPath: string | null
   file: OpenFile | null
   buffers: ReadonlyMap<string, OpenFile>
   opening: boolean
   joining: boolean
   onSelect: (path: string) => void
   onClose: (path: string) => void
+  onKeepOpen: (path: string) => void
 }) {
   const descriptionId = useId()
   const list = useRef<HTMLDivElement>(null)
@@ -42,6 +46,7 @@ export function FileTabs({
       {!paths.length && <span className="file-tabs-empty">Choose a file</span>}
       {paths.map((path, index) => {
         const active = path === file?.path
+        const preview = path === previewPath
         const buffer = buffers.get(path)
         const dirty = !!buffer && buffer.content !== buffer.savedContent
         const name = path.split('/').at(-1) || path
@@ -50,7 +55,7 @@ export function FileTabs({
         )
         return (
           <div
-            className={`file-tab-item ${active ? 'active' : ''}`}
+            className={`file-tab-item ${active ? 'active' : ''} ${preview ? 'preview' : ''}`}
             role="presentation"
             key={path}
           >
@@ -62,12 +67,21 @@ export function FileTabs({
               aria-selected={active}
               aria-controls="file-editor-panel"
               tabIndex={active || (!file && path === paths[0]) ? 0 : -1}
-              title={path}
+              title={
+                preview ? `${path} — Preview. Double-click to keep open.` : path
+              }
               aria-disabled={opening}
               onClick={() => {
                 if (!opening) onSelect(path)
               }}
+              onDoubleClick={() => onKeepOpen(path)}
               onKeyDown={(event) => {
+                if (event.key === 'Enter' && preview && !opening) {
+                  event.preventDefault()
+                  onKeepOpen(path)
+                  onSelect(path)
+                  return
+                }
                 if (event.key === 'Delete' && !opening) {
                   event.preventDefault()
                   onClose(path)
@@ -96,9 +110,7 @@ export function FileTabs({
               }}
             >
               <Icon name="file" size={14} />
-              <span className="file-tab-name" title={path}>
-                {duplicate ? path : name}
-              </span>
+              <span className="file-tab-name">{duplicate ? path : name}</span>
               {buffer?.readOnly && <span className="tag">Read only</span>}
               {active && joining && (
                 <span className="tag">Joining live editing…</span>
@@ -119,11 +131,30 @@ export function FileTabs({
                   event.stopPropagation()
                   if (!opening) onClose(path)
                 }}
+                onDoubleClick={(event) => event.stopPropagation()}
               >
                 <Icon name="close" size={12} />
               </span>
             </button>
+            {preview && (
+              <button
+                className="file-tab-keep"
+                aria-label={`Keep ${path} open`}
+                title="Keep open"
+                onClick={(event) => {
+                  event.currentTarget.parentElement
+                    ?.querySelector<HTMLButtonElement>('[role="tab"]')
+                    ?.focus()
+                  onKeepOpen(path)
+                }}
+              >
+                <Icon name="pin" size={14} />
+              </button>
+            )}
             <span id={`${descriptionId}-${index}`} className="sr-only">
+              {preview
+                ? 'Preview. Use Keep open, double-click, or press Enter to keep open. '
+                : ''}
               {dirty ? 'Unsaved changes. ' : ''}
               {buffer?.unavailable
                 ? 'File deleted or moved. '

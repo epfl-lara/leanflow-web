@@ -131,11 +131,13 @@ try {
     )
     assert.equal(await page.locator('.editor-failure').count(), 0)
   }
+  let keepVisits = false
   async function visit(filename, marker) {
     const tab = page.getByRole('tab', { name: filename, exact: true })
     if (await tab.count()) await tab.click()
     else await page.locator(`.file-item[title="${filename}"]`).click()
     await opened(filename, marker)
+    if (keepVisits) await tab.dblclick()
   }
   await fixture.ready()
   await until(
@@ -150,13 +152,25 @@ try {
   const initialOpens = notifications('didOpen', 'Main.lean').length
   const initialCloses = notifications('didClose', 'Main.lean').length
   await visit('Second.lean', 'cachedB')
+  assert.equal(await page.getByRole('tab').count(), 1)
   await visit('Main.lean', 'cachedA')
+  assert.equal(await page.getByRole('tab').count(), 1)
   assert.equal(notifications('didOpen', 'Main.lean').length, initialOpens)
   assert.equal(notifications('didClose', 'Main.lean').length, initialCloses)
   assert.equal(notifications('didChange', 'Main.lean').length, 0)
+  await visit('Third.lean', 'cachedC')
+  await visit('Second.lean', 'cachedB')
+  await visit('Main.lean', 'cachedA')
+  assert.equal(notifications('didOpen', 'Main.lean').length, initialOpens)
+  assert.equal(notifications('didOpen', 'Second.lean').length, 1)
+  assert.equal(notifications('didOpen', 'Third.lean').length, 1)
+  assert.equal(await page.getByRole('tab').count(), 1)
   report.checks.push(
-    'Switching A to B and back preserves A’s Lean worker and model version without a virtual file rewrite.',
+    'Replacing preview A with B and returning preserves A’s Lean worker and model version without a virtual file rewrite.',
   )
+  // The remaining close/keyboard checks exercise explicitly kept tabs.
+  keepVisits = true
+  await page.getByRole('tab', { name: 'Main.lean', exact: true }).dblclick()
 
   const protocolCount = () =>
     messages.filter((message) =>
@@ -338,6 +352,7 @@ try {
     'Closing a background tab releases its Lean worker without rechecking the current file; tab navigation supports keyboard focus.',
   )
 
+  keepVisits = false
   await page.locator('.project-item[title="Other cache fixture"]').click()
   await opened('Main.lean', 'OTHER_PROJECT_SOURCE')
   assert.equal(

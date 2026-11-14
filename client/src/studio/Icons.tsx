@@ -21,6 +21,7 @@ const paths = {
   play: 'm8 5 12 7-12 7Z',
   stop: 'M6 6h12v12H6Z',
   check: 'm5 12 4 4L19 6',
+  pin: 'M12 17v5M5 17h14l-3-6V3H8v8ZM7 3h10',
   close: 'm6 6 12 12M6 18 18 6',
   refresh:
     'M20 7v5h-5M4 17v-5h5M5 7a8 8 0 0 1 13-2l2 2M4 17l2 2a8 8 0 0 0 13-2',

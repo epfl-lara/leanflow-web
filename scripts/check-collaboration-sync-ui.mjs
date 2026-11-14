@@ -264,8 +264,21 @@ async function type(fixture, value) {
 try {
   const owner = await browser('terminal-owner')
   const peer = await browser('terminal-peer')
+  await type(peer, '\n-- REMOTE_PREVIEW_UPDATE\n')
+  await until(
+    async () => (await text(owner)).includes('REMOTE_PREVIEW_UPDATE'),
+    'remote edit reaches the preview',
+  )
+  assert.equal(await owner.page.locator('.file-tab-item.preview').count(), 1)
+  assert.equal(await peer.page.locator('.file-tab-item.preview').count(), 0)
+  await owner.page
+    .getByRole('tab', { name: 'Main.lean', exact: true })
+    .dblclick()
   await owner.page.locator('.file-item[title="Other.lean"]').click()
   await opened(owner, 'Other.lean')
+  await owner.page
+    .getByRole('tab', { name: 'Other.lean', exact: true })
+    .dblclick()
   await owner.page.getByRole('tab', { name: 'Main.lean', exact: true }).click()
   await opened(owner, 'Main.lean')
   const removedSource = sources['Other.lean']
@@ -951,6 +964,7 @@ try {
   const report = {
     passed: true,
     checks: [
+      'Remote edits update a preview without pinning it; the editor who types keeps a persistent tab.',
       'A collaborator deletion removes a closed-buffer tab without changing the active source; deleted drafts remain recoverable.',
       'Two live editors follow terminal file moves and continue receiving and saving each other’s edits.',
       'Late old-path errors cannot stop destination saves or recreate old files.',

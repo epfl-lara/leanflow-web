@@ -181,6 +181,18 @@ try {
       (await page.locator('.view-lines').innerText()).includes('BETA_PREVIEW'),
     'Beta definition source',
   )
+  const sourceTab = page.getByRole('tab', { name: 'Main.lean', exact: true })
+  assert.equal(
+    await sourceTab.count(),
+    1,
+    'Go to Definition keeps its source tab',
+  )
+  assert.equal(
+    await sourceTab
+      .locator('..')
+      .evaluate((node) => node.classList.contains('preview')),
+    false,
+  )
   assert.equal(
     report.requests.filter(
       (request) =>

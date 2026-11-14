@@ -228,7 +228,7 @@ export function LeanWorkspace({
   files,
   file,
   buffers,
-  openPaths,
+  retainedPaths,
   bufferDiscardVersion,
   bufferSaveVersion,
   editorImportsVersion,
@@ -260,7 +260,7 @@ export function LeanWorkspace({
   files: readonly FileEntry[]
   file: OpenFile | null
   buffers: ReadonlyMap<string, OpenFile>
-  openPaths: readonly string[]
+  retainedPaths: readonly string[]
   bufferDiscardVersion: number
   bufferSaveVersion: number
   editorImportsVersion?: number
@@ -304,10 +304,10 @@ export function LeanWorkspace({
   const fileRef = useRef(file)
   const joiningRef = useRef(joining)
   joiningRef.current = joining
-  const openPathsRef = useRef(openPaths)
+  const retainedPathsRef = useRef(retainedPaths)
   useLayoutEffect(() => {
-    openPathsRef.current = openPaths
-  }, [openPaths])
+    retainedPathsRef.current = retainedPaths
+  }, [retainedPaths])
   const buffersRef = useRef(buffers)
   buffersRef.current = buffers
   const syncingContent = useRef(false)
@@ -702,11 +702,11 @@ export function LeanWorkspace({
 
   useLayoutEffect(() => {
     const active = runtime.current
-    active?.modelCache.retainOpenPaths(openPaths)
+    active?.modelCache.retainOpenPaths(retainedPaths)
     if (active)
       for (const path of active.viewStates.keys())
-        if (!openPaths.includes(path)) active.viewStates.delete(path)
-  }, [openPaths])
+        if (!retainedPaths.includes(path)) active.viewStates.delete(path)
+  }, [retainedPaths])
 
   useLayoutEffect(() => {
     const previous = listedFiles.current
@@ -1149,9 +1149,13 @@ export function LeanWorkspace({
     return () => {
       cancelled = true
       // Capture before disposal, including scroll and selections. State is
-      // scoped to this project and survives only while its tab stays open.
+      // scoped to this project and retained for open tabs and recent previews.
       const viewState = ownEditor?.editor?.saveViewState()
-      if (snapshot && viewState && openPathsRef.current.includes(snapshot.path))
+      if (
+        snapshot &&
+        viewState &&
+        retainedPathsRef.current.includes(snapshot.path)
+      )
         runtime.current?.viewStates.set(snapshot.path, viewState)
       void serialize(() => {
         if (runtime.current?.editor === ownEditor) {

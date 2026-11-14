@@ -844,6 +844,7 @@ textarea {
   color: var(--text);
 }
 .file-tab-button,
+.file-tab-keep,
 .file-tab-close {
   display: flex;
   align-items: center;
@@ -869,17 +870,23 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.file-tab-item.preview .file-tab-name {
+  font-style: italic;
+}
+.file-tab-keep,
 .file-tab-close {
   flex-shrink: 0;
   width: 24px;
   border-radius: 4px;
 }
 .file-tab-button:hover,
+.file-tab-keep:hover,
 .file-tab-close:hover {
   color: var(--text);
   background: var(--surface-hover);
 }
 .file-tab-button:focus-visible,
+.file-tab-keep:focus-visible,
 .file-tab-close:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;

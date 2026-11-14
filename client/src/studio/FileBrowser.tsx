@@ -61,6 +61,7 @@ export const FileBrowser = memo(function FileBrowser({
   projectName,
   revealFolder,
   selectedPath,
+  openingPath,
   dirty,
   dirtyPaths,
   disabled,
@@ -68,6 +69,7 @@ export const FileBrowser = memo(function FileBrowser({
   ready,
   writable = true,
   onSelect,
+  onKeepOpen,
   onDelete,
   onRename,
   onMove,
@@ -80,6 +82,7 @@ export const FileBrowser = memo(function FileBrowser({
   projectName?: string
   revealFolder: string | null
   selectedPath?: string
+  openingPath?: string
   dirty: boolean
   dirtyPaths?: ReadonlySet<string>
   disabled: boolean
@@ -87,6 +90,7 @@ export const FileBrowser = memo(function FileBrowser({
   ready: boolean
   writable?: boolean
   onSelect: (path: string) => void
+  onKeepOpen: (path: string) => void
   onDelete: (path: string, kind: 'file' | 'folder') => void
   onRename: (path: string, kind: 'file' | 'folder') => void
   onMove: (path: string, kind: 'file' | 'folder') => void
@@ -201,8 +205,11 @@ export const FileBrowser = memo(function FileBrowser({
         aria-current={selectedPath === file.path ? 'true' : undefined}
         aria-haspopup={disabled ? undefined : 'menu'}
         title={file.path}
-        disabled={disabled}
-        onClick={() => onSelect(file.path)}
+        disabled={disabled && openingPath !== file.path}
+        onClick={() => {
+          if (!disabled) onSelect(file.path)
+        }}
+        onDoubleClick={() => onKeepOpen(file.path)}
       >
         <Icon name="file" size={15} />
         <span>
