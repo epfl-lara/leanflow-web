@@ -145,10 +145,13 @@ try {
     await visit('Third.lean', false)
     assert.equal(await tab('Second.lean').count(), 1)
     await visit('Second.lean', false)
+    const saveNotice = page.locator('.statusbar-notice')
+    await expect(saveNotice).not.toHaveText('File saved')
     await source().focus()
     const marker = `-- SAVED_WITH_${shortcut}\n`
     await page.keyboard.insertText(marker)
     await page.keyboard.press(shortcut)
+    await expect(saveNotice).toHaveText('File saved')
     await until(
       () => state.files[projectId]['Second.lean'].includes(marker),
       `${shortcut} saves source changes`,

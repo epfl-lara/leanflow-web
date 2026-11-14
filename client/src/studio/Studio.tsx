@@ -1360,12 +1360,6 @@ export function Studio() {
     [loadGit, loadProjects, bufferStore, projectCanEdit, flushCollaboration],
   )
 
-  const saveManually = useCallback(() => {
-    const current = bufferStore.getSnapshot().file
-    if (current) bufferStore.keepOpen(current.path)
-    return saveFile()
-  }, [bufferStore, saveFile])
-
   const automaticSave = useCallback(
     () => saveFile({ automatic: true }),
     [saveFile],
@@ -1461,7 +1455,9 @@ export function Studio() {
     const keydown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault()
-        void saveManually().catch((error) => setError(errorText(error)))
+        const current = bufferStore.getSnapshot().file
+        if (current) bufferStore.keepOpen(current.path)
+        void saveFile().catch((error) => setError(errorText(error)))
       }
     }
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -1476,7 +1472,7 @@ export function Studio() {
       window.removeEventListener('keydown', keydown)
       window.removeEventListener('beforeunload', beforeUnload)
     }
-  }, [saveManually, bufferStore])
+  }, [saveFile, bufferStore])
 
   useEffect(() => {
     if (!notice) return
@@ -3753,9 +3749,7 @@ export function Studio() {
                 <button
                   className="button small secondary"
                   onClick={() =>
-                    void saveManually().catch((error) =>
-                      setError(errorText(error)),
-                    )
+                    void saveFile().catch((error) => setError(errorText(error)))
                   }
                   disabled={
                     !projectCanEdit ||
