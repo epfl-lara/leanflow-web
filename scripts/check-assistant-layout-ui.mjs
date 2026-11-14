@@ -65,6 +65,32 @@ async function closedPicker() {
 async function width() {
   return (await assistant.boundingBox()).width
 }
+async function settledScroll() {
+  return page.locator('.chat-workbench').evaluate(async (node) => {
+    await document.fonts.ready
+    let previous = ''
+    let stableFrames = 0
+    for (let frame = 0; frame < 120; frame++) {
+      await new Promise(requestAnimationFrame)
+      const box = node.getBoundingClientRect()
+      const geometry = JSON.stringify([
+        box.x,
+        box.y,
+        box.width,
+        box.height,
+        node.scrollHeight,
+        node.clientHeight,
+        node.scrollTop,
+      ])
+      stableFrames = geometry === previous ? stableFrames + 1 : 0
+      previous = geometry
+      // Resizing and removing the previous attachment can queue scroll anchoring.
+      // Capture the baseline after it settles, before opening the picker.
+      if (stableFrames >= 3) return node.scrollTop
+    }
+    throw new Error('Assistant layout did not settle before opening context.')
+  })
+}
 async function dragToWidth(next) {
   const before = await width()
   const box = await resize.boundingBox()
@@ -248,9 +274,7 @@ try {
           node.open = value
         }, expanded)
         await trigger.scrollIntoViewIfNeeded()
-        const before = await page
-          .locator('.chat-workbench')
-          .evaluate((node) => node.scrollTop)
+        const before = await settledScroll()
         await openPicker()
         await filter.fill('')
         assert.equal(
@@ -266,6 +290,7 @@ try {
             .locator('.chat-workbench')
             .evaluate((node) => node.scrollTop),
           before,
+          `Opening context must preserve scroll at ${viewport.width}×${viewport.height}, ${theme}, options ${expanded ? 'open' : 'closed'}`,
         )
         await filter.fill('Main')
         await page
