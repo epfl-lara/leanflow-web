@@ -338,6 +338,13 @@ export class Terminals {
             `File updates paused: ${message} Close this terminal to recover its preserved private working copy (${session.snapshot.runId}) from /api/projects/${project.id}/terminal-recoveries/${session.snapshot.runId}/download.`,
           )
         }
+        const refreshSyncStatus = () => {
+          if (session.publicationPaused) return
+          const message = [session.unpublishedMessage, session.referenceWarning]
+            .filter(Boolean)
+            .join(' ')
+          syncStatus(message ? 'limited' : 'synced', message)
+        }
         if (session.snapshot)
           session.mirror = new TerminalSourceMirror({
             workspaces: this.workspaces,
@@ -348,15 +355,24 @@ export class Terminals {
               session.recovery = paths.length > 0
               if (!paths.length) {
                 session.unpublished = ''
-                syncStatus('synced')
+                session.unpublishedMessage = ''
+                refreshSyncStatus()
                 return
               }
               const fingerprint = paths.join('\0')
               if (fingerprint === session.unpublished) return
               session.unpublished = fingerprint
               session.recoveryMessage = `Some generated, binary or oversized files remain in this private terminal copy: ${paths.slice(0, 5).join(', ')}${paths.length > 5 ? ', …' : ''}. Download the copy to recover them. Text changes continue to publish.`
-              syncStatus('limited', session.recoveryMessage)
+              session.unpublishedMessage = session.recoveryMessage
+              refreshSyncStatus()
               notice(session.recoveryMessage)
+            },
+            onReferenceWarning: (warning) => {
+              const message = warning ? this.redact(warning) : ''
+              if (session.referenceWarning === message) return
+              session.referenceWarning = message
+              refreshSyncStatus()
+              if (message) notice(message)
             },
             onConflict: preserve,
             onError: preserve,

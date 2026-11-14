@@ -852,7 +852,7 @@ test('a lost batch-save response can be replayed without replacing files or crea
     )
 })
 
-test('exact batch-save retries still enforce preparation and current membership, while agent and terminal changes keep strict conflicts', async (t) => {
+test('batch-save retries enforce access and preparation, matching terminal updates reconcile, and conflicting publication stays strict', async (t) => {
   const { store, project } = await fixture(t)
   await store.setMember(project.id, 'alice', 'bob', 'editor')
   const main = await store.readFile(project.id, 'alice', 'Main.lean')
@@ -870,13 +870,29 @@ test('exact batch-save retries still enforce preparation and current membership,
   ]
   await store.writeFiles(project.id, 'bob', request)
   await fs.writeFile(path.join(snapshot.root, 'Main.lean'), request[0].content)
-  await assert.rejects(store.syncTerminal(snapshot), { status: 409 })
+  const synchronized = await store.syncTerminal(snapshot)
+  const saved = await store.readFile(project.id, 'bob', 'Main.lean')
+  assert.equal(saved.content, request[0].content)
   await assert.rejects(
     store.applyChanges(project.id, 'bob', [
       { path: 'Main.lean', after: request[0].content, beforeHash: main.hash },
     ]),
     { status: 409 },
   )
+  await store.writeFiles(project.id, 'bob', [
+    {
+      path: 'Main.lean',
+      content: saved.content + '-- newer browser edit\n',
+      expectedHash: saved.hash,
+    },
+  ])
+  await fs.writeFile(
+    path.join(snapshot.root, 'Main.lean'),
+    saved.content + '-- conflicting private edit\n',
+  )
+  await assert.rejects(store.syncTerminal(snapshot, synchronized), {
+    status: 409,
+  })
   await store.cleanupTerminalSnapshot(snapshot, { finalize: true })
 
   store.jobs.set(project.id, Promise.resolve())

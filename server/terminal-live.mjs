@@ -6,6 +6,7 @@ export class TerminalSourceMirror {
     snapshot,
     assertAuthorized,
     onUnpublished,
+    onReferenceWarning,
     onConflict,
     onError,
     intervalMs = 500,
@@ -15,6 +16,7 @@ export class TerminalSourceMirror {
       snapshot,
       assertAuthorized,
       onUnpublished,
+      onReferenceWarning,
       onConflict,
       onError,
       intervalMs,
@@ -37,6 +39,7 @@ export class TerminalSourceMirror {
         this.workspaces.syncTerminal(this.snapshot, this.changes, {
           assertAuthorized: this.assertAuthorized,
           onUnpublished: this.onUnpublished,
+          onReferenceWarning: this.onReferenceWarning,
         }),
       )
       .then((changes) => {

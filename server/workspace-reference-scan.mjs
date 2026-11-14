@@ -5,6 +5,7 @@ import {
 } from '../shared/source-limits.mjs'
 import {
   createReferenceRewriter,
+  createReferencePathMapper,
   isReferenceFile,
 } from './workspace-references.mjs'
 
@@ -14,6 +15,7 @@ import {
 export async function prepareReferenceUpdates({
   from,
   to,
+  moves,
   files,
   readFile,
   signal,
@@ -22,6 +24,13 @@ export async function prepareReferenceUpdates({
   const rewrite = createReferenceRewriter({
     from,
     to,
+    moves,
+    files: files.map((file) => file.path),
+  })
+  const moved = createReferencePathMapper({
+    from,
+    to,
+    moves,
     files: files.map((file) => file.path),
   })
   const updates = []
@@ -77,10 +86,7 @@ export async function prepareReferenceUpdates({
       }
       changedBytes += size
       updates.push({
-        path:
-          file.path === from || file.path.startsWith(from + '/')
-            ? to + file.path.slice(from.length)
-            : file.path,
+        path: moved(file.path),
         beforeHash: source.hash,
         after: result.content,
         count: result.count,

@@ -50,7 +50,11 @@ If an edit exceeds the file limit or includes unsupported text, remove that text
 
 ## Private terminals and recovery
 
-Each terminal opens a private working copy. Its text file changes publish to the project with version checks. A conflict pauses publication and preserves the private copy. Close the terminal and choose **Recover terminal files** to download it. Recovery downloads belong to the account that opened the terminal, including after project access is removed or the shared project is deleted. Open your account settings and choose **Private terminal files** to find copies from projects you can no longer access. Keep at most eight copies per account; download what you need, then use **Discard recovery copy** to free a slot. Copies that are open or still publishing their final changes cannot be downloaded or discarded. They appear in recovery only after closing; interrupted copies remain available after a server restart.
+Each terminal opens a private working copy. Saved project changes arrive in clean files while its own text edits publish with version checks. File and folder moves also reach an open terminal. A conflict pauses synchronization and preserves the private copy. Close the terminal and choose **Recover terminal files** to download it. Recovery downloads belong to the account that opened the terminal, including after project access is removed or the shared project is deleted. Open your account settings and choose **Private terminal files** to find copies from projects you can no longer access. Keep at most eight copies per account; download what you need, then use **Discard recovery copy** to free a slot. Copies that are open or still publishing their final changes cannot be downloaded or discarded. They appear in recovery only after closing; interrupted copies remain available after a server restart.
+
+Moving a text file with `mv` also updates recognized project imports and file links when the original file can be identified safely. This includes SVG diagrams linked from Lean comments. The updated references reach the terminal and other connected editors. A warning asks you to review references that could not be updated. Copying and deleting a file, changing its contents during the move, or moving binary files may require a manual reference update.
+
+Recovery downloads can include earlier file versions under `.terminal-sync-recovery/`. Check that folder when recovering an interrupted write.
 
 Choose **Choose individual files** if the ZIP is too large. Downloads allow up to 32 MiB per file and 64 MiB per ZIP. A larger file does not prevent downloading smaller files individually. Ask the server administrator to recover files above the individual limit before discarding the copy. Listing and ZIP downloads also stop at 12,000 permitted entries or 50,000 scanned entries. If a copy exceeds those limits, ask the server administrator to recover it; repeatedly retrying the listing will not help.
 
@@ -60,7 +64,9 @@ Agents also use the initiating account's saved Git connections for HTTPS command
 
 ## Concurrency and hosting
 
-Opening a terminal saves pending browser edits before creating its private copy. Later browser edits do not update an already open terminal. If those edits conflict with a terminal command, a persistent notice explains how to recover the private files and start a new terminal from the latest saved project. Brief file changes during a terminal scan retry automatically; actual version conflicts still preserve the private copy.
+Opening a terminal saves pending browser edits before creating its private copy. Later saved edits and moves arrive automatically after a short delay; reopening is unnecessary. A moved folder keeps the terminal's working directory and private files. If a saved update conflicts with a terminal command, a persistent notice explains how to recover the private files and start a new terminal from the latest saved project. Brief file changes during a terminal scan retry automatically; actual version conflicts still preserve the private copy. Project environment changes still require reopening the terminal with the updated configuration.
+
+If your shell prompt still shows a folder's old name after a move, run `pwd -P` to see its current path.
 
 Terminal synchronization publishes files. Use the file browser to create, move, or remove empty folders.
 

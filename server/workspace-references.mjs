@@ -12,10 +12,22 @@ export function isReferenceFile(filename) {
   return /\.(?:lean|tex)$/i.test(filename) || markdownExtension.test(filename)
 }
 
-function moved(filename, from, to) {
-  return filename === from || filename.startsWith(from + '/')
-    ? to + filename.slice(from.length)
-    : filename
+export function createReferencePathMapper({ from, to, moves, files }) {
+  const known = files instanceof Set ? files : new Set(files)
+  const exact = new Map()
+  const folders = []
+  for (const move of moves || [{ from, to }]) {
+    if (known.has(move.from)) exact.set(move.from, move.to)
+    else folders.push(move)
+  }
+  folders.sort((left, right) => right.from.length - left.from.length)
+  return (filename) => {
+    if (exact.has(filename)) return exact.get(filename)
+    for (const move of folders)
+      if (filename === move.from || filename.startsWith(move.from + '/'))
+        return move.to + filename.slice(move.from.length)
+    return filename
+  }
 }
 
 function normalized(base, value) {
@@ -444,8 +456,9 @@ function texReferences(source, add) {
  * Prepare the known-file lookup once per move. Only recognized local references
  * are rewritten; strings, prose, remote URLs and ambiguous TeX paths stay intact.
  */
-export function createReferenceRewriter({ from, to, files }) {
+export function createReferenceRewriter({ from, to, moves, files }) {
   const known = new Set(files)
+  const moved = createReferencePathMapper({ from, to, moves, files: known })
   const rewritePath = (value, filename, { angle = false, extensions } = {}) => {
     if (/^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(value)) return null
     const boundary = extensions ? -1 : value.search(/[?#]/)
@@ -477,15 +490,15 @@ export function createReferenceRewriter({ from, to, files }) {
     if (distinct.size !== 1) {
       if (
         candidates.some(
-          (candidate) => moved(candidate.target, from, to) !== candidate.target,
+          (candidate) => moved(candidate.target) !== candidate.target,
         )
       )
         throw new ReferenceScanSkipped()
       return null
     }
     const selected = candidates[0]
-    const nextFile = moved(filename, from, to)
-    const nextTarget = moved(selected.target, from, to)
+    const nextFile = moved(filename)
+    const nextTarget = moved(selected.target)
     if (nextFile === filename && nextTarget === selected.target) return null
     let next
     if (rooted) next = (workspace ? '/workspace/' : '/') + nextTarget
@@ -560,7 +573,7 @@ export function createReferenceRewriter({ from, to, files }) {
                 .map((segment) => segment.replace(/^«|»$/g, ''))
                 .join('/') + '.lean'
             if (!known.has(original)) continue
-            const next = moved(original, from, to)
+            const next = moved(original)
             if (next === original) continue
             const replacement = leanModule(next)
             if (!replacement) throw new ReferenceScanSkipped()

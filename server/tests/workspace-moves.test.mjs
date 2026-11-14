@@ -1490,6 +1490,14 @@ test('terminal edits publish unrelated files after a move and reject stale sourc
       '-- private edit\n',
     )
     const stale = '<svg><!-- private edit --></svg>\n'
+    assert.equal(
+      await fs.readFile(path.join(snapshot.root, 'MovedFigures/A.svg'), 'utf8'),
+      '<svg><!-- original --></svg>\n',
+    )
+    await assert.rejects(fs.stat(path.join(snapshot.root, 'Figures')), {
+      code: 'ENOENT',
+    })
+    await fs.mkdir(path.join(snapshot.root, 'Figures'))
     await fs.writeFile(path.join(snapshot.root, 'Figures/A.svg'), stale)
     await assert.rejects(f.store.syncTerminal(snapshot, published), {
       status: 409,

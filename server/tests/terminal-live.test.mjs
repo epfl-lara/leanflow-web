@@ -61,6 +61,26 @@ test('a terminal publication conflict pauses once and preserves the candidate fo
   assert.equal(mirror.paused, true)
 })
 
+test('reference warnings reach a live terminal without pausing ordinary source publication', async () => {
+  const warnings = []
+  let calls = 0
+  const mirror = new TerminalSourceMirror({
+    workspaces: {
+      async syncTerminal(_snapshot, _previous, { onReferenceWarning }) {
+        onReferenceWarning(
+          ++calls === 1 ? 'Review an unsupported figure link.' : '',
+        )
+        return []
+      },
+    },
+    onReferenceWarning: (message) => warnings.push(message),
+  })
+  await mirror.poll()
+  await mirror.poll()
+  assert.deepEqual(warnings, ['Review an unsupported figure link.', ''])
+  assert.equal(mirror.paused, false)
+})
+
 test('a changing private file retries from the last publication, but a failed final scan retains recovery', async () => {
   const published = [{ path: 'Main.lean', after: 'published' }]
   const errors = []

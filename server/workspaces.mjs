@@ -2,6 +2,17 @@ import { removeDisposableTree } from './temporary-workspaces.mjs'
 import { durableSourceWrite } from './durable-source-write.mjs'
 import { SaveEvents } from './save-events.mjs'
 import { ReferenceUpdateAdmission } from './reference-update-admission.mjs'
+import {
+  createTerminalReconciliation,
+  queueTerminalChanges,
+  reconcileTerminal,
+  recoverTerminalBackups,
+} from './terminal-reconcile.mjs'
+import {
+  captureTerminalIdentities,
+  matchTerminalMoves,
+  prepareTerminalReferenceUpdates,
+} from './terminal-reference-updates.mjs'
 import { storageFailure } from './storage-capacity.mjs'
 import { ProjectMemberships } from './project-memberships.mjs'
 import {
@@ -1406,6 +1417,7 @@ export class WorkspaceStore {
     kind = 'files',
     removedPaths = [],
     moves = [],
+    originRunId,
   ) {
     // Listeners enqueue their own work. Never await a socket, agent or another
     // workspace operation while the nonreentrant project write queue is held.
@@ -1421,6 +1433,15 @@ export class WorkspaceStore {
         }
       }
     }
+    for (const [runId, copy] of this.terminalCopies)
+      if (copy.projectId === projectId && copy.reconciliation)
+        queueTerminalChanges(copy.reconciliation, {
+          paths,
+          kind,
+          removedPaths,
+          moves,
+          own: runId === originRunId,
+        })
     for (const listener of this.changeListeners) {
       try {
         listener({
@@ -5179,6 +5200,7 @@ export class WorkspaceStore {
         actor,
         projectId: id,
         phase: 'starting',
+        reconciliation: createTerminalReconciliation(),
       }
       this.terminalCopies.set(runId, reservation)
     })
@@ -5190,6 +5212,11 @@ export class WorkspaceStore {
           createdContainer = identity
         },
       })
+      reservation.identities = await captureTerminalIdentities(
+        snapshot.files,
+        async (filename) =>
+          fs.lstat(await guarded(snapshot.root, filename), { bigint: true }),
+      )
       signal?.throwIfAborted()
       this.requireEditor(id, actor)
       // Private Git metadata never includes the original checkout's history,
@@ -5251,20 +5278,61 @@ export class WorkspaceStore {
     )
   }
 
+  async #terminalPublicationProject(
+    manifest,
+    previousChanges,
+    authorize,
+    assertCopyCurrent,
+  ) {
+    await assertCopyCurrent()
+    authorize()
+    const project = this.requireEditor(manifest.projectId, manifest.actor)
+    if (this.jobs.has(project.id))
+      fail('Wait for project setup before publishing terminal changes.', 409)
+    this.#ready(project, true)
+    const configuration = new Map(
+      manifest.files
+        .filter((file) => CONFIGURATION_FILES.has(file.path))
+        .map((file) => [file.path, file.hash]),
+    )
+    for (const change of previousChanges) {
+      if (!CONFIGURATION_FILES.has(change.path)) continue
+      configuration.set(
+        change.path,
+        change.after === null ? null : sha(change.after),
+      )
+    }
+    for (const filename of CONFIGURATION_FILES) {
+      const current = await textFile(
+        await guarded(project.root, filename, { write: true }),
+        true,
+      )
+      if ((current?.hash ?? null) !== (configuration.get(filename) ?? null))
+        fail(
+          `Project configuration changed: ${filename}. Reopen the terminal from the current project.`,
+          409,
+        )
+    }
+    return project
+  }
+
   async #syncTerminal(
     snapshot,
     previousChanges,
-    { assertAuthorized, onUnpublished },
+    { assertAuthorized, onUnpublished, onReferenceWarning },
   ) {
     assertAuthorized?.()
-    const { manifest } = await this.#manifest(snapshot)
+    const { manifest, container } = await this.#manifest(snapshot)
     if (manifest.purpose !== 'terminal')
       fail('Invalid private terminal copy.', 403)
-    if (!this.terminalCopies.has(manifest.runId))
+    const copy = this.terminalCopies.get(manifest.runId)
+    if (!copy)
       fail(
         'This terminal has finished. Reopen a terminal to publish changes.',
         409,
       )
+    const state = (copy.reconciliation ||= createTerminalReconciliation())
+    previousChanges = state.previousChanges ?? previousChanges
     const identity = await fs.lstat(manifest.root)
     const assertCopyCurrent = async () => {
       let current
@@ -5284,18 +5352,53 @@ export class WorkspaceStore {
         )
     }
     const actor = manifest.actor
-    this.requireEditor(manifest.projectId, actor)
+    const authorize = () => {
+      assertAuthorized?.()
+      this.requireEditor(manifest.projectId, actor)
+    }
+    const receive = (project, accepted) =>
+      reconcileTerminal({
+        state,
+        manifest,
+        container,
+        previousChanges: accepted,
+        sharedRoot: project.root,
+        openParent: writeParent,
+        authorize,
+      })
+    const receiveIdentities = async () => {
+      if (!state.identityPaths.size) return
+      const paths = [...state.identityPaths]
+      state.identityPaths.clear()
+      copy.identities ||= new Map()
+      const received = await captureTerminalIdentities(
+        paths,
+        async (filename) =>
+          fs.lstat(await guarded(manifest.root, filename), { bigint: true }),
+      )
+      for (const filename of paths) copy.identities.delete(filename)
+      for (const [filename, identity] of received)
+        copy.identities.set(filename, identity)
+    }
+    previousChanges = await this.#locked(manifest.projectId, async () => {
+      const project = await this.#terminalPublicationProject(
+        manifest,
+        previousChanges,
+        authorize,
+        assertCopyCurrent,
+      )
+      return receive(project, previousChanges)
+    })
+    await receiveIdentities()
     const unpublished = new Set()
     let changes
     try {
       changes = await this.changes(snapshot, {
         skipNoneditable: true,
+        ignoredPaths: state.ignoredPaths,
         onSkipped: (filename) => unpublished.add(filename),
       })
     } catch (error) {
-      // The root and protected manifest must still be ours. Only races while
-      // reading the writable copy may retry; authorization, baseline damage,
-      // symbolic links and project-version conflicts remain blocking errors.
       await assertCopyCurrent()
       if (
         error.code === 'ENOENT' ||
@@ -5309,63 +5412,171 @@ export class WorkspaceStore {
         )
       throw error
     }
-    // A temporary partial UTF-8 write, generated binary, or oversized output
-    // must not look like an intentional reversion/deletion of an earlier edit.
-    // Keep the last published version until this private file is editable again.
     for (const previous of previousChanges)
       if (unpublished.has(previous.path)) changes.push(previous)
-    const published = await this.#locked(manifest.projectId, async () => {
-      await assertCopyCurrent()
-      assertAuthorized?.()
-      const project = this.requireEditor(manifest.projectId, actor)
-      if (this.jobs.has(project.id))
-        fail('Wait for project setup before publishing terminal changes.', 409)
-      this.#ready(project, true)
-      const configuration = new Map(
-        manifest.files
-          .filter((file) => CONFIGURATION_FILES.has(file.path))
-          .map((file) => [file.path, file.hash]),
+    const identityPaths = [
+      ...new Set([
+        ...manifest.files.map((file) => file.path),
+        ...changes.map((change) => change.path),
+      ]),
+    ]
+    const captureIdentities = () =>
+      captureTerminalIdentities(identityPaths, async (filename) =>
+        fs.lstat(await guarded(manifest.root, filename), { bigint: true }),
       )
-      for (const change of previousChanges) {
-        if (!CONFIGURATION_FILES.has(change.path)) continue
-        configuration.set(
-          change.path,
-          change.after === null ? null : sha(change.after),
+    const currentIdentities = await captureIdentities()
+    const transition = this.#liveTransition(previousChanges, changes)
+    const moveTransition = transition.filter(
+      (change) => !CONFIGURATION_FILES.has(change.path),
+    )
+    const moves = matchTerminalMoves(
+      moveTransition,
+      copy.identities,
+      currentIdentities,
+    )
+    const uncertainMove =
+      unchangedFileMoves(moveTransition).length > moves.length
+    let referenceResult
+    const commit = (referencePlan) =>
+      this.#locked(manifest.projectId, async () => {
+        const project = await this.#terminalPublicationProject(
+          manifest,
+          previousChanges,
+          authorize,
+          assertCopyCurrent,
         )
-      }
-      // A changed environment invalidates terminal commands even when they edit
-      // a different file. Reject publication rather than guessing its context.
-      for (const filename of CONFIGURATION_FILES) {
-        const current = await textFile(
-          await guarded(project.root, filename, { write: true }),
-          true,
-        )
-        if ((current?.hash ?? null) !== (configuration.get(filename) ?? null))
-          fail(
-            `Project configuration changed: ${filename}. Reopen the terminal from the current project.`,
-            409,
+        if (
+          state.pendingEvents.some((event) =>
+            event.paths.some((filename) =>
+              transition.some(
+                (change) =>
+                  filename === change.path ||
+                  filename.startsWith(change.path + '/') ||
+                  change.path.startsWith(filename + '/'),
+              ),
+            ),
           )
-      }
-      const transition = this.#liveTransition(previousChanges, changes)
-      if (transition.some((change) => CONFIGURATION_FILES.has(change.path)))
-        this.assertConfigurationIdle?.(project.id, actor, {
-          terminalRunId: manifest.runId,
+        )
+          fail(
+            'The project changed during terminal synchronization. Updates will retry.',
+            503,
+            'TERMINAL_SOURCE_CHANGED',
+          )
+        const confirmedMoves = moves.length
+          ? matchTerminalMoves(
+              moveTransition,
+              copy.identities,
+              await captureIdentities(),
+            )
+          : []
+        const committedMoves = moves.filter(({ from, to }) =>
+          confirmedMoves.some((move) => move.from === from && move.to === to),
+        )
+        for (const change of transition) {
+          if (
+            change.after === null ||
+            committedMoves.some((move) => move.to === change.path) ||
+            ![...state.deletedPaths].some(
+              (removed) =>
+                change.path === removed ||
+                change.path.startsWith(removed + '/'),
+            )
+          )
+            continue
+          if (
+            !(await exists(
+              await guarded(project.root, change.path, { write: true }),
+            ))
+          )
+            fail(
+              `The project moved or removed ${change.path}. Its stale terminal update was kept private. Close this terminal and recover the private copy before reopening it.`,
+              409,
+            )
+        }
+        if (transition.some((change) => CONFIGURATION_FILES.has(change.path)))
+          this.assertConfigurationIdle?.(project.id, actor, {
+            terminalRunId: manifest.runId,
+          })
+        // A rename proof must still name the same private inode after scanning.
+        if (referencePlan && committedMoves.length !== moves.length)
+          referencePlan = { updates: [], skippedFiles: 1 }
+        authorize()
+        await assertCopyCurrent()
+        await this.#applyLocked(project, transition, 'saved', authorize, {
+          moves: committedMoves,
+          originRunId: manifest.runId,
         })
-      assertAuthorized?.()
-      await assertCopyCurrent()
-      await this.#applyLocked(
-        project,
-        transition,
-        'saved',
-        () => {
-          assertAuthorized?.()
-          this.requireEditor(project.id, actor)
-        },
-        { detectMoves: true },
+        state.previousChanges = changes
+        copy.identities = currentIdentities
+        if (referencePlan)
+          referenceResult = await applyReferenceUpdates(referencePlan, {
+            readFile: async (filename) =>
+              textFile(await guarded(project.root, filename, { write: true })),
+            apply: (updates) =>
+              this.#applyLocked(project, updates, 'saved', authorize),
+          })
+        await this.#pruneTerminalFolders(
+          project,
+          manifest,
+          transition,
+          manifest.runId,
+        )
+        return receive(project, changes)
+      })
+    const publish = async () => {
+      let plan
+      try {
+        const project = this.requireEditor(manifest.projectId, actor)
+        const signal = AbortSignal.timeout(5000)
+        const files = await this.#walk(project.root, {
+          limit: MAX_FILES + 1,
+          signal,
+        })
+        plan = await prepareTerminalReferenceUpdates({
+          transition,
+          moves,
+          files,
+          signal,
+          readFile: async (filename) =>
+            textFile(await guarded(project.root, filename, { write: true })),
+          isProtected: (filename) =>
+            filename.split('/').some((part) => CONFIGURATION_FILES.has(part)),
+        })
+      } catch {
+        plan = { updates: [], skippedFiles: 1 }
+      }
+      return commit(plan)
+    }
+    let published
+    try {
+      published = moves.length
+        ? await this.referenceUpdateAdmission.run(
+            manifest.projectId,
+            actor,
+            publish,
+          )
+        : await commit()
+    } catch (error) {
+      if (error.status === 429 && moves.length) {
+        onReferenceWarning?.(
+          'File reference updates are busy. This terminal will retry automatically; its edits stay in the private copy until they can be published.',
+        )
+        fail(
+          'Terminal reference updates are waiting for capacity.',
+          503,
+          'TERMINAL_SOURCE_CHANGED',
+        )
+      }
+      throw error
+    }
+    await receiveIdentities()
+    if (moves.length || uncertainMove)
+      onReferenceWarning?.(
+        referenceResult?.warning ||
+          (uncertainMove
+            ? 'Some terminal file moves could not be identified safely. Review imports and file links that use the old paths.'
+            : ''),
       )
-      await this.#pruneTerminalFolders(project, manifest, transition)
-      return changes
-    })
     onUnpublished?.([...unpublished])
     return published
   }
@@ -5375,7 +5586,7 @@ export class WorkspaceStore {
     if (active) active.phase = 'finalizing'
   }
 
-  async #pruneTerminalFolders(project, manifest, changes) {
+  async #pruneTerminalFolders(project, manifest, changes, originRunId) {
     const folders = new Set()
     for (const change of changes) {
       if (change.after !== null) continue
@@ -5408,7 +5619,8 @@ export class WorkspaceStore {
           this.#saveDiagnostic(project.id, error, 'terminal folder cleanup')
       }
     }
-    if (removed.length) this.#changed(project.id, removed, 'files', removed)
+    if (removed.length)
+      this.#changed(project.id, removed, 'files', removed, [], originRunId)
   }
 
   async retainTerminalSnapshot(snapshot, message, { active = false } = {}) {
@@ -5426,6 +5638,13 @@ export class WorkspaceStore {
       // Recovery ZIPs contain project files, not dependency mounts. Once the
       // worker has stopped, retaining a copy must not retain the shared project.
       await this.#releaseTerminalDependencies(manifest.root)
+      const state = this.terminalCopies.get(manifest.runId)?.reconciliation
+      await recoverTerminalBackups({
+        state,
+        manifest,
+        container,
+        openParent: writeParent,
+      })
     }
     const receipt = {
       runId: manifest.runId,
@@ -5496,10 +5715,29 @@ export class WorkspaceStore {
     validateId(runId, 'terminal')
     validateOwner(actor)
     this.assertActorActive?.(actor)
+    const active = this.terminalCopies.get(runId)
+    if (active) {
+      if (active.actor !== actor || active.projectId !== id)
+        fail('Private terminal recovery not found.', 404)
+      fail(
+        'This terminal is open or finishing its file updates. Wait for it to close before recovering or discarding its private copy.',
+        409,
+      )
+    }
+    return this.#locked(`\0terminal-copy\0${runId}`, () =>
+      this.#terminalRecovery(id, actor, runId),
+    )
+  }
+
+  async #terminalRecovery(id, actor, runId) {
+    validateId(id)
+    validateId(runId, 'terminal')
+    validateOwner(actor)
+    this.assertActorActive?.(actor)
     const root = path.join(this.snapshotsDir, runId, 'workspace')
-    let manifest
+    let manifest, container
     try {
-      ;({ manifest } = await this.#manifest({ root, runId }))
+      ;({ manifest, container } = await this.#manifest({ root, runId }))
     } catch {
       fail('Private terminal recovery not found.', 404)
     }
@@ -5515,6 +5753,11 @@ export class WorkspaceStore {
         409,
       )
     this.#assertTerminalStopped(root)
+    await recoverTerminalBackups({
+      manifest,
+      container,
+      openParent: writeParent,
+    })
     this.assertActorActive?.(actor)
     return {
       ...manifest,
@@ -5812,7 +6055,10 @@ export class WorkspaceStore {
     return { manifest, container }
   }
 
-  async changes(snapshot, { skipNoneditable = false, onSkipped } = {}) {
+  async changes(
+    snapshot,
+    { skipNoneditable = false, onSkipped, ignoredPaths = new Set() } = {},
+  ) {
     const { manifest, container } = await this.#manifest(snapshot)
     const base = new Map(manifest.files.map((file) => [file.path, file]))
     const entries = await this.#walk(manifest.root, {
@@ -5830,10 +6076,20 @@ export class WorkspaceStore {
         .filter((file) => file.link === undefined)
         .map((file) => [file.path, file]),
     )
+    const ignored = (filename) => {
+      for (
+        let candidate = filename;
+        candidate !== '.';
+        candidate = path.posix.dirname(candidate)
+      )
+        if (ignoredPaths.has(candidate)) return true
+      return false
+    }
     const changes = []
     for (const filename of [
       ...new Set([...base.keys(), ...current.keys()]),
     ].sort()) {
+      if (ignored(filename)) continue
       const original = base.get(filename)
       if (
         original &&
@@ -6649,7 +6905,12 @@ export class WorkspaceStore {
     changes,
     reason = 'applied',
     authorize,
-    { detectMoves = false, allowExactSaveRetries = false } = {},
+    {
+      detectMoves = false,
+      moves,
+      originRunId,
+      allowExactSaveRetries = false,
+    } = {},
   ) {
     authorize?.()
     project = this.#record(project.id)
@@ -6809,11 +7070,15 @@ export class WorkspaceStore {
       prepared
         .filter((change) => change.after === null)
         .map((change) => change.path),
-      detectMoves
-        ? unchangedFileMoves(
-            prepared.filter((change) => !CONFIGURATION_FILES.has(change.path)),
-          )
-        : [],
+      moves ??
+        (detectMoves
+          ? unchangedFileMoves(
+              prepared.filter(
+                (change) => !CONFIGURATION_FILES.has(change.path),
+              ),
+            )
+          : []),
+      originRunId,
     )
     return {
       applied: prepared.length,

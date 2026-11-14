@@ -60,6 +60,8 @@ Simultaneous reference updates wait briefly for capacity while unrelated editing
 
 You can move files while checks, assistant runs, PDF builds and terminals stay open. Wait for setup or a Git operation to finish first. If an assistant or terminal later tries to update the old path, its conflicting update is kept in its private copy. A Lean check that sees changed files asks you to run it again. Project setup files stay in place. Open files, chat attachments and focused proofs follow the new paths while you are connected. If you were offline, refresh the file list and reopen the file at its new path.
 
+An open terminal receives saved file moves and clean file updates automatically. Moving an unchanged text file with `mv` in the terminal also updates recognized imports and links, including SVG diagram links in Lean comments. References that cannot be identified safely need manual review; the terminal shows a warning. Conflicting private edits stay available for recovery.
+
 ## Share a project
 
 Choose **Share project** to find an account or create an Editor or Viewer link. Project roles are **Admin**, **Editor**, and **Viewer**. Admins manage access and deletion; granting another Admin requires acknowledging those powers. Keep at least one Admin.
