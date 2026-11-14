@@ -127,6 +127,15 @@ try {
       process.stderr.write(error.stdout || '')
       process.stderr.write(error.stderr || '')
       console.error(`${suite}: ${error.message}`)
+      if (process.env.GITHUB_ACTIONS === 'true') {
+        const detail = String(error.stderr || error.message)
+          .trim()
+          .slice(0, 4000)
+          .replaceAll('%', '%25')
+          .replaceAll('\r', '%0D')
+          .replaceAll('\n', '%0A')
+        console.error(`::error title=Browser ${suite}::${detail}`)
+      }
     }
   }
 } finally {
