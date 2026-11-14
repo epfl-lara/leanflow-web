@@ -10,6 +10,10 @@ Docker access is administrative access to the machine. Keep its socket, SSH keys
 and account home outside every project container. This installation does not use
 Docker to change host accounts, mount permissions, system services or policies.
 
+Use [the worker expansion handoff](WorkerExpansion.md) to generate a private
+administrator package with a standard or smaller primary allocation, pinned
+source and separate temporary bootstrap credentials.
+
 ## Install the release and configuration
 
 Verify and extract a [worker bundle](DistributedExecution.md#install-a-reviewed-release)

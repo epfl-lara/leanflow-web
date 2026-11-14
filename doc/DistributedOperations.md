@@ -34,6 +34,11 @@ a one-per-host limit. These are job counts, not simultaneous-user claims.
 Editors, model calls, agent runs and setup have separate coordinator and
 provider limits.
 
+Use [the worker expansion plan](WorkerExpansion.md) to prepare more primary
+workers, including a smaller regular allocation on a shared host. It also
+separates check-worker enrollment from the application work needed for more
+simultaneous live Lean editors.
+
 The [ten-user compilation test](releases/2026-11-13-ten-user-compilation.md)
 records 70 successful checks, real browser editing and saving, observed queue
 behavior, and commands for repeating the test with disposable accounts.
