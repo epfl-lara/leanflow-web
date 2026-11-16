@@ -12,13 +12,15 @@ shared PCs. This guide covers operation after enrollment.
 | Published toolchains and prepared public dependency environments               | Coordinator runtime                           | Protected originals used by local work and indexed for transfers |
 | Transfer manifests, source/result objects, partial uploads and source index    | Coordinator cluster directory                 | Bounded cache and private metadata; preserve indexed originals   |
 | Container images, installed toolchains and disposable dependency/object caches | Each execution worker's local volume          | Rebuildable copies; not backups of saved projects                |
+| Disposable check and editor source copies                                      | Assigned worker's private local volume        | Remove after confirmed cleanup; canonical saves stay on the VM   |
 | Writable check output and scratch                                              | Each job's isolated memory-backed filesystems | Removed after confirmed cleanup; charged to the job's RAM        |
 
 Worker disks are already used for execution assets and caches. They are not
 automatically joined into the coordinator filesystem. Do not move project
 databases to a worker or mount a shared writable project tree to increase space.
-The website, editors, agents, terminals, setup and canonical writes still depend
-on the coordinator. Worker capacity does not make it highly available.
+The website, authentication, collaboration, agents, terminals, setup and canonical
+writes depend on the coordinator. Distributed editors also depend on it for
+routing and saves. Worker capacity does not make the website highly available.
 
 ## Add capacity by workload
 
@@ -145,8 +147,10 @@ distinguish the independent hash audit from the trim operation.
 
 Keep the production SSH key restricted to the control/bulk protocol. Do not use
 Docker privileges or the bridge to obtain a shell. Host upgrades use an approved
-installation or temporary access; revoke temporary keys afterwards. Do not run
-an AI coding agent on worker hosts.
+installation or a separate approved maintenance key. Revoke temporary keys
+afterwards; retain a long-term maintenance key only when explicitly approved by
+the administrator. Keep it separate from the protocol-only production key.
+Do not run an AI coding agent on worker hosts.
 
 ## Roll back safely
 

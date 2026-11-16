@@ -7,6 +7,7 @@ import { BlobStore, captureTree } from '../cluster/blobs.mjs'
 import { CheckInputs, manifestFingerprint } from '../cluster/check-inputs.mjs'
 import { sourceFingerprint } from '../source-fingerprint.mjs'
 import { registeredToolchainRoot } from '../cluster/config.mjs'
+import { publicPreset, presetTemplatePaths } from '../public-preset.mjs'
 
 async function fixture(t) {
   const directory = await fs.realpath(
@@ -119,49 +120,80 @@ test('shared immutable dependencies and toolchains are captured once while sourc
   assert.equal(f.inputs.assets.size, 2)
 })
 
-test('only verified public templates extend dependency eligibility for editor captures', async (t) => {
-  const f = await fixture(t)
-  const environment = path.join(f.runtime.runtimeDir, 'templates', 'lean')
-  await fs.mkdir(path.join(environment, '.lake/packages'), {
-    recursive: true,
-    mode: 0o700,
+for (const versioned of [false, true])
+  test(`only verified ${versioned ? 'versioned' : 'legacy'} public templates extend dependency eligibility for editor captures`, async (t) => {
+    const f = await fixture(t)
+    const preset = publicPreset('lean')
+    f.runtime.toolchains.set(
+      preset.toolchain,
+      [...f.runtime.toolchains.values()][0],
+    )
+    await fs.writeFile(
+      path.join(f.root, 'lean-toolchain'),
+      preset.toolchain + '\n',
+    )
+    const environment = presetTemplatePaths(f.runtime.runtimeDir, preset)[
+      versioned ? 0 : 1
+    ]
+    await fs.mkdir(path.join(environment, '.lake/packages'), {
+      recursive: true,
+      mode: 0o700,
+    })
+    await fs.writeFile(
+      path.join(environment, '.lake/packages/dependency'),
+      'public',
+      { mode: 0o600 },
+    )
+    await fs.writeFile(
+      path.join(environment, 'lake-manifest.json'),
+      JSON.stringify({ packages: [] }),
+      { mode: 0o600 },
+    )
+    f.runtime.dependencyRoot = () => environment
+    assert.equal(await f.inputs.capture(f.root, { editor: true }), null)
+    f.runtime.transferableDependencyRoot = () => environment
+    assert.equal(
+      await f.inputs.capture(f.root),
+      null,
+      'ordinary check eligibility stays unchanged',
+    )
+    await fs.writeFile(
+      path.join(environment, 'lean-toolchain'),
+      preset.toolchain + '\n',
+      { mode: 0o600 },
+    )
+    await fs.writeFile(
+      path.join(environment, 'lakefile.toml'),
+      'name = "TemplateFixture"\n',
+      { mode: 0o600 },
+    )
+    await fs.writeFile(
+      path.join(environment, '.ready.json'),
+      JSON.stringify({
+        code: 0,
+        toolchain: preset.toolchain,
+        revision: preset.revision,
+      }),
+      { mode: 0o600 },
+    )
+    await f.inputs.prepareEditorAssets({ root: environment, preset: 'lean' })
+    const captured = await f.inputs.capture(f.root, { editor: true })
+    assert.ok(captured.dependencies)
+    assert.ok(captured.editorSource)
+    const prepared = f.inputs.editorEnvironment
+    f.inputs.editorEnvironment = undefined
+    assert.equal(await f.inputs.capture(f.root, { editor: true }), null)
+    f.inputs.editorEnvironment = { ...prepared, dependencies: 'f'.repeat(64) }
+    assert.equal(await f.inputs.capture(f.root, { editor: true }), null)
+    f.inputs.editorEnvironment = prepared
+    assert.equal(
+      await f.inputs.prepareEditorAssets({
+        root: environment,
+        preset: 'mathlib',
+      }),
+      null,
+    )
   })
-  await fs.writeFile(
-    path.join(environment, '.lake/packages/dependency'),
-    'public',
-    { mode: 0o600 },
-  )
-  await fs.writeFile(
-    path.join(environment, 'lake-manifest.json'),
-    '{"packages":[]}',
-    { mode: 0o600 },
-  )
-  f.runtime.dependencyRoot = () => environment
-  assert.equal(await f.inputs.capture(f.root, { editor: true }), null)
-  f.runtime.transferableDependencyRoot = () => environment
-  assert.equal(
-    await f.inputs.capture(f.root),
-    null,
-    'ordinary check eligibility stays unchanged',
-  )
-  await fs.writeFile(
-    path.join(environment, 'lean-toolchain'),
-    'leanprover/lean4:v4.35.0\n',
-    { mode: 0o600 },
-  )
-  await fs.writeFile(
-    path.join(environment, 'lakefile.toml'),
-    'name = "TemplateFixture"\n',
-    { mode: 0o600 },
-  )
-  await fs.writeFile(
-    path.join(environment, '.ready.json'),
-    '{"code":0,"toolchain":"leanprover/lean4:v4.35.0"}',
-    { mode: 0o600 },
-  )
-  await f.inputs.prepareEditorAssets({ root: environment })
-  assert.ok((await f.inputs.capture(f.root, { editor: true })).dependencies)
-})
 
 test('preset preloading uses the protected toolchain directory registered by the running coordinator', async (t) => {
   const f = await fixture(t)

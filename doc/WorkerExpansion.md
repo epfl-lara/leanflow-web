@@ -5,9 +5,11 @@ Generate a private administrator handoff before changing a machine. The
 worker contributes during normal service; it is not a reserve. Generated
 controller entries remain disabled until installation and acceptance pass.
 
-This adds pure check capacity through the existing restricted SSH protocol.
-Live Lean editors, agents, terminals, project setup, canonical files and SQLite
-remain on the coordinator. Adding these workers does not raise the editor cap.
+Initial enrollment adds check capacity through the restricted SSH protocol.
+Enable distributed Lean editors through the separate
+[editor upgrade and acceptance](RemoteEditors.md). Agents, terminals, project
+setup, canonical files and SQLite remain on the coordinator. Check-worker
+enrollment alone does not raise the editor cap.
 Use [the expansion record](releases/2026-11-14-worker-expansion-preparation.md)
 for the actual machine inventory and current rollout status.
 
@@ -73,6 +75,11 @@ Do not change an existing account used for another purpose.
    must be removed immediately after installation. The separate production key
    is forced to the fixed protocol bridge. The administrator retains an approved
    maintenance path for later upgrades.
+
+The administrator can instead approve a separate long-term maintenance key for
+reviewed home-directory upgrades. Preserve that explicitly retained route when
+removing a generated temporary bootstrap key. PC06's approved maintenance route
+is recorded in the [editor rollout](releases/2026-11-16-remote-editors.md).
 
 If the administrator prefers, they can perform the home-directory installation
 themselves and omit the bootstrap key. No public worker port is needed; only
@@ -233,9 +240,11 @@ snapshot or an aggregate total across the PCs. Twenty repository editors at
 6 GiB still have 120 GiB of combined caps, exceeding the coordinator budget.
 
 The [remote editor integration](RemoteEditors.md) adds a certified live-session
-capability for managed single-file workspaces. Placement defaults to off; the
-currently enrolled worker needs the reviewed upgrade, preloaded environments and
-fresh certification before it can serve editors. Follow the
+capability for managed single-file workspaces. Placement defaults to off. Each
+worker needs the reviewed upgrade, preloaded environments and fresh
+certification before it can serve editors. Public Mathlib environments also
+need compiler and same-profile LSP diagnostics/save qualification after every
+worker restart; installed dependency bytes alone add no editor slots. Follow the
 [rollout record](releases/2026-11-16-remote-editors.md) for measured acceptance.
 Canonical source and collaboration stay on the coordinator; worker-local copies
 are disposable. Repository and private/unsupported environments use the local

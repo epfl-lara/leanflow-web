@@ -76,7 +76,11 @@ export class ClusterChecks {
           mode: this.mode,
           reason: result ? 'editor-assets-ready' : 'editor-assets-unavailable',
           ...(result
-            ? { toolchain: result.toolchain, dependencies: result.dependencies }
+            ? {
+                toolchain: result.toolchain,
+                dependencies: result.dependencies,
+                editorSource: result.editorSource,
+              }
             : {}),
         })
         if (result)

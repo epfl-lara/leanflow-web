@@ -122,6 +122,272 @@ test('remote editors stream framed messages, mirror bounded saves, and retain ca
   await assert.rejects(fsp.stat(child.workspace), { code: 'ENOENT' })
 })
 
+test('dependency bytes do not advertise editor slots before environment diagnostics pass, including after restart', async (t) => {
+  let calls = 0
+  let release = Promise.withResolvers()
+  const qualified = {
+    compilerPassed: true,
+    initialized: true,
+    invalidDiagnostic: true,
+    correctedDiagnostic: true,
+    savedMirror: true,
+  }
+  const spec = editorNode({
+    certifyToolchain: VERSION,
+    editorEnvironmentVerifier: async (_runtime, root) => {
+      calls++
+      assert.equal(
+        (await fsp.readFile(path.join(root, 'lean-toolchain'), 'utf8')).trim(),
+        VERSION,
+      )
+      await release.promise
+      return qualified
+    },
+  })
+  const f = await cluster(t, {
+    nodes: [spec],
+    files: { 'Main.lean': 'import Lean\nexample : True := by trivial\n' },
+  })
+  await f.ready()
+  const dependencies = (await f.blobs.seal([], 'dependencies')).hash
+  const input = {
+    ...f.input,
+    dependencies,
+    editorSource: f.input.sourceManifest,
+  }
+  await f.controller.prepareNode(
+    'node-a',
+    { ...f.input, dependencies },
+    { certify: true },
+  )
+  assert.equal(f.controller.editorCapacity(input), 0)
+  const prepared = f.controller.prepareNode('node-a', input)
+  await until(() => calls === 1)
+  await until(() => f.controller.status().ready === 0)
+  assert.equal(f.controller.editorCapacity(input), 0)
+  release.resolve()
+  const report = await prepared
+  assert(
+    report.capabilities.includes('check.kernel'),
+    'warming preserves native certification',
+  )
+  assert.equal(f.controller.editorCapacity(input), 2)
+  assert.equal(
+    f.controller.editorCapacity({ ...input, editorSource: 'f'.repeat(64) }),
+    0,
+  )
+  assert.equal(
+    f.controller.editorCapacity({ ...input, editorSource: undefined }),
+    0,
+  )
+  await f.controller.prepareNode('node-a', input)
+  assert.equal(
+    calls,
+    1,
+    'a verified environment is not warmed for each browser open',
+  )
+  const opened = await f.controller.openEditor(
+    input,
+    options({ jobId: 'qualified-editor' }),
+  )
+  assert(opened)
+  opened.stdout.resume()
+  opened.stderr.resume()
+  opened.kill()
+  await until(() => f.controller.status().active === 0)
+
+  // Persisted assets survive, but a new process must earn fresh qualification.
+  await f.workers.get('node-a').worker.close()
+  await until(() => f.controller.status().ready === 0)
+  release = Promise.withResolvers()
+  f.workers.set('node-a', await startWorker(f.root, spec))
+  await until(() => calls === 2)
+  assert.equal(f.controller.editorCapacity(input), 0)
+  release.resolve()
+  await f.ready()
+  assert.equal(f.controller.editorCapacity(input), 2)
+  assert.equal(calls, 2)
+
+  const { worker } = f.workers.get('node-a')
+  const certifier = worker.certifier
+  worker.certifier = async () => {
+    throw new Error('recertification failed')
+  }
+  await assert.rejects(worker.certify({ toolchain: VERSION }))
+  await until(() => f.controller.editorCapacity(input) === 0)
+  assert.equal(worker.state.meta('certification'), null)
+  assert.deepEqual(worker.status().assets.editorEnvironments, [])
+  worker.certifier = certifier
+  await worker.certify({ toolchain: VERSION })
+  await f.ready()
+  assert.equal(f.controller.editorCapacity(input), 2)
+  assert.equal(calls, 3)
+
+  await f.controller.compactCaches({ nodeId: 'node-a' })
+  await until(() => f.controller.editorCapacity(input) === 0)
+  assert.deepEqual(worker.state.meta('editorEnvironments'), {})
+  assert.deepEqual(worker.status().assets.editorEnvironments, [])
+
+  const setMeta = worker.state.setMeta.bind(worker.state)
+  worker.state.setMeta = () => {
+    throw new Error('database unavailable')
+  }
+  await assert.rejects(worker.certify({ toolchain: VERSION }))
+  assert.equal(worker.maintenance, false)
+  assert.equal(worker.status().certified, false)
+  assert(worker.certificationError)
+  worker.state.setMeta = setMeta
+  await worker.certify({ toolchain: VERSION })
+  assert.equal(worker.status().certified, true)
+})
+
+test('failed environment diagnostics leave ordinary checks ready and no editor slots or workspace', async (t) => {
+  const f = await cluster(t, {
+    files: { 'Main.lean': 'import Lean\nexample : True := by trivial\n' },
+    nodes: [
+      editorNode({
+        editorEnvironmentVerifier: async () => {
+          throw new Error('diagnostics did not arrive')
+        },
+      }),
+    ],
+  })
+  await f.ready()
+  const dependencies = (await f.blobs.seal([], 'dependencies')).hash
+  const input = {
+    ...f.input,
+    dependencies,
+    editorSource: f.input.sourceManifest,
+  }
+  await f.controller.prepareNode(
+    'node-a',
+    { ...f.input, dependencies },
+    { certify: true },
+  )
+  await assert.rejects(f.controller.prepareNode('node-a', input))
+  await f.ready()
+  assert.equal(f.controller.editorCapacity(input), 0)
+  assert.deepEqual(
+    await fsp.readdir(path.join(f.root, 'node-a', 'editor-warmups')),
+    [],
+  )
+  assert.equal((await f.controller.run(f.input, options())).code, 0)
+})
+
+const editorEnvironmentProof = Object.freeze({
+  compilerPassed: true,
+  initialized: true,
+  invalidDiagnostic: true,
+  correctedDiagnostic: true,
+  savedMirror: true,
+})
+
+async function preparedEnvironment(f) {
+  await f.ready()
+  const dependencies = (await f.blobs.seal([], 'dependencies')).hash
+  await f.controller.prepareNode(
+    'node-a',
+    { ...f.input, dependencies },
+    { certify: true },
+  )
+  return { ...f.input, dependencies, editorSource: f.input.sourceManifest }
+}
+
+test('a failed warm-up materialization keeps ordinary checks available after the copy removes its own destination', async (t) => {
+  const f = await cluster(t, {
+    files: { 'Main.lean': 'import Lean\nexample : True := by trivial\n' },
+    nodes: [
+      editorNode({
+        editorEnvironmentVerifier: async () => editorEnvironmentProof,
+      }),
+    ],
+  })
+  const input = await preparedEnvironment(f)
+  const { worker, runtime } = f.workers.get('node-a')
+  runtime.clearInheritedDependencies = (root) => fsp.realpath(root)
+  const materialize = worker.blobs.materialize.bind(worker.blobs)
+  worker.blobs.materialize = async (hash, root, options) => {
+    if (root.includes('/editor-warmups/')) {
+      await fsp.mkdir(root, { recursive: true })
+      await fsp.rm(root, { recursive: true })
+      throw Object.assign(new Error('copy failed'), { code: 'EIO' })
+    }
+    return materialize(hash, root, options)
+  }
+  await assert.rejects(f.controller.prepareNode('node-a', input))
+  await f.ready()
+  assert.equal(worker.recoveryError, null)
+  assert.equal(f.controller.editorCapacity(input), 0)
+  assert.deepEqual(
+    await fsp.readdir(path.join(f.root, 'node-a', 'editor-warmups')),
+    [],
+  )
+  assert.equal((await f.controller.run(f.input, options())).code, 0)
+})
+
+test('an unconfirmed warm-up container quarantines the worker and prevents further warming', async (t) => {
+  let calls = 0
+  const f = await cluster(t, {
+    files: { 'Main.lean': 'import Lean\nexample : True := by trivial\n' },
+    nodes: [
+      editorNode({
+        editorEnvironmentVerifier: async (runtime, root) => {
+          calls++
+          runtime.children = new Set([{ workspaceRoot: root }])
+          return editorEnvironmentProof
+        },
+      }),
+    ],
+  })
+  const input = await preparedEnvironment(f)
+  const { worker, runtime } = f.workers.get('node-a')
+  await assert.rejects(f.controller.prepareNode('node-a', input))
+  assert(worker.recoveryError)
+  assert.equal(worker.maintenance, false)
+  assert.deepEqual(worker.status().assets.editorEnvironments, [])
+  await assert.rejects(f.controller.prepareNode('node-a', input), {
+    code: 'worker_recovery',
+  })
+  assert.equal(calls, 1)
+  runtime.children.clear()
+})
+
+test('restart removes an abandoned warm-up and keeps checks serving when fresh editor qualification fails', async (t) => {
+  let fail = false
+  const spec = editorNode({
+    certifyToolchain: VERSION,
+    editorEnvironmentVerifier: async () => {
+      if (fail) throw new Error('cold diagnostics failed')
+      return editorEnvironmentProof
+    },
+  })
+  const f = await cluster(t, {
+    files: { 'Main.lean': 'import Lean\nexample : True := by trivial\n' },
+    nodes: [spec],
+  })
+  const input = await preparedEnvironment(f)
+  await f.controller.prepareNode('node-a', input)
+  const abandoned = path.join(
+    f.root,
+    'node-a',
+    'editor-warmups',
+    '11111111-1111-4111-8111-111111111111',
+  )
+  await fsp.mkdir(abandoned, { recursive: true })
+  await fsp.writeFile(path.join(abandoned, 'Main.lean'), 'abandoned')
+  await f.workers.get('node-a').worker.close()
+  await until(() => f.controller.status().ready === 0)
+  fail = true
+  const restarted = await startWorker(f.root, spec)
+  f.workers.set('node-a', restarted)
+  await restarted.worker.certificationTask
+  await f.ready()
+  await assert.rejects(fsp.stat(abandoned), { code: 'ENOENT' })
+  assert.equal(f.controller.editorCapacity(input), 0)
+  assert.equal(restarted.worker.recoveryError, null)
+  assert.equal((await f.controller.run(f.input, options())).code, 0)
+})
+
 test('persistent editor grants share the check pool and keep an ordinary batch reserve', async (t) => {
   const f = await cluster(t, { nodes: [editorNode()] })
   await f.ready()
@@ -534,6 +800,7 @@ class FakeRuntime {
 
   async inheritDependencies() {}
   async clearInheritedDependencies() {}
+  async releaseVerificationWorkspace() {}
   async shutdown() {}
 }
 
@@ -597,11 +864,15 @@ async function startWorker(root, spec) {
       ...(spec.editors
         ? { editors: spec.editors, maxConcurrent: spec.maxConcurrent ?? 4 }
         : {}),
+      ...(spec.certifyToolchain
+        ? { certifyToolchain: spec.certifyToolchain }
+        : {}),
     },
     runtime,
     verifyToolchain: async () => {},
     bundleDigest: bundle,
     certifier: async (node) => certification(node, capabilities),
+    editorEnvironmentVerifier: spec.editorEnvironmentVerifier,
     reap: async () => {},
     boundaryInspector: async () => ({ relative: 'leanflow-workers.slice' }),
     leaseAcquire: async () => ({ release: async () => {} }),

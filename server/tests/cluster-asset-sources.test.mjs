@@ -5,7 +5,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { BlobStore, captureTree } from '../cluster/blobs.mjs'
 import { sha256 } from '../cluster/state.mjs'
-import { capturePresetDependencies } from '../cluster/dependencies.mjs'
+import {
+  capturePresetDependencies,
+  capturePresetEditorSource,
+} from '../cluster/dependencies.mjs'
+import { publicPreset } from '../public-preset.mjs'
 
 async function writeProtected(filename, data, options = {}) {
   return fs.writeFile(filename, data, { mode: 0o600, ...options })
@@ -38,6 +42,67 @@ async function fixture(
   })
   return { root, data, directory, toolchain, store, options }
 }
+
+test('editor warm-up exports only protected preset configuration and fixed synthetic proof text', async (t) => {
+  const { store, data } = await fixture(t)
+  const preset = publicPreset('mathlib')
+  const root = path.join(data, 'runtime/templates/mathlib')
+  await fs.mkdir(root, { recursive: true, mode: 0o700 })
+  for (const [name, content] of Object.entries({
+    'lean-toolchain': preset.toolchain + '\n',
+    'lakefile.toml': 'name = "WarmupFixture"\n',
+    'lake-manifest.json': JSON.stringify({
+      packages: [{ name: preset.package, rev: preset.revision }],
+    }),
+    '.ready.json': JSON.stringify({
+      code: 0,
+      toolchain: preset.toolchain,
+      revision: preset.revision,
+    }),
+    'Main.lean': 'do-not-export-this-body',
+    '.env': 'do-not-export-secrets',
+  }))
+    await writeProtected(path.join(root, name), content)
+  const captured = await capturePresetEditorSource(store, {
+    dataDir: data,
+    preset: 'mathlib',
+    version: preset.toolchain,
+  })
+  const source = await store.manifest(captured.hash, 'source')
+  assert.deepEqual(
+    source.entries.map((e) => e.path).sort(),
+    [
+      'Main.lean',
+      'lake-manifest.json',
+      'lakefile.toml',
+      'lean-toolchain',
+    ].sort(),
+  )
+  const main = source.entries.find((e) => e.path === 'Main.lean')
+  assert.equal(
+    (await store.read(main.hash)).toString(),
+    'import Mathlib\nexample : True := by trivial\n',
+  )
+  assert.equal(
+    (
+      await capturePresetEditorSource(store, {
+        dataDir: data,
+        preset: 'mathlib',
+        version: preset.toolchain,
+      })
+    ).hash,
+    captured.hash,
+  )
+  await fs.chmod(path.join(root, 'lakefile.toml'), 0o664)
+  await assert.rejects(
+    capturePresetEditorSource(store, {
+      dataDir: data,
+      preset: 'mathlib',
+      version: preset.toolchain,
+    }),
+    /protected/,
+  )
+})
 
 test('managed toolchain captures keep exact bytes available without duplicating payloads, including after restart', async (t) => {
   const { store, toolchain, options } = await fixture(t, { maxBytes: 4096 })

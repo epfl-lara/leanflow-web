@@ -86,6 +86,7 @@ const startRefusals = new Set([
   'stale_generation',
   'worker_stopping',
   'attempt_cancelled',
+  'assets_missing',
 ])
 // Failures raised by the local transport rather than by the worker.
 const transportFailures = new Set([
@@ -627,6 +628,8 @@ export class ClusterController {
         input.dependencies == null ? null : digest(input.dependencies),
       sourceManifest:
         input.sourceManifest == null ? null : digest(input.sourceManifest),
+      editorSource:
+        input.editorSource == null ? null : digest(input.editorSource),
     }
     if (!node.control) {
       clearTimeout(node.retryTimer)
@@ -665,6 +668,7 @@ export class ClusterController {
       nodeId: node.config.id,
       ready: this.#ready(node),
       capabilities: [...(node.status?.capabilities ?? [])],
+      editorEnvironments: node.status?.assets?.editorEnvironments || [],
     }
   }
 
@@ -897,6 +901,9 @@ export class ClusterController {
       toolchain: pinnedToolchain(input.toolchain),
       operation,
       file: null,
+      ...(input.editorSource != null
+        ? { editorSource: digest(input.editorSource) }
+        : {}),
     }
     if (operation === 'lean.file' || file != null) {
       if (typeof file !== 'string' || !file.endsWith('.lean'))
@@ -1159,7 +1166,14 @@ export class ClusterController {
       node.status?.assets?.toolchains[input.toolchain.version] ===
         input.toolchain.manifest &&
       (!input.dependencies ||
-        node.status.assets.dependencies.includes(input.dependencies))
+        (node.status.assets.dependencies.includes(input.dependencies) &&
+          node.status.assets.editorEnvironments?.some(
+            (environment) =>
+              environment.toolchain.version === input.toolchain.version &&
+              environment.toolchain.manifest === input.toolchain.manifest &&
+              environment.dependencies === input.dependencies &&
+              environment.editorSource === input.editorSource,
+          )))
     )
   }
 
@@ -1225,6 +1239,7 @@ export class ClusterController {
       bundleDigest: this.#bundleDigest,
       imageDigest: this.#imageDigest,
       sourceManifest: request.sourceManifest,
+      ...(request.editorSource ? { editorSource: request.editorSource } : {}),
       dependencies: request.dependencies,
       toolchain: request.toolchain,
       ...(request.file ? { file: request.file } : {}),
@@ -1769,11 +1784,19 @@ export class ClusterController {
       await this.#upload(node, bulk, dependencies, 'dependencies', signal)
     if (sourceManifest)
       await this.#upload(node, bulk, sourceManifest, 'source', signal)
-    const key = `${nodeEpoch}:assets:${toolchain.version}:${toolchain.manifest}:${dependencies ?? ''}`
+    if (environment.editorSource)
+      await this.#upload(node, bulk, environment.editorSource, 'source', signal)
+    const key = `${nodeEpoch}:assets:${toolchain.version}:${toolchain.manifest}:${dependencies ?? ''}:${environment.editorSource ?? ''}`
     if (!node.prepared.has(key)) {
       const reply = await bulk.request(
         'assets.prepare',
-        { toolchain, ...(dependencies ? { dependencies } : {}) },
+        {
+          toolchain,
+          ...(dependencies ? { dependencies } : {}),
+          ...(environment.editorSource
+            ? { editorSource: environment.editorSource }
+            : {}),
+        },
         { signal, timeoutMs: TIMEOUTS.prepare },
       )
       if (!isRecord(reply) || reply.ready !== true) throw invalidReply()
@@ -2087,7 +2110,10 @@ export class ClusterController {
           !isRecord(value.assets.toolchains) ||
           Object.keys(value.assets.toolchains).length > 64 ||
           !Array.isArray(value.assets.dependencies) ||
-          value.assets.dependencies.length > 128
+          value.assets.dependencies.length > 128 ||
+          (value.assets.editorEnvironments != null &&
+            (!Array.isArray(value.assets.editorEnvironments) ||
+              value.assets.editorEnvironments.length > 8))
         )
           throw invalidReply()
         assets = {
@@ -2100,6 +2126,23 @@ export class ClusterController {
             ),
           ),
           dependencies: value.assets.dependencies.map((hash) => digest(hash)),
+          editorEnvironments: (value.assets.editorEnvironments || []).map(
+            (environment) => {
+              if (
+                environment.nodeEpoch !== value.nodeEpoch ||
+                typeof environment.checkedAt !== 'string' ||
+                !Number.isFinite(Date.parse(environment.checkedAt))
+              )
+                throw invalidReply()
+              return {
+                toolchain: pinnedToolchain(environment.toolchain),
+                dependencies: digest(environment.dependencies),
+                editorSource: digest(environment.editorSource),
+                nodeEpoch: environment.nodeEpoch,
+                checkedAt: environment.checkedAt,
+              }
+            },
+          ),
         }
       }
     } catch {

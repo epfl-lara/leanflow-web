@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises'
+import { constants } from 'node:fs'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -19,6 +20,11 @@ export async function capturePresetDependencies(
   store,
   { dataDir, preset: id, version, signal } = {},
 ) {
+  const root = protectedPresetRoot(dataDir, id, version)
+  return captureDependencies(store, root, { signal, requireReferences: true })
+}
+
+export function protectedPresetRoot(dataDir, id, version) {
   const preset = publicPreset(id)
   if (!preset || preset.toolchain !== version)
     throw clusterError(
@@ -31,7 +37,86 @@ export async function capturePresetDependencies(
     throw clusterError(
       'Prepare and protect the pinned public preset before export.',
     )
-  return captureDependencies(store, root, { signal, requireReferences: true })
+  return root
+}
+
+export async function capturePresetEditorSource(
+  store,
+  { dataDir, preset = 'mathlib', version, signal } = {},
+) {
+  if (!['lean', 'mathlib'].includes(preset))
+    throw clusterError('Editor warm-up supports the Lean and Mathlib presets.')
+  const root = protectedPresetRoot(dataDir, preset, version)
+  const entries = []
+  for (const name of [
+    'lean-toolchain',
+    'lakefile.toml',
+    'lakefile.lean',
+    'lake-manifest.json',
+  ]) {
+    signal?.throwIfAborted()
+    const filename = path.join(root, name)
+    let handle
+    try {
+      if ((await fs.realpath(filename)) !== filename)
+        throw clusterError(
+          'Public editor configuration must not be redirected.',
+        )
+      handle = await fs.open(
+        filename,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      )
+      const before = await handle.stat({ bigint: true })
+      if (
+        !before.isFile() ||
+        before.uid !== BigInt(process.getuid()) ||
+        before.nlink !== 1n ||
+        before.mode & 0o022n ||
+        before.size > 1024n * 1024n
+      )
+        throw clusterError('Public editor configuration must be protected.')
+      const bytes = await handle.readFile()
+      const after = await handle.stat({ bigint: true })
+      if (
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeNs !== after.mtimeNs ||
+        before.ctimeNs !== after.ctimeNs
+      )
+        throw clusterError(
+          'Public editor configuration changed during capture.',
+        )
+      entries.push({
+        path: name,
+        type: 'file',
+        ...(await store.put(bytes)),
+        mode: 0o600,
+      })
+    } catch (error) {
+      if (
+        !['lakefile.toml', 'lakefile.lean'].includes(name) ||
+        error.code !== 'ENOENT'
+      )
+        throw error
+    } finally {
+      await handle?.close()
+    }
+  }
+  if (
+    !entries.some((entry) =>
+      ['lakefile.toml', 'lakefile.lean'].includes(entry.path),
+    )
+  )
+    throw clusterError('The public editor configuration is incomplete.')
+  entries.push({
+    path: 'Main.lean',
+    type: 'file',
+    ...(await store.put(
+      `import ${publicPreset(preset).import}\nexample : True := by trivial\n`,
+    )),
+    mode: 0o600,
+  })
+  return store.seal(entries, 'source')
 }
 
 export async function capturePreparedDependencies(

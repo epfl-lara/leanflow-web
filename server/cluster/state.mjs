@@ -59,6 +59,9 @@ export function executionDigest(value) {
       toolchain: value.toolchain || null,
       operation: value.operation,
       file: value.file || null,
+      ...(value.editorSource
+        ? { editorSource: digest(value.editorSource) }
+        : {}),
     }),
   )
 }

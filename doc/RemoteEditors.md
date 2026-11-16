@@ -6,6 +6,12 @@ files, authentication, collaboration and saves stay on the coordinator. Each
 remote editor receives a disposable source copy and an isolated `lake serve`
 container. This does not add general project storage on the PCs.
 
+Editors reuse the same controller, resource grants, worker daemon and cleanup
+paths as distributed checks. SSH, Docker/cgroups, systemd and Lean's LSP provide
+the underlying services. Scheduling, leases and artifact transfer remain custom
+LeanFlow code; this is not a third-party cluster orchestrator or a highly
+available coordinator.
+
 Remote placement is **off by default**. The existing enrolled worker continues
 serving checks until it has been upgraded and the controller explicitly enables
 editors. Installation and acceptance are tracked in the
@@ -21,7 +27,9 @@ more than 16 MiB stay local. Repository editors stay local while their project
 module build-cache synchronization is developed.
 
 A worker must advertise the certified `lean.session` capability and already
-hold the exact toolchain and dependency manifest. A browser connection never
+hold the exact toolchain, dependency and qualified public configuration manifests.
+Installing dependency bytes alone does not qualify an editor environment. A
+browser connection never
 starts a large dependency upload. If placement or capture is unavailable before
 launch, the editor uses the existing local path. A started remote session closes
 on failure; it does not replay a possibly stale session on another machine.
@@ -135,7 +143,17 @@ nothing. These ceilings describe admission, not a measured concurrency promise.
    protected `runtime/toolchains.json`; it refuses a different supplied directory
    or manifest. Compare the preload's hashes with the `editor-assets-ready` audit
    entry or the startup log line `Editor environment ready`. Remote admission
-   counts only nodes holding that exact warmed environment. Controller maintenance
+   counts only nodes holding that exact warmed environment. The worker first
+   runs a compiler with its ordinary check allocation, then requires invalid and
+   corrected diagnostics and a saved-file read from the actual editor profile.
+   It advertises the environment only after both containers have stopped and
+   their temporary workspace has been removed. A failed qualification leaves
+   ordinary certified checks available, with no slots for that environment.
+   Preparation holds the node in maintenance while the compiler and LSP run;
+   ordinary checks use other workers or the coordinator during that window.
+   A CLI preset preload succeeds only when its exact configuration tuple is
+   present in `editorEnvironments` and `editorEnvironmentReady` is true.
+   Controller maintenance
    status shows configured capability limits; the public session capacity and an
    actual remote open are the acceptance checks for serving editors.
 
@@ -147,7 +165,9 @@ nothing. These ceilings describe admission, not a measured concurrency promise.
    the environments again.
 7. Run the acceptance tests below before raising the published user capacity.
    Remove temporary maintenance keys and verify that the production key still
-   accepts only its fixed protocol commands. Preserve an admin maintenance route.
+   accepts only its fixed protocol commands. Preserve the separate maintenance
+   route approved by the administrator, including an explicitly retained
+   long-term maintenance key. Do not remove that key as temporary test cleanup.
 
 The feature needs no new system package, extra public port, shared filesystem,
 or provider key on the PC. It reuses the existing Docker image, dedicated account,
@@ -178,10 +198,20 @@ in bounded chunks; LSP text is not persisted in the check-event journal. The
 session ends when its browser closes, its channel fails, its lease expires or
 its six-hour deadline is reached. Unconfirmed cleanup holds the grant and
 quarantines placement until reconciliation. A worker restart reaps its old
-owned containers and disposable workspaces before reporting ready.
+owned containers and disposable workspaces. It earns fresh native certification
+and repeats the compiler/editor checks for its previously prepared public
+environments before advertising their editor slots. Qualification is tied to the
+current worker process epoch; a persisted success alone cannot restore capacity.
+Image changes, recertification and cache removal invalidate existing qualification.
+The entire node remains unavailable during restart certification and environment
+qualification. Measure that window; the coordinator continues local serving.
+Startup removes abandoned warm-up copies, their dependency bindings and homes
+after reaping the node's owned containers. An unconfirmed container cleanup
+quarantines the worker; an ordinary qualification failure removes only the
+affected editor environment.
 
 Cache/history maintenance requires drained sessions as well as drained checks.
-Startup warm-up runs once. If the preset/toolchain is missing or being rebuilt,
+Coordinator asset capture runs once per startup. If the preset/toolchain is missing or being rebuilt,
 correct preparation and permissions, finish preloading, then restart the idle
 coordinator to retry it. Until then, local serving remains available.
 Use the existing bounded store budgets and scheduled idle maintenance. For

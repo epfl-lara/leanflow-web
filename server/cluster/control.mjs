@@ -15,6 +15,7 @@ import { clusterError, digest } from './state.mjs'
 import {
   capturePreparedDependencies,
   capturePresetDependencies,
+  capturePresetEditorSource,
 } from './dependencies.mjs'
 
 const usage =
@@ -268,7 +269,7 @@ export async function controlMain(argv = process.argv.slice(2)) {
     }
     const input = { toolchain: { version, manifest: toolchainManifest } }
     if (command === 'prepare') {
-      if (flags.has('--preset'))
+      if (flags.has('--preset')) {
         input.dependencies = (
           await capturePresetDependencies(blobs, {
             dataDir,
@@ -277,7 +278,15 @@ export async function controlMain(argv = process.argv.slice(2)) {
             signal: abort.signal,
           })
         ).hash
-      else if (flags.has('--dependencies'))
+        input.editorSource = (
+          await capturePresetEditorSource(blobs, {
+            dataDir,
+            preset: flags.get('--preset'),
+            version,
+            signal: abort.signal,
+          })
+        ).hash
+      } else if (flags.has('--dependencies'))
         input.dependencies = digest(flags.get('--dependencies'))
       else if (flags.has('--dependency-dir'))
         input.dependencies = (
@@ -295,10 +304,28 @@ export async function controlMain(argv = process.argv.slice(2)) {
         certify: flags.get('--certify') !== 'false',
         signal: abort.signal,
       })
+      const editorEnvironmentReady =
+        !input.editorSource ||
+        report.editorEnvironments.some(
+          (environment) =>
+            environment.toolchain.version === input.toolchain.version &&
+            environment.toolchain.manifest === input.toolchain.manifest &&
+            environment.dependencies === input.dependencies &&
+            environment.editorSource === input.editorSource,
+        )
       process.stdout.write(
-        JSON.stringify({ ...report, bundleDigest, ...input }, null, 2) + '\n',
+        JSON.stringify(
+          { ...report, editorEnvironmentReady, bundleDigest, ...input },
+          null,
+          2,
+        ) + '\n',
       )
-      if (!report.ready || !report.capabilities.length) process.exitCode = 2
+      if (
+        !report.ready ||
+        !report.capabilities.length ||
+        !editorEnvironmentReady
+      )
+        process.exitCode = 2
       return
     }
     const operation = flags.get('--operation') || 'check.build'

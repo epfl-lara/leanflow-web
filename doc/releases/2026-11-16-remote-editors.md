@@ -1,75 +1,75 @@
 # Distributed editor integration — 16 November 2026
 
-Status: coordinator revision `67657d47d9078401fb58adaa52fa4b8207020b9f` is
-deployed and verified. Production remote editors are not enabled. PC06 still
-serves the previously accepted check operations; PC05 remains disabled and PC2
-is not enrolled.
+Status: the coordinator at `67657d47d9078401fb58adaa52fa4b8207020b9f`
+continues serving with remote editors off. PC06 has the reviewed
+`72bb931b89a8eabb6968286f07fd24f5c7017ab3e8085bba7241a107dc75fbc5`
+worker installed, its native check capabilities certified, and the exact public
+Mathlib environment preloaded. PC05 remains disabled; PC2 is not enrolled.
+The cold-start qualification gate is awaiting its reviewed deployment and live
+acceptance. This record will be updated with the actual result.
 
-The implementation adds leased, resource-accounted live Lean sessions, bounded
-SSH stream adapters, canonical single-file save mirroring and a real Lean editor
-conformance gate. See [operation and rollout instructions](../RemoteEditors.md).
-Canonical projects and collaboration remain on the VM.
+Canonical project files, accounts, collaboration and durable saves stay on the
+VM. The PCs hold public dependencies and disposable execution copies. See
+[operations and eligibility](../RemoteEditors.md).
 
-## Production rollout
+## Installed PC06 resources
 
-The coordinator was restarted after checking that workers, setup and live
-connections were idle. Its worker execution profile, capacity settings and user
-metadata were preserved. The pinned worker image and previous browser assets
-were retained. Both [CI](https://github.com/epfl-lara/leanflow-web/actions/runs/43888718356)
-and [security checks](https://github.com/epfl-lara/leanflow-web/actions/runs/43888718479)
-passed. Public HTTPS health passed after deployment.
+The worker shares its existing 24 GiB / eight-CPU pool between checks and editors.
+The candidate policy admits six managed Mathlib editors at 3 GiB / one CPU each,
+leaving 6 GiB / two CPUs for an ordinary check. Native checks require 18 GiB /
+six CPUs and use the VM when the PC cannot fit them beside persistent editors.
+The VM retains its 18 GiB native-check reserve and nine-editor local ceiling.
+No system slice, AppArmor policy or user privilege was expanded.
 
-A disposable ordinary account completed a real native kernel check on PC06.
-A local Mathlib editor initialized, reported an invalid proof, cleared the error
-after correction and saved the corrected canonical source. Both test projects
-were permanently removed, the test account was revoked and its plaintext token
-was deleted. No model inference was requested. The existing nine-editor admission
-setting is unchanged; this smoke check does not accept a higher user capacity.
+The administrator restored separate maintenance access on PC06. The explicitly
+approved long-term maintenance key is retained; the production key remains
+protocol-only and rejects shell commands. No AI agent runs on a LARA PC.
 
-## Validation receipts
+## Cold-start correction
 
-The final Linux suite passed 2,180 tests with two skips and zero failures.
-The client typecheck and build passed. Disposable pinned Lean 4.35.0 and Mathlib
-4.35.0-rc4 containers passed initialization, invalid/corrected diagnostics and a
-Lean read of the mirrored saved source through the remote streaming adapters.
-The Mathlib case also passed with the proposed one-CPU editor cap. Their
-containers and dependency copies were removed after the tests. Browser
-fixtures passed imports, single-file editing, workspace switching and oversized
-source handling. These checks do not establish a higher production editor count.
-An additional Linux HTTP/WebSocket suite passed all 19 tests, including three
-simultaneous authenticated editor sockets routed to two remote adapters and one
-local adapter, canonical save mirroring, capacity limits and account isolation.
-Its runtime is simulated; it is separate from the real Lean runtime checks.
+A first cold Mathlib editor initialized but did not produce the requested error
+diagnostic within 240 seconds. A compiler warm-up followed by the same 3 GiB /
+one-CPU language server passed invalid/corrected diagnostics and a Lean read of
+the mirrored saved source. A subsequent ordinary-account WebSocket smoke test
+also passed and cleaned its projects and account. An actual editor OOM was not
+established; certification deliberately exercises the container memory boundary.
 
-A separate Linux test passed through the real controller, worker node and
-container runtime over loopback framed RPC. It inspected the actual command and
-3-GiB / one-CPU caps, verified that no compiler runs after `lake serve`, and
-completed LSP shutdown/exit, stdin EOF and confirmed cleanup with exit code zero.
-That fixture simulates host enrollment and the outer slice; it does not certify
-PC06 or establish networked multi-user capacity.
+Dependency bytes alone therefore no longer qualify a Mathlib editor environment.
+The new gate first compiles its fixed public source with the ordinary check
+allocation, then runs the actual editor profile through diagnostics, correction
+and saved-file reading. It advertises only the exact toolchain, dependency and
+public-configuration tuple, after cleanup. Every worker restart must earn fresh
+qualification. The entire PC06 node is in maintenance during that process;
+ordinary checks use other capacity until it finishes.
 
-Claude's initial implementation review found blockers in dependency navigation,
-template preloading, editor launch options, account quotas, queueing and cold
-captures. Regression fixes are included. Claude's follow-up and guard reviews
-found no remaining code blockers and approved committing and deploying the
-coordinator with remote placement off. Remote activation remains
-separately gated by PC06 installation and acceptance.
+Claude's implementation review found two restart-path blockers: missing-root
+cleanup could unnecessarily quarantine ordinary checks, and failed database
+invalidation could leave maintenance set. Both have regression fixes. Additional
+changes clean abandoned warm-ups and bindings, stop after unconfirmed cleanup,
+report qualification failures and require the exact environment in CLI success.
+Claude verified the corrections and cleared installation with placement off,
+followed by a temporary live acceptance window after qualification and restart
+checks. The final preset-root guard reuses the shared verified resolver for
+both legacy and versioned template directories.
 
-Remaining acceptance work includes the reviewed PC06 upgrade,
-fresh host certification and multi-user diagnostics with mixed checks on the
-installed hosts. The proposed six remote editor slots are an admission policy
-inside PC06's existing 24 GiB / 8 CPU pool, not yet a load-test result.
+## Validation and remaining acceptance
 
-The previous temporary maintenance key and private key were removed after the
-November 13 upgrade. The production SSH key deliberately permits protocol
-commands only. Installing a new worker bundle needs an administrator-approved
-maintenance route or an administrator performing the reviewed home-directory
-installation. It does not require more sudo access or running an agent on a PC.
+The corrected Linux suite passed 2,192 tests with two skips and zero failures.
+The 64 focused worker/controller tests passed, including real-runtime cleanup
+for existing and already-removed roots, live-child refusal, failed database
+invalidation, restart qualification failure and ordinary-check continuity.
+Client type checking and scoped formatting pass. Lint exits successfully; the
+warm-up cleanup deliberately overrides earlier failures when cleanup is unsafe.
 
-The VM's public Mathlib preset was prepared for reference-based export by
-tightening five service-owned permission entries. Public source bytes and
-canonical projects were unchanged. Full dependency export and PC06 preload still
-need acceptance before enabling editor placement. The reviewed worker bundle is
-prepared with digest
-`72bb931b89a8eabb6968286f07fd24f5c7017ab3e8085bba7241a107dc75fbc5`;
-it has not been installed on PC06.
+The previously deployed production smoke passed a native check on PC06 and a
+real remote Mathlib editor, with canonical saved-file mirroring and cleanup.
+That single-session result does not establish higher multi-user capacity.
+
+Remaining work: install the final reviewed cold-start bundle with placement off,
+qualify the exact environment, measure one worker restart, then temporarily enable
+placement for a 15-account browser acceptance test. Require six actual PC06 plus
+nine local editors, live diagnostics and distinct saves for every account, mixed
+checks, isolation, no OOMs or cleanup holds, and fresh remote diagnostics within
+90 seconds after mixed load and an idle interval. Keep placement enabled only
+if acceptance passes. Twenty-user acceptance still needs additional enrolled
+workers; no twenty-user capacity claim is made.

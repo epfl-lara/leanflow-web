@@ -5,7 +5,7 @@
   "coordinatorDeployment": "deployed-and-verified",
   "workerBundleDigest": "72bb931b89a8eabb6968286f07fd24f5c7017ab3e8085bba7241a107dc75fbc5",
   "productionRemoteEditorsEnabled": false,
-  "workerUpgrade": "pending-administrator-maintenance-access",
+  "workerUpgrade": "installed-and-certified; cold-start gate upgrade pending",
   "candidatePolicy": {
     "workerMemoryBudgetGiB": 24,
     "workerCpus": 8,
@@ -33,7 +33,7 @@
       "inferenceRequests": 0,
       "publishedEditorLimitUnchanged": 9
     },
-    "linuxPassed": 2180,
+    "linuxPassed": 2192,
     "linuxSkipped": 2,
     "linuxFailed": 0,
     "typecheck": "passed",
@@ -65,12 +65,28 @@
       "gracefulExit": true,
       "cleanupConfirmed": true
     },
-    "inferenceRequestedByHarnesses": false
+    "inferenceRequestedByHarnesses": false,
+    "focusedWorkerControllerPassed": 64,
+    "coldStart": {
+      "initialColdDiagnosticTimedOutSeconds": 240,
+      "sameProfileAfterCompilerWarmupPassed": true,
+      "editorOomEstablished": false,
+      "qualificationGateDeployment": "pending",
+      "firstDiagnosticAcceptanceLimitSeconds": 90
+    },
+    "claudeReview": {
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "correctionsVerified": true,
+      "offInstallationAndTemporaryAcceptance": "go",
+      "permanentEnablement": "conditional-on-live-acceptance"
+    }
   },
   "pending": [
-    "reviewed worker installation",
-    "public preset export and PC06 preload acceptance",
-    "fresh PC06 host certification",
-    "networked multi-user editor diagnostics with mixed checks"
-  ]
+    "cold-start qualification gate installation",
+    "exact-environment qualification and restart timing",
+    "15-account networked editor acceptance with mixed checks",
+    "fresh remote diagnostics after mixed load and idle"
+  ],
+  "workerMaintenanceAccess": "administrator-approved-long-term-key-retained"
 }

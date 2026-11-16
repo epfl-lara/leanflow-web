@@ -23,10 +23,17 @@ import {
 import { BlobStore, contentPath, snapshotDirectory } from './blobs.mjs'
 import { nodeConfig, readNodeConfig, workerBundleDigest } from './config.mjs'
 import { certifyWorker } from './conformance.mjs'
+import {
+  cleanupEditorEnvironment,
+  warmEditorEnvironment,
+} from './editor-environment.mjs'
 import { inspectBoundary } from './boundary.mjs'
 import { acquireServerLease } from '../lease.mjs'
 import { StorageCapacity } from '../storage-capacity.mjs'
-import { WorkerEditor, editorSource } from './worker-editor.mjs'
+import {
+  WorkerEditor,
+  editorSource as editorSourceManifest,
+} from './worker-editor.mjs'
 
 const execute = promisify(execFile)
 const terminal = new Set([
@@ -67,6 +74,7 @@ export class WorkerNode {
     boundaryInspector = inspectBoundary,
     leaseAcquire = acquireServerLease,
     verifyToolchain,
+    editorEnvironmentVerifier = warmEditorEnvironment,
   } = {}) {
     this.config = nodeConfig(config)
     this.runtime =
@@ -95,6 +103,8 @@ export class WorkerNode {
       })
     this.expectedBundle = bundleDigest
     this.certifier = certifier
+    this.editorEnvironmentVerifier = editorEnvironmentVerifier
+    this.editorEnvironments = new Map()
     this.boundaryInspector = boundaryInspector
     this.leaseAcquire = leaseAcquire
     this.verifyToolchain =
@@ -212,6 +222,7 @@ export class WorkerNode {
     await this.runtime.init()
     try {
       await this.reap()
+      await this.#reapEditorWarmups()
       for (const attempt of this.state.list({ active: true }))
         this.state.transition(attempt.id, 'lost', {
           reason: 'worker-restarted',
@@ -231,6 +242,7 @@ export class WorkerNode {
     const runtime = this.runtime.info()
     const certification = this.state.meta('certification')
     const certified =
+      !this.certificationError &&
       certification?.nodeEpoch === this.nodeEpoch &&
       certification?.bundleDigest === this.bundleDigest &&
       certification?.imageDigest === runtime.imageId &&
@@ -278,6 +290,7 @@ export class WorkerNode {
           0,
           128,
         ),
+        editorEnvironments: [...this.editorEnvironments.values()],
       },
       boundary: this.boundary || null,
       certified: !!certified,
@@ -365,6 +378,8 @@ export class WorkerNode {
         )
       this.maintenance = true
       try {
+        this.state.setMeta('editorEnvironments', {})
+        this.editorEnvironments.clear()
         for (const hash of Object.keys(this.state.meta('dependencies') || {})) {
           digest(hash)
           await removeDisposableTree(
@@ -401,6 +416,7 @@ export class WorkerNode {
             409,
           )
         this.state.setMeta('certification', null)
+        this.editorEnvironments.clear()
         await this.blobs.verify(value.archive)
         this.boundary = await this.boundaryInspector(this.config)
         await execute(
@@ -491,12 +507,31 @@ export class WorkerNode {
       )
     this.maintenance = true
     try {
+      this.editorEnvironments.clear()
+      this.state.setMeta('certification', null)
       const report = await this.certifier(this, value)
       if (this.closed)
         throw clusterError('Worker is stopping.', 'worker_stopping', 503)
       this.state.setMeta('certification', report)
       this.certificationError = null
+      if (
+        this.config.maxEditors &&
+        report.capabilities.includes('lean.session')
+      )
+        for (const environment of Object.values(
+          this.state.meta('editorEnvironments') || {},
+        )) {
+          try {
+            await this.#warmEditorEnvironment(environment)
+          } catch (error) {
+            this.#logEditorEnvironmentFailure(environment, error)
+            if (this.recoveryError) break
+          }
+        }
       return report
+    } catch (error) {
+      this.certificationError = safeWorkerError(error).message
+      throw error
     } finally {
       this.maintenance = false
     }
@@ -601,7 +636,217 @@ export class WorkerNode {
         },
       )
     }
+    if (value.editorSource) {
+      if (this.recoveryError)
+        throw clusterError(
+          'Reconcile worker cleanup before warming editors.',
+          'worker_recovery',
+          503,
+        )
+      if (!value.toolchain || !value.dependencies)
+        throw clusterError(
+          'Prepare the complete public editor environment.',
+          'assets_missing',
+          409,
+        )
+      if (!this.config.maxEditors)
+        throw clusterError(
+          'Enable the agreed worker editor policy before warming editors.',
+          'editor_policy_disabled',
+          409,
+        )
+      if (!this.status().capabilities.includes('lean.session'))
+        throw clusterError(
+          'Certify lean.session with the supported native toolchain before warming editors.',
+          'editor_uncertified',
+          409,
+        )
+      if (this.running.size || this.preparing.size || this.maintenance)
+        throw clusterError(
+          'Drain the worker before warming editors.',
+          'worker_busy',
+          409,
+        )
+      this.maintenance = true
+      try {
+        await this.#warmEditorEnvironment(value)
+      } catch (error) {
+        this.#logEditorEnvironmentFailure(value, error)
+        throw error
+      } finally {
+        this.maintenance = false
+      }
+    }
     return { ready: true }
+  }
+
+  async #warmEditorEnvironment(value) {
+    if (this.recoveryError)
+      throw clusterError(
+        'Reconcile worker cleanup before warming editors.',
+        'worker_recovery',
+        503,
+      )
+    const { toolchain, dependencies, editorSource } = value
+    digest(editorSource)
+    digest(dependencies)
+    digest(toolchain?.manifest)
+    if (
+      (this.state.meta('toolchains') || {})[toolchain.version] !==
+        toolchain.manifest ||
+      !(this.state.meta('dependencies') || {})[dependencies]
+    )
+      throw clusterError(
+        'Prepare the complete pinned editor environment.',
+        'assets_missing',
+        409,
+      )
+    const key = `${toolchain.manifest}:${dependencies}:${editorSource}`
+    if (this.editorEnvironments.has(key)) return
+    const known = this.state.meta('editorEnvironments') || {}
+    if (!known[key] && Object.keys(known).length >= 8)
+      throw clusterError(
+        'The worker editor environment limit has been reached.',
+      )
+    const source = await this.blobs.manifest(editorSource, 'source')
+    if (!editorSourceManifest(source))
+      throw clusterError(
+        'Editor warm-up requires a bounded single-file source.',
+      )
+    const main = source.entries.find((entry) => entry.path === 'Main.lean')
+    const content = (await this.blobs.read(main.hash, 16 * 1024 ** 2)).toString(
+      'utf8',
+    )
+    const prelude = ['import Mathlib\n', 'import Lean\n'].find((value) =>
+      content.startsWith(value),
+    )
+    if (!prelude)
+      throw clusterError('Choose a supported public editor warm-up source.')
+    const parent = path.join(this.config.dataDir, 'editor-warmups')
+    await fs.mkdir(parent, { recursive: true, mode: 0o700 })
+    if ((await fs.realpath(parent)) !== parent)
+      throw clusterError('Editor warm-up storage must be a real directory.')
+    const root = path.join(parent, randomUUID())
+    const environment = snapshotDirectory(
+      path.join(this.config.dataDir, 'runtime/shared-dependencies'),
+      dependencies,
+    )
+    let verification
+    await this.storage.withReservation(
+      {
+        bytes: source.totalBytes + 16 * 1024 ** 2,
+        signal: this.shutdownController.signal,
+      },
+      async () => {
+        try {
+          await this.blobs.materialize(editorSource, root, {
+            signal: this.shutdownController.signal,
+          })
+          const pin = (
+            await fs.readFile(path.join(root, 'lean-toolchain'), 'utf8')
+          ).trim()
+          if (pin !== toolchain.version)
+            throw clusterError(
+              'The editor warm-up toolchain differs from its pin.',
+            )
+          await this.runtime.inheritDependencies(environment, root)
+          const report = await this.editorEnvironmentVerifier(
+            this.runtime,
+            root,
+            {
+              signal: this.shutdownController.signal,
+              prelude,
+            },
+          )
+          if (
+            ![
+              'compilerPassed',
+              'initialized',
+              'invalidDiagnostic',
+              'correctedDiagnostic',
+              'savedMirror',
+            ].every((key) => report?.[key] === true)
+          )
+            throw clusterError(
+              'The editor environment did not pass its diagnostics and save checks.',
+              'editor_environment_unavailable',
+              503,
+            )
+          verification = report
+        } catch (error) {
+          if (error.workerCleanup)
+            this.recoveryError =
+              'Editor warm-up cleanup requires reconciliation.'
+          throw error
+        } finally {
+          try {
+            if (
+              [...(this.runtime.children || [])].some(
+                (child) => child.workspaceRoot === root,
+              )
+            )
+              throw clusterError(
+                'Editor warm-up is still running.',
+                'cleanup_failed',
+                503,
+              )
+            await cleanupEditorEnvironment(this.runtime, root)
+          } catch (error) {
+            this.recoveryError =
+              'Editor warm-up cleanup requires reconciliation.'
+            throw error
+          }
+        }
+      },
+    )
+    if (this.closed)
+      throw clusterError('Worker is stopping.', 'worker_stopping', 503)
+    const qualified = {
+      toolchain,
+      dependencies,
+      editorSource,
+      nodeEpoch: this.nodeEpoch,
+      checkedAt: new Date().toISOString(),
+      ...(verification.timings ? { timings: verification.timings } : {}),
+    }
+    this.state.setMeta('editorEnvironments', { ...known, [key]: qualified })
+    this.editorEnvironments.set(key, qualified)
+  }
+
+  #logEditorEnvironmentFailure(environment, error) {
+    const code =
+      typeof error?.code === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(error.code)
+        ? error.code
+        : 'worker_failed'
+    console.warn(
+      '[LeanFlow worker] Editor environment warm-up failed: ' +
+        JSON.stringify({
+          editorSource:
+            typeof environment.editorSource === 'string' &&
+            /^[a-f0-9]{64}$/.test(environment.editorSource)
+              ? environment.editorSource
+              : null,
+          code,
+        }),
+    )
+  }
+
+  async #reapEditorWarmups() {
+    const parent = path.join(this.config.dataDir, 'editor-warmups')
+    const actual = await fs.realpath(parent).catch((error) => {
+      if (error.code === 'ENOENT') return null
+      throw error
+    })
+    if (!actual) return
+    if (actual !== parent)
+      throw clusterError('Invalid abandoned editor warm-up directory.')
+    for (const entry of await fs.readdir(parent, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^[a-f0-9-]{36}$/.test(entry.name)) continue
+      const directory = path.join(parent, entry.name)
+      if ((await fs.realpath(directory)) !== directory)
+        throw clusterError('Invalid abandoned editor warm-up directory.')
+      await cleanupEditorEnvironment(this.runtime, directory)
+    }
   }
 
   async #prepareOnce(key, action) {
@@ -707,6 +952,15 @@ export class WorkerNode {
     const slots = value.operation === 'check.kernel' ? 3 : 1
     const resources = resourceVector(value.resources)
     const editor = value.operation === 'lean.session'
+    if (editor && value.dependencies) {
+      const key = `${value.toolchain?.manifest}:${value.dependencies}:${value.editorSource}`
+      if (!this.editorEnvironments.has(key))
+        throw clusterError(
+          'Warm and verify this editor environment first.',
+          'assets_missing',
+          409,
+        )
+    }
     if (
       resources.memoryBytes !==
         (editor
@@ -815,7 +1069,7 @@ export class WorkerNode {
       const source = await this.blobs.manifest(value.sourceManifest, 'source')
       if (source.kind !== 'source')
         throw clusterError('Invalid source manifest kind.')
-      if (record.editor && !editorSource(source))
+      if (record.editor && !editorSourceManifest(source))
         throw clusterError(
           'This project requires a local repository editor.',
           'editor_unsupported',

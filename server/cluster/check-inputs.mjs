@@ -4,7 +4,12 @@ import { createHash } from 'node:crypto'
 import { captureTree } from './blobs.mjs'
 import { sourceFingerprint } from '../source-fingerprint.mjs'
 import { clusterError } from './state.mjs'
-import { captureDependencies } from './dependencies.mjs'
+import {
+  captureDependencies,
+  capturePresetEditorSource,
+  protectedPresetRoot,
+} from './dependencies.mjs'
+import { publicPresetDefinition } from '../public-preset.mjs'
 
 // Match source-fingerprint.mjs's Python JSON encoding and Unicode ordering.
 // Comparing this digest with the canonical source catches a mixed capture even
@@ -80,13 +85,20 @@ export class CheckInputs {
 
   async prepareEditorAssets({
     signal,
-    root = this.runtime.templateRoot?.('mathlib'),
+    preset = 'mathlib',
+    root = this.runtime.templateRoot?.(preset),
   } = {}) {
-    if (!root || this.runtime.transferableDependencyRoot?.(root) !== root)
+    const dataDir =
+      this.runtime.dataDir || path.dirname(this.runtime.runtimeDir)
+    const definition = root && publicPresetDefinition(dataDir, root)
+    if (
+      !root ||
+      definition?.id !== preset ||
+      this.runtime.transferableDependencyRoot?.(root) !== root
+    )
       return null
-    const version = (
-      await fs.readFile(path.join(root, 'lean-toolchain'), 'utf8')
-    ).trim()
+    const version = definition.toolchain
+    if (root !== protectedPresetRoot(dataDir, preset, version)) return null
     const toolchainRoot = this.runtime.toolchains?.get(version)
     if (!toolchainRoot) return null
     // Start this service-owned task before accepting browser requests. A user's
@@ -97,12 +109,21 @@ export class CheckInputs {
       'dependencies',
       signal,
     )
-    return toolchain && dependencies
-      ? {
-          toolchain: { version, manifest: toolchain.hash },
-          dependencies: dependencies.hash,
-        }
-      : null
+    if (toolchain && dependencies) {
+      const editorSource = await capturePresetEditorSource(this.blobs, {
+        dataDir,
+        preset,
+        version,
+        signal,
+      })
+      this.editorEnvironment = {
+        toolchain: { version, manifest: toolchain.hash },
+        dependencies: dependencies.hash,
+        editorSource: editorSource.hash,
+      }
+      return this.editorEnvironment
+    }
+    return null
   }
 
   async capture(root, { signal, fingerprint, editor = false } = {}) {
@@ -171,10 +192,21 @@ export class CheckInputs {
     const toolchain = await this.#asset(toolchainRoot, 'toolchain', signal)
     if (!toolchain) return null
     signal?.throwIfAborted()
+    if (
+      editor &&
+      dependencies &&
+      (this.editorEnvironment?.toolchain.version !== version ||
+        this.editorEnvironment?.toolchain.manifest !== toolchain.hash ||
+        this.editorEnvironment?.dependencies !== dependencies)
+    )
+      return null
     return {
       sourceManifest: source.hash,
       dependencies,
       toolchain: { version, manifest: toolchain.hash },
+      ...(editor && dependencies
+        ? { editorSource: this.editorEnvironment.editorSource }
+        : {}),
     }
   }
 }
