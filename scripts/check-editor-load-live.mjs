@@ -255,11 +255,16 @@ try {
   )
   assert.equal(sessions.length, users)
   const live = (await get(sessions[0], '/api/session')).value.runtime
-  assert(
-    live.workloads.active.interactive >= users,
-    'All Lean editors must coexist',
-  )
-  report.allEditorsActive = live.workloads.active.interactive
+  report.localEditorsActive = live.workloads.active.interactive
+  // The coordinator runtime excludes remote editors. Every session above has
+  // produced real diagnostics; retain the same sockets through the concurrent
+  // error/correction rounds and check burst below. Measure worker placement
+  // separately from the coordinator's private attempt records.
+  report.allEditorsActive = sessions.filter(
+    (session) =>
+      session.sockets.length === 1 && session.row.webSocketCloses.length === 0,
+  ).length
+  assert.equal(report.allEditorsActive, users, 'All Lean editors must coexist')
   await Promise.all(
     sessions.map(async (session) => {
       const baseline = session.version,
@@ -398,16 +403,10 @@ try {
     for (const session of sessions) {
       if (session.job && !terminal.has(session.job.status))
         await session.context.request
-          .post(
-            origin +
-              '/api/projects/' +
-              session.account.projects[session.job.kind].id +
-              '/stop',
-            {
-              data: {},
-              headers: { 'X-LeanFlow-User': session.account.id },
-            },
-          )
+          .post(origin + '/api/jobs/' + session.job.id + '/stop', {
+            data: {},
+            headers: { 'X-LeanFlow-User': session.account.id },
+          })
           .catch(() => {})
     }
   for (const session of sessions) await session.context.close().catch(() => {})
