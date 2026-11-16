@@ -46,6 +46,16 @@ let rejectCreate = false
 let rejectSaves = false
 let preparation = 'ready'
 const deleted = new Map()
+await page.route('**/api/projects/*/terminal-recoveries', async (route) => {
+  const id = new URL(route.request().url()).pathname.split('/')[3]
+  if (
+    route.request().method() === 'GET' &&
+    Object.hasOwn(state.files, id) &&
+    !state.projects.some((project) => project.id === id)
+  )
+    return route.fulfill({ status: 404, json: { error: 'Project not found' } })
+  return route.fallback()
+})
 await page.route('**/api/projects/*/trash', async (route) => {
   const id = new URL(route.request().url()).pathname.split('/')[3]
   const project = state.projects.find((item) => item.id === id)
