@@ -98,7 +98,8 @@ try {
   const { page, state } = fixture
   let response = 'fail'
   let requests = 0,
-    stops = 0
+    stops = 0,
+    rejectedSaves = 0
   await page.route('**/api/storage', (route) => {
     assert.equal(route.request().headers()['x-leanflow-user'], 'storage-editor')
     requests++
@@ -111,8 +112,10 @@ try {
         : { json: response === 'blocked' ? blocked : ready },
     )
   })
-  state.onSave = ({ respond }) =>
-    respond({ error: 'Fixture keeps the private editor draft.' }, 409)
+  state.onSave = ({ respond }) => {
+    rejectedSaves++
+    return respond({ error: 'Fixture keeps the private editor draft.' }, 409)
+  }
   state.onStop = ({ run, respond }) => {
     stops++
     run.status = 'cancelled'
@@ -131,6 +134,12 @@ try {
   await editor.focus()
   await page.keyboard.press(editorShortcuts.documentEnd)
   await page.keyboard.insertText(marker)
+  await until(() => rejectedSaves > 0, 'the draft save receives its conflict')
+  const retrySave = page.getByRole('button', {
+    name: 'Retry save',
+    exact: true,
+  })
+  await retrySave.waitFor()
   const assertDraft = async () => {
     assert.equal(
       await page.getByLabel('Message Lemex').inputValue(),
@@ -176,6 +185,9 @@ try {
   await editor.focus()
   await page.keyboard.press('ControlOrMeta+A')
   await page.keyboard.press('Backspace')
+  // A 409 deliberately pauses autosave until an explicit retry, even when the
+  // user types again. Keep this storage test independent of debounce timing.
+  await retrySave.click()
   await until(
     () => state.files[project.id]['Main.lean'] === '',
     'accepted empty source saves while new allocations are blocked',
