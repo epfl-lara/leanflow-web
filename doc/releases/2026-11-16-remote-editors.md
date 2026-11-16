@@ -1,13 +1,30 @@
 # Distributed editor integration — 16 November 2026
 
-Status: implementation and isolated validation passed; deployment in progress. Production remote
-editors are not enabled. PC06 still serves the previously accepted check
-operations; PC05 remains disabled and PC2 is not enrolled.
+Status: coordinator revision `67657d47d9078401fb58adaa52fa4b8207020b9f` is
+deployed and verified. Production remote editors are not enabled. PC06 still
+serves the previously accepted check operations; PC05 remains disabled and PC2
+is not enrolled.
 
 The implementation adds leased, resource-accounted live Lean sessions, bounded
 SSH stream adapters, canonical single-file save mirroring and a real Lean editor
 conformance gate. See [operation and rollout instructions](../RemoteEditors.md).
 Canonical projects and collaboration remain on the VM.
+
+## Production rollout
+
+The coordinator was restarted after checking that workers, setup and live
+connections were idle. Its worker execution profile, capacity settings and user
+metadata were preserved. The pinned worker image and previous browser assets
+were retained. Both [CI](https://github.com/epfl-lara/leanflow-web/actions/runs/43888718356)
+and [security checks](https://github.com/epfl-lara/leanflow-web/actions/runs/43888718479)
+passed. Public HTTPS health passed after deployment.
+
+A disposable ordinary account completed a real native kernel check on PC06.
+A local Mathlib editor initialized, reported an invalid proof, cleared the error
+after correction and saved the corrected canonical source. Both test projects
+were permanently removed, the test account was revoked and its plaintext token
+was deleted. No model inference was requested. The existing nine-editor admission
+setting is unchanged; this smoke check does not accept a higher user capacity.
 
 ## Validation receipts
 
@@ -52,4 +69,7 @@ installation. It does not require more sudo access or running an agent on a PC.
 The VM's public Mathlib preset was prepared for reference-based export by
 tightening five service-owned permission entries. Public source bytes and
 canonical projects were unchanged. Full dependency export and PC06 preload still
-need acceptance before enabling editor placement.
+need acceptance before enabling editor placement. The reviewed worker bundle is
+prepared with digest
+`72bb931b89a8eabb6968286f07fd24f5c7017ab3e8085bba7241a107dc75fbc5`;
+it has not been installed on PC06.

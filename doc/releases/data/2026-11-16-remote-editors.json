@@ -1,6 +1,9 @@
 {
   "date": "2026-11-16",
   "baseRevision": "d587033dccb1de53429ffa3fd2cdb48fe9c6f295",
+  "coordinatorRevision": "67657d47d9078401fb58adaa52fa4b8207020b9f",
+  "coordinatorDeployment": "deployed-and-verified",
+  "workerBundleDigest": "72bb931b89a8eabb6968286f07fd24f5c7017ab3e8085bba7241a107dc75fbc5",
   "productionRemoteEditorsEnabled": false,
   "workerUpgrade": "pending-administrator-maintenance-access",
   "candidatePolicy": {
@@ -15,6 +18,21 @@
     "publishedCapacityIncreaseAccepted": false
   },
   "validation": {
+    "ci": "https://github.com/epfl-lara/leanflow-web/actions/runs/43888718356",
+    "securityChecks": "https://github.com/epfl-lara/leanflow-web/actions/runs/43888718479",
+    "productionSmoke": {
+      "passed": true,
+      "publicHttpsHealth": true,
+      "ordinaryAccount": true,
+      "nativeKernelCheckCompletedOnPc06": true,
+      "localMathlibInvalidAndCorrectedDiagnostics": true,
+      "canonicalSave": true,
+      "testProjectsPurged": 2,
+      "testAccountRevoked": true,
+      "plaintextFixtureRemoved": true,
+      "inferenceRequests": 0,
+      "publishedEditorLimitUnchanged": 9
+    },
     "linuxPassed": 2180,
     "linuxSkipped": 2,
     "linuxFailed": 0,
@@ -51,7 +69,7 @@
   },
   "pending": [
     "reviewed worker installation",
-    "public preset protection and preload",
+    "public preset export and PC06 preload acceptance",
     "fresh PC06 host certification",
     "networked multi-user editor diagnostics with mixed checks"
   ]
