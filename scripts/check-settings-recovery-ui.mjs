@@ -44,7 +44,9 @@ const accounts = [{ ...user, lemex: { configured: true } }]
 let releaseAccount
 let releaseProvider
 let holdProvider = false
-let failSession = 0
+// Session refreshes keep failing until the test retries manually, so bounded
+// automatic retries end in the visible recovery action.
+let failSession = false
 let failAfterProvider = false
 let providerSaves = 0
 let failLogout = false
@@ -59,10 +61,8 @@ await page.route('**/api/**', async (route) => {
       contentType: 'application/json',
       body: JSON.stringify(value),
     })
-  if (endpoint === '/api/session' && failSession > 0) {
-    --failSession
+  if (endpoint === '/api/session' && failSession)
     return respond({ error: 'Temporary fixture connection problem.' }, 503)
-  }
   if (endpoint === '/api/logout' && failLogout) {
     failLogout = false
     await new Promise((resolve) => {
@@ -98,7 +98,7 @@ await page.route('**/api/**', async (route) => {
         updatedAt: String(providerSaves),
       }
       state.session.lemex = { configured: true }
-      if (failAfterProvider) failSession = 1
+      if (failAfterProvider) failSession = true
     }
     return respond(provider)
   }
@@ -198,6 +198,7 @@ try {
     await page.getByLabel('Message Lemex').inputValue(),
     'Keep my question while settings refresh.',
   )
+  failSession = false
   await page
     .getByRole('button', { name: 'Retry workspace refresh', exact: true })
     .click()
@@ -267,6 +268,7 @@ try {
   await page.screenshot({
     path: new URL('onboarding-refresh-retry.png', directory).pathname,
   })
+  failSession = false
   await page
     .getByRole('button', { name: 'Retry opening workspace', exact: true })
     .click()

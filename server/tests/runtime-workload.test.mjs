@@ -83,7 +83,7 @@ const kernelOptions = {
   freshHome: true,
 }
 
-test('smaller editor sandboxes serve 25 connections while charging actual RAM and preserving build headroom', async (t) => {
+test('fake-engine admission charges actual RAM for 25 small editor workers while preserving build headroom', async (t) => {
   const { runtime, root } = await fixture(t, {
     maxConcurrent: 28,
     memoryBudget: '45g',
@@ -138,27 +138,27 @@ test('smaller editor sandboxes serve 25 connections while charging actual RAM an
   assert.equal(runtime.info().limits.usedMemoryBytes, 0)
 })
 
-test('a 45-GiB pool holds thirteen 2-GiB editors alongside one 18-GiB native check', async (t) => {
+test('a 45-GiB pool holds nine 3-GiB editors alongside one 18-GiB native check', async (t) => {
   const { runtime, root } = await fixture(t, {
-    maxConcurrent: 16,
+    maxConcurrent: 12,
     memoryBudget: '45g',
-    editorMemory: '2g',
-    editorCpus: 1,
+    editorMemory: '3g',
+    editorCpus: 2,
     batchMemoryReserved: '18g',
   })
-  runtime.memoryCapacity = { slots: 22, memoryBudgetBytes: 45 * 1024 ** 3 }
-  const editors = Array.from({ length: 13 }, () =>
+  runtime.memoryCapacity = { slots: 15, memoryBudgetBytes: 45 * 1024 ** 3 }
+  const editors = Array.from({ length: 9 }, () =>
     runtime.spawn(root, ['lake', 'serve', '--'], {
       workload: 'interactive',
       editor: true,
     }),
   )
-  assert.equal(runtime.info().workloads.interactiveLimit, 13)
+  assert.equal(runtime.info().workloads.interactiveLimit, 9)
   assert.equal(runtime.info().availability.editor, false)
   assert.equal(runtime.info().availability.kernel, true)
   const kernel = runtime.spawn(root, ['lake', 'check'], kernelOptions)
   assert.equal(kernel.workerMemoryBytes, 18 * 1024 ** 3)
-  assert.equal(runtime.info().limits.usedMemoryBytes, 44 * 1024 ** 3)
+  assert.equal(runtime.info().limits.usedMemoryBytes, 45 * 1024 ** 3)
   assert.throws(() => runtime.spawn(root, ['quick']), { status: 503 })
   await stop(kernel)
   assert(editors.every((child) => child.cancelled === undefined))

@@ -88,7 +88,8 @@ const fixture = await chatBrowserFixture({
 })
 const { page, browser, report } = fixture
 const reads = []
-let failNext = true
+// Fail every bounded automatic attempt until the test retries by reopening.
+let failReads = true
 await page.route(`**/api/chats/${chatId}`, (route) =>
   route.fulfill({
     contentType: 'application/json',
@@ -105,8 +106,7 @@ await page.route('**/api/runs/*/reasoning/**', (route) => {
   const url = new URL(route.request().url()),
     offset = Number(url.searchParams.get('offset') || 0)
   reads.push(url.pathname + url.search)
-  if (failNext) {
-    failNext = false
+  if (failReads)
     return route.fulfill({
       status: 503,
       contentType: 'application/json',
@@ -114,7 +114,6 @@ await page.route('**/api/runs/*/reasoning/**', (route) => {
         error: 'Could not load this step. Try opening the trace again.',
       }),
     })
-  }
   const isLive = url.pathname.includes(`/${active.id}/`)
   assert(url.pathname.endsWith(isLive ? '/reasoning-10' : '/reasoning-1'))
   const body = isLive ? liveText : earlier
@@ -140,6 +139,12 @@ try {
     async () => (await first.innerText()).includes('Could not load this step'),
     'actionable history error',
   )
+  assert.equal(
+    reads.length,
+    3,
+    'A failing step read stops after bounded automatic retries',
+  )
+  failReads = false
   await first.getByRole('button', { name: 'Hide reasoning trace' }).click()
   await first.locator('summary').click()
   await first.locator('.reasoning-content').waitFor()
@@ -158,12 +163,12 @@ try {
     await first.getByRole('button', { name: 'Load more reasoning' }).count(),
     0,
   )
-  assert.equal(reads.length, 3)
-  assert.match(reads[2], /offset=250000$/)
+  assert.equal(reads.length, 5)
+  assert.match(reads[4], /offset=250000$/)
   await first.getByRole('button', { name: 'Hide reasoning trace' }).click()
   await first.locator('summary').click()
   await first.locator('.reasoning-content').waitFor()
-  assert.equal(reads.length, 3, 'Reopening reuses the loaded step')
+  assert.equal(reads.length, 5, 'Reopening reuses the loaded step')
   await page.reload()
   await page.locator('.monaco-editor').waitFor()
   await until(
@@ -174,7 +179,7 @@ try {
   await first.locator('summary').click()
   await first.locator('.reasoning-content').waitFor()
   assert.match(await first.innerText(), /EARLY_STEP/)
-  assert.equal(reads.length, 4)
+  assert.equal(reads.length, 6)
   await first.getByRole('button', { name: 'Hide reasoning trace' }).click()
   await until(
     () => page.evaluate((id) => window.__chatFixture.connected(id), active.id),
@@ -182,7 +187,7 @@ try {
   )
   const live = page.locator(`[data-run-id="${active.id}"] .reasoning-trace`)
   await live.locator('summary').click()
-  await until(() => reads.length === 5, 'saved live prefix')
+  await until(() => reads.length === 7, 'saved live prefix')
   const delta =
     '\n\n' + 'z'.repeat(500001) + '\n\nLIVE_END: The check completed.'
   liveText += delta

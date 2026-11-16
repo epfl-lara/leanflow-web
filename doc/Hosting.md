@@ -19,6 +19,10 @@ Keep editors responsive during checks by reserving worker capacity in both direc
 
 Full checks keep their priority as slots become available. While open editors or agents prevent a full check from starting, bounded jobs can use the otherwise idle slots. New agents cannot use that exception. An assistant’s LaTeX compiler has a protected shared slot and inherits its parent’s priority, so a waiting check cannot block the compiler that lets the assistant finish. Cancelling queued work releases its place without stopping unrelated work. Capacity status reports effective class limits and active and queued slots. Before a larger rollout, run concurrent project checks on representative Lean projects with the intended hardware and provider limits; the deterministic worker-load regressions validate admission and cancellation, not a hardware sizing guarantee.
 
+For the measured production editor profile and compilation burst results, see
+[the availability rollout](releases/2026-11-16-availability.md). The four-editor
+example above describes the earlier equal-size worker pool.
+
 ## Run as a service
 
 The supplied systemd user service assumes the checkout is `~/leanflow-web`. Adjust its paths and Node.js 24+ location if needed. Stop the foreground server before starting the service.

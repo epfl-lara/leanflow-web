@@ -67,6 +67,8 @@ const sharing = {
   links: [],
 }
 const operations = []
+// Read failures persist until the test retries manually, so bounded automatic
+// retries end in each dialog's visible retry action.
 let failInitialSharingLoad = true
 let fixture
 try {
@@ -189,11 +191,10 @@ try {
   await page.route('**/api/accounts/search?*', (route) =>
     route.fulfill({ json: [{ id: 'collaborator', name: 'Collaborator' }] }),
   )
-  let participantRequests = 0
+  let failParticipants = true
   await page.route('**/api/projects/sharing-viewer/participants', (route) => {
     assert.equal(route.request().method(), 'GET')
-    participantRequests++
-    if (participantRequests === 1)
+    if (failParticipants)
       return route.fulfill({
         status: 503,
         json: { error: 'Temporary participant interruption.' },
@@ -229,13 +230,11 @@ try {
     const body = request.postData() ? request.postDataJSON() : null
     operations.push({ method, suffix, body })
     if (method === 'GET' && !suffix) {
-      if (failInitialSharingLoad) {
-        failInitialSharingLoad = false
+      if (failInitialSharingLoad)
         return route.fulfill({
           status: 503,
           json: { error: 'Temporary sharing interruption.' },
         })
-      }
       return route.fulfill({ json: sharing })
     }
     if (suffix === '/members/collaborator' && method === 'PUT') {
@@ -294,6 +293,7 @@ try {
     exact: true,
   })
   await dialog.getByRole('alert').waitFor()
+  failInitialSharingLoad = false
   await dialog
     .getByRole('button', { name: 'Retry sharing', exact: true })
     .click()
@@ -500,6 +500,7 @@ try {
     exact: true,
   })
   await participantDialog.getByRole('alert').waitFor()
+  failParticipants = false
   await participantDialog
     .getByRole('button', { name: 'Retry participants', exact: true })
     .click()
@@ -894,12 +895,11 @@ try {
     [...privateRecoveryUrl.searchParams],
     [['expectedUserId', 'fixture-admin']],
   )
-  let listingAttempts = 0
+  let failRecoveryListing = true
   await page.route(
     '**/api/projects/sharing-viewer/terminal-recoveries/private-copy/files',
-    (route) => {
-      listingAttempts++
-      return listingAttempts === 1
+    (route) =>
+      failRecoveryListing
         ? route.fulfill({
             status: 503,
             json: { error: 'Temporary recovery listing failure.' },
@@ -916,8 +916,7 @@ try {
               ],
               fileByteLimit: 32 * 1024 * 1024,
             },
-          })
-    },
+          }),
   )
   await page.setViewportSize({ width: 390, height: 844 })
   const individualFiles = settingsDialog.locator('.terminal-recovery-files')
@@ -926,6 +925,7 @@ try {
     .getByRole('alert')
     .filter({ hasText: 'Temporary recovery listing failure.' })
     .waitFor()
+  failRecoveryListing = false
   await individualFiles
     .getByRole('button', { name: 'Retry recovery files', exact: true })
     .click()

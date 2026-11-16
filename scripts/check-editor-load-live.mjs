@@ -106,7 +106,7 @@ try {
     // authentication, WebSockets, diagnostics, compilation and saves stay real.
     await context.route('**/api/session', async (route) => {
       const response = await route.fetch()
-      assert.equal(response.status(), 200)
+      if (response.status() !== 200) return route.fulfill({ response })
       const value = await response.json()
       assert.equal(value.user.id, account.id)
       assert.equal(value.user.role, 'user')
@@ -190,6 +190,7 @@ try {
     assert.equal(auth.user.id, account.id)
     assert.equal(auth.user.role, 'user')
     assert.equal(auth.lemex.configured, false)
+    session.authenticated = true
     report.profile ||= { capacity: auth.capacity, runtime: auth.runtime.limits }
     session.original = (
       await get(session, '/api/projects/' + project.id + '/file?path=Main.lean')
@@ -214,7 +215,12 @@ try {
         if (sampling) return
         sampling = true
         probeTask = (async () => {
-          const selected = sessions[report.probes.length % sessions.length]
+          const authenticated = sessions.filter(
+            (session) => session.authenticated,
+          )
+          if (!authenticated.length) return
+          const selected =
+            authenticated[report.probes.length % authenticated.length]
           const result = await get(selected, '/api/projects')
           report.probes.push(result.ms)
           const current = (await get(selected, '/api/session')).value.runtime

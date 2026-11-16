@@ -243,8 +243,8 @@ the dependent-compiler reserve and the shared memory budget still apply. Inspect
 for effective capacity. `usedMemoryBytes` is admitted RAM, not measured resident
 usage. Reported host RAM still leaves at least 25% outside the worker budget.
 
-For example, a 45-GiB budget with 2-GiB editors and an 18-GiB batch reserve allows
-at most 13 single-file editors by memory, while preserving one 18-GiB native
+For example, a 45-GiB budget with 3-GiB editors and an 18-GiB batch reserve allows
+at most nine single-file editors by memory, while preserving one 18-GiB native
 check. Repository editors at 6 GiB each reduce that total. This also
 requires enough total slots and editor connections. A private terminal consumes
 ordinary worker RAM from the interactive allowance. Additional assistants and

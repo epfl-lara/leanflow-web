@@ -1,0 +1,88 @@
+{
+  "date": "2026-11-16",
+  "applicationCommit": "7a0d366e4e24692173899598e9b706d22cf50c1e",
+  "acceptedConfiguration": {
+    "workers": 12,
+    "editors": 9,
+    "editorMemoryGiB": 3,
+    "editorCpus": 2,
+    "repositoryEditorMemoryGiB": 6,
+    "workerMemoryGiB": 6,
+    "workerCpus": 2,
+    "memoryBudgetGiB": 45,
+    "batchMemoryReservedGiB": 18,
+    "editorsPerUser": 3,
+    "editorsPerProject": 3,
+    "workerQueue": 128
+  },
+  "editorTest": {
+    "passed": true,
+    "accounts": 9,
+    "concurrentMathlibLanguageServers": 9,
+    "theoremsPerFile": 120,
+    "generatedWorkloads": true,
+    "savedEdits": 9,
+    "successfulChecks": 9,
+    "mixedCheckBurstMs": 53458,
+    "browserErrors": 0,
+    "oomKills": 0,
+    "peakContainerMemoryGiB": 2.3844070434570312,
+    "peakAggregateCgroupMemoryGiB": 19.635173797607422,
+    "browserApiProbes": {
+      "count": 76,
+      "p50Ms": 21.41491699999824,
+      "p95Ms": 1241.1796669999967,
+      "maxMs": 1442.5849579999922
+    },
+    "inferenceRequests": 0
+  },
+  "compileTest": {
+    "passed": true,
+    "accounts": 25,
+    "successfulChecks": 25,
+    "nativeRemoteChecks": 13,
+    "localMathlibChecks": 12,
+    "elapsedMs": 60857,
+    "submissionSpreadMs": 128,
+    "peakOutstanding": 25,
+    "peakRemoteRunning": 1,
+    "peakLocalBatch": 6,
+    "peakLocalQueue": 6,
+    "loopbackSessionProbeMs": {
+      "count": 120,
+      "p50": 6,
+      "p95": 11,
+      "max": 138
+    },
+    "inferenceRequestedByHarness": false,
+    "inferenceCallsMeasured": false
+  },
+  "admissionTest": {
+    "passed": true,
+    "perUserAcrossProjects": 3,
+    "repositoryEditorMemoryBytes": 6442450944,
+    "globalEditors": 9,
+    "extraEditorStatus": 429,
+    "nativeCheckStillAdmissible": true
+  },
+  "rejectedConfigurations": [
+    {
+      "editors": 13,
+      "editorMemoryGiB": 2,
+      "reason": "8 cgroup OOM kills during concurrent edits and checks; all 13 checks completing was insufficient for acceptance"
+    },
+    {
+      "editorMemoryMiB": 1280,
+      "reason": "isolated Mathlib OOM kill"
+    },
+    {
+      "editorMemoryMiB": 1536,
+      "reason": "isolated Mathlib OOM kill"
+    }
+  ],
+  "limits": [
+    "Warm managed generated Lean/Mathlib projects; not arbitrary research repositories or a cold operating-system cache.",
+    "No model inference or 25 concurrent language servers were tested.",
+    "Remote language servers remain unimplemented; larapc05 is disabled and larapc2 is not enrolled."
+  ]
+}

@@ -51,10 +51,14 @@ try {
   let releaseFolder = null
   let delayNextFolder = false
   let folderListingStatus = 200
-  let failNextFileListing = false
+  // The listing keeps failing until Refresh files, so bounded automatic
+  // retries end in the creation acknowledgement.
+  let failFileListing = false
+  let fileListings = 0
   await page.route('**/api/projects/*/files', async (route) => {
-    if (!failNextFileListing) return route.fallback()
-    failNextFileListing = false
+    if (route.request().method() !== 'GET') return route.fallback()
+    fileListings++
+    if (!failFileListing) return route.fallback()
     return route.fulfill({
       status: 503,
       json: { error: 'File list temporarily unavailable.' },
@@ -421,7 +425,7 @@ try {
   for (const kind of ['folder', 'file']) {
     const name =
       kind === 'file' ? 'CreatedDespiteRefresh.md' : 'CreatedDespiteRefresh'
-    failNextFileListing = true
+    failFileListing = true
     await create(kind, name)
     await dialog(kind).waitFor({ state: 'hidden' })
     await until(
@@ -444,9 +448,16 @@ try {
         .length,
       1,
     )
+    failFileListing = false
+    const listingsBeforeRefresh = fileListings
     await page
       .getByRole('button', { name: 'Refresh files', exact: true })
       .click()
+    // Serve the manual refresh before the next creation fails the listing.
+    await until(
+      () => fileListings > listingsBeforeRefresh,
+      'manual file list refresh',
+    )
   }
   report.checks.push(
     'Trailing folder slashes are accepted, absolute paths explain how to fix the name, and successful creation remains acknowledged when refresh fails.',

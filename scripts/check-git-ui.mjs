@@ -70,7 +70,7 @@ let pushed,
   holdPreview,
   holdGet,
   failCommit = false,
-  failNextGet = false,
+  failStatus = false,
   failStatusAfterPush = false,
   pushWarning = '',
   getRequests = 0,
@@ -130,13 +130,11 @@ await page.route('**/api/projects/*/git', async (route) => {
     pendingGets++
     maxPendingGets = Math.max(maxPendingGets, pendingGets)
     try {
-      if (id === projectId && failNextGet) {
-        failNextGet = false
+      if (id === projectId && failStatus)
         return await respond(
           { error: 'Fixture metadata unavailable after confirmed publish.' },
           503,
         )
-      }
       if (id === projectId && holdGet && !holdGet.release) {
         const pending = holdGet
         return await new Promise((resolve) => {
@@ -259,7 +257,9 @@ await page.route('**/api/projects/*/git', async (route) => {
         }
       })
     if (failStatusAfterPush) {
-      failNextGet = true
+      // Keep metadata unavailable until the test recovers it, so the bounded
+      // automatic read retry cannot hide the post-push failure.
+      failStatus = true
       failStatusAfterPush = false
     }
     return respond({
@@ -623,6 +623,7 @@ try {
   assert.equal(await reviewed.count(), 0)
   await noStoredCredential()
   pushWarning = ''
+  failStatus = false
   report.checks.push(
     'A confirmed push retains Published status and destination-save warning when subsequent metadata refresh fails; credentials remain cleared',
   )

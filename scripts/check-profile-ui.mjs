@@ -45,8 +45,8 @@ let failProfile = true
 let expireProfile = false
 let holdProfile = false
 let releaseProfile
-let holdSession = false
-let releaseSession
+let holdModelRefresh = false
+let releaseModelRefresh
 await page.route('**/api/**', async (route) => {
   const endpoint = new URL(route.request().url()).pathname
   const method = route.request().method()
@@ -54,17 +54,7 @@ await page.route('**/api/**', async (route) => {
     route.fulfill({ status, json: value })
   if (endpoint === '/api/session') {
     if (!authenticated) return respond({ error: 'Please sign in.' }, 401)
-    const snapshot = structuredClone(state.session)
-    if (holdSession) {
-      snapshot.models = snapshot.models.map((model) => ({
-        ...model,
-        name: `${model.name} (refreshed)`,
-      }))
-      await new Promise((resolve) => {
-        releaseSession = resolve
-      })
-    }
-    return respond(snapshot)
+    return respond(structuredClone(state.session))
   }
   if (endpoint === '/api/login') {
     const body = route.request().postDataJSON()
@@ -126,12 +116,23 @@ await page.route('**/api/**', async (route) => {
       showReasoning: true,
       tools: { lean: true, lean_probe: true, lean_explore: true, exa: true },
     })
-  if (endpoint === '/api/models' || endpoint === '/api/models/refresh')
-    return respond({
+  if (endpoint === '/api/models' || endpoint === '/api/models/refresh') {
+    const access = {
       models: state.session.models,
       defaultModel: state.session.defaultModel,
       savedModels: state.session.savedModels,
-    })
+    }
+    if (endpoint === '/api/models/refresh' && holdModelRefresh) {
+      access.models = access.models.map((model) => ({
+        ...model,
+        name: `${model.name} (refreshed)`,
+      }))
+      await new Promise((resolve) => {
+        releaseModelRefresh = resolve
+      })
+    }
+    return respond(access)
+  }
   return route.fallback()
 })
 const settings = () =>
@@ -238,11 +239,11 @@ try {
   await page.screenshot({
     path: new URL('account-settings.png', directory).pathname,
   })
-  holdSession = true
+  holdModelRefresh = true
   await settings()
     .getByRole('button', { name: 'Refresh models', exact: true })
     .click()
-  await until(() => !!releaseSession, 'model refresh waiting for session')
+  await until(() => !!releaseModelRefresh, 'pending model refresh')
   await settings()
     .getByLabel('Display name', { exact: true })
     .fill('Renamed collaborator')
@@ -267,13 +268,13 @@ try {
   holdProfile = false
   releaseProfile = undefined
   await settings().getByText('Profile saved.', { exact: true }).waitFor()
-  const staleSession = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === '/api/session',
+  const staleRefresh = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === '/api/models/refresh',
   )
-  releaseSession()
-  holdSession = false
-  releaseSession = undefined
-  await staleSession
+  releaseModelRefresh()
+  holdModelRefresh = false
+  releaseModelRefresh = undefined
+  await staleRefresh
   assert.equal(
     await settings().getByLabel('Account ID', { exact: true }).inputValue(),
     originalId,
@@ -332,7 +333,7 @@ try {
     .catch(() => {})
 } finally {
   releaseProfile?.()
-  releaseSession?.()
+  releaseModelRefresh?.()
   await fs.writeFile(
     new URL('report.json', directory),
     JSON.stringify(report, null, 2) + '\n',

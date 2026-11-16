@@ -191,9 +191,14 @@ try {
 
   const beforeStale = await page.evaluate(() => window.__recoveryEvents.expired)
   await delayedGit()
+  // The late 401 settles the old refresh as unavailable status; Refresh Git
+  // status stays available for a manual retry.
   await page
-    .getByRole('button', { name: 'Refresh Git status', exact: true })
-    .waitFor({ state: 'hidden' })
+    .getByRole('button', {
+      name: 'Source control, Git status unavailable, 0 changes',
+      exact: true,
+    })
+    .waitFor()
   assert.equal(
     await page.evaluate(() => window.__recoveryEvents.expired),
     beforeStale,
