@@ -116,6 +116,98 @@ test('a changed-cookie 401 opens recovery without rebinding the tab', async (t) 
   )
 })
 
+test('a read retry cannot cross logout and return to the same account', async (t) => {
+  const client = clientApi()
+  client.bindSessionUser('alpha')
+  let calls = 0
+  withFetch(t, async () => {
+    calls++
+    client.bindSessionUser(null)
+    client.bindSessionUser('alpha')
+    throw new TypeError('Failed to fetch')
+  })
+  await assert.rejects(
+    client.api('/api/projects'),
+    (error) => error.status === 409,
+  )
+  assert.equal(calls, 1)
+})
+
+test('a response body cannot populate a later visit to the same account', async (t) => {
+  const client = clientApi()
+  client.bindSessionUser('alpha')
+  let finish
+  const body = new ReadableStream({
+    start(controller) {
+      finish = controller
+    },
+  })
+  withFetch(t, async () => new Response(body))
+  const pending = client.api('/api/projects')
+  await new Promise((resolve) => setImmediate(resolve))
+  client.bindSessionUser(null)
+  client.bindSessionUser('alpha')
+  finish.enqueue(new TextEncoder().encode('[]'))
+  finish.close()
+  await assert.rejects(pending, (error) => error.status === 409)
+})
+
+test('real api wiring retries a safe GET after an interrupted body', async (t) => {
+  const client = clientApi()
+  let calls = 0
+  withFetch(t, async () => {
+    calls++
+    if (calls === 1)
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new TypeError('network error'))
+          },
+        }),
+      )
+    return Response.json({ ok: true })
+  })
+  assert.deepEqual(await client.api('/api/projects'), { ok: true })
+  assert.equal(calls, 2)
+})
+
+test('real api wiring never repeats mutations after a connection failure', async (t) => {
+  const client = clientApi()
+  let calls = 0
+  withFetch(t, async () => {
+    calls++
+    throw new TypeError('Failed to fetch')
+  })
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+    const before = calls
+    await assert.rejects(
+      client.api('/api/fixture', { method }),
+      (error) => error.name === 'ApiNetworkError' && error.status === 0,
+    )
+    assert.equal(calls, before + 1, method)
+  }
+})
+
+test('real api wiring parses Retry-After and does not repeat reads with a long wait', async (t) => {
+  const client = clientApi()
+  let calls = 0
+  withFetch(t, async () => {
+    calls++
+    return Response.json(
+      { error: 'Busy' },
+      {
+        status: 429,
+        headers: { 'Retry-After': '10' },
+      },
+    )
+  })
+  await assert.rejects(
+    client.api('/api/projects'),
+    (error) => error.status === 429 && error.retryAfterMs === 10000,
+  )
+  assert.equal(calls, 1)
+})
+
 test('image and HTML previews reject responses from a replaced account, including delayed response bodies', async (t) => {
   let currentFetch
   withFetch(t, (...args) => currentFetch(...args))

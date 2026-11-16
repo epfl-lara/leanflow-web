@@ -398,7 +398,7 @@ export class Runtime {
             this.memoryCapacity.memoryBudgetBytes
         )
           throw new Error(
-            'Reserved batch memory must leave room for an editor.',
+            'STUDIO_RESERVED_BATCH_MEMORY plus STUDIO_EDITOR_MEMORY exceeds the worker memory budget. Lower the reserve or editor limit.',
           )
       } catch (error) {
         this.capacityError = error.message
@@ -1299,7 +1299,7 @@ export class Runtime {
     )
   }
 
-  #workloadLimits() {
+  #reservations() {
     const slots = this.#slotLimit()
     // A single-slot helper cannot run both classes simultaneously. On larger
     // hosts keep at least one usable slot for each class, including after the
@@ -1313,6 +1313,11 @@ export class Runtime {
       Math.max(0, slots - interactiveReserved),
       Math.max(0, slots - 1),
     )
+    return { slots, interactiveReserved, batchReserved }
+  }
+
+  #workloadLimits() {
+    const { slots, interactiveReserved, batchReserved } = this.#reservations()
     return {
       interactiveReserved,
       batchReserved,
@@ -1328,7 +1333,7 @@ export class Runtime {
         Math.floor(
           (this.#memoryBudget() -
             Math.min(
-              interactiveReserved * this.editorMemoryBytes,
+              interactiveReserved * this.workerMemoryBytes,
               Math.max(0, this.#memoryBudget() - this.workerMemoryBytes),
             )) /
             this.workerMemoryBytes,
@@ -1344,9 +1349,7 @@ export class Runtime {
     )
   }
 
-  #reservedBatchMemory(
-    count = Math.min(this.batchReserved, Math.max(0, this.#slotLimit() - 1)),
-  ) {
+  #reservedBatchMemory(count = this.#reservations().batchReserved) {
     return Math.min(
       this.batchMemoryReserved ?? count * this.workerMemoryBytes,
       Math.max(0, this.#memoryBudget() - this.editorMemoryBytes),
@@ -1927,7 +1930,8 @@ export class Runtime {
     const workerEnv = {
       ...env,
       LEAN_NUM_THREADS:
-        env.LEAN_NUM_THREADS ?? String(Math.max(1, Math.floor(this.cpus))),
+        env.LEAN_NUM_THREADS ??
+        String(Math.max(1, Math.floor(editor ? this.editorCpus : this.cpus))),
     }
     for (const [key, value] of Object.entries(workerEnv)) {
       if (

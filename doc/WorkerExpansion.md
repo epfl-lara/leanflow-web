@@ -224,15 +224,16 @@ coordinator owner token or user credential goes to a worker.
 
 ## Prepare for more active editors
 
-Adding check workers alone leaves the four-editor limit unchanged. Increasing
-that number to twenty without changing the worker pool and measuring memory
-would be unsound: twenty containers at the current 6-GiB limit have 120 GiB of
-combined caps, exceeding the coordinator's RAM. Those are caps, not measured
-resident memory or twenty dedicated reservations.
+Adding check workers alone does not increase language-server capacity.
+[The availability rollout](releases/2026-11-16-availability.md) separates local
+resources for managed single-file editors and measures their real Mathlib
+diagnostics. Repository editors retain the ordinary worker size. Use the
+current measured limits in that report, rather than the earlier four-editor
+snapshot or an aggregate total across the PCs. Twenty repository editors at
+6 GiB still have 120 GiB of combined caps, exceeding the coordinator budget.
 
-The next application milestone is a measured interactive pool, either by
-separating local LSP resources from batch resources or by adding a remote LSP
-capability. Remote sessions need explicit ownership and leases, bounded framed
+The next expansion milestone is a remote LSP capability, following the
+measured local editor allocation. Remote sessions need explicit ownership and leases, bounded framed
 stdin/stdout transport, document-version synchronization from the coordinator,
 isolated per-session working copies and writable caches, and idle/cancellation/
 reconnect cleanup. Canonical source and collaboration stay on the coordinator;

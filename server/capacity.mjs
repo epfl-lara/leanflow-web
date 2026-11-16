@@ -42,7 +42,11 @@ export function loadCapacity(env = process.env) {
   if (workerMemoryBudget)
     memoryBytes(workerMemoryBudget, 'STUDIO_WORKER_MEMORY_BUDGET')
   const editorMemory = env.STUDIO_EDITOR_MEMORY?.trim() || null
-  if (editorMemory) memoryBytes(editorMemory, 'STUDIO_EDITOR_MEMORY')
+  if (
+    editorMemory &&
+    memoryBytes(editorMemory, 'STUDIO_EDITOR_MEMORY') < 6 * 1024 ** 2
+  )
+    throw new Error('STUDIO_EDITOR_MEMORY must be at least 6 MiB.')
   const batchMemoryReserved = env.STUDIO_RESERVED_BATCH_MEMORY?.trim() || null
   if (batchMemoryReserved)
     memoryBytes(batchMemoryReserved, 'STUDIO_RESERVED_BATCH_MEMORY')

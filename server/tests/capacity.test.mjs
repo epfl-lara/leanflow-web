@@ -56,6 +56,10 @@ test('invalid capacity settings fail before startup rather than disabling admiss
   for (const name of ['STUDIO_EDITOR_MEMORY', 'STUDIO_RESERVED_BATCH_MEMORY'])
     assert.throws(() => loadCapacity({ [name]: '0g' }), new RegExp(name))
   assert.throws(
+    () => loadCapacity({ STUDIO_EDITOR_MEMORY: '1m' }),
+    /STUDIO_EDITOR_MEMORY.*6 MiB/,
+  )
+  assert.throws(
     () => loadCapacity({ STUDIO_EDITOR_CPUS: '0' }),
     /STUDIO_EDITOR_CPUS/,
   )

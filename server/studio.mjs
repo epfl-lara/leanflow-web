@@ -1719,7 +1719,9 @@ export async function createStudio({
     try {
       child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
         workload: 'interactive',
-        editor: true,
+        // Keep repository editors at their existing worker size. The smaller
+        // allocation was measured for managed single-file Mathlib workspaces.
+        editor: project.kind === 'single-file',
         network: 'none',
         readOnlyWorkspace: true,
         writeLakeCache: true,

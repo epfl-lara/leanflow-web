@@ -162,6 +162,31 @@ if (args[0] === 'run') {
   }
 }
 
+test('initialization derives smaller editor capacity from verified host RAM and enforces the explicit reserve', async (t) => {
+  const { runtime } = await fixture(t, {
+    maxConcurrent: 9,
+    memory: '4g',
+    editorMemory: '1g',
+    interactiveReserved: 1,
+    batchReserved: 1,
+    batchMemoryReserved: '4g',
+  })
+  assert.equal(runtime.ready, true, runtime.error)
+  assert.equal(runtime.info().maxConcurrent, 9)
+  assert.equal(runtime.info().workloads.interactiveLimit, 8)
+  assert.equal(runtime.info().limits.memoryBudgetBytes, 12 * gib)
+  assert.equal(runtime.info().limits.reservedBatchMemoryBytes, 4 * gib)
+  const invalid = await fixture(t, {
+    editorMemory: '2g',
+    batchMemoryReserved: '12g',
+  })
+  assert.equal(invalid.runtime.ready, false)
+  assert.match(
+    invalid.runtime.error,
+    /STUDIO_RESERVED_BATCH_MEMORY.*STUDIO_EDITOR_MEMORY/,
+  )
+})
+
 test('memory admission queues weighted checks without smaller jobs overtaking and recovers after cancellation', async (t) => {
   const { runtime, root, runs } = await fixture(t)
   assert.equal(runtime.ready, true, runtime.error)

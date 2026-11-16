@@ -703,7 +703,7 @@ test('Lean editor admission limits one account across projects and releases its 
     f.spawned.every(
       ({ args, options }) =>
         JSON.stringify(args) === JSON.stringify(['lake', 'serve', '--']) &&
-        options.editor === true &&
+        options.editor === false &&
         options.workload === 'interactive',
     ),
   )

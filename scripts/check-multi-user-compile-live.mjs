@@ -10,19 +10,20 @@ import {
   loadTestSetting,
 } from './lib/compile-load-fixture.mjs'
 
+const users = Number(process.env.STUDIO_LOAD_USERS || 10)
 const {
   state: credentials,
   directory,
   origin,
   rounds,
-} = await compileLoadFixture()
+} = await compileLoadFixture({ users })
 const data = await fs.realpath(loadTestSetting('STUDIO_LOAD_DATA_DIR'))
 assert(
   ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(origin).hostname),
   'Run the API sampler beside the server; its administrator token must stay on loopback.',
 )
 const actors = new Set(credentials.accounts.map((a) => a.id))
-assert.equal(actors.size, 10)
+assert.equal(actors.size, users)
 const owner = (
   await fs.readFile(path.join(data, 'auth/owner.token'), 'utf8')
 ).trim()
@@ -55,7 +56,7 @@ const report = {
   passed: false,
   runTag: credentials.runTag,
   suppliedRelease: path.basename(release),
-  users: 10,
+  users,
   inferenceRequestedByHarness: false,
   inferenceCallsMeasured: false,
   workloads: [],
@@ -159,7 +160,11 @@ async function round(label, kinds) {
   }
   report.rounds.push(record)
   console.log(
-    'Starting ' + label + ': ten simultaneous authenticated compile requests',
+    'Starting ' +
+      label +
+      ': ' +
+      users +
+      ' simultaneous authenticated compile requests',
   )
   const submissions = await Promise.all(
     credentials.accounts.map(async (account, index) => {
@@ -255,7 +260,7 @@ async function round(label, kinds) {
     JSON.stringify({
       label,
       passed: true,
-      users: 10,
+      users,
       elapsedMs: record.elapsedMs,
       submissionSpreadMs: record.submissionSpreadMs,
       statuses: record.cases.map((c) => ({
@@ -336,13 +341,13 @@ try {
     sampling = false
   })
   if (rounds === 'all' || rounds === 'native')
-    await round('native-projects', Array(10).fill('native'))
+    await round('native-projects', Array(users).fill('native'))
   if (rounds === 'all' || rounds === 'mathlib')
-    await round('mathlib-files', Array(10).fill('mathlib'))
+    await round('mathlib-files', Array(users).fill('mathlib'))
   if (rounds === 'all' || rounds === 'mixed')
     await round(
       'mixed-projects-and-mathlib',
-      Array.from({ length: 10 }, (_, i) => (i % 2 ? 'mathlib' : 'native')),
+      Array.from({ length: users }, (_, i) => (i % 2 ? 'mathlib' : 'native')),
     )
   assert.equal(report.errors.length, 0)
   report.passed = true

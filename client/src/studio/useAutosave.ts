@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, errorText, type OpenFile } from './api'
+import { ApiNetworkError } from './apiTransport.mjs'
 import { WorkspaceBuffers, type WorkspaceScope } from './workspaceBuffers'
 
 interface SaveIssue {
@@ -133,7 +134,7 @@ export function useAutosave({
           retryAt:
             Date.now() +
             Math.min(30_000, 2000 * 2 ** Math.min(attempts - 1, 4)),
-          message: `${retrying ? 'Autosave will retry' : 'Autosave paused'}: ${errorText(error)} Your edits are kept in this tab.`,
+          message: `${retrying ? 'Autosave will retry' : 'Autosave paused'}: ${error instanceof ApiNetworkError ? 'The last save was not acknowledged.' : errorText(error)} Your edits are kept in this tab.`,
         }
         failed.current = failure
         setIssue(failure)

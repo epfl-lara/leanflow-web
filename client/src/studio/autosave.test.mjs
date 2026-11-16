@@ -61,16 +61,18 @@ function fixture(t, save) {
   })
   t.mock.timers.enable({ apis: ['setTimeout'] })
   let cleanup
+  const issues = []
   const { useAutosave } = load('./useAutosave.ts', {
     react: {
       useCallback: (fn) => fn,
       useRef: (current) => ({ current }),
-      useState: (initial) => [initial, () => {}],
+      useState: (initial) => [initial, (issue) => issues.push(issue)],
       useEffect: (fn) => {
         cleanup = fn()
       },
     },
     './api': { ApiError, errorText },
+    './apiTransport.mjs': apiTransport,
     './workspaceBuffers': { WorkspaceBuffers },
   })
   const store = new WorkspaceBuffers()
@@ -89,7 +91,7 @@ function fixture(t, save) {
       else delete globalThis[name]
     }
   })
-  return { store, controls }
+  return { store, controls, issues }
 }
 
 test('removing a failed batch member resumes autosaving the healthy files without losing its draft', async (t) => {
@@ -138,4 +140,38 @@ test('typing against the same conflicting saved version does not silently retry 
   await settle()
   assert.equal(calls, 1)
   assert.equal(store.drafts()[0].content, 'more local typing')
+})
+
+test('an unacknowledged save retains its draft and a subsequent version conflict pauses retrying', async (t) => {
+  let calls = 0
+  const { store, issues } = fixture(t, async (store) => {
+    calls++
+    assert.equal(store.dirty()[0].hash, 'a'.repeat(64))
+    if (calls === 1)
+      throw new apiTransport.ApiNetworkError(
+        'PUT',
+        1,
+        new TypeError('Failed to fetch'),
+      )
+    throw new ApiError('Version conflict', 409)
+  })
+  store.setFile(source('Main.lean'))
+  store.change('Main.lean', 'unacknowledged draft')
+  t.mock.timers.tick(1500)
+  await settle()
+  assert.match(
+    issues.at(-1).message,
+    /Autosave will retry: The last save was not acknowledged/,
+  )
+  assert.equal(
+    store.getSnapshot().buffers.get('Main.lean').savedContent,
+    'saved',
+  )
+  t.mock.timers.tick(2000)
+  await settle()
+  assert.match(issues.at(-1).message, /Autosave paused/)
+  t.mock.timers.tick(30000)
+  await settle()
+  assert.equal(calls, 2)
+  assert.equal(store.drafts()[0].content, 'unacknowledged draft')
 })

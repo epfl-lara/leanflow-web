@@ -79,7 +79,7 @@ Optional remote pure checks use `STUDIO_CLUSTER_CONFIG`, an absolute path to a p
 
 Workers have hard CPU, memory, and process limits. Their combined RAM and swap allowance equals the memory limit, so workers cannot use host swap. These limits cover the whole worker process tree, including Lean, Lake, native tools, and assistant commands. Project settings cannot raise the worker's hard limit. LeanFlow does not add a fixed `-M1536` or `-j1` to project Lake files: a per-process Lean limit can reject larger proofs and does not bound all the processes in a build.
 
-At startup, LeanFlow limits the total worker memory allowance to 75% of the RAM reported by Docker. Set `STUDIO_WORKER_MEMORY_BUDGET` to a smaller Docker memory size, such as `8g`, when sharing the host with other services. The budget cannot exceed that 75% ceiling. The number of available slots is the smaller of `STUDIO_MAX_WORKERS` and the budget divided by `STUDIO_WORKER_MEMORY`, rounded down. For example, exactly 16 GiB of reported RAM allows three 4 GiB slots, leaving 4 GiB for the app and system. If one worker cannot fit, or Docker cannot report or enforce memory and swap limits, workers stay unavailable with an actionable configuration error.
+At startup, LeanFlow limits the total worker memory allowance to 75% of the RAM reported by Docker. Set `STUDIO_WORKER_MEMORY_BUDGET` to a smaller Docker memory size, such as `8g`, when sharing the host with other services. The budget cannot exceed that 75% ceiling. With the editor profile unset, the number of available slots is the smaller of `STUDIO_MAX_WORKERS` and the budget divided by `STUDIO_WORKER_MEMORY`, rounded down. A smaller editor profile allows more containers, while every launch still charges its actual RAM limit; see [editor capacity](#editor-capacity-and-memory). For example, exactly 16 GiB of reported RAM allows three 4 GiB slots, leaving 4 GiB for the app and system. If one worker cannot fit, or Docker cannot report or enforce memory and swap limits, workers stay unavailable with an actionable configuration error.
 
 Editors and terminals use interactive slots; agents, toolchain installation, setup, TeX, and proof checks use batch slots within the same total budget. `STUDIO_RESERVED_INTERACTIVE_WORKERS` defaults to 1, which batch jobs cannot occupy. `STUDIO_RESERVED_BATCH_WORKERS` defaults to 3, which editors and terminals cannot occupy. Effective reserves shrink when the memory allowance leaves fewer slots, keeping both classes usable; a single-slot host has no simultaneous separation. Full kernel checks use up to three batch slots and their combined CPU and RAM. Full checks keep priority once the slots they need can become available. If open sessions or agents prevent a check from starting, bounded one-slot jobs can use the remaining capacity; they stop entering that gap once those holders leave. Bounded jobs can also use spare capacity while another full check finishes its exclusive export. New agents and work without a deadline cannot use this exception. Stop cancels waiting work without interrupting other projects.
 
@@ -217,3 +217,41 @@ Existing installed books are preserved. Install into a new directory for a refre
 Back up your data directory (`.data` by default) while the server is stopped or from a consistent snapshot. It contains project sources, account tokens, saved provider settings, and chats. Dependency caches take several gigabytes; keep them while projects or runs use them.
 
 Never commit `.env`, `.data`, tokens, or certificate keys. Use trusted collaborators and repositories: imported project code and assistant tools can access the assistant worker's provider key. Read [SECURITY.md](../SECURITY.md) before exposing the server to additional users.
+
+## Editor capacity and memory
+
+Set `STUDIO_MAX_EDITORS` for language-server connections, not signed-in people.
+Each open project can start a Lean language server. `STUDIO_MAX_EDITORS_PER_USER`
+and `STUDIO_MAX_EDITORS_PER_PROJECT` keep one account or project from consuming
+all connections. The per-user default is the global editor maximum.
+
+`STUDIO_EDITOR_MEMORY` and `STUDIO_EDITOR_CPUS` optionally give the fixed
+`lake serve --` command its own limits for managed single-file workspaces.
+Repository editors retain their ordinary worker size, so importing a larger
+research project does not silently reduce its RAM. Unset values retain ordinary
+worker limits. Builds, assistants and terminals keep `STUDIO_WORKER_MEMORY` and
+`STUDIO_WORKER_CPUS`. Changing an editor limit does not move editors to remote
+check workers. CPU limits allow individual bursts; they do not create dedicated
+CPUs for every connection.
+
+The scheduler checks both worker counts and the sum of running containers' RAM
+limits. Full native checks charge up to three ordinary worker allocations.
+`STUDIO_RESERVED_BATCH_MEMORY` holds RAM out of interactive admission; unset, it
+uses ordinary worker RAM times the effective batch-slot reserve. Count reserves,
+the dependent-compiler reserve and the shared memory budget still apply. Inspect
+`/api/session` → `runtime.workloads`, `runtime.availability` and `runtime.limits`
+for effective capacity. `usedMemoryBytes` is admitted RAM, not measured resident
+usage. Reported host RAM still leaves at least 25% outside the worker budget.
+
+For example, a 45-GiB budget with 2-GiB editors and an 18-GiB batch reserve allows
+at most 13 single-file editors by memory, while preserving one 18-GiB native
+check. Repository editors at 6 GiB each reduce that total. This also
+requires enough total slots and editor connections. A private terminal consumes
+ordinary worker RAM from the interactive allowance. Additional assistants and
+checks queue when their own required resources do not fit.
+
+Measure real project diagnostics before applying a smaller editor allocation.
+A Mathlib import can be killed without stopping its parent language server, so
+successful WebSocket initialization alone is insufficient. Larger research
+projects can require a higher editor limit and fewer simultaneous editors.
+See [the availability measurements](releases/2026-11-16-availability.md).

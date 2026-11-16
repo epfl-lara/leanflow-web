@@ -322,7 +322,7 @@ try {
       const response = await session.context.request.post(
         origin + '/api/projects/' + project.id + '/check',
         {
-          data: {},
+          data: { path: kind === 'native' ? 'Workload.lean' : 'Main.lean' },
           headers: { 'X-LeanFlow-User': session.account.id },
           timeout: 60000,
         },
@@ -397,7 +397,10 @@ try {
               '/api/projects/' +
               session.account.projects[session.job.kind].id +
               '/stop',
-            { data: {}, headers: { 'X-LeanFlow-User': session.account.id } },
+            {
+              data: {},
+              headers: { 'X-LeanFlow-User': session.account.id },
+            },
           )
           .catch(() => {})
     }

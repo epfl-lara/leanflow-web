@@ -138,6 +138,77 @@ test('smaller editor sandboxes serve 25 connections while charging actual RAM an
   assert.equal(runtime.info().limits.usedMemoryBytes, 0)
 })
 
+test('a 45-GiB pool holds thirteen 2-GiB editors alongside one 18-GiB native check', async (t) => {
+  const { runtime, root } = await fixture(t, {
+    maxConcurrent: 16,
+    memoryBudget: '45g',
+    editorMemory: '2g',
+    editorCpus: 1,
+    batchMemoryReserved: '18g',
+  })
+  runtime.memoryCapacity = { slots: 22, memoryBudgetBytes: 45 * 1024 ** 3 }
+  const editors = Array.from({ length: 13 }, () =>
+    runtime.spawn(root, ['lake', 'serve', '--'], {
+      workload: 'interactive',
+      editor: true,
+    }),
+  )
+  assert.equal(runtime.info().workloads.interactiveLimit, 13)
+  assert.equal(runtime.info().availability.editor, false)
+  assert.equal(runtime.info().availability.kernel, true)
+  const kernel = runtime.spawn(root, ['lake', 'check'], kernelOptions)
+  assert.equal(kernel.workerMemoryBytes, 18 * 1024 ** 3)
+  assert.equal(runtime.info().limits.usedMemoryBytes, 44 * 1024 ** 3)
+  assert.throws(() => runtime.spawn(root, ['quick']), { status: 503 })
+  await stop(kernel)
+  assert(editors.every((child) => child.cancelled === undefined))
+  await Promise.all(editors.map(stop))
+  assert.equal(runtime.info().limits.usedMemoryBytes, 0)
+})
+
+test('clamped batch RAM preserves nondefault interactive reserves and reports the same limits it admits', async (t) => {
+  const { runtime, root } = await fixture(t, {
+    maxConcurrent: 3,
+    memory: '4g',
+    interactiveReserved: 2,
+    batchReserved: 3,
+  })
+  runtime.memoryCapacity = { slots: 3, memoryBudgetBytes: 12 * 1024 ** 3 }
+  assert.equal(runtime.info().workloads.interactiveLimit, 2)
+  assert.equal(runtime.info().limits.reservedBatchMemoryBytes, 4 * 1024 ** 3)
+  const first = runtime.spawn(root, ['hold-editor'], {
+    workload: 'interactive',
+  })
+  const second = runtime.spawn(root, ['hold-editor'], {
+    workload: 'interactive',
+  })
+  assert.throws(
+    () => runtime.spawn(root, ['hold-editor'], { workload: 'interactive' }),
+    { status: 503 },
+  )
+  await Promise.all([first, second].map(stop))
+})
+
+test('smaller editors retain enough protected interactive RAM for an ordinary terminal', async (t) => {
+  const { runtime, root } = await fixture(t, {
+    maxConcurrent: 16,
+    memoryBudget: '45g',
+    editorMemory: '2g',
+    batchMemoryReserved: '18g',
+  })
+  runtime.memoryCapacity = { slots: 22, memoryBudgetBytes: 45 * 1024 ** 3 }
+  assert.equal(runtime.info().workloads.batchLimit, 6)
+  const jobs = Array.from({ length: 6 }, () =>
+    runtime.spawn(root, ['hold-batch']),
+  )
+  const terminal = runtime.spawn(root, ['hold-terminal'], {
+    workload: 'interactive',
+  })
+  assert.equal(terminal.workerMemoryBytes, 6 * 1024 ** 3)
+  assert.equal(runtime.info().limits.usedMemoryBytes, 42 * 1024 ** 3)
+  await Promise.all([...jobs, terminal].map(stop))
+})
+
 test('RAM-blocked native checks permit bounded backfill, then resume as editors release memory', async (t) => {
   const { runtime, root } = await fixture(t, {
     maxConcurrent: 28,

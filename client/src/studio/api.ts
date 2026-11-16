@@ -473,12 +473,14 @@ export const SESSION_EXPIRED_EVENT = 'leanflow:session-expired'
 export const SESSION_RESTORED_EVENT = 'leanflow:session-restored'
 let sessionRevision = 0
 let sessionUserId: string | null = null
+let sessionBinding = 0
 
 // Each tab keeps the account that owns its drafts, even if another tab replaces
 // the shared sign-in cookie. Only bootstrap, explicit login and logout bind it.
 export function bindSessionUser(userId: string | null) {
   if (sessionUserId === userId) return
   sessionUserId = userId
+  sessionBinding += 1
   sessionRevision += 1
 }
 
@@ -579,16 +581,25 @@ async function requestResult<T>(
   read: (response: Response) => Promise<T>,
 ): Promise<T> {
   const requestUserId = sessionUserId
+  const binding = sessionBinding
+  const requireBinding = () => {
+    requireCurrentSession(requestUserId)
+    if (binding !== sessionBinding)
+      throw new ApiError(
+        'The workspace account changed. Try again in this account.',
+        409,
+      )
+  }
   return withApiRetries(
     async () => {
       const value = await read(await request(path, options))
-      requireCurrentSession(requestUserId)
+      requireBinding()
       return value
     },
     {
       method: options.method,
       signal: options.signal,
-      beforeAttempt: () => requireCurrentSession(requestUserId),
+      beforeAttempt: requireBinding,
     },
   )
 }
