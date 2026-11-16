@@ -906,3 +906,74 @@ test('local package cache mounts reject symlinked packages and generated cache d
     )
   }
 })
+
+test('Git-only workers ignore stale Lean bindings without exposing dependency or toolchain mounts', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  const source = path.join(dataDir, 'runtime/shared-dependencies/git-fixture')
+  await fs.mkdir(path.join(source, '.lake/packages/Library'), {
+    recursive: true,
+  })
+  await fs.writeFile(
+    path.join(root, 'lean-toolchain'),
+    'leanprover/lean4:v4.35.0\n',
+  )
+  await runtime.inheritDependencies(source, root)
+  await fs.writeFile(
+    path.join(root, 'lean-toolchain'),
+    'leanprover/lean4:v4.19.0\n',
+  )
+  await assert.rejects(
+    runtime.run(root, ['git', 'status']),
+    /configuration changed/,
+  )
+  const argv = JSON.parse(
+    (await runtime.runGit(root, ['git', 'status'], { readOnlyWorkspace: true }))
+      .stdout,
+  )
+  const bound = mounts(argv)
+  assert(
+    bound.some(
+      (value) => value === `type=bind,src=${root},dst=/workspace,readonly`,
+    ),
+  )
+  assert(
+    !bound.some(
+      (value) =>
+        value.includes('/.lake') ||
+        value.includes('/opt/lean-toolchains/') ||
+        value.includes('/opt/dependency-lake-cache'),
+    ),
+  )
+  assert(argv.includes('/workspace/.lake:rw,nosuid,nodev,noexec,size=16m'))
+  const home = bound.find((value) => value.includes(',dst=/home/worker'))
+  assert(home && home.includes('runtime/homes/'))
+  await assert.rejects(
+    runtime.run(root, ['lean', '--version']),
+    /configuration changed/,
+  )
+  assert.equal(
+    await fs.readFile(path.join(root, 'lean-toolchain'), 'utf8'),
+    'leanprover/lean4:v4.19.0\n',
+  )
+})
+
+test('Git-only workers reject wider mounts and Lean cache options, and permit no shell fallback', async (t) => {
+  const { runtime, root } = await fixture(t)
+  for (const options of [
+    { repositoryRoot: root },
+    { kernelCheck: true },
+    { writeLakeCache: true },
+    { writePrivateDependencyCache: true },
+    { boundedScratchBytes: 32 * 1024 ** 2 },
+  ])
+    await assert.rejects(
+      runtime.runGit(root, ['git', 'status'], options),
+      /cannot request Lean caches/,
+    )
+  for (const args of [
+    ['bash', '-c', 'git status'],
+    ['python3', '-c', 'print(1)'],
+    ['lean', '--version'],
+  ])
+    await assert.rejects(runtime.runGit(root, args))
+})

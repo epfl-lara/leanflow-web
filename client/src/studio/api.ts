@@ -218,6 +218,7 @@ export interface GitInfo {
   head?: string | null
   remoteUrl?: string | null
   pullBranch?: string | null
+  pullRemoteUrl?: string | null
   publishingEnabled?: boolean
   provider?: GitProvider
   suggestedBranch?: string
@@ -225,6 +226,7 @@ export interface GitInfo {
   lastPublished?: GitPushResult
   changes?: { status: string; path: string; from?: string }[]
   diff?: string
+  diffTruncated?: boolean
   commits?: { sha: string; message: string }[]
   mutationBlocked?: boolean
   blockedReason?: string

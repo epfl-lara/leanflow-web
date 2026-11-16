@@ -113,6 +113,177 @@ test('pull fast-forwards with the same saved repository token as push and cleans
   )
 })
 
+test('an imported unpublished working branch keeps pulling its original base after a fork push', async (t) => {
+  const f = await pullFixture(t)
+  await f.git('switch', '-c', 'leanflow/unpublished-import')
+  const project = f.workspaces.get(f.project.id, 'owner')
+  project.repository = DEST
+  project.publishingBaseBranch = 'main'
+  f.workspaces.db
+    .prepare('UPDATE projects SET data=? WHERE id=?')
+    .run(JSON.stringify(project), project.id)
+  const imported = await f.publisher.metadata('owner', project.id)
+  assert.equal(imported.branch, 'leanflow/unpublished-import')
+  assert.equal(imported.pullBranch, 'main')
+  const fork = 'https://git.example.invalid/fork/proofs.git'
+  f.publisher.publishTransport = async () => ({
+    code: 0,
+    stdout: '',
+    stderr: '',
+  })
+  const preview = await f.publisher.preview('owner', project.id, {
+    remoteUrl: fork,
+    branch: 'leanflow/fork-proof',
+  })
+  await f.publisher.push('owner', project.id, { previewId: preview.previewId })
+  const info = await (await f.request(undefined, 'GET')).json()
+  assert.equal(info.remoteUrl, fork)
+  assert.equal(info.pullRemoteUrl, DEST)
+  assert.equal(info.branch, 'leanflow/unpublished-import')
+  assert.equal(info.pullBranch, 'main')
+  const head = await f.advance()
+  const response = await f.pull({ remoteUrl: undefined, branch: undefined })
+  assert.equal(response.status, 200, await response.clone().text())
+  assert.equal((await response.json()).remoteUrl, DEST)
+  assert.equal((await f.git('rev-parse', 'HEAD')).stdout.trim(), head)
+  const fetch = f.calls.find(
+    (call) =>
+      call.args.includes(gitCredentialsRunner) && call.args.includes('fetch'),
+  )
+  assert(fetch.args.includes(DEST))
+  assert(!fetch.args.includes(fork))
+})
+
+test('an uploaded repository pulls from its safe origin while new local repositories retain their first push destination', async (t) => {
+  const f = await fixture(t)
+  const fork = 'https://git.example.invalid/fork/proofs.git'
+  f.publisher.publishTransport = async () => ({
+    code: 0,
+    stdout: '',
+    stderr: '',
+  })
+  const preview = await f.publisher.preview('owner', f.project.id, {
+    remoteUrl: fork,
+    branch: 'leanflow/first-push',
+  })
+  await f.publisher.push('owner', f.project.id, {
+    previewId: preview.previewId,
+  })
+  let info = await f.publisher.metadata('owner', f.project.id)
+  assert.equal(info.pullRemoteUrl, fork)
+  assert.equal(info.pullBranch, 'leanflow/first-push')
+  await f.git('remote', 'add', 'origin', DEST)
+  info = await f.publisher.metadata('owner', f.project.id)
+  assert.equal(info.remoteUrl, fork)
+  assert.equal(info.pullRemoteUrl, DEST)
+  assert.equal(info.pullBranch, 'main')
+  await f.git(
+    'remote',
+    'set-url',
+    'origin',
+    'ssh://git@git.example.invalid/alice/proofs.git',
+  )
+  info = await f.publisher.metadata('owner', f.project.id)
+  assert.equal(
+    info.pullRemoteUrl,
+    null,
+    'An unsupported origin requires an explicit HTTPS source instead of falling back to a push fork',
+  )
+})
+
+test('Git mutations admit recoverable setup states and retain other activity and recovery guards', async (t) => {
+  const f = await fixture(t)
+  const update = (status, needsPreparation = false) => {
+    const project = f.workspaces.get(f.project.id, 'owner')
+    Object.assign(project, { status, needsPreparation })
+    f.workspaces.db
+      .prepare('UPDATE projects SET data=? WHERE id=?')
+      .run(JSON.stringify(project), project.id)
+  }
+  for (const [status, needsPreparation] of [
+    ['needs-setup', false],
+    ['error', true],
+  ]) {
+    update(status, needsPreparation)
+    assert.equal(
+      await f.publisher.withProject(
+        'owner',
+        f.project.id,
+        (project) => project.status,
+      ),
+      status,
+    )
+  }
+  for (const [status, needsPreparation] of [
+    ['preparing', true],
+    ['error', false],
+    ['creating', false],
+  ]) {
+    update(status, needsPreparation)
+    await assert.rejects(
+      f.publisher.withProject('owner', f.project.id, () =>
+        assert.fail('Blocked work must not run'),
+      ),
+      { status: 409 },
+    )
+    assert(!f.publisher.busy.has(f.project.id))
+  }
+  update('needs-setup')
+  f.publisher.assertIdle = () => {
+    throw Object.assign(new Error('Active project work'), { status: 409 })
+  }
+  await assert.rejects(
+    f.publisher.withProject('owner', f.project.id, () =>
+      assert.fail('Active work must remain protected'),
+    ),
+    /Active project work/,
+  )
+  assert(!f.publisher.busy.has(f.project.id))
+  await assert.rejects(
+    f.publisher.withProject('another-owner', f.project.id, () =>
+      assert.fail('Access must remain protected'),
+    ),
+    { status: 404 },
+  )
+})
+
+test('Git review rejects oversized changed files before hashing their contents', async (t) => {
+  const f = await fixture(t)
+  const generated = path.join(f.root, 'Generated.bin')
+  const handle = await fs.open(generated, 'wx')
+  await handle.truncate(512 * 1024 * 1024 + 1)
+  await handle.close()
+  await assert.rejects(f.publisher.metadata('owner', f.project.id), (error) => {
+    assert.equal(error.status, 413)
+    assert.match(error.message, /512 MiB Git review limit/)
+    return true
+  })
+  await fs.rm(generated)
+  assert.equal(
+    (await f.publisher.metadata('owner', f.project.id)).repository,
+    true,
+  )
+})
+
+test('truncated successful Git history cannot become a partial review', async (t) => {
+  const f = await fixture(t)
+  const run = f.runtime.run.bind(f.runtime)
+  f.runtime.run = async (root, args, options) =>
+    args.includes('log')
+      ? {
+          code: 0,
+          stdout: 'a'.repeat(40) + '\0Incomplete message\0',
+          stderr: '',
+          truncated: true,
+        }
+      : run(root, args, options)
+  await assert.rejects(f.publisher.metadata('owner', f.project.id), (error) => {
+    assert.equal(error.status, 413)
+    assert.match(error.message, /too much output to review safely/)
+    return true
+  })
+})
+
 test('pull preserves different local edits and rejects stale reviews', async (t) => {
   const f = await pullFixture(t)
   await f.advance()
@@ -132,6 +303,39 @@ test('pull preserves different local edits and rejects stale reviews', async (t)
   assert.match(
     await fs.readFile(path.join(f.root, 'Main.lean'), 'utf8'),
     /local edit/,
+  )
+})
+
+test('agent Git context preserves private nested-import scope and refuses shared sibling history before running Git', async (t) => {
+  const f = await fixture(t)
+  const project = f.workspaces.get(f.project.id, 'owner')
+  project.root = path.join(f.root, 'Selected')
+  project.subdirectory = 'Selected'
+  await fs.mkdir(project.root)
+  f.workspaces.db
+    .prepare('UPDATE projects SET data=? WHERE id=?')
+    .run(JSON.stringify(project), project.id)
+  const revision = (await f.git('rev-parse', 'HEAD')).stdout.trim()
+  const context = await f.publisher.agentContext('owner', project.id, {
+    sourceRevision: revision,
+  })
+  assert.equal(context.sourceRevision, revision)
+  assert.equal(context.commits[0].message, 'Initial valid source')
+  assert.equal(context.subdirectory, 'Selected')
+  const collaborator = await f.auth.createUser(
+    { id: 'owner' },
+    { name: 'Collaborator' },
+  )
+  f.workspaces.memberships.set(project, collaborator.user.id, 'editor')
+  const before = f.calls.length
+  for (const actor of ['owner', collaborator.user.id])
+    await assert.rejects(f.publisher.agentContext(actor, project.id), {
+      status: 403,
+    })
+  assert.equal(
+    f.calls.length,
+    before,
+    'No broader history is read for a shared nested project',
   )
 })
 
@@ -375,6 +579,7 @@ async function fixture(t) {
   })
   await studio.workspaces.jobs.get(project.id)
   const root = studio.workspaces.repositoryRoot(project)
+  await fs.mkdir(path.join(root, '.git/info'), { recursive: true })
   const git = async (...args) =>
     execute('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
       cwd: root,

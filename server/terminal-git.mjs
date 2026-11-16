@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import { constants } from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
+import { repositoryConnectionKey } from '../shared/git-connections.mjs'
 
 const socketName = '.git-credentials.sock'
 const maxRequest = 16 * 1024
@@ -89,12 +90,29 @@ function requestUrl(request) {
   }
 }
 
+function repositoryKeys(repositories) {
+  if (
+    !repositories ||
+    typeof repositories === 'string' ||
+    typeof repositories[Symbol.iterator] !== 'function'
+  )
+    throw new TypeError('Allowed Git repositories must be an iterable of URLs.')
+  return new Set([...repositories].map(repositoryConnectionKey).filter(Boolean))
+}
+
 export async function createTerminalGitBroker({
   home,
   owner,
   connections,
   assertAuthorized = () => {},
+  allowedHostRepositories,
 }) {
+  const allowedRepositories =
+    typeof allowedHostRepositories === 'function'
+      ? allowedHostRepositories
+      : allowedHostRepositories === undefined
+        ? undefined
+        : repositoryKeys(allowedHostRepositories)
   const directory = await fs.open(
     home,
     constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
@@ -134,7 +152,24 @@ export async function createTerminalGitBroker({
             ++lookups
             try {
               assertAuthorized()
-              credentials = await connections.credentials(owner, url)
+              if (allowedRepositories === undefined)
+                credentials = await connections.credentials(owner, url)
+              else {
+                let allowedSet = allowedRepositories
+                if (typeof allowedRepositories === 'function') {
+                  try {
+                    allowedSet = repositoryKeys(await allowedRepositories())
+                  } catch {
+                    allowedSet = new Set()
+                  }
+                  assertAuthorized()
+                }
+                credentials = await connections.credentials(owner, url, {
+                  allowHostFallback: allowedSet.has(
+                    repositoryConnectionKey(url),
+                  ),
+                })
+              }
               assertAuthorized()
             } finally {
               --lookups
@@ -194,12 +229,14 @@ export async function configureAgentGit({
   connections,
   identity,
   assertAuthorized,
+  allowedRepositories = [],
 }) {
   const broker = await createTerminalGitBroker({
     home,
     owner,
     connections,
     assertAuthorized,
+    allowedHostRepositories: allowedRepositories,
   })
   try {
     await fs.writeFile(

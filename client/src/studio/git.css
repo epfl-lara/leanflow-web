@@ -82,7 +82,7 @@
   white-space: nowrap;
 }
 .git-file-status {
-  min-width: 30px;
+  min-width: 92px;
   color: var(--accent);
   font-size: 10px;
 }
@@ -379,6 +379,33 @@
   flex: 1;
   min-width: 120px;
   width: 180px;
+}
+.git-pull-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-basis: 100%;
+  min-width: 0;
+}
+.git-pull-source input {
+  width: 0;
+}
+.git-history .git-commit-list {
+  max-height: 320px;
+}
+.git-history .git-commit-list li {
+  align-items: start;
+}
+.git-history .git-commit-list li > span {
+  flex: 1;
+}
+.git-history .copy-button {
+  flex-shrink: 0;
+  max-width: 160px;
+}
+.git-initialize h3,
+.git-history h3 {
+  font-size: 14px;
 }
 .git-sync .field-help {
   flex-basis: 100%;

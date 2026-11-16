@@ -376,6 +376,8 @@ export async function createStudio({
   })
   await texBuilds.init()
   const agents = new AgentManager({
+    gitContext: (owner, projectId, options) =>
+      publisher.agentContext(owner, projectId, options),
     gitConnections,
     gitIdentity,
     texBuilds,
@@ -1258,6 +1260,10 @@ export async function createStudio({
   })
   app.post('/api/projects/:id/git', async (req, res) => {
     publisher.requireProjectAccess(req.user.id, req.params.id)
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body))
+      throw Object.assign(new Error('Send the Git action as a JSON object.'), {
+        status: 400,
+      })
     const { action, name, message, authorName, authorEmail, reviewToken } =
       req.body
     if (action === 'preview-push')
@@ -1272,6 +1278,19 @@ export async function createStudio({
       return res.json(
         await publisher.pull(req.user.id, req.params.id, req.body),
       )
+    if (action === 'initialize') {
+      await publisher.withProject(
+        req.user.id,
+        req.params.id,
+        () =>
+          workspaces.initializeGit(req.params.id, req.user.id, {
+            assertIdle: () =>
+              requireNoRun(req.params.id, req.user.id, { ignoreGit: true }),
+          }),
+        { workspaceLock: false },
+      )
+      return res.json(await gitInfo(req.params.id, req.user))
+    }
     if (action === 'enable-publishing') {
       await workspaces.enablePublishing(req.params.id, req.user.id, {
         assertIdle: () => requireNoRun(req.params.id, req.user.id),
@@ -1282,7 +1301,8 @@ export async function createStudio({
       const options = { network: 'none', timeoutMs: 60_000, queue: false }
       const gitRoot = workspaces.repositoryRoot(project)
       const command = async (args, input) => {
-        const result = await runtime.run(
+        const result = await (runtime.runGit || runtime.run).call(
+          runtime,
           gitRoot,
           [
             'git',
@@ -1294,6 +1314,13 @@ export async function createStudio({
           ],
           { ...options, input },
         )
+        if (result.truncated)
+          throw Object.assign(
+            new Error(
+              'Git returned too much output to complete this action safely. Ignore generated files or use a separate Git checkout.',
+            ),
+            { status: 413 },
+          )
         if (result.code !== 0)
           throw new Error(
             result.stderr || result.stdout || 'Git operation failed.',

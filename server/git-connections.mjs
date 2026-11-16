@@ -525,7 +525,7 @@ export class GitConnections {
     })
   }
 
-  async credentials(owner, repositoryUrl) {
+  async credentials(owner, repositoryUrl, { allowHostFallback = true } = {}) {
     await this.init()
     const host = repositoryHost(repositoryUrl)
     const repository = repositoryConnectionKey(repositoryUrl)
@@ -533,9 +533,10 @@ export class GitConnections {
       const record = await this.readRecord(owner)
       const connection =
         record.connections.find((item) => item.repository === repository) ||
-        record.connections.find(
-          (item) => !item.repository && item.host === host,
-        )
+        (allowHostFallback &&
+          record.connections.find(
+            (item) => !item.repository && item.host === host,
+          ))
       if (!connection) return null
       await this.validateRepository(repositoryUrl, this.resolveHost)
       return { token: connection.token, username: connection.username }

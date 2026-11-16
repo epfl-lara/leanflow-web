@@ -31,6 +31,7 @@ import {
 import { createTexArtifactReceiver } from './tex-artifacts.mjs'
 import { ContainerEngine } from './container-engine.mjs'
 import { localDependencyDirectories } from './dependency-layout.mjs'
+import { gitWorkerCommand } from './git-worker-command.mjs'
 import {
   SharedDependencyCache,
   configurationDigest,
@@ -42,6 +43,7 @@ const scheduledWorker = Symbol('scheduledWorker')
 const kernelStorageReservation = Symbol('kernelStorageReservation')
 const dependentWorkerParent = Symbol('dependentWorkerParent')
 const agentWorkerRole = Symbol('agentWorkerRole')
+const gitWorkerRole = Symbol('gitWorkerRole')
 
 const projectDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -1105,7 +1107,7 @@ export class Runtime {
     }
   }
 
-  #prepareHome(root, { fresh = false, clean = false } = {}) {
+  #prepareHome(root, { fresh = false, clean = false, gitOnly = false } = {}) {
     const actual = this.#root(root)
     const key = createHash('sha256')
       .update(fresh ? `${actual}\0${randomUUID()}` : actual)
@@ -1129,7 +1131,7 @@ export class Runtime {
       }
     }
     managedWorkerDirectory(home, '.elan/toolchains', (directory) => {
-      for (const toolchain of this.toolchains.keys()) {
+      for (const toolchain of gitOnly ? [] : this.toolchains.keys()) {
         const name = toolchainName(toolchain)
         const link = `${directory}/${name}`
         const target = `/opt/lean-toolchains/${name}`
@@ -1148,7 +1150,7 @@ export class Runtime {
       content: 'version = "12"\ntelemetry = false\n',
       maxBytes: 16384,
     })
-    const dependencySource = this.#dependencySource(actual)
+    const dependencySource = gitOnly ? null : this.#dependencySource(actual)
     if (dependencySource && dependencySource !== actual) {
       const sourceCache = this.#dependencyArtifactCache(dependencySource)
       const privateCache = path.join(home, '.cache/lake')
@@ -1416,6 +1418,27 @@ export class Runtime {
     )
   }
 
+  async runGit(root, args, options = {}) {
+    const command = gitWorkerCommand(args)
+    if (
+      options.repositoryRoot !== undefined ||
+      options.kernelCheck ||
+      options.writeLakeCache ||
+      options.writePrivateDependencyCache ||
+      options.boundedScratchBytes !== undefined ||
+      options.postCheckFile !== undefined
+    )
+      throw new Error(
+        'Git workers cannot request Lean caches, kernel checks or wider repository mounts.',
+      )
+    return this.run(root, command, {
+      ...options,
+      freshHome: true,
+      cleanHome: true,
+      [gitWorkerRole]: true,
+    })
+  }
+
   spawn(
     root,
     args,
@@ -1441,6 +1464,7 @@ export class Runtime {
       [scheduledWorker]: scheduled = false,
       [kernelStorageReservation]: storageReservation,
       [agentWorkerRole]: agentRole,
+      [gitWorkerRole]: gitOnly = false,
     } = {},
   ) {
     this.#assertReady()
@@ -1565,18 +1589,17 @@ export class Runtime {
           'Full Lean checking needs more temporary disk space. Ask the administrator to free space or review the kernel export limit.',
         )
     }
-    this.#reloadDependencies()
+    if (!gitOnly) this.#reloadDependencies()
     const actual = this.#root(root)
     const repository = this.#repositoryMount(actual, repositoryRoot)
-    const dependencySource = this.#dependencySource(actual)
-    this.#checkSharedBinding(actual, dependencySource)
+    const dependencySource = gitOnly ? null : this.#dependencySource(actual)
+    if (!gitOnly) this.#checkSharedBinding(actual, dependencySource)
     // Only a fixed initial Git clone may keep its empty destination empty.
     // Ready projects always pin cache paths before any project code can run.
     const initialClone =
       emptyRepositoryClone && fs.readdirSync(actual).length === 0
-    const lakeCache = initialClone
-      ? null
-      : ensurePrivateDirectory(actual, '.lake')
+    const lakeCache =
+      initialClone || gitOnly ? null : ensurePrivateDirectory(actual, '.lake')
     const privatePackages = lakeCache
       ? ensurePrivateDirectory(actual, '.lake/packages')
       : null
@@ -1602,6 +1625,7 @@ export class Runtime {
     const home = this.#prepareHome(actual, {
       fresh: freshHome,
       clean: cleanHome,
+      gitOnly,
     })
     const kernelTemp =
       kernelCheck && boundedScratchBytes === undefined
@@ -1745,7 +1769,7 @@ export class Runtime {
           `type=bind,src=${lakeCache},dst=${alias}/.lake${readonly}`,
         )
     }
-    for (const [toolchain, source] of this.toolchains) {
+    for (const [toolchain, source] of gitOnly ? [] : this.toolchains) {
       dockerArgs.push(
         '--mount',
         `type=bind,src=${source},dst=/opt/lean-toolchains/${toolchainName(toolchain)},readonly`,
@@ -1789,6 +1813,16 @@ export class Runtime {
           '--mount',
           `type=bind,src=${cache},dst=${alias}/${relative}/.lake`,
         )
+    if (
+      gitOnly &&
+      fs
+        .lstatSync(path.join(actual, '.lake'), { throwIfNoEntry: false })
+        ?.isDirectory()
+    )
+      dockerArgs.push(
+        '--tmpfs',
+        '/workspace/.lake:rw,nosuid,nodev,noexec,size=16m',
+      )
     const childEnv = { ...process.env }
     // Lean's executable task pool otherwise uses the host CPU count, even when
     // Docker gives this worker a smaller quota. This is a scheduler setting,

@@ -79,6 +79,7 @@ const workspaceSuites = [
   'private-import',
   'import-publishing',
   'git',
+  'git-usability',
   'git-connections',
   'file-creation',
   'file-tree',

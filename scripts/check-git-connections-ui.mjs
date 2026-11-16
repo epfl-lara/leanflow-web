@@ -601,6 +601,7 @@ try {
     await source().getByText('Pulled main.', { exact: true }).waitFor()
     await preview()
     await source()
+      .getByRole('region', { name: 'Reviewed push', exact: true })
       .getByText(`Uses your saved token for ${repository}.`, { exact: false })
       .waitFor()
     assert.equal(await publish().isDisabled(), false)
@@ -680,6 +681,7 @@ try {
   assert.equal(pushes.at(-1).token, undefined)
   await preview()
   await source()
+    .getByRole('region', { name: 'Reviewed push', exact: true })
     .getByText(
       'Uses your saved token for https://github.com/fixture/another.',
       { exact: false },

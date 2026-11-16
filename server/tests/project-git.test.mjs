@@ -10,6 +10,7 @@ import { createStudio } from '../studio.mjs'
 const execute = promisify(execFile)
 test('nested project commits preserve pre-staged sibling and private files outside the commit', async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lemex-git-scope-'))
+  let truncatedListings = false
   const runtime = {
     async init() {},
     info: () => ({ ready: true }),
@@ -34,6 +35,7 @@ test('nested project commits preserve pre-staged sibling and private files outsi
         return {
           code: 0,
           ...(await command),
+          truncated: truncatedListings && args.includes('ls-files'),
         }
       } catch (error) {
         return { code: error.code, stdout: error.stdout, stderr: error.stderr }
@@ -126,6 +128,46 @@ test('nested project commits preserve pre-staged sibling and private files outsi
       .trim()
       .split('\n')
     assert.deepEqual(staged.sort(), ['Lean/.env', 'sibling.txt'])
+    const endpoint = `http://127.0.0.1:${studio.server.address().port}/api/projects/${project.id}/git`
+    const request = (body) =>
+      fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + token,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      })
+    assert.equal((await request(null)).status, 400)
+    assert.equal((await request([])).status, 400)
+    const head = (
+      await execute('git', ['rev-parse', 'HEAD'], { cwd: checkout })
+    ).stdout
+    await fs.appendFile(
+      path.join(project.root, 'Main.lean'),
+      '-- preserve this edit\n',
+    )
+    truncatedListings = true
+    const rejected = await request({
+      action: 'commit',
+      message: 'Must not commit a partial listing',
+    })
+    assert.equal(rejected.status, 413, await rejected.text())
+    assert.equal(
+      (await execute('git', ['rev-parse', 'HEAD'], { cwd: checkout })).stdout,
+      head,
+    )
+    assert.deepEqual(
+      (
+        await execute('git', ['diff', '--cached', '--name-only'], {
+          cwd: checkout,
+        })
+      ).stdout
+        .trim()
+        .split('\n')
+        .sort(),
+      ['Lean/.env', 'sibling.txt'],
+    )
   } finally {
     await studio.close()
     await fs.rm(dataDir, { recursive: true, force: true })

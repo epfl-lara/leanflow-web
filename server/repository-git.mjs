@@ -19,7 +19,8 @@ export async function runAuthenticatedRepositoryGit({
 }) {
   let child
   try {
-    const result = await runtime.run(
+    const result = await (runtime.runGit || runtime.run).call(
+      runtime,
       root,
       ['python3', '-c', gitCredentialsRunner, ...gitHttpsArgs, ...args],
       {

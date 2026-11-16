@@ -205,6 +205,105 @@ test('repository tokens survive restart and stay scoped to the account and repos
   assert.equal((await store.get('alice')).connections.length, 1)
 })
 
+test('repository-only credential lookup preserves exact scoped precedence without borrowing host or other account tokens', async (t) => {
+  const { store } = await fixture(t)
+  const repository = 'https://github.com/example/private.git'
+  for (const owner of ['alice', 'bob']) {
+    await connect(store, owner, { token: `fixture-${owner}-host` })
+    await store.connect(owner, {
+      repository,
+      token: `fixture-${owner}-repository`,
+      username: `${owner}-repository-user`,
+    })
+  }
+  for (const owner of ['alice', 'bob']) {
+    for (const options of [
+      undefined,
+      { allowHostFallback: true },
+      { allowHostFallback: false },
+    ])
+      assert.deepEqual(await store.credentials(owner, repository, options), {
+        token: `fixture-${owner}-repository`,
+        username: `${owner}-repository-user`,
+      })
+    for (const related of [
+      'https://github.com/example/private-fork.git',
+      'https://github.com/example/another.git',
+      'https://github.com/another/private.git',
+      'https://github.com/example/private/child.git',
+    ]) {
+      assert.equal(
+        await store.credentials(owner, related, { allowHostFallback: false }),
+        null,
+      )
+      assert.equal(
+        (await store.credentials(owner, related)).token,
+        `fixture-${owner}-host`,
+      )
+      assert.equal(
+        (await store.credentials(owner, related, { allowHostFallback: true }))
+          .token,
+        `fixture-${owner}-host`,
+      )
+    }
+  }
+  assert.equal(
+    await store.credentials('carol', repository, { allowHostFallback: false }),
+    null,
+  )
+})
+
+test('repository-only lookup keeps current public DNS validation for exact matches and does not resolve skipped host credentials', async (t) => {
+  const lookups = []
+  let address = '140.82.112.3'
+  const { store } = await fixture(t, {
+    resolveHost: async (host) => {
+      lookups.push(host)
+      return [{ address }]
+    },
+  })
+  const repository = 'https://github.com/example/private.git'
+  const related = 'https://github.com/example/another.git'
+  await connect(store)
+  await store.connect('alice', {
+    repository,
+    token: 'fixture-exact-repository',
+  })
+  lookups.length = 0
+  assert.equal(
+    await store.credentials('alice', related, { allowHostFallback: false }),
+    null,
+  )
+  assert.deepEqual(lookups, [])
+  assert.equal(
+    (await store.credentials('alice', repository, { allowHostFallback: false }))
+      .token,
+    'fixture-exact-repository',
+  )
+  assert.deepEqual(lookups, ['github.com'])
+  address = '127.0.0.1'
+  await assert.rejects(
+    store.credentials('alice', repository, { allowHostFallback: false }),
+    { status: 400 },
+  )
+  await assert.rejects(
+    store.credentials('alice', related, { allowHostFallback: true }),
+    { status: 400 },
+  )
+  assert.equal(
+    await store.credentials('alice', related, { allowHostFallback: false }),
+    null,
+  )
+  await assert.rejects(
+    store.credentials(
+      'alice',
+      'https://user:secret@github.com/example/private.git',
+      { allowHostFallback: false },
+    ),
+    { status: 400 },
+  )
+})
+
 test('repository connections reject unsafe destinations and mismatched hosts before saving', async (t) => {
   const { store } = await fixture(t)
   for (const repository of [

@@ -96,7 +96,7 @@ export async function pullProjectGit({
       : input.branch,
   )
   const remote = await destination(
-    input.remoteUrl === undefined ? initial.remoteUrl : input.remoteUrl,
+    input.remoteUrl === undefined ? initial.pullRemoteUrl : input.remoteUrl,
   )
   const credentials = validateGitCredentials(input)
   const root = path.join(directory, randomUUID())

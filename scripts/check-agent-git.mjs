@@ -40,6 +40,7 @@ try {
     home,
     owner: 'alice',
     identity: { name: 'Agent fixture', email: 'agent@example.test' },
+    allowedRepositories: ['https://github.com/fixture/project.git'],
     connections: {
       async credentials(owner, repository) {
         calls.push({ owner, repository })

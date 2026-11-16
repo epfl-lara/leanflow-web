@@ -6,6 +6,8 @@ import { lookup } from 'node:dns/promises'
 import { validateRepository } from './workspaces.mjs'
 import { validateGitBranch } from './git-branches.mjs'
 import { pullProjectGit } from './git-pull.mjs'
+import { captureAgentGitContext } from './agent-git-context.mjs'
+import { NETWORK_GIT } from './git-worker-command.mjs'
 import {
   cleanupGitWorkerHome,
   clearGitCredentials,
@@ -29,11 +31,6 @@ const MAX_BUNDLE = 512 * 1024 * 1024
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status })
 }
-const NETWORK_GIT = `import os, sys
-env = dict(os.environ)
-env.pop('GIT_SSL_NO_VERIFY', None)
-os.execvpe(sys.argv[1], sys.argv[1:], env)
-`
 
 function destinationHint(value) {
   try {
@@ -259,8 +256,15 @@ export class GitPublisher {
     this.busy.add(projectId)
     const execute = async () => {
       const project = this.requireProjectAccess(owner, projectId)
-      if (project.status !== 'ready')
-        fail('Prepare this project before changing Git history.', 409)
+      if (
+        project.status !== 'ready' &&
+        project.status !== 'needs-setup' &&
+        !(project.status === 'error' && project.needsPreparation)
+      )
+        fail(
+          'Wait for project setup to finish before changing Git history.',
+          409,
+        )
       this.#assertIdle(projectId, owner)
       return action(project)
     }
@@ -324,6 +328,11 @@ export class GitPublisher {
         ...options,
       },
     )
+    if (result.truncated)
+      fail(
+        'Git returned too much output to review safely. Ignore generated files or use a separate Git checkout.',
+        413,
+      )
     if (result.code !== 0) {
       const detail = this.redact(
         String(result.stderr || result.stdout || 'Git operation failed.'),
@@ -341,15 +350,20 @@ export class GitPublisher {
       ? AbortSignal.any([deadline, options.signal])
       : deadline
     try {
-      result = await this.runtime.run(root, args, {
-        ...options,
-        retainHome: keepHome,
-        signal,
-        maxOutputBytes: 1024 * 1024,
-        onSpawn: (worker) => {
-          child = worker
+      result = await (this.runtime.runGit || this.runtime.run).call(
+        this.runtime,
+        root,
+        args,
+        {
+          ...options,
+          retainHome: keepHome,
+          signal,
+          maxOutputBytes: 1024 * 1024,
+          onSpawn: (worker) => {
+            child = worker
+          },
         },
-      })
+      )
     } catch (error) {
       await this.#cleanupHome(child)
       if (signal.aborted)
@@ -415,6 +429,19 @@ export class GitPublisher {
     } catch (error) {
       if (error.status !== 409) throw error
       return null
+    }
+  }
+  async #origin(root, { queue = true } = {}) {
+    try {
+      const result = await this.#run(
+        root,
+        ['config', '--get', 'remote.origin.url'],
+        { readOnlyWorkspace: true, readOnlyHome: true, queue },
+      )
+      return destinationHint(result.stdout.trim())
+    } catch (error) {
+      if (error.status !== 409) throw error
+      return undefined
     }
   }
   async #exportedShallowBoundaries(root, hashes) {
@@ -499,6 +526,30 @@ export class GitPublisher {
       resolveHost: this.resolveHost,
     })
   }
+  async agentContext(owner, projectId, { signal, sourceRevision } = {}) {
+    const project = this.requireProjectAccess(owner, projectId)
+    const root = this.workspaces.repositoryRoot(project)
+    if (!(await optionalStat(path.join(root, '.git')))) {
+      this.requireProjectAccess(owner, projectId)
+      return { kind: 'git', repository: false }
+    }
+    const context = await captureAgentGitContext({
+      runtime: this.runtime,
+      root: await this.#source(project),
+      repository: destinationHint(project.repository),
+      subdirectory: project.subdirectory,
+      sourceRevision,
+      signal,
+      assertAuthorized: () => this.requireProjectAccess(owner, projectId),
+    })
+    const remembered = await this.#remembered(owner, projectId)
+    this.requireProjectAccess(owner, projectId)
+    return {
+      ...context,
+      pushRepository:
+        destinationHint(remembered?.remoteUrl) || context.repository,
+    }
+  }
   async metadata(owner, projectId, status, options = {}) {
     const project = this.requireProjectAccess(owner, projectId)
     status ||= await this.workspaces.gitStatus(projectId, owner, options)
@@ -506,10 +557,19 @@ export class GitPublisher {
     const remembered = await this.#remembered(owner, projectId)
     let remoteUrl =
         remembered?.remoteUrl || destinationHint(project.repository),
+      pullRemoteUrl = destinationHint(project.repository),
+      hasPullSource = !!project.repository,
       commits = [],
       defaultBranch = null
     if (status.repository) {
       const root = await this.#source(project)
+      if (!hasPullSource) {
+        const origin = await this.#origin(root, options)
+        if (origin !== undefined) {
+          pullRemoteUrl = origin
+          hasPullSource = true
+        }
+      }
       if (status.revision)
         commits = (await this.#history(root, false, options)).commits
       if (
@@ -522,6 +582,9 @@ export class GitPublisher {
           options,
         )
     }
+    // A new local repository has no import source or origin until its first
+    // push. Reuse that destination only when no canonical source exists.
+    if (!hasPullSource) pullRemoteUrl = remembered?.remoteUrl || null
     const review = createHash('sha256').update(
       JSON.stringify({
         revision: status.revision,
@@ -530,6 +593,14 @@ export class GitPublisher {
         diff: status.diff,
       }),
     )
+    let reviewedBytes = 0
+    const checkReviewSize = (bytes) => {
+      if (bytes > MAX_BUNDLE)
+        fail(
+          'Changed files exceed the 512 MiB Git review limit. Ignore generated files or use a separate Git checkout.',
+          413,
+        )
+    }
     for (const change of [...status.changes].sort((a, b) =>
       a.path.localeCompare(b.path),
     )) {
@@ -549,6 +620,7 @@ export class GitPublisher {
             fail('A Git file path changed while reviewing it.', 409)
           if (!stat.isFile())
             fail('The changed Git path is not a regular file.', 409)
+          checkReviewSize(reviewedBytes + stat.size)
           const buffer = Buffer.alloc(1024 * 1024)
           let position = 0
           while (true) {
@@ -559,12 +631,14 @@ export class GitPublisher {
               position,
             )
             if (!bytesRead) break
-            review.update(buffer.subarray(0, bytesRead))
             position += bytesRead
+            checkReviewSize(reviewedBytes + position)
+            review.update(buffer.subarray(0, bytesRead))
           }
           const after = await handle.stat()
           if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs)
             fail('Files changed while reviewing Git. Refresh the review.', 409)
+          reviewedBytes += position
         } finally {
           await handle.close()
         }
@@ -579,8 +653,10 @@ export class GitPublisher {
     return {
       ...status,
       remoteUrl,
+      pullRemoteUrl,
       pullBranch:
-        namedBranch(remembered?.lastPublished?.branch) ||
+        (pullRemoteUrl === remembered?.lastPublished?.remoteUrl &&
+          namedBranch(remembered.lastPublished.branch)) ||
         namedBranch(project.publishingBaseBranch) ||
         namedBranch(status.branch),
       publishingEnabled: project.publishingEnabled !== false,

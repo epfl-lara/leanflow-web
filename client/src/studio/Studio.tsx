@@ -601,6 +601,12 @@ export function Studio() {
   const projectKindRef = useRef(project?.kind)
   projectKindRef.current = project?.kind
   const singleFileMode = project?.kind === 'single-file'
+  const gitProjectAvailable =
+    projectCanEdit &&
+    !singleFileMode &&
+    (project.status === 'ready' ||
+      project.status === 'needs-setup' ||
+      (project.status === 'error' && project.needsPreparation === true))
   const singleFileView =
     singleFileMode &&
     !files.some(
@@ -1037,9 +1043,8 @@ export function Studio() {
     [bufferStore],
   )
   useEffect(() => {
-    if (project?.status === 'ready' && project.kind !== 'single-file')
-      void loadGit(project.id)
-  }, [project?.id, project?.status, project?.kind, loadGit])
+    if (gitProjectAvailable && project) void loadGit(project.id)
+  }, [project?.id, gitProjectAvailable, loadGit])
   const acceptGit = useCallback(
     (value: GitInfo) => {
       if (bufferStore.isCurrent(scope)) setGit(value)
@@ -3154,37 +3159,35 @@ export function Studio() {
             className="sidebar-resize-handle"
           />
         )}
-        {projectCanEdit &&
-          !singleFileMode &&
-          git &&
-          git.repository !== false &&
-          project?.status === 'ready' && (
-            <div className="git-sidebar">
-              <button
-                className="git-source-entry"
-                aria-label={`Source control, ${git.branch || 'Detached HEAD'}, ${git.changes?.length || 0} changes`}
-                title={`Source control · ${git.branch || 'Detached HEAD'}`}
-                onClick={() => setGitOpen('changes')}
-              >
-                <Icon name="git" size={14} />
-                <span className="git-branch">
-                  {git.branch || 'Detached HEAD'}
-                </span>
-                <span className="git-source-label">Source control</span>
-                <span className="git-change-count">
-                  {git.changes?.length || 0}
-                </span>
-              </button>
-              <button
-                className="icon-button"
-                aria-label="Refresh Git status"
-                title="Refresh Git status"
-                onClick={() => projectId && void loadGit(projectId)}
-              >
-                <Icon name="refresh" size={13} />
-              </button>
-            </div>
-          )}
+        {gitProjectAvailable && (
+          <div className="git-sidebar">
+            <button
+              className="git-source-entry"
+              aria-label={`Source control, ${git?.repository === false ? 'not initialized' : git?.branch || 'Git status unavailable'}, ${git?.changes?.length || 0} changes`}
+              title={`Source control${git?.branch ? ` · ${git.branch}` : ''}`}
+              onClick={() => setGitOpen('changes')}
+            >
+              <Icon name="git" size={14} />
+              <span className="git-branch">
+                {git?.repository === false
+                  ? 'Not initialized'
+                  : git?.branch || 'Git'}
+              </span>
+              <span className="git-source-label">Source control</span>
+              <span className="git-change-count">
+                {git?.changes?.length || 0}
+              </span>
+            </button>
+            <button
+              className="icon-button"
+              aria-label="Refresh Git status"
+              title="Refresh Git status"
+              onClick={() => projectId && void loadGit(projectId)}
+            >
+              <Icon name="refresh" size={13} />
+            </button>
+          </div>
+        )}
         <div className="sidebar-footer">
           <button
             type="button"
@@ -3260,25 +3263,22 @@ export function Studio() {
                 {git.branch}
               </span>
             )}
-            {projectCanEdit &&
-              project?.status === 'ready' &&
-              project.repository &&
-              !singleFileMode && (
-                <ToolbarAction
-                  className="workspace-publish"
-                  label="Publish"
-                  icon={<Icon name="git" size={14} />}
-                  onClick={() => setGitOpen('publish')}
-                  help={
-                    <>
-                      Save and commit your changes, then review a push to the
-                      imported repository or your existing fork. After
-                      publishing, open GitHub or GitLab to finish creating a
-                      pull request or merge request.
-                    </>
-                  }
-                />
-              )}
+            {gitProjectAvailable && project.repository && (
+              <ToolbarAction
+                className="workspace-publish"
+                label="Publish"
+                icon={<Icon name="git" size={14} />}
+                onClick={() => setGitOpen('publish')}
+                help={
+                  <>
+                    Save and commit your changes, then review a push to the
+                    imported repository or your existing fork. After publishing,
+                    open GitHub or GitLab to finish creating a pull request or
+                    merge request.
+                  </>
+                }
+              />
+            )}
           </div>
           <div className="header-actions">
             {project && !singleFileMode && (

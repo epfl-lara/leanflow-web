@@ -14,7 +14,7 @@ import { gitCredentialsRunner } from '../server/git-credentials.mjs'
 
 const exec = promisify(execFile)
 const output = path.resolve('.runtime/git-publish-check')
-const dataDir = path.resolve('.data/runtime/git-publish-check', randomUUID())
+const dataDir = path.join(output, 'data-' + randomUUID())
 const source = path.join(dataDir, 'source')
 const destination = path.join(dataDir, 'destination.git')
 const certificate = path.join(dataDir, 'tls')
@@ -23,8 +23,7 @@ const token = 'disposable-' + randomUUID()
 const report = { providerCalls: 0, externalPushes: 0, checks: [], pushes: 0 }
 const runtime = new Runtime({
   dataDir,
-  image:
-    process.env.STUDIO_TEST_IMAGE || 'lemex-web-worker:lean-probe-646cb0ee',
+  image: process.env.STUDIO_TEST_IMAGE || process.env.LEMEX_WORKER_IMAGE,
   scope: 'helper',
 })
 const gitOptions = [
@@ -81,6 +80,9 @@ const project = {
 }
 const workspaces = {
   locks: new Map(),
+  memberships: {
+    list: () => ({ members: [{ user: 'owner', role: 'admin' }] }),
+  },
   get(id, owner) {
     if (id !== project.id || owner !== project.owner)
       throw Object.assign(new Error('Project not found'), { status: 404 })
