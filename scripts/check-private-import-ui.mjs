@@ -52,6 +52,7 @@ try {
   const prepareRequests = []
   const externalRequests = []
   let holdImport = false
+  let failImport = false
   let releaseImport = null
   let failPrepare = false
   let holdPrepare = false
@@ -68,6 +69,13 @@ try {
     if (route.request().method() !== 'POST') return route.fallback()
     const body = route.request().postDataJSON()
     imports.push(body)
+    if (failImport) {
+      failImport = false
+      return route.fulfill({
+        status: 503,
+        json: { error: 'Project creation is busy. Try again shortly.' },
+      })
+    }
     if (holdImport) {
       holdImport = false
       await new Promise((resolve) => {
@@ -332,6 +340,37 @@ try {
   assert.equal(await storageHasToken(), false)
   report.checks.push(
     'Authentication failures request fresh credentials on Retry setup, support cancellation and actionable errors, and lock duplicate submissions.',
+  )
+
+  await openImport()
+  await url().fill(gitlabLink)
+  await openPrivate()
+  await token().fill(fakeToken)
+  await username().fill(fakeUsername)
+  failImport = true
+  const failedImportIndex = imports.length
+  await importDialog()
+    .getByRole('button', { name: 'Import project', exact: true })
+    .click()
+  await importDialog().getByRole('alert').waitFor()
+  assert.equal(await token().inputValue(), fakeToken)
+  assert.equal(await username().inputValue(), fakeUsername)
+  assert.equal(await storageHasToken(), false)
+  await submitImport()
+  assert.equal(imports.length, failedImportIndex + 2)
+  for (const input of imports.slice(failedImportIndex)) {
+    assert.equal(input.repositoryToken, fakeToken)
+    assert.equal(input.repositoryUsername, fakeUsername)
+  }
+  await openImport()
+  await openPrivate()
+  assert.equal(await token().inputValue(), '')
+  assert.equal(await username().inputValue(), '')
+  await importDialog()
+    .getByRole('button', { name: 'Cancel', exact: true })
+    .click()
+  report.checks.push(
+    'A temporary project creation failure keeps one-use credentials for retry, without browser storage, and clears them after success.',
   )
 
   fixture.assertClean()

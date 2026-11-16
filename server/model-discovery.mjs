@@ -195,15 +195,66 @@ export class ModelDiscovery {
     providers,
     discover = discoverNativeModels,
     ttlMs = 300000,
+    maxConcurrent = 2,
+    maxQueued = 32,
+    waitTimeoutMs = 10000,
   }) {
-    Object.assign(this, { config, providers, discover, ttlMs })
+    for (const value of [maxConcurrent, maxQueued, waitTimeoutMs])
+      if (!Number.isSafeInteger(value) || value < 1)
+        throw new Error('Model discovery limits must be positive integers.')
+    Object.assign(this, {
+      config,
+      providers,
+      discover,
+      ttlMs,
+      maxConcurrent,
+      maxQueued,
+      waitTimeoutMs,
+    })
     this.directory = path.join(dataDir, 'model-discovery')
     this.cache = new Map()
     this.pending = new Map()
     this.tasks = new Set()
     this.controllers = new Set()
     this.running = 0
+    this.waiting = new Set()
     this.stopping = false
+  }
+  async #acquire(signal) {
+    if (signal.aborted) throw signal.reason
+    if (this.running < this.maxConcurrent) {
+      this.running++
+      return
+    }
+    const busy = () =>
+      failure('Model discovery is busy. It will retry shortly.', 429)
+    if (this.waiting.size >= this.maxQueued) throw busy()
+    await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer)
+        this.waiting.delete(ready)
+        signal.removeEventListener('abort', abort)
+      }
+      const ready = () => {
+        cleanup()
+        this.running++
+        resolve()
+      }
+      const abort = () => {
+        cleanup()
+        reject(signal.reason)
+      }
+      const timer = setTimeout(() => {
+        cleanup()
+        reject(busy())
+      }, this.waitTimeoutMs)
+      this.waiting.add(ready)
+      signal.addEventListener('abort', abort, { once: true })
+    })
+  }
+  #release() {
+    this.running--
+    this.waiting.values().next().value?.()
   }
   async get(owner, { refresh = false } = {}) {
     if (!this.providers.status(owner).configured)
@@ -228,13 +279,27 @@ export class ModelDiscovery {
     if (pending?.identity === identity) return pending.task
     if (this.stopping)
       throw failure('The server is restarting. Try again shortly.')
-    if (this.running >= 2)
-      throw failure('Model discovery is busy. Try again shortly.', 429)
-    this.running++
     const controller = new AbortController()
     this.controllers.add(controller)
-    const timer = setTimeout(() => controller.abort(), 35000)
+    const requireCurrentProvider = () => {
+      const current = this.providers.provider(owner)
+      if (
+        current.LEMEX_API_KEY !== provider.LEMEX_API_KEY ||
+        current.LEMEX_BASE_URL !== provider.LEMEX_BASE_URL
+      )
+        throw failure(
+          'Your provider or API key changed while loading models. Refresh models again.',
+          409,
+        )
+    }
+    let timer,
+      acquired = false
     const task = (async () => {
+      await this.#acquire(controller.signal)
+      acquired = true
+      controller.signal.throwIfAborted()
+      requireCurrentProvider()
+      timer = setTimeout(() => controller.abort(), 35000)
       await fs.mkdir(this.directory, { recursive: true, mode: 0o700 })
       const discovered = await this.discover({
         config: this.config,
@@ -245,16 +310,7 @@ export class ModelDiscovery {
       const rcp = isRcpEndpoint(provider.LEMEX_BASE_URL || RCP_BASE_URL)
       const modelCatalog = rcp ? rcpModelCatalog(discovered) : discovered
       controller.signal.throwIfAborted()
-      if (
-        this.providers.provider(owner).LEMEX_API_KEY !==
-          provider.LEMEX_API_KEY ||
-        this.providers.provider(owner).LEMEX_BASE_URL !==
-          provider.LEMEX_BASE_URL
-      )
-        throw failure(
-          'Your provider or API key changed while loading models. Refresh models again.',
-          409,
-        )
+      requireCurrentProvider()
       modelCatalog.models.sort(
         (a, b) =>
           (a.priority ?? 100) - (b.priority ?? 100) ||
@@ -298,7 +354,7 @@ export class ModelDiscovery {
         this.controllers.delete(controller)
         if (this.pending.get(owner)?.task === task) this.pending.delete(owner)
         this.tasks.delete(task)
-        this.running--
+        if (acquired) this.#release()
       })
     this.pending.set(owner, { identity, task })
     this.tasks.add(task)

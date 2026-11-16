@@ -42,6 +42,7 @@ async function fixture(t, workspaceOverrides = {}) {
     events,
     workspaces,
     maxConcurrent: 0,
+    maxQueuePerUser: 12,
     runtime: {},
     settings: {},
     config: {

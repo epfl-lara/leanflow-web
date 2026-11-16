@@ -500,7 +500,7 @@ export function LeanWorkspace({
               (error) => {
                 if (!cancelled) {
                   setRequestIssue(
-                    'Lean could not connect. Use Restart Lean or reopen the project to retry.',
+                    'Lean could not connect. Check your connection or close unused project tabs, then wait a moment and use Restart Lean. You can keep editing.',
                   )
                   onStateRef.current('Lean connection failed')
                 }

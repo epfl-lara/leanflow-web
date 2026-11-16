@@ -950,7 +950,10 @@ export function AssistantPanel({
       />
       {!session.models.length && (
         <p className="error-message" role="alert">
-          {session.lemex?.modelError || 'No model is available with your key.'}{' '}
+          {session.lemex?.modelErrorRetryable
+            ? 'Models are loading while the server is busy. Retrying automatically.'
+            : session.lemex?.modelError ||
+              'No model is available with your key.'}{' '}
           <button
             type="button"
             className="model-settings-link"

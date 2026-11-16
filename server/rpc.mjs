@@ -167,31 +167,71 @@ function lspMessageObject(message) {
 
 export class LspFrames {
   constructor(onMessage, maxBytes = 64 * 1024 * 1024) {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
+      throw new Error('Lean message limit must be a positive integer.')
     this.buffer = Buffer.alloc(0)
+    this.bytes = 0
+    this.bodyLength = null
+    this.headerBytes = 0
     this.onMessage = onMessage
     this.maxBytes = maxBytes
   }
   push(chunk) {
-    this.buffer = Buffer.concat([this.buffer, chunk])
-    if (this.buffer.length > this.maxBytes + 8192)
+    const input = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    const size = this.bytes + input.length
+    if (size > this.maxBytes + 8192)
       throw new Error('Lean message exceeded the transport limit.')
-    while (true) {
-      const end = this.buffer.indexOf('\r\n\r\n')
-      if (end === -1) {
-        if (this.buffer.length > 8192)
-          throw new Error('Invalid Lean message header.')
-        return
-      }
-      const size = /(?:^|\r\n)Content-Length:\s*(\d+)/i.exec(
-        this.buffer.subarray(0, end).toString('ascii'),
+    if (this.buffer.length < size) {
+      const grown = Buffer.allocUnsafe(
+        Math.min(
+          this.maxBytes + 8192,
+          Math.max(4096, size, this.buffer.length * 2),
+        ),
       )
-      if (!size || Number(size[1]) > this.maxBytes)
-        throw new Error('Invalid Lean message length.')
-      const length = Number(size[1])
-      if (this.buffer.length < end + 4 + length) return
-      const body = this.buffer.subarray(end + 4, end + 4 + length)
-      this.buffer = this.buffer.subarray(end + 4 + length)
-      this.onMessage(lspMessageObject(JSON.parse(body.toString('utf8'))))
+      this.buffer.copy(grown, 0, 0, this.bytes)
+      this.buffer = grown
+    }
+    input.copy(this.buffer, this.bytes)
+    this.bytes = size
+    let consumed = 0
+    try {
+      while (consumed < this.bytes) {
+        if (this.bodyLength === null) {
+          const header = this.buffer.subarray(consumed, this.bytes)
+          const end = header.indexOf('\r\n\r\n')
+          if (end === -1) {
+            if (this.bytes - consumed > 8192)
+              throw new Error('Invalid Lean message header.')
+            return
+          }
+          if (end > 8192) throw new Error('Invalid Lean message header.')
+          const size = /(?:^|\r\n)Content-Length:\s*(\d+)/i.exec(
+            header.subarray(0, end).toString('ascii'),
+          )
+          if (!size || Number(size[1]) > this.maxBytes)
+            throw new Error('Invalid Lean message length.')
+          this.bodyLength = Number(size[1])
+          this.headerBytes = end + 4
+        }
+        const bodyStart = consumed + this.headerBytes
+        const bodyEnd = bodyStart + this.bodyLength
+        if (this.bytes < bodyEnd) return
+        const body = this.buffer.toString('utf8', bodyStart, bodyEnd)
+        consumed = bodyEnd
+        this.bodyLength = null
+        this.headerBytes = 0
+        this.onMessage(lspMessageObject(JSON.parse(body)))
+      }
+    } finally {
+      // Compact coalesced messages once per input, rather than copying the
+      // remaining frames after every callback. Partial bodies grow geometrically.
+      if (consumed === this.bytes) {
+        this.buffer = Buffer.alloc(0)
+        this.bytes = 0
+      } else if (consumed) {
+        this.buffer.copy(this.buffer, 0, consumed, this.bytes)
+        this.bytes -= consumed
+      }
     }
   }
 }

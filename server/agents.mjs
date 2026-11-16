@@ -132,7 +132,12 @@ export class AgentManager {
       (await import('./optimization.mjs')).measureOptimization(...args),
     maxConcurrent = 2,
     maxQueue = 12,
+    maxQueuePerUser = 4,
   }) {
+    if (!Number.isSafeInteger(maxQueuePerUser) || maxQueuePerUser <= 0)
+      throw new Error(
+        'The per-account assistant queue limit must be a positive integer.',
+      )
     Object.assign(this, {
       runtime,
       workspaces,
@@ -148,6 +153,7 @@ export class AgentManager {
       optimizationMeasure,
       maxConcurrent,
       maxQueue,
+      maxQueuePerUser,
     })
     this.active = new Map()
     this.queue = []
@@ -165,6 +171,32 @@ export class AgentManager {
       redact: config.redact,
     })
     this.followups.recover()
+  }
+  #assertQueueCapacity(owner, setup = false) {
+    if (this.queue.length >= this.maxQueue)
+      throw Object.assign(
+        new Error(
+          setup
+            ? 'Agent queue is full. Retry setup when capacity is available.'
+            : 'The assistant queue is full. Try again shortly.',
+        ),
+        { status: 429 },
+      )
+    if (
+      owner !== undefined &&
+      this.queue.filter(
+        (queued) =>
+          (typeof queued === 'string'
+            ? this.events.getMetadata(queued).owner
+            : queued.owner) === owner,
+      ).length >= this.maxQueuePerUser
+    )
+      throw Object.assign(
+        new Error(
+          'Too many assistant tasks are waiting for your account. Stop a waiting task or try again later.',
+        ),
+        { status: 429 },
+      )
   }
   async start(owner, projectId, input) {
     if (this.stopping)
@@ -273,11 +305,7 @@ export class AgentManager {
         { status: 409 },
       )
     this.assertCanStart(owner, projectId)
-    if (this.queue.length >= this.maxQueue)
-      throw Object.assign(
-        new Error('The assistant queue is full. Try again shortly.'),
-        { status: 429 },
-      )
+    this.#assertQueueCapacity(owner)
     if (
       this.events
         .listMetadata(owner, projectId)
@@ -540,25 +568,22 @@ export class AgentManager {
   }
   runSetupRepair(
     execute,
-    { signal, provider, onQueued, onStarted, onProviderQueued } = {},
+    { owner, signal, provider, onQueued, onStarted, onProviderQueued } = {},
   ) {
     if (this.stopping || signal?.aborted)
       return Promise.reject(
         signal?.reason || new Error('The server is shutting down.'),
       )
-    if (this.queue.length >= this.maxQueue)
-      return Promise.reject(
-        Object.assign(
-          new Error(
-            'Agent queue is full. Retry setup when capacity is available.',
-          ),
-          { status: 429 },
-        ),
-      )
+    try {
+      this.#assertQueueCapacity(owner, true)
+    } catch (error) {
+      return Promise.reject(error)
+    }
     return new Promise((resolve, reject) => {
       const controller = new AbortController()
       const reservation = this.providerRequests.reserve(provider)
       const job = {
+        owner,
         execute,
         resolve,
         reject,

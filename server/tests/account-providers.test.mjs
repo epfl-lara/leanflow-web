@@ -188,10 +188,10 @@ test('validation does no inference, forbids redirects, and never returns provide
     await assert.rejects(() => store.validate(input), { status: 400 })
 })
 
-async function fixture(t) {
+async function fixture(t, modelDiscoverer = fixtureModelDiscovery) {
   const dataDir = await temp(t)
   const studio = await createStudio({
-    modelDiscoverer: fixtureModelDiscovery,
+    modelDiscoverer,
     dataDir,
     runtime: {
       async init() {},
@@ -226,6 +226,36 @@ async function fixture(t) {
     })
   return { ...studio, dataDir, token, request }
 }
+
+test('session marks only temporary model admission failures for automatic recovery', async (t) => {
+  let status = 429
+  const f = await fixture(t, async () => {
+    if (status)
+      throw Object.assign(new Error('Fixture model discovery unavailable.'), {
+        status,
+      })
+    return {
+      models: [
+        { slug: 'available', visibility: 'list', supported_in_api: true },
+      ],
+    }
+  })
+  await f.providers.save('owner', 'fixture-owner-provider-key')
+  let session = await (await f.request('/api/session')).json()
+  assert.deepEqual(session.models, [])
+  assert.equal(session.lemex.configured, true)
+  assert.equal(session.lemex.modelErrorRetryable, true)
+  status = 403
+  session = await (await f.request('/api/session')).json()
+  assert.equal(session.lemex.modelErrorRetryable, false)
+  status = 0
+  const models = await (await f.request('/api/models')).json()
+  assert.equal(models.defaultModel, 'available')
+  session = await (await f.request('/api/session')).json()
+  assert.equal(session.lemex.modelErrorRetryable, false)
+  assert.equal(session.lemex.modelError, null)
+  assert.equal(session.defaultModel, 'available')
+})
 
 test('tokens identify roles; only owner appoints admins; users cannot list or create accounts', async (t) => {
   const f = await fixture(t)

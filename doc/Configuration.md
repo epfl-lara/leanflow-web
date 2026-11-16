@@ -71,6 +71,8 @@ TeX shares the normal worker pool and its CPU, RAM, and process limits. A projec
 
 ### Worker capacity
 
+Each account may have up to `STUDIO_MAX_AGENT_QUEUE_PER_USER` waiting assistant tasks (default 4), within the shared `STUDIO_MAX_AGENT_QUEUE` limit (default 12). This waiting limit covers chats and assistant setup repairs. Running task concurrency keeps its separate server and provider limits. Cancel an unused waiting task to make room for another.
+
 Use the `STUDIO_MAX_*` settings in [`.env.example`](../.env.example) to set editor, agent, search, worker, and queue limits. Set `STUDIO_WORKER_CPUS` and `STUDIO_WORKER_MEMORY` for each worker; defaults are 2 CPUs and 4 GiB.
 
 Optional remote pure checks use `STUDIO_CLUSTER_CONFIG`, an absolute path to a protected controller JSON file. Execution stays local when it is unset or its mode is `off`. See [distributed execution](DistributedExecution.md) for enrollment, independent worker budgets, shadow checks and rollout limits. This setting does not move editors, agents or terminals.
@@ -112,6 +114,8 @@ The initial owner is also an administrator. In **Assistant settings → Accounts
 At first sign-in, enter your own Lemex API key. The server checks access with a non-inference `/models` request before saving it. Later, use **Assistant settings → Your Lemex API key** to replace it. A failed validation preserves the previous key. Running requests keep their current credential; new requests use the replacement.
 
 Keys are stored as account-bound AES-256-GCM ciphertext in `.data/providers`, with private file permissions. Encryption depends on `.data/auth/session.key`: back up that file together with the data directory. Losing or rotating it requires entering saved provider keys again. APIs return only saved/not-saved status, never the stored key. The server process can decrypt keys to run Lemex; retain the trusted-collaborator deployment model.
+
+Assistant live updates allow up to `STUDIO_MAX_EVENT_STREAMS` connections across the server (default 256), with up to `STUDIO_MAX_EVENT_STREAMS_PER_USER` per account (default 16). Extra live connections receive a retryable busy response. The browser retries failed live connections with increasing delays, then uses cursor polling after three failures. Closing an unused tab releases its place; polling remains available while live connections are full. Review both limits for the number of expected users and open chats.
 
 For a temporary relay that buffers SSE, set `STUDIO_EVENT_TRANSPORT=poll`. Assistant events and reasoning history then use bounded JSON cursor replay. Ordinary deployments retain SSE by default.
 

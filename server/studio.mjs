@@ -19,7 +19,7 @@ import { GitConnections } from './git-connections.mjs'
 import { loadConfig } from './config.mjs'
 import { EventStore, JobManager } from './events.mjs'
 import { loadClusterChecks } from './cluster/load.mjs'
-import { streamRunEvents } from './event-stream.mjs'
+import { eventStreamAdmission, streamRunEvents } from './event-stream.mjs'
 import { staticAssets } from './static-assets.mjs'
 import { TexBuildManager } from './tex-builds.mjs'
 import { AgentManager } from './agents.mjs'
@@ -32,7 +32,8 @@ import { ChatStore } from './chats.mjs'
 import { TrashManager } from './trash.mjs'
 import { createChatTitleGenerator } from './chat-titles.mjs'
 import { searchDeclarations } from './search.mjs'
-import { LspFrames, frame, validateClientUris } from './rpc.mjs'
+import { LspFrames, validateClientUris } from './rpc.mjs'
+import { leanTransport } from './lean-transport.mjs'
 import { LeanRequests } from './lean-requests.mjs'
 import { LeanProgress } from './lean-progress.mjs'
 import { LeanEditPolicy } from './lean-edit-policy.mjs'
@@ -387,6 +388,7 @@ export async function createStudio({
     assertCanStart: (owner, projectId) => requireNoGit(projectId, owner),
     maxConcurrent: capacity.agents,
     maxQueue: capacity.agentQueue,
+    maxQueuePerUser: capacity.agentQueuePerUser ?? 4,
   })
   workspaces.setupRepair = async (args) =>
     agents.runSetupRepair(
@@ -404,6 +406,7 @@ export async function createStudio({
         ),
       {
         signal: args.signal,
+        owner: args.owner,
         provider: await providerFor(config, args.owner),
         onQueued: () => args.onProgress?.('waiting-for-repair'),
         onProviderQueued: (message) => {
@@ -691,6 +694,7 @@ export async function createStudio({
         models: [],
         defaultModel: null,
         modelError: config.redact(error.message),
+        modelErrorRetryable: error.status === 429,
       }
     }
     res.json({
@@ -709,6 +713,7 @@ export async function createStudio({
         ...config.lemex,
         ...providers.status(req.user.id),
         modelError: modelAccess.modelError || null,
+        modelErrorRetryable: !!modelAccess.modelErrorRetryable,
       },
     })
   })
@@ -1552,6 +1557,10 @@ export async function createStudio({
       await agents[action](req.user.id, req.params.id)
       res.json(publicJob(events.snapshot(req.params.id, req.user.id)))
     })
+  const admitEventStream = eventStreamAdmission({
+    maxConcurrent: capacity.eventStreams ?? 256,
+    maxPerUser: capacity.eventStreamsPerUser ?? 16,
+  })
   app.get('/api/runs/:id/events', (req, res) => {
     events.getMetadata(req.params.id, req.user.id)
     const after = Number(req.headers['last-event-id'] || req.query.after || 0)
@@ -1559,6 +1568,7 @@ export async function createStudio({
       return res.status(400).json({ error: 'Invalid event cursor.' })
     if (req.query.transport === 'poll')
       return res.json({ events: events.eventPage(req.params.id, after) })
+    if (!admitEventStream(req, res)) return
     res.setHeader('Content-Type', 'text/event-stream')
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
@@ -1699,7 +1709,7 @@ export async function createStudio({
     let child,
       alive = true,
       lastActivity = Date.now()
-    let requests, progress, editPolicy, widgetPolicy
+    let requests, progress, editPolicy, widgetPolicy, transport
     try {
       child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
         workload: 'interactive',
@@ -1709,13 +1719,14 @@ export async function createStudio({
         freshHome: true,
         cleanHome: true,
       })
+      transport = leanTransport(ws, child)
       const sendToClient = (message) => {
         if (!isAuthenticated(request, actor)) {
           ws.close(1008, 'Account access changed. Sign in again.')
           child?.kill()
           return
         }
-        if (ws.readyState === 1) ws.send(JSON.stringify(message))
+        transport.sendToClient(message)
       }
       requests = new LeanRequests({
         sendToClient,
@@ -1725,11 +1736,11 @@ export async function createStudio({
       }
       editPolicy = new LeanEditPolicy({
         sendToClient: forward,
-        sendToLean: (message) => child.stdin.write(frame(message)),
+        sendToLean: transport.sendToLean,
       })
       widgetPolicy = new LeanWidgetPolicy({
         sendToClient: forward,
-        sendToLean: (message) => child.stdin.write(frame(message)),
+        sendToLean: transport.sendToLean,
       })
       progress = new LeanProgress(sendToClient)
       const frames = new LspFrames((message) => {
@@ -1768,7 +1779,7 @@ export async function createStudio({
           requests.track(message)
           progress.client(message)
           if (widgetPolicy.client(message) && editPolicy.client(message))
-            child.stdin.write(frame(message))
+            transport.sendToLean(message)
         } catch (error) {
           if (error.sourceTooLarge) ws.close(1009, error.message)
           else ws.close(1008, 'Invalid Lean message or workspace path.')
@@ -1793,6 +1804,7 @@ export async function createStudio({
     }, 30_000)
     ws.on('close', () => {
       clearInterval(heartbeat)
+      transport?.dispose()
       requests?.dispose()
       progress?.dispose()
       editPolicy?.dispose()

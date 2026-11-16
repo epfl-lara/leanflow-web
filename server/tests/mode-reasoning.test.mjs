@@ -132,6 +132,7 @@ test('agent API omitted effort follows workflow defaults and preserves explicit 
     workspaces: { get: (id) => ({ id, status: 'ready' }) },
     maxConcurrent: 0,
     maxQueue: 100,
+    maxQueuePerUser: 100,
   })
   t.after(async () => {
     await manager.shutdown()

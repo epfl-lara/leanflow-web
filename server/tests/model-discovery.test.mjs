@@ -19,7 +19,7 @@ const profile = (slug, effort = 'medium', priority = 100) => ({
   default_reasoning_level: effort,
   supported_reasoning_levels: effort ? [{ effort }] : [],
 })
-async function fixture(t, discover) {
+async function fixture(t, discover, options = {}) {
   const dataDir = await fs.mkdtemp(
     path.join(os.tmpdir(), 'leanflow-discovery-'),
   )
@@ -36,11 +36,146 @@ async function fixture(t, discover) {
     redact: providers.redact,
   }
   config.providerForUser = (owner) => providers.provider(owner)
-  const discovery = new ModelDiscovery({ dataDir, config, providers, discover })
+  const discovery = new ModelDiscovery({
+    dataDir,
+    config,
+    providers,
+    discover,
+    ...options,
+  })
   config.modelsForUser = (owner, options) => discovery.get(owner, options)
   t.after(() => discovery.close())
   return { dataDir, providers, config, discovery }
 }
+
+async function waitFor(check) {
+  const deadline = Date.now() + 3000
+  while (!check() && Date.now() < deadline)
+    await new Promise((resolve) => setImmediate(resolve))
+  assert(check(), 'Discovery did not reach the expected state')
+}
+
+test('a 25-account discovery burst waits for bounded native capacity and keeps each catalog private', async (t) => {
+  const ready = []
+  let active = 0,
+    peak = 0
+  const f = await fixture(t, ({ provider, signal }) => {
+    active++
+    peak = Math.max(peak, active)
+    return new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), {
+        once: true,
+      })
+      ready.push(() => resolve({ models: [profile(provider.LEMEX_API_KEY)] }))
+    }).finally(() => active--)
+  })
+  for (let i = 0; i < 25; i++)
+    await f.providers.save(`account-${i}`, `catalog-${i}`)
+  let completed = 0
+  const tasks = Array.from({ length: 25 }, (_, i) =>
+    f.discovery.get(`account-${i}`).then((value) => {
+      assert.equal(value.defaultModel, `catalog-${i}`)
+      completed++
+      return value
+    }),
+  )
+  await waitFor(() => ready.length === 2)
+  const coalesced = f.discovery.get('account-24')
+  while (completed < 25) {
+    await waitFor(() => ready.length > 0 || completed === 25)
+    ready.shift()?.()
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  const values = await Promise.all(tasks)
+  assert.equal(await coalesced, values[24])
+  assert.equal(peak, 2)
+  assert.equal(f.discovery.running, 0)
+  assert.equal(f.discovery.waiting.size, 0)
+})
+
+test('a full or timed-out discovery queue returns recoverable overload and releases waiting places', async (t) => {
+  let finish
+  const f = await fixture(
+    t,
+    ({ signal }) =>
+      new Promise((resolve, reject) => {
+        finish = () => resolve({ models: [profile('available')] })
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        })
+      }),
+    { maxConcurrent: 1, maxQueued: 1, waitTimeoutMs: 40 },
+  )
+  for (const name of ['alice', 'bob', 'carol'])
+    await f.providers.save(name, `${name}-fixture`)
+  const first = f.discovery.get('alice')
+  await waitFor(() => !!finish)
+  const timedOut = assert.rejects(f.discovery.get('bob'), { status: 429 })
+  await assert.rejects(f.discovery.get('carol'), { status: 429 })
+  await timedOut
+  assert.equal(f.discovery.waiting.size, 0)
+  finish()
+  await first
+  finish = undefined
+  const recovered = f.discovery.get('bob')
+  await waitFor(() => !!finish)
+  finish()
+  assert.equal((await recovered).defaultModel, 'available')
+})
+
+test('shutdown cancels queued discovery without starting more children', async (t) => {
+  let started = 0
+  const f = await fixture(
+    t,
+    ({ signal }) =>
+      new Promise((_resolve, reject) => {
+        started++
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        })
+      }),
+    { maxConcurrent: 1 },
+  )
+  for (const name of ['alice', 'bob'])
+    await f.providers.save(name, `${name}-fixture`)
+  const pending = Promise.allSettled([
+    f.discovery.get('alice'),
+    f.discovery.get('bob'),
+  ])
+  await waitFor(() => started === 1)
+  await f.discovery.close()
+  assert((await pending).every((result) => result.status === 'rejected'))
+  assert.equal(started, 1)
+  assert.equal(f.discovery.running, 0)
+  assert.equal(f.discovery.waiting.size, 0)
+})
+
+test('a queued key change rejects the superseded catalog before using its old credentials', async (t) => {
+  let finish
+  const calls = []
+  const f = await fixture(
+    t,
+    ({ provider, signal }) =>
+      new Promise((resolve, reject) => {
+        calls.push(provider.LEMEX_API_KEY)
+        finish = () => resolve({ models: [profile('available')] })
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        })
+      }),
+    { maxConcurrent: 1 },
+  )
+  await f.providers.save('alice', 'alice-fixture')
+  await f.providers.save('bob', 'bob-old-fixture')
+  const first = f.discovery.get('alice')
+  await waitFor(() => !!finish)
+  const obsolete = assert.rejects(f.discovery.get('bob'), { status: 409 })
+  await f.providers.save('bob', 'bob-new-fixture')
+  finish()
+  await first
+  await obsolete
+  assert.deepEqual(calls, ['alice-fixture'])
+})
 
 test('fresh catalogs are account scoped, prefer the Lemex default only when available, and invalidate after key changes', async (t) => {
   const calls = []

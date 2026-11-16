@@ -101,8 +101,7 @@ try {
   await page.locator('.monaco-editor textarea').first().waitFor()
   await page
     .getByText(
-      'Lean could not connect. Use Restart Lean or reopen the project to retry.',
-      { exact: true },
+      /Lean could not connect\. Check your connection or close unused project tabs, then wait a moment and use Restart Lean\./,
     )
     .waitFor()
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })
@@ -118,7 +117,7 @@ try {
     'typing saved after failed Lean initialization',
   )
   report.checks.push(
-    'An initial Lean connection rejection keeps Monaco typing bound to the source buffer and live saves.',
+    'An initial Lean connection rejection offers connection, tab capacity and retry guidance while Monaco typing and live saves stay available.',
   )
   document
     .getText('source')

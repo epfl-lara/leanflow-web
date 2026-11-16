@@ -14,6 +14,16 @@ import { WebSocketServer } from 'ws'
 
 import { zLeanWebProjectConfig } from './types.mjs'
 
+// This upstream server has no account authentication. Production entry points
+// must use studio.mjs; retain the old server only for explicit local development.
+if (
+  process.env.NODE_ENV !== 'development' ||
+  process.env.LEANFLOW_LEGACY_DEV !== '1'
+)
+  throw new Error(
+    'The unauthenticated legacy server is disabled. Start LeanFlow with npm start. For legacy local development only, set NODE_ENV=development and LEANFLOW_LEGACY_DEV=1.',
+  )
+
 let socketCounter = 0
 
 function logStats() {
@@ -170,7 +180,7 @@ if (crtFile && keyFile) {
   const PORT = process.env.PORT ?? 443
   server = https
     .createServer(credentials, app)
-    .listen(PORT, () => console.log(`HTTPS on port ${PORT}`))
+    .listen(PORT, '127.0.0.1', () => console.log(`HTTPS on port ${PORT}`))
 
   // redirect http to https
   express().get('*', function (req, res) {
@@ -178,7 +188,9 @@ if (crtFile && keyFile) {
   })
 } else {
   const PORT = process.env.PORT ?? 8080
-  server = app.listen(PORT, () => console.log(`HTTP on port ${PORT}`))
+  server = app.listen(PORT, '127.0.0.1', () =>
+    console.log(`HTTP on port ${PORT}`),
+  )
 }
 
 const wss = new WebSocketServer({

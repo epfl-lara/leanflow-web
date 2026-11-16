@@ -130,6 +130,7 @@ test('proof run defaults use max; explicit selections and provider-default null 
     events,
     config,
     maxConcurrent: 0,
+    maxQueuePerUser: 12,
     settings: {},
     runtime: {
       spawn() {

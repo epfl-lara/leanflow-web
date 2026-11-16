@@ -48,6 +48,8 @@ export function ProjectModal({
   const environment = useProjectEnvironment(templates, initialPreset)
   const { unavailableLibrary } = environment
   const [busy, setBusy] = useState(false)
+  const [reading, setReading] = useState(false)
+  const pending = busy || reading
   const [error, setError] = useState('')
   const { data: gitConnections, canSave } = useGitConnections()
   const connection = findGitConnection(gitConnections, repository)
@@ -64,7 +66,7 @@ export function ProjectModal({
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (busy) return
+    if (pending) return
     if (
       kind === 'import' &&
       repositoryUsername.trim() &&
@@ -91,7 +93,6 @@ export function ProjectModal({
         kind === 'import' && !!credential && rememberToken && canSave
       if (saved)
         await saveRepositoryConnection(repository.trim(), credential, login)
-      clearRepositoryCredentials()
       const project = await post<Project>('/api/projects', {
         name: name.trim() || undefined,
         autoRepair,
@@ -130,7 +131,7 @@ export function ProjectModal({
       title="Open a Lean project"
       subtitle="Paste a project link, upload local files, or start from a library."
       onClose={onClose}
-      busy={busy}
+      busy={pending}
     >
       <form onSubmit={submit} autoComplete="off">
         <div
@@ -142,7 +143,7 @@ export function ProjectModal({
             aria-pressed={kind === 'import'}
             className={kind === 'import' ? 'selected' : ''}
             onClick={() => selectSource('import')}
-            disabled={busy}
+            disabled={pending}
           >
             <Icon name="git" />
             Repository
@@ -152,7 +153,7 @@ export function ProjectModal({
             aria-pressed={kind === 'upload'}
             className={kind === 'upload' ? 'selected' : ''}
             onClick={() => selectSource('upload')}
-            disabled={busy}
+            disabled={pending}
           >
             <Icon name="folder" />
             Upload
@@ -162,7 +163,7 @@ export function ProjectModal({
             aria-pressed={kind === 'create'}
             className={kind === 'create' ? 'selected' : ''}
             onClick={() => selectSource('create')}
-            disabled={busy}
+            disabled={pending}
           >
             <Icon name="plus" />
             New project
@@ -182,7 +183,7 @@ export function ProjectModal({
           }
           value={name}
           onChange={(event) => setName(event.target.value)}
-          disabled={busy}
+          disabled={pending}
           maxLength={100}
           autoFocus={kind === 'create'}
         />
@@ -201,7 +202,7 @@ export function ProjectModal({
                 setRepository(event.target.value)
               }}
               required
-              disabled={busy}
+              disabled={pending}
               autoComplete="off"
             />
             <p className="field-help">
@@ -213,7 +214,7 @@ export function ProjectModal({
             <GitConnectionStatus
               connection={connection}
               onOpenConnections={onOpenConnections}
-              disabled={busy}
+              disabled={pending}
             />
             <details className="repository-access-options">
               <summary>
@@ -227,7 +228,7 @@ export function ProjectModal({
                 username={repositoryUsername}
                 onTokenChange={setRepositoryToken}
                 onUsernameChange={setRepositoryUsername}
-                disabled={busy}
+                disabled={pending}
                 remember={rememberToken}
                 onRememberChange={canSave ? setRememberToken : undefined}
               />
@@ -237,7 +238,7 @@ export function ProjectModal({
                 <input
                   type="checkbox"
                   checked={publishingEnabled}
-                  disabled={busy}
+                  disabled={pending}
                   onChange={(event) =>
                     setPublishingEnabled(event.target.checked)
                   }
@@ -262,7 +263,7 @@ export function ProjectModal({
                   value={workingBranch}
                   onChange={(event) => setWorkingBranch(event.target.value)}
                   placeholder="Generate a new leanflow/… branch"
-                  disabled={busy}
+                  disabled={pending}
                   autoComplete="off"
                 />
                 <p className="field-help">
@@ -278,6 +279,7 @@ export function ProjectModal({
         ) : kind === 'upload' ? (
           <UploadFiles
             files={files}
+            onReadingChange={setReading}
             disabled={busy}
             onChange={(values, folder) => {
               setFiles(values)
@@ -289,7 +291,7 @@ export function ProjectModal({
             <ProjectEnvironmentFields
               templates={templates}
               environment={environment}
-              disabled={busy}
+              disabled={pending}
             />
           </>
         )}
@@ -304,7 +306,7 @@ export function ProjectModal({
               value={subdirectory}
               placeholder="Detected automatically"
               onChange={(event) => setSubdirectory(event.target.value)}
-              disabled={busy}
+              disabled={pending}
             />
             {kind === 'import' && (
               <>
@@ -316,7 +318,7 @@ export function ProjectModal({
                   value={revision}
                   placeholder="From the link or default branch"
                   onChange={(event) => setRevision(event.target.value)}
-                  disabled={busy}
+                  disabled={pending}
                 />
               </>
             )}
@@ -328,7 +330,7 @@ export function ProjectModal({
               type="checkbox"
               checked={autoRepair}
               onChange={(event) => setAutoRepair(event.target.checked)}
-              disabled={busy || !repairAvailable}
+              disabled={pending || !repairAvailable}
             />
             <span>
               Let Lemex repair setup if needed.
@@ -351,7 +353,7 @@ export function ProjectModal({
             type="button"
             className="button secondary"
             onClick={onClose}
-            disabled={busy}
+            disabled={pending}
           >
             Cancel
           </button>
@@ -359,7 +361,7 @@ export function ProjectModal({
             type="submit"
             className="button primary"
             disabled={
-              busy ||
+              pending ||
               (kind === 'import'
                 ? !repository.trim()
                 : kind === 'upload'

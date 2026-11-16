@@ -829,6 +829,7 @@ export class WorkspaceStore {
     this.preparationActors = new Map()
     this.preparationAllocations = new Map()
     this.changeListeners = new Set()
+    this.fileListings = new Map()
     this.saveEvents = new SaveEvents({
       append: (entries) => this.#saveEventBatch(entries),
       onError: (error) => this.#saveDiagnostic(null, error, 'activity'),
@@ -1050,6 +1051,7 @@ export class WorkspaceStore {
 
   close() {
     this.saveEvents.close()
+    this.fileListings.clear()
     this.db?.close()
   }
 
@@ -1409,6 +1411,10 @@ export class WorkspaceStore {
     return () => this.changeListeners.delete(listener)
   }
 
+  invalidateFileListing(projectId) {
+    this.fileListings.delete(projectId)
+  }
+
   // `moves` ([{from, to}]) tells live editors that a path was renamed rather
   // than deleted, so they can carry open drafts to the destination.
   #changed(
@@ -1419,6 +1425,7 @@ export class WorkspaceStore {
     moves = [],
     originRunId,
   ) {
+    this.invalidateFileListing(projectId)
     // Listeners enqueue their own work. Never await a socket, agent or another
     // workspace operation while the nonreentrant project write queue is held.
     if (kind === 'access') {
@@ -4393,16 +4400,38 @@ export class WorkspaceStore {
 
   async files(id, owner) {
     const project = this.get(id, owner)
-    const dependencyRoot =
-      (await this.runtime.dependencyRoot?.(project.root)) || project.root
-    const files = await this.#walk(project.root, {
-      dependencies: true,
-      revisions: true,
-      dependencyRoot,
-    })
-    return project.accessRole === 'viewer'
-      ? files.map((file) => ({ ...file, readOnly: true }))
-      : files
+    let listing = this.fileListings.get(id)
+    if (!listing || listing.root !== project.root) {
+      listing = {
+        root: project.root,
+        task: (async () => {
+          const dependencyRoot =
+            (await this.runtime.dependencyRoot?.(project.root)) || project.root
+          return this.#walk(project.root, {
+            dependencies: true,
+            revisions: true,
+            dependencyRoot,
+          })
+        })(),
+      }
+      // Coalesce concurrent tabs without retaining stale filesystem metadata.
+      // A busy server may track only a bounded number of scans at once.
+      if (this.fileListings.size < 128 || this.fileListings.has(id))
+        this.fileListings.set(id, listing)
+    }
+    let files
+    try {
+      files = await listing.task
+    } finally {
+      if (this.fileListings.get(id) === listing) this.fileListings.delete(id)
+    }
+    const current = this.get(id, owner)
+    if (current.root !== listing.root)
+      fail('This project changed during access. Refresh the file tree.', 409)
+    return files.map((file) => ({
+      ...file,
+      ...(current.accessRole === 'viewer' ? { readOnly: true } : {}),
+    }))
   }
 
   async folders(id, owner) {

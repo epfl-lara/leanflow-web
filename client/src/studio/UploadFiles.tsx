@@ -119,10 +119,12 @@ async function droppedFiles(entries: FileSystemEntry[], fallback: File[]) {
 export function UploadFiles({
   files,
   onChange,
+  onReadingChange,
   disabled = false,
 }: {
   files: UploadFile[]
   onChange: (files: UploadFile[], folder?: string) => void
+  onReadingChange?: (reading: boolean) => void
   disabled?: boolean
 }) {
   const filesInput = useRef<HTMLInputElement>(null),
@@ -135,7 +137,9 @@ export function UploadFiles({
       | Promise<{ file: File; path: string }[]>
       | { file: File; path: string }[],
   ) {
+    if (disabled || reading) return
     setReading(true)
+    onReadingChange?.(true)
     setError('')
     try {
       const value = await readSourceFiles(await input)
@@ -145,6 +149,7 @@ export function UploadFiles({
       setError(errorText(error))
     } finally {
       setReading(false)
+      onReadingChange?.(false)
     }
   }
   return (
@@ -239,7 +244,7 @@ export function UploadFiles({
           <button
             type="button"
             className="button small subtle"
-            disabled={disabled}
+            disabled={disabled || reading}
             onClick={() => onChange([])}
           >
             Clear selection
@@ -265,6 +270,7 @@ export function UploadModal({
   onUploaded: () => Promise<void>
 }) {
   const [files, setFiles] = useState<UploadFile[]>([]),
+    [reading, setReading] = useState(false),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('')
   return (
@@ -272,11 +278,12 @@ export function UploadModal({
       title="Add local files"
       subtitle="Choose files or a folder. Existing project files are kept."
       onClose={onClose}
-      busy={busy}
+      busy={busy || reading}
     >
       <form
         onSubmit={async (event) => {
           event.preventDefault()
+          if (busy || reading || !files.length) return
           setBusy(true)
           setError('')
           try {
@@ -292,7 +299,12 @@ export function UploadModal({
           }
         }}
       >
-        <UploadFiles files={files} onChange={setFiles} disabled={busy} />
+        <UploadFiles
+          files={files}
+          onChange={setFiles}
+          onReadingChange={setReading}
+          disabled={busy}
+        />
         {error && (
           <p className="error-message" role="alert">
             {error}
@@ -302,12 +314,15 @@ export function UploadModal({
           <button
             type="button"
             className="button secondary"
-            disabled={busy}
+            disabled={busy || reading}
             onClick={onClose}
           >
             Cancel
           </button>
-          <button className="button primary" disabled={busy || !files.length}>
+          <button
+            className="button primary"
+            disabled={busy || reading || !files.length}
+          >
             {busy ? 'Uploading…' : 'Add files'}
           </button>
         </footer>

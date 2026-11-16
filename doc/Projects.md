@@ -14,7 +14,7 @@ It is possible to add additional projects to the web editor which can be selecte
 dropdown or through the URL.
 
 The default directory for projects is `./Projects/` but this can be changed by setting
-the environment variable `PROJECTS_BASE_PATH`. This needs to be set for the build process (`npm run build:projects`) and for the production mode (`npm run prod` / `ecosystem.config.cjs`) and it contains a
+the environment variable `PROJECTS_BASE_PATH`. This needs to be set for the build process (`npm run build:projects`) and for the explicitly enabled upstream development server and it contains a
 relativ path from the project's root directory.
 
 Inside this folder, new Lean projects can be created containing 2 special files:

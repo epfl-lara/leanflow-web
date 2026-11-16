@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, errorText, type ModelAccess as ModelAccessStatus } from './api'
 import { ModelLibrary } from './ModelLibrary'
 
@@ -7,19 +7,26 @@ export function ModelAccess({
   onUpdated,
 }: {
   revision?: string | null
-  onUpdated: () => void
+  onUpdated: (access: ModelAccessStatus) => void
 }) {
   const [access, setAccess] = useState<ModelAccessStatus | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [libraryOpen, setLibraryOpen] = useState(false)
+  const onUpdatedRef = useRef(onUpdated)
+  useEffect(() => {
+    onUpdatedRef.current = onUpdated
+  }, [onUpdated])
   useEffect(() => {
     let cancelled = false
     setAccess(null)
     setError('')
     void api<ModelAccessStatus>('/api/models')
       .then((value) => {
-        if (!cancelled) setAccess(value)
+        if (!cancelled) {
+          setAccess(value)
+          onUpdatedRef.current(value)
+        }
       })
       .catch((error) => {
         if (!cancelled) setError(errorText(error))
@@ -37,7 +44,7 @@ export function ModelAccess({
         body: '{}',
       })
       setAccess(value)
-      onUpdated()
+      onUpdated(value)
     } catch (error) {
       setError(errorText(error))
     } finally {
@@ -93,7 +100,7 @@ export function ModelAccess({
           savedModels={access.savedModels}
           onSaved={(value) => {
             setAccess(value)
-            onUpdated()
+            onUpdated(value)
           }}
           onClose={() => setLibraryOpen(false)}
         />

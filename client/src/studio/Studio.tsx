@@ -25,6 +25,7 @@ import {
   type Project,
   type Preset,
   type Session,
+  type ModelAccess,
   type TrashItem,
   type TrashDeleteResult,
 } from './api'
@@ -38,7 +39,7 @@ import { CheckControls } from './CheckControls'
 import { TrashDialog } from './TrashDialog'
 import { Icon } from './Icons'
 import { ToolbarAction } from './ToolbarAction'
-import { LeanWorkspace } from './LeanWorkspace'
+import { LazyLeanWorkspace as LeanWorkspace } from './LazyLeanWorkspace'
 import { FileTabs } from './FileTabs'
 import { WorkspaceBuffers, type WorkspaceScope } from './workspaceBuffers'
 import { useAutosave } from './useAutosave'
@@ -123,6 +124,12 @@ import {
   useMediaQuery,
   useStoredSize,
 } from './layout'
+import {
+  readStoredValue,
+  removeStoredValue,
+  writeStoredValue,
+} from './safeStorage'
+import { useModelDiscoveryRecovery } from './useModelDiscoveryRecovery'
 import './studio.css'
 import './single-file.css'
 import './file-reading.css'
@@ -236,15 +243,45 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
   )
 }
 
+const INVITATION_STORAGE_KEY = 'lemex-project-invitation'
+
+// Removes one invitation from the address fragment. Other fragment parameters
+// and a different invitation stay exactly as they were.
+function clearInvitationFromAddress(token: string) {
+  const fragment = window.location.hash.slice(1)
+  const kept = fragment
+    .split('&')
+    .filter((part) => new URLSearchParams(part).get('share') !== token)
+    .join('&')
+  if (kept === fragment) return
+  const url = new URL(window.location.href)
+  url.hash = kept ? `#${kept}` : ''
+  window.history.replaceState(null, '', url)
+}
+
 function pendingProjectInvitation() {
   const token = new URLSearchParams(window.location.hash.slice(1)).get('share')
-  if (token) {
-    sessionStorage.setItem('lemex-project-invitation', token)
-    const url = new URL(window.location.href)
-    url.hash = ''
-    window.history.replaceState(null, '', url)
+  if (!token) return readStoredValue('session', INVITATION_STORAGE_KEY)
+  // Until this tab's storage holds the token, the address is the only copy a
+  // reload before sign-in can recover, so it stays there when saving fails.
+  if (
+    writeStoredValue('session', INVITATION_STORAGE_KEY, token) &&
+    readStoredValue('session', INVITATION_STORAGE_KEY) === token
+  ) {
+    clearInvitationFromAddress(token)
+  } else {
+    // The newer link still replaces any invitation saved before it.
+    removeStoredValue('session', INVITATION_STORAGE_KEY)
   }
-  return token || sessionStorage.getItem('lemex-project-invitation')
+  return token
+}
+
+// Forgets an invitation that was joined or dismissed, and only that one: a
+// newer link may already be waiting in the address or in storage.
+function forgetProjectInvitation(token: string) {
+  if (readStoredValue('session', INVITATION_STORAGE_KEY) === token)
+    removeStoredValue('session', INVITATION_STORAGE_KEY)
+  clearInvitationFromAddress(token)
 }
 
 export function Studio() {
@@ -293,6 +330,7 @@ export function Studio() {
     80,
   )
   const [session, setSession] = useState<Session | null>(null)
+  useModelDiscoveryRecovery(session, setSession)
   const [authRequired, setAuthRequired] = useState(false)
   const { pause: pauseSessionActivity, resume: resumeSessionActivity } =
     useSessionActivity(session?.user.id, authRequired)
@@ -316,6 +354,9 @@ export function Studio() {
   const [invitationIssue, setInvitationIssue] = useState('')
   const [invitationAttempt, setInvitationAttempt] = useState(0)
   const [projects, setProjects] = useState<Project[]>([])
+  const [projectListLoading, setProjectListLoading] = useState(true)
+  const [projectListError, setProjectListError] = useState('')
+  const [projectListAttempt, setProjectListAttempt] = useState(0)
   const [projectId, setSelectedProjectId] = useState<string | null>(null)
   const [files, setFiles] = useState<FileEntry[]>([])
   const [folders, setFolders] = useState<string[]>([])
@@ -444,7 +485,7 @@ export function Studio() {
   } | null>(null)
   const [leanState, setLeanState] = useState('')
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const saved = localStorage.getItem('lemex-theme')
+    const saved = readStoredValue('local', 'lemex-theme')
     return saved === 'light' || saved === 'dark'
       ? saved
       : matchMedia('(prefers-color-scheme: dark)').matches
@@ -744,6 +785,9 @@ export function Studio() {
       setSessionRefreshing(false)
       setSession(null)
       setAuthRequired(true)
+      setProjects([])
+      setProjectListLoading(true)
+      setProjectListError('')
       setProjectId(null)
       setFile(null)
     } catch (error) {
@@ -790,6 +834,24 @@ export function Studio() {
       p.preparationState === 'queued' || p.preparationState === 'preparing',
   )
   const sessionUser = session?.user.id
+  const acceptModels = useCallback(
+    (access: ModelAccess) => {
+      setSession((current) =>
+        current && current.user.id === sessionUser
+          ? {
+              ...current,
+              ...access,
+              lemex: {
+                ...current.lemex,
+                modelError: null,
+                modelErrorRetryable: false,
+              },
+            }
+          : current,
+      )
+    },
+    [sessionUser],
+  )
   useEffect(() => {
     if (!sessionUser || authRequired || (!projectModal && !preparingTemplates))
       return
@@ -832,7 +894,7 @@ export function Studio() {
   }, [])
   useEffect(() => {
     document.documentElement.dataset.theme = theme
-    localStorage.setItem('lemex-theme', theme)
+    writeStoredValue('local', 'lemex-theme', theme)
   }, [theme])
 
   const sessionOwner = session?.user.id
@@ -871,6 +933,8 @@ export function Studio() {
   useEffect(() => {
     if (!session || invitationToken) return
     let cancelled = false
+    setProjectListLoading(true)
+    setProjectListError('')
     void api<Project[]>('/api/projects')
       .then((value) => {
         if (cancelled) return
@@ -878,7 +942,7 @@ export function Studio() {
         // Refreshing the account must keep the current visit, including drafts
         // retained after project access ends. Explicit navigation owns leaving it.
         if (bufferStore.getSnapshot().scope.projectId) return
-        const savedId = localStorage.getItem('lemex-project')
+        const savedId = readStoredValue('local', 'lemex-project')
         setProjectId(
           value.some((item) => item.id === savedId)
             ? savedId
@@ -886,12 +950,15 @@ export function Studio() {
         )
       })
       .catch((error) => {
-        if (!cancelled) setError(errorText(error))
+        if (!cancelled) setProjectListError(errorText(error))
+      })
+      .finally(() => {
+        if (!cancelled) setProjectListLoading(false)
       })
     return () => {
       cancelled = true
     }
-  }, [session, setProjectId, invitationToken, bufferStore])
+  }, [session, setProjectId, invitationToken, bufferStore, projectListAttempt])
 
   const preparing = projects.some((item) => item.status === 'preparing')
   useEffect(() => {
@@ -1083,7 +1150,7 @@ export function Studio() {
           },
           { preview: previewRequested() },
         )
-        localStorage.setItem(`lemex-file-${id}`, path)
+        writeStoredValue('local', `lemex-file-${id}`, path)
         setSidebarOpen(false)
       } catch (error) {
         if (request === openRequest.current) setError(errorText(error))
@@ -1098,14 +1165,14 @@ export function Studio() {
 
   useEffect(() => {
     if (!projectId) return
-    localStorage.setItem('lemex-project', projectId)
+    writeStoredValue('local', 'lemex-project', projectId)
     if (!workspaceEditable) return
     const expected = scope
     let cancelled = false
     void loadFiles(projectId)
       .then((value) => {
         if (cancelled || !bufferStore.isCurrent(expected)) return
-        const savedPath = localStorage.getItem(`lemex-file-${projectId}`)
+        const savedPath = readStoredValue('local', `lemex-file-${projectId}`)
         const first =
           value.find((item) => item.path === savedPath) ||
           value.find((item) => item.path === 'Main.lean') ||
@@ -1241,7 +1308,7 @@ export function Studio() {
           })
       }
       const active = movedFile?.path
-      if (active) localStorage.setItem(`lemex-file-${id}`, active)
+      if (active) writeStoredValue('local', `lemex-file-${id}`, active)
       if (!ownMoves.current.has(`${from}\0${to}`))
         setNotice(`${from} was moved to ${to}.`)
     },
@@ -1546,15 +1613,18 @@ export function Studio() {
     })
       .then((joined) => {
         if (cancelled) return
-        sessionStorage.removeItem('lemex-project-invitation')
+        forgetProjectInvitation(invitationToken)
         setProjects((previous) => [
           ...previous.filter((item) => item.id !== joined.id),
           joined,
         ])
         navigate(async () => {
-          localStorage.setItem('lemex-project', joined.id)
+          writeStoredValue('local', 'lemex-project', joined.id)
           setProjectId(joined.id)
-          setInvitationToken(null)
+          // A newer link opened while this one was joining stays pending.
+          setInvitationToken((current) =>
+            current === invitationToken ? null : current,
+          )
           setNotice('Shared project opened')
         }, joined.name)
       })
@@ -1637,7 +1707,7 @@ export function Studio() {
               return
           } else {
             ++openRequest.current
-            localStorage.removeItem(`lemex-file-${expected.projectId}`)
+            removeStoredValue('local', `lemex-file-${expected.projectId}`)
           }
         }
         bufferStore.closeFile(path)
@@ -1652,7 +1722,7 @@ export function Studio() {
 
   function rememberCreatedProject(created: Project) {
     if (created.kind === 'single-file')
-      localStorage.setItem(`lemex-file-${created.id}`, 'Main.lean')
+      writeStoredValue('local', `lemex-file-${created.id}`, 'Main.lean')
     setProjects((previous) => [
       created,
       ...previous.filter((item) => item.id !== created.id),
@@ -2448,7 +2518,7 @@ export function Studio() {
           setFolders([])
           setGit(null)
           setProjectId(null)
-          localStorage.removeItem('lemex-project')
+          removeStoredValue('local', 'lemex-project')
         }
         const remaining = await loadProjects()
         if (active) setProjectId(remaining[0]?.id || null)
@@ -2643,8 +2713,10 @@ export function Studio() {
           <button
             className="button small subtle"
             onClick={() => {
-              sessionStorage.removeItem('lemex-project-invitation')
-              setInvitationToken(null)
+              forgetProjectInvitation(invitationToken)
+              setInvitationToken((current) =>
+                current === invitationToken ? null : current,
+              )
               setInvitationIssue('')
             }}
           >
@@ -2652,6 +2724,19 @@ export function Studio() {
           </button>
         </>
       )}
+    </div>
+  )
+
+  const projectListNotice = !invitationToken && projectListError && (
+    <div className="workspace-alert" role="alert">
+      <span>Your project list could not load. {projectListError}</span>
+      <button
+        className="button small secondary"
+        disabled={projectListLoading}
+        onClick={() => setProjectListAttempt((value) => value + 1)}
+      >
+        Retry loading projects
+      </button>
     </div>
   )
 
@@ -2691,6 +2776,7 @@ export function Studio() {
             if (result) throw result.error
           }}
           invitationNotice={invitationNotice}
+          projectListNotice={projectListNotice}
           viewerProjects={
             session.user.profileComplete === false
               ? []
@@ -2698,7 +2784,7 @@ export function Studio() {
           }
           onOpenViewer={(id) =>
             navigate(async () => {
-              localStorage.setItem('lemex-project', id)
+              writeStoredValue('local', 'lemex-project', id)
               setProjectId(id)
             })
           }
@@ -3477,7 +3563,32 @@ export function Studio() {
             <DraftDownloads files={dirtyFiles} />
           </div>
         )}
-        {!project ? (
+        {project && projectListNotice}
+        {!project &&
+        !invitationToken &&
+        (projectListLoading || projectListError) ? (
+          <div className="welcome-state">
+            {projectListLoading ? (
+              <>
+                <span className="spinner" />
+                <output>Loading your projects…</output>
+              </>
+            ) : (
+              <>
+                <h1>Your projects could not load</h1>
+                <p className="error-message" role="alert">
+                  {projectListError}
+                </p>
+                <button
+                  className="button primary"
+                  onClick={() => setProjectListAttempt((value) => value + 1)}
+                >
+                  Retry loading projects
+                </button>
+              </>
+            )}
+          </div>
+        ) : !project ? (
           <div className="welcome-state">
             <img className="welcome-mark" src="/leanflow-mark.svg" alt="" />
             <div className="eyebrow">A place to work on proofs</div>
@@ -4182,13 +4293,7 @@ export function Studio() {
                 readOnly={file?.readOnly}
                 canRun={projectCanEdit}
                 session={session}
-                onModelsUpdated={(access) =>
-                  setSession((current) =>
-                    current?.user.id === session.user.id
-                      ? { ...current, ...access }
-                      : current,
-                  )
-                }
+                onModelsUpdated={acceptModels}
                 dirty={dirty}
                 dirtyFileCount={dirtyFiles.length}
                 beforeRun={saveWorkspace}
@@ -4417,6 +4522,7 @@ export function Studio() {
         <SettingsModal
           user={session.user}
           onProfileSaved={acceptProfile}
+          onModelsUpdated={acceptModels}
           onProviderSaved={() => {
             void loadSession()
           }}

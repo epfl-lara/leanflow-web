@@ -1,5 +1,7 @@
 > **Upstream reference.** This describes the original lean4web application. For LeanFlow Web, see [Install and run](LemexWeb.md#install-and-run) and [Configuration](Configuration.md).
 
+The unauthenticated upstream server is disabled by default. For local legacy development only, run `NODE_ENV=development LEANFLOW_LEGACY_DEV=1 node server/index.mjs`; it listens on `127.0.0.1`. The PM2 configuration starts authenticated LeanFlow Web.
+
 - [Back to README](../README.md)
 - [User Manual](./Usage.md)
 - Installation

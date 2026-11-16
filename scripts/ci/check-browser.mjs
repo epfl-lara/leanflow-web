@@ -22,6 +22,7 @@ const chatSuites = [
   'profile',
   'provider-settings',
   'model-options',
+  'model-discovery-recovery',
   'chat-naming',
   'rcp-queue',
   'chat',
@@ -48,6 +49,9 @@ const chatSuites = [
   'settings-recovery',
 ]
 const workspaceSuites = [
+  'startup-loading',
+  'storage-denied',
+  'project-list-recovery',
   'account-controls',
   'session-account-switch',
   'account-setup-invitation',
@@ -70,6 +74,7 @@ const workspaceSuites = [
   'collaboration-sync',
   'search-results',
   'import',
+  'upload-reading',
   'import-environment',
   'private-import',
   'import-publishing',

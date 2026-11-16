@@ -839,6 +839,7 @@ export class ProjectDocuments {
 
   changed(event) {
     if (this.closed) return
+    this.workspaces.invalidateFileListing?.(event.projectId)
     if (event.kind === 'access' || event.kind === 'project')
       this.closeAccess(event.projectId)
     for (const client of this.clients)

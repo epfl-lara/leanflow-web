@@ -1,3 +1,44 @@
+// Keep a tab or account from consuming every live replay subscription. Polling
+// remains available when live-stream capacity is full.
+export function eventStreamAdmission({
+  maxConcurrent = 256,
+  maxPerUser = 16,
+} = {}) {
+  for (const limit of [maxConcurrent, maxPerUser])
+    if (!Number.isSafeInteger(limit) || limit <= 0)
+      throw new Error('Event stream limits must be positive integers.')
+  let active = 0
+  const users = new Map()
+  return (request, response) => {
+    const actor = request.user.id
+    const owned = users.get(actor) || 0
+    if (active >= maxConcurrent || owned >= maxPerUser) {
+      response.setHeader('Retry-After', '2')
+      response.status(429).json({
+        error:
+          'Live updates are busy. They will reconnect automatically. Close unused tabs if this continues.',
+      })
+      return false
+    }
+    active++
+    users.set(actor, owned + 1)
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      active--
+      const remaining = users.get(actor) - 1
+      if (remaining) users.set(actor, remaining)
+      else users.delete(actor)
+      response.off('close', release)
+      response.off('finish', release)
+    }
+    response.once('close', release)
+    response.once('finish', release)
+    return true
+  }
+}
+
 // Replay from durable storage in small pages. A slow tab must not accumulate
 // the whole run in the HTTP write buffer or in a separate in-memory queue.
 export function streamRunEvents(

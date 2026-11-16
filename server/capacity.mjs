@@ -60,7 +60,18 @@ export function loadCapacity(env = process.env) {
     ),
     agents: positiveNumber(env, 'STUDIO_MAX_AGENTS', 2),
     agentQueue: positiveNumber(env, 'STUDIO_MAX_AGENT_QUEUE', 12),
+    agentQueuePerUser: positiveNumber(
+      env,
+      'STUDIO_MAX_AGENT_QUEUE_PER_USER',
+      4,
+    ),
     searches: positiveNumber(env, 'STUDIO_MAX_SEARCHES', 4),
+    eventStreams: positiveNumber(env, 'STUDIO_MAX_EVENT_STREAMS', 256),
+    eventStreamsPerUser: positiveNumber(
+      env,
+      'STUDIO_MAX_EVENT_STREAMS_PER_USER',
+      16,
+    ),
     sourceRequests: positiveNumber(env, 'STUDIO_MAX_SOURCE_REQUESTS', 2),
     sourceRequestsPerUser: positiveNumber(
       env,

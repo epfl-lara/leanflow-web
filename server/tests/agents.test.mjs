@@ -417,6 +417,7 @@ test('agent runs have no overall deadline by default but accept explicit finite 
   t.after(() => events.close())
   const manager = new AgentManager({
     maxConcurrent: 0,
+    maxQueuePerUser: 12,
     events,
     workspaces: { get: (id) => ({ id, status: 'ready' }) },
     runtime: {
@@ -467,4 +468,114 @@ test('agent runs have no overall deadline by default but accept explicit finite 
     )
   await manager.shutdown()
   assert.equal(manager.active.size, 0)
+})
+
+async function queuedManager(t, options = {}) {
+  const root = await directory(t),
+    events = new EventStore(root)
+  const manager = new AgentManager({
+    events,
+    workspaces: { get: (id) => ({ id, status: 'ready' }) },
+    runtime: {
+      spawn() {
+        assert.fail('Queue admission must not launch a provider')
+      },
+    },
+    settings: new Settings(root),
+    config: {
+      provider: { LEMEX_API_KEY: 'fixture-key' },
+      defaultModel: 'model',
+      models: [{ id: 'model' }],
+      redact: String,
+    },
+    maxConcurrent: 0,
+    maxQueue: 5,
+    maxQueuePerUser: 2,
+    ...options,
+  })
+  t.after(async () => {
+    await manager.shutdown()
+    events.close()
+  })
+  return {
+    manager,
+    events,
+    start: (owner, project) =>
+      manager.start(owner, project, {
+        mode: 'prove',
+        prompt: 'Complete the saved theorem.',
+      }),
+  }
+}
+
+test('one account cannot fill the assistant waiting queue and cancelling restores its admission', async (t) => {
+  const f = await queuedManager(t)
+  const first = await f.start('alice', 'one')
+  await f.start('alice', 'two')
+  await assert.rejects(f.start('alice', 'three'), {
+    status: 429,
+    message: /waiting for your account.*Stop a waiting task/,
+  })
+  const other = await f.start('bob', 'one')
+  assert.equal(other.status, 'queued')
+  assert.equal(f.events.listMetadata('alice', 'three').length, 0)
+  await f.manager.stop('alice', first.id)
+  assert.equal(f.events.get(first.id).status, 'cancelled')
+  assert.equal((await f.start('alice', 'three')).status, 'queued')
+})
+
+test('setup repairs and foreground runs share the account waiting allowance and release it on cancellation', async (t) => {
+  const f = await queuedManager(t)
+  await f.start('alice', 'one')
+  const cancelled = new AbortController()
+  const repair = f.manager.runSetupRepair(
+    () => assert.fail('Waiting repair must not execute'),
+    { owner: 'alice', signal: cancelled.signal },
+  )
+  const stopped = assert.rejects(repair, /Cancel fixture repair/)
+  await assert.rejects(f.start('alice', 'two'), { status: 429 })
+  await assert.rejects(
+    f.manager.runSetupRepair(() => {}, { owner: 'alice' }),
+    { status: 429, message: /waiting for your account/ },
+  )
+  assert.equal((await f.start('bob', 'one')).status, 'queued')
+  cancelled.abort(new Error('Cancel fixture repair'))
+  await stopped
+  assert.equal((await f.start('alice', 'two')).status, 'queued')
+})
+
+test('the global assistant waiting limit still bounds different accounts', async (t) => {
+  const f = await queuedManager(t, { maxQueue: 2 })
+  await f.start('alice', 'one')
+  await f.start('bob', 'one')
+  await assert.rejects(f.start('carol', 'one'), {
+    status: 429,
+    message: /assistant queue is full/,
+  })
+})
+
+test('running tasks do not consume their account waiting allowance', async (t) => {
+  const f = await queuedManager(t, { maxConcurrent: 1 })
+  let finish
+  const running = f.manager.runSetupRepair(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve
+      }),
+    { owner: 'alice' },
+  )
+  await new Promise((resolve) => setImmediate(resolve))
+  try {
+    assert.equal(f.manager.running, 1)
+    assert.equal((await f.start('alice', 'one')).status, 'queued')
+    assert.equal((await f.start('alice', 'two')).status, 'queued')
+    await assert.rejects(f.start('alice', 'three'), {
+      status: 429,
+      message: /waiting for your account/,
+    })
+  } finally {
+    f.manager.stopping = true
+    finish()
+    await running
+  }
 })

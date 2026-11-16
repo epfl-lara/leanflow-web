@@ -26,7 +26,10 @@ test('invalid capacity settings fail before startup rather than disabling admiss
     'STUDIO_MAX_TERMINALS_PER_PROJECT',
     'STUDIO_MAX_AGENTS',
     'STUDIO_MAX_AGENT_QUEUE',
+    'STUDIO_MAX_AGENT_QUEUE_PER_USER',
     'STUDIO_MAX_SEARCHES',
+    'STUDIO_MAX_EVENT_STREAMS',
+    'STUDIO_MAX_EVENT_STREAMS_PER_USER',
     'STUDIO_MAX_SOURCE_REQUESTS',
     'STUDIO_MAX_SOURCE_REQUESTS_PER_USER',
     'STUDIO_MAX_SMALL_SOURCE_REQUESTS',
@@ -780,4 +783,56 @@ test('a precommit configuration version conflict preserves both project editor c
     fs.stat(path.join(f.projects[0].root, 'lakefile.toml')),
     { code: 'ENOENT' },
   )
+})
+
+test('event streams enforce account and global capacity while polling and private-run checks remain available', async (t) => {
+  const f = await fixture(t, {
+    STUDIO_MAX_EVENT_STREAMS: '2',
+    STUDIO_MAX_EVENT_STREAMS_PER_USER: '1',
+  })
+  const actor = f.studio.auth.users.find((user) => user.id === 'owner')
+  const bob = await f.studio.auth.createUser(actor, { name: 'Bob' })
+  const carol = await f.studio.auth.createUser(actor, { name: 'Carol' })
+  const runs = ['owner', bob.user.id, carol.user.id].map((owner) =>
+    f.studio.events.create(owner, {
+      kind: 'agent',
+      projectId: f.projects[0].id,
+    }),
+  )
+  const controllers = []
+  t.after(() => controllers.forEach((controller) => controller.abort()))
+  const open = (run, headers = f.headers, query = '') => {
+    const controller = new AbortController()
+    controllers.push(controller)
+    return fetch(`${f.base}/api/runs/${run.id}/events${query}`, {
+      headers,
+      signal: controller.signal,
+    })
+  }
+  const bobHeaders = { Authorization: `Bearer ${bob.token}` }
+  const carolHeaders = { Authorization: `Bearer ${carol.token}` }
+  const privateRun = await open(runs[1])
+  assert.equal(privateRun.status, 404)
+  const first = await open(runs[0])
+  assert.equal(first.status, 200)
+  assert.match(first.headers.get('Content-Type'), /text\/event-stream/)
+  const personalOverflow = await open(runs[0])
+  assert.equal(personalOverflow.status, 429)
+  assert.equal(personalOverflow.headers.get('Retry-After'), '2')
+  assert.match((await personalOverflow.json()).error, /Live updates are busy/)
+  const second = await open(runs[1], bobHeaders)
+  assert.equal(second.status, 200)
+  assert.equal((await open(runs[2], carolHeaders)).status, 429)
+  const polled = await open(runs[0], f.headers, '?transport=poll')
+  assert.equal(polled.status, 200)
+  assert.equal((await polled.json()).events.length, 1)
+  await first.body.cancel()
+  const deadline = Date.now() + 2000
+  while (f.studio.events.listenerCount(runs[0].id) && Date.now() < deadline)
+    await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(f.studio.events.listenerCount(runs[0].id), 0)
+  const recovered = await open(runs[2], carolHeaders)
+  assert.equal(recovered.status, 200)
+  await second.body.cancel()
+  await recovered.body.cancel()
 })

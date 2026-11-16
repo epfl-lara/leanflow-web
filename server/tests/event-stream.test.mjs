@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import test from 'node:test'
-import { streamRunEvents } from '../event-stream.mjs'
+import { eventStreamAdmission, streamRunEvents } from '../event-stream.mjs'
 
 const tick = () => new Promise((resolve) => setImmediate(resolve))
 function fixture(t, count = 0) {
@@ -122,4 +122,57 @@ test('an open event stream stops before private output after its account credent
   assert.equal(f.written.length, 1)
   assert.equal(ended, true)
   assert.equal(f.events.listenerCount('run'), 0)
+})
+
+test('live stream admission bounds accounts and total connections and releases each place once', () => {
+  const admit = eventStreamAdmission({ maxConcurrent: 2, maxPerUser: 1 })
+  const response = () => {
+    const res = new EventEmitter()
+    res.setHeader = (key, value) => {
+      res[key] = value
+    }
+    res.status = (value) => {
+      res.statusCode = value
+      return res
+    }
+    res.json = (value) => {
+      res.body = value
+      return res
+    }
+    return res
+  }
+  const alice = { user: { id: 'alice' } },
+    bob = { user: { id: 'bob' } },
+    carol = { user: { id: 'carol' } }
+  const first = response(),
+    second = response(),
+    rejected = response()
+  assert.equal(admit(alice, first), true)
+  assert.equal(admit(alice, rejected), false)
+  assert.equal(rejected.statusCode, 429)
+  assert.equal(rejected['Retry-After'], '2')
+  assert.match(rejected.body.error, /Live updates are busy/)
+  assert.equal(admit(bob, second), true)
+  assert.equal(admit(carol, response()), false)
+  first.emit('finish')
+  first.emit('close')
+  const third = response()
+  assert.equal(admit(carol, third), true)
+  assert.equal(
+    admit(alice, response()),
+    false,
+    'finish and close must not release twice',
+  )
+  second.emit('close')
+  assert.equal(admit(bob, response()), true)
+  third.emit('close')
+})
+
+test('invalid live stream limits fail before accepting connections', () => {
+  for (const key of ['maxConcurrent', 'maxPerUser'])
+    for (const value of [0, -1, NaN, Infinity, 1.5])
+      assert.throws(
+        () => eventStreamAdmission({ [key]: value }),
+        /positive integers/,
+      )
 })

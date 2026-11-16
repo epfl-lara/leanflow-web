@@ -1,5 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { api, errorText, type Account, type ProviderStatus } from './api'
+import {
+  api,
+  errorText,
+  type Account,
+  type ModelAccess as ModelAccessStatus,
+  type ProviderStatus,
+} from './api'
 import { ProviderKeyForm } from './ProviderKeyForm'
 import { AdminAccounts } from './AdminAccounts'
 import { ModelAccess } from './ModelAccess'
@@ -26,12 +32,14 @@ export function SettingsModal({
   user,
   onProviderSaved,
   onProfileSaved,
+  onModelsUpdated,
 }: {
   onClose: () => void
   onSaved: () => void
   user: Account
   onProviderSaved: () => void
   onProfileSaved?: (user: Account) => void
+  onModelsUpdated: (access: ModelAccessStatus) => void
 }) {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [provider, setProvider] = useState<ProviderStatus | null>(null)
@@ -131,7 +139,7 @@ export function SettingsModal({
       {provider?.configured && (
         <ModelAccess
           revision={provider.updatedAt}
-          onUpdated={onProviderSaved}
+          onUpdated={onModelsUpdated}
         />
       )}
       {!settings && !error && (

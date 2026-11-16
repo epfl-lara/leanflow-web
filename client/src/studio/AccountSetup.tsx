@@ -15,6 +15,7 @@ export function AccountSetup({
   viewerProjects = [],
   onOpenViewer,
   invitationNotice,
+  projectListNotice,
 }: {
   session: Session
   onSaved: () => void
@@ -26,6 +27,7 @@ export function AccountSetup({
   viewerProjects?: readonly { id: string; name: string }[]
   onOpenViewer?: (id: string) => void
   invitationNotice?: ReactNode
+  projectListNotice?: ReactNode
 }) {
   const [providerBusy, setProviderBusy] = useState(false)
   const [profileBusy, setProfileBusy] = useState(false)
@@ -62,6 +64,7 @@ export function AccountSetup({
           </>
         ) : (
           <>
+            {projectListNotice}
             {!!viewerProjects.length && onOpenViewer && (
               <section
                 className="account-viewer-projects"

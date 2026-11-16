@@ -82,7 +82,10 @@ export interface Session {
     terminalsPerProject: number
     agents: number
     agentQueue: number
+    agentQueuePerUser: number
     searches: number
+    eventStreams: number
+    eventStreamsPerUser: number
     sourceRequests: number
     sourceRequestsPerUser: number
     smallSourceRequests: number
@@ -97,6 +100,7 @@ export interface Session {
     version?: string
     configured?: boolean
     modelError?: string | null
+    modelErrorRetryable?: boolean
     [key: string]: unknown
   }
 }
