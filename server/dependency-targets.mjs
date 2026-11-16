@@ -7,6 +7,11 @@ import { runSetupStep } from './setup-output.mjs'
 const inspectLibraries = `import Lake
 import Lake.Load.Workspace
 open Lake
+private def packageName (pkg : Package) : Lean.Name := by
+  first
+  | exact pkg.baseName
+  | exact pkg.name
+
 unsafe def main (imports : List String) : IO Unit := do
   let includeRoot := imports.head? == some "--include-root"
   let imports := imports.filter (· != "--include-root")
@@ -17,18 +22,21 @@ unsafe def main (imports : List String) : IO Unit := do
   let env ← match ← (Env.compute lake lean elanInstall?).toBaseIO with
     | .ok env => pure env
     | .error error => throw (IO.userError error)
-  let config : LoadConfig :=
-    { lakeEnv := env, wsDir := ← IO.currentDir, updateToolchain := false }
+  let directory ← IO.currentDir
+  let config : LoadConfig := by
+    first
+    | exact { lakeEnv := env, wsDir := directory, updateToolchain := false }
+    | exact { lakeEnv := env, wsDir := directory }
   let some workspace ← (loadWorkspace config).run?'
     | throw (IO.userError "Could not inspect Lake dependency targets")
-  let packages := workspace.packages.filter fun pkg => includeRoot || pkg.baseName != workspace.root.baseName
+  let packages := workspace.packages.filter fun pkg => includeRoot || packageName pkg != packageName workspace.root
   let plan := packages.map fun pkg =>
     let libraries := (pkg.defaultTargets.filter fun target => (pkg.findLeanLib? target).isSome).map toString
     let modules := imports.toArray.filterMap fun name =>
       match workspace.findModule? name.toName with
-      | some mod => if mod.pkg.baseName == pkg.baseName then some ("+" ++ mod.name.toString) else none
+      | some mod => if packageName mod.pkg == packageName pkg then some ("+" ++ mod.name.toString) else none
       | none => none
-    (pkg.baseName.toString, libraries ++ modules)
+    ((packageName pkg).toString, libraries ++ modules)
   IO.println ("LEANFLOW_DEPENDENCY_TARGETS=" ++ (Lean.toJson plan).compress)
 `
 

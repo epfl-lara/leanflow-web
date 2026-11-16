@@ -12,6 +12,7 @@ export interface ChatDraft {
   files: string[]
   revision: number
   mode: ChatMode
+  purpose?: 'setup'
   proofTarget?: ProofTarget
 }
 export interface DraftSubmission {
@@ -19,6 +20,7 @@ export interface DraftSubmission {
   revision: number
   text: string
   files: string[]
+  purpose?: 'setup'
   proofTarget?: ProofTarget
 }
 
@@ -29,6 +31,12 @@ export const proofFocusPrompts = {
     'Explain this proof or definition and find relevant lemmas. Do not edit files.',
 }
 
+function withoutPurpose(current: ChatDraft): ChatDraft {
+  const value = { ...current }
+  delete value.purpose
+  return value
+}
+
 export function focusDraft(
   current: ChatDraft,
   proofTarget: ProofTarget,
@@ -36,7 +44,7 @@ export function focusDraft(
 ): ChatDraft {
   const nextMode = mode || current.mode
   return {
-    ...current,
+    ...withoutPurpose(current),
     proofTarget: { ...proofTarget },
     mode: nextMode,
     text:
@@ -69,6 +77,7 @@ export function clearDraftSubmission(
   if (
     current.revision !== submission.revision ||
     current.text !== submission.text ||
+    current.purpose !== submission.purpose ||
     !sameFiles(current.files, submission.files) ||
     !sameTarget(current.proofTarget, submission.proofTarget)
   )
@@ -90,6 +99,7 @@ export function restoreDraftSubmission(
     current.revision !== submission.revision + 1 ||
     current.text !== '' ||
     current.files.length !== 0 ||
+    current.purpose !== submission.purpose ||
     !!current.proofTarget
   )
     return null
@@ -185,6 +195,9 @@ export function readChatDraft(key: string): ChatDraft {
         mode: ['proofs', 'formalize', 'optimize', 'search'].includes(value.mode)
           ? value.mode
           : 'proofs',
+        ...(value.purpose === 'setup' && value.mode === 'search'
+          ? { purpose: 'setup' }
+          : {}),
         ...(value.proofTarget &&
         typeof value.proofTarget.path === 'string' &&
         typeof value.proofTarget.source === 'string' &&
@@ -263,7 +276,17 @@ export function useChatDraft(
     setFiles: (files: string[]) =>
       write(key, { ...get(key), files, revision: get(key).revision + 1 }),
     setMode: (mode: ChatMode) =>
-      write(key, { ...get(key), mode, revision: get(key).revision + 1 }),
+      write(key, {
+        ...withoutPurpose(get(key)),
+        mode,
+        revision: get(key).revision + 1,
+      }),
+    setPurpose: (purpose?: 'setup') =>
+      write(key, {
+        ...withoutPurpose(get(key)),
+        ...(purpose ? { purpose } : {}),
+        revision: get(key).revision + 1,
+      }),
     clearTarget: () =>
       write(key, {
         ...get(key),
@@ -287,6 +310,7 @@ export function useChatDraft(
         stored.revision > submission.revision ||
         (stored.revision === submission.revision &&
           (stored.text !== submission.text ||
+            stored.purpose !== submission.purpose ||
             !sameFiles(stored.files, submission.files) ||
             !sameTarget(stored.proofTarget, submission.proofTarget)))
       )
@@ -301,6 +325,7 @@ export function useChatDraft(
       if (
         stored.revision === submission.revision + 1 &&
         (stored.text !== '' ||
+          stored.purpose !== submission.purpose ||
           stored.files.length !== 0 ||
           !!stored.proofTarget)
       )

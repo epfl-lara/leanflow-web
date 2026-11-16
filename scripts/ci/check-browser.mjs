@@ -93,6 +93,7 @@ const workspaceSuites = [
   'markdown-files',
   'setup-progress',
   'setup-recovery',
+  'setup-assistant',
   'sidebar',
   'single-file',
   'source-navigation',

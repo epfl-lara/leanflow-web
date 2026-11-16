@@ -10,6 +10,7 @@ import {
   runDependencyCache,
   setupInfrastructureFailure,
   setupFailureMessage,
+  changedDependencyPin,
 } from '../pinned-lake.mjs'
 import {
   TemporaryWorkspaces,
@@ -35,6 +36,214 @@ const runtime = () => ({
   templateRoot: () => null,
   prepareToolchain: async () => {},
   run: async () => ({ code: 0, stdout: '', stderr: '' }),
+})
+
+test('pinned Git dependencies retain their source type and selected package subdirectory', () => {
+  const dependency = {
+    name: 'fixture',
+    type: 'git',
+    url: 'https://github.com/example/library',
+    rev: 'a'.repeat(40),
+    subDir: 'packages/original',
+  }
+  for (const replacement of [
+    { ...dependency, type: 'path', dir: 'vendor/local' },
+    { ...dependency, subDir: 'packages/different' },
+    { ...dependency, subDir: undefined },
+  ])
+    assert.equal(
+      changedDependencyPin(
+        { packages: [dependency] },
+        { packages: [replacement] },
+      ),
+      'fixture',
+    )
+  assert.equal(
+    changedDependencyPin(
+      { packages: [dependency] },
+      {
+        packages: [
+          {
+            ...dependency,
+            subDir: './packages/original/',
+            inputRev: 'main',
+            inherited: true,
+          },
+        ],
+      },
+    ),
+    null,
+  )
+  for (const subDir of [undefined, null, '', '.', './'])
+    assert.equal(
+      changedDependencyPin(
+        { packages: [{ ...dependency, subDir: undefined }] },
+        { packages: [{ ...dependency, subDir }] },
+      ),
+      null,
+    )
+})
+
+test('Lake cannot replace a pinned Git package source while keeping its revision and URL fields', async (t) => {
+  for (const replacement of [
+    { type: 'path', dir: 'vendor/local' },
+    { subDir: 'different-package' },
+  ]) {
+    const root = await fixture(t)
+    await fs.writeFile(path.join(root, 'lean-toolchain'), toolchain)
+    const dependency = {
+      name: 'fixture',
+      type: 'git',
+      url: 'https://github.com/example/library',
+      rev: 'a'.repeat(40),
+    }
+    const original = JSON.stringify({ packages: [dependency] })
+    const manifest = path.join(root, 'lake-manifest.json')
+    await fs.writeFile(manifest, original)
+    await assert.rejects(
+      runPinnedLake(
+        {
+          run: async () => {
+            await fs.writeFile(
+              manifest,
+              JSON.stringify({ packages: [{ ...dependency, ...replacement }] }),
+            )
+            return { code: 0 }
+          },
+        },
+        root,
+        ['lake', 'env', 'lean', '--version'],
+      ),
+      /pinned dependency.*original lockfile was restored/,
+    )
+    assert.equal(await fs.readFile(manifest, 'utf8'), original)
+  }
+})
+
+test('local package source identities retain their folder and type while ignoring revision metadata', () => {
+  const dependency = { name: 'local', type: 'path', dir: 'vendor/local' }
+  for (const replacement of [
+    { ...dependency, dir: 'vendor/different' },
+    {
+      ...dependency,
+      type: 'git',
+      url: 'https://github.com/example/local',
+      rev: 'a'.repeat(40),
+    },
+  ])
+    assert.equal(
+      changedDependencyPin(
+        { packages: [dependency] },
+        { packages: [replacement] },
+      ),
+      'local',
+    )
+  assert.equal(
+    changedDependencyPin(
+      { packages: [dependency] },
+      {
+        packages: [
+          {
+            ...dependency,
+            dir: './vendor/unused/../local/',
+            rev: 'metadata',
+            inherited: true,
+          },
+        ],
+      },
+    ),
+    null,
+  )
+})
+
+test('Lake restores a local dependency manifest if setup changes its source identity', async (t) => {
+  for (const replacement of [
+    { dir: 'vendor/different' },
+    {
+      type: 'git',
+      url: 'https://github.com/example/local',
+      rev: 'a'.repeat(40),
+    },
+  ]) {
+    const root = await fixture(t)
+    await fs.writeFile(path.join(root, 'lean-toolchain'), toolchain)
+    const dependency = { name: 'local', type: 'path', dir: 'vendor/local' }
+    const manifest = path.join(root, 'lake-manifest.json')
+    const original = JSON.stringify({ packages: [dependency] })
+    await fs.writeFile(manifest, original)
+    await assert.rejects(
+      runPinnedLake(
+        {
+          run: async () => {
+            await fs.writeFile(
+              manifest,
+              JSON.stringify({ packages: [{ ...dependency, ...replacement }] }),
+            )
+            return { code: 0 }
+          },
+        },
+        root,
+        ['lake', 'env', 'lean', '--version'],
+      ),
+      /pinned dependency source.*lockfile was restored/,
+    )
+    assert.equal(await fs.readFile(manifest, 'utf8'), original)
+  }
+})
+
+test('outside-folder local dependencies stop setup before Lake or paid repair and preserve source files', async (t) => {
+  for (const lockfile of [false, true]) {
+    const dataDir = await fixture(t)
+    let commands = 0,
+      repairs = 0
+    const worker = runtime()
+    worker.run = async () => {
+      commands++
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const input = files.map((file) =>
+      file.path === 'lakefile.toml'
+        ? {
+            ...file,
+            content:
+              'name = "fixture"\n[[require]]\nname = "common"\npath = "../common"\n',
+          }
+        : file,
+    )
+    if (lockfile)
+      input.push({
+        path: 'lake-manifest.json',
+        content: JSON.stringify({
+          packages: [{ name: 'common', type: 'path', dir: '../common' }],
+        }),
+      })
+    const store = await new WorkspaceStore({
+      dataDir,
+      runtime: worker,
+      setupRepair: async () => {
+        repairs++
+      },
+    }).init()
+    t.after(() => store.close())
+    const project = await store.create('alice', {
+      files: input,
+      autoRepair: true,
+    })
+    await store.jobs.get(project.id)
+    const failed = store.get(project.id, 'alice')
+    assert.equal(failed.status, 'error')
+    assert.match(
+      failed.error,
+      /selected-folder layout is not supported.*root contains both packages/,
+    )
+    assert.equal(commands, 0)
+    assert.equal(repairs, 0)
+    for (const file of input)
+      assert.equal(
+        await fs.readFile(path.join(project.root, file.path), 'utf8'),
+        file.content,
+      )
+  }
 })
 
 test('setup detects resource and Git transport failures even with a generic stderr and detailed stdout', async (t) => {

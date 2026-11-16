@@ -778,3 +778,131 @@ test('writable cache inspection rejects a nested directory replaced by a host sy
     'protected',
   )
 })
+
+test('private setup dependencies and contained local build caches can write while project sources stay read only', async (t) => {
+  const { runtime, root } = await fixture(t)
+  await fs.mkdir(path.join(root, 'Local'), { recursive: true })
+  await fs.writeFile(
+    path.join(root, 'lake-manifest.json'),
+    JSON.stringify({
+      packages: [{ type: 'path', name: 'Local', dir: './Local' }],
+    }),
+  )
+  const argv = JSON.parse(
+    (
+      await runtime.run(root, ['true'], {
+        ...cacheOptions,
+        writePrivateDependencyCache: true,
+      })
+    ).stdout,
+  )
+  const bound = mounts(argv)
+  assert(bound.includes(`type=bind,src=${root},dst=/workspace,readonly`))
+  assert(
+    bound.includes(
+      `type=bind,src=${root}/.lake/packages,dst=/workspace/.lake/packages`,
+    ),
+  )
+  assert(
+    bound.includes(
+      `type=bind,src=${root}/Local/.lake,dst=/workspace/Local/.lake`,
+    ),
+  )
+  assert(!bound.some((mount) => mount.endsWith('dst=/workspace/Local')))
+  const ordinary = mounts(
+    JSON.parse((await runtime.run(root, ['true'], cacheOptions)).stdout),
+  )
+  assert(
+    ordinary.includes(
+      `type=bind,src=${root}/.lake/packages,dst=/workspace/.lake/packages,readonly`,
+    ),
+  )
+  assert(
+    !ordinary.some((mount) => mount.includes('dst=/workspace/Local/.lake')),
+  )
+})
+
+test('private cache permission never makes inherited dependency sources writable', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t)
+  const source = path.join(dataDir, 'prepared-source')
+  await fs.mkdir(path.join(source, '.lake/packages/Dependency'), {
+    recursive: true,
+  })
+  await runtime.inheritDependencies(source, root)
+  const bound = mounts(
+    JSON.parse(
+      (
+        await runtime.run(root, ['true'], {
+          ...cacheOptions,
+          writePrivateDependencyCache: true,
+        })
+      ).stdout,
+    ),
+  )
+  assert(
+    bound.includes(
+      `type=bind,src=${source}/.lake/packages,dst=/workspace/.lake/packages,readonly`,
+    ),
+  )
+  assert(
+    !bound.includes(
+      `type=bind,src=${source}/.lake/packages,dst=/workspace/.lake/packages`,
+    ),
+  )
+})
+
+test('private dependency cache option rejects unsafe combinations and cache aliases of source files', async (t) => {
+  const { runtime, root } = await fixture(t)
+  for (const options of [
+    { writePrivateDependencyCache: true },
+    { readOnlyWorkspace: true, writePrivateDependencyCache: true },
+    { ...cacheOptions, writePrivateDependencyCache: 'true' },
+    { ...cacheOptions, writePrivateDependencyCache: true, kernelCheck: true },
+  ])
+    await assert.rejects(
+      runtime.run(root, ['true'], options),
+      /private dependencies require|must be booleans/,
+    )
+  await fs.mkdir(path.join(root, '.lake/packages/Dependency'), {
+    recursive: true,
+  })
+  await fs.writeFile(
+    path.join(root, 'Main.lean'),
+    'example : True := by trivial\n',
+  )
+  await fs.link(
+    path.join(root, 'Main.lean'),
+    path.join(root, '.lake/packages/Dependency/source-alias'),
+  )
+  await assert.rejects(
+    runtime.run(root, ['true'], {
+      ...cacheOptions,
+      writePrivateDependencyCache: true,
+    }),
+    /hardlinked/,
+  )
+})
+
+test('local package cache mounts reject symlinked packages and generated cache directories', async (t) => {
+  for (const linkedCache of [false, true]) {
+    const { runtime, root, dataDir } = await fixture(t)
+    const outside = path.join(dataDir, 'other-project')
+    await fs.mkdir(outside)
+    await fs.writeFile(
+      path.join(root, 'lake-manifest.json'),
+      JSON.stringify({
+        packages: [{ type: 'path', name: 'Local', dir: 'Local' }],
+      }),
+    )
+    if (linkedCache) {
+      await fs.mkdir(path.join(root, 'Local'))
+      await fs.symlink(outside, path.join(root, 'Local/.lake'))
+    } else await fs.symlink(outside, path.join(root, 'Local'))
+    await assert.rejects(
+      runtime.run(root, ['true'], {
+        ...cacheOptions,
+        writePrivateDependencyCache: true,
+      }),
+    )
+  }
+})

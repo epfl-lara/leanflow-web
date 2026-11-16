@@ -166,6 +166,17 @@ try {
     .getByLabel('Exact Lean version', { exact: true })
     .fill('4.36.0-rc1')
   await f.page.setViewportSize({ width: 390, height: 844 })
+  // Setup keeps the assistant available. Close its narrow-screen overlay to
+  // continue choosing the environment without losing the selection.
+  await f.page
+    .getByRole('button', { name: 'Close tools panel', exact: true })
+    .click()
+  assert.equal(
+    await setup()
+      .getByLabel('Exact Lean version', { exact: true })
+      .inputValue(),
+    '4.36.0-rc1',
+  )
   await setup()
     .getByRole('button', { name: 'Prepare environment', exact: true })
     .scrollIntoViewIfNeeded()

@@ -1059,6 +1059,7 @@ test('ordinary document requests work before a Lean environment is configured in
       })
       assert.equal(result.status, 'completed', result.error)
       assert.equal(result.verification.kind, 'workspace')
+      assert.equal(result.verification.complete, true)
       assert.equal(result.verification.editsAllowed, true)
       assert.equal(calls.length, 0)
       await manager.apply('alice', result.id)
@@ -1066,6 +1067,7 @@ test('ordinary document requests work before a Lean environment is configured in
         (await workspaces.readFile(project.id, 'alice', 'Notes.md')).content,
         'Requested edits\n',
       )
+      assert.equal(workspaces.get(project.id, 'alice').status, 'needs-setup')
     })
 })
 

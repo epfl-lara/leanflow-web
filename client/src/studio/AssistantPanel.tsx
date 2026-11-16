@@ -61,6 +61,14 @@ const mergeRun = (values: Run[], value: Run) =>
     ),
   ])
 
+export interface SetupHelpRequest {
+  id: number
+  projectId: string
+}
+
+const setupHelpPrompt =
+  'Help me get this project ready. Diagnose its Lean setup and propose configuration fixes while preserving the pinned Lean version, dependency revisions, and my source files. Explain what you change and test the environment. I will review the changes before applying them.'
+
 export function AssistantPanel({
   projectId,
   file,
@@ -79,6 +87,9 @@ export function AssistantPanel({
   dirtyFileCount = 1,
   readOnly,
   canRun = true,
+  runUnavailableReason,
+  setupHelpRequest,
+  onSetupHelpHandled,
   focusRequest,
   bookRequest,
   onBookHandled,
@@ -104,6 +115,9 @@ export function AssistantPanel({
   dirtyFileCount?: number
   readOnly?: boolean
   canRun?: boolean
+  runUnavailableReason?: string
+  setupHelpRequest?: SetupHelpRequest | null
+  onSetupHelpHandled?: (id: number) => void
   focusRequest?: ProofFocusRequest | null
   bookRequest?: BookChatRequest | null
   onBookHandled?: (id: number) => void
@@ -161,6 +175,7 @@ export function AssistantPanel({
     )
   const handledFocus = useRef<number | null>(null)
   const handledBook = useRef<number | null>(null)
+  const handledSetupHelp = useRef<number | null>(null)
   draftRef.current = draft
   const liveSeen = useRef(new Map<string, string>()),
     livePending = useRef(new Set<string>())
@@ -172,8 +187,13 @@ export function AssistantPanel({
     prompt = draft.value.text,
     contextFiles = draft.value.files,
     proofTarget = draft.value.proofTarget
+  const setupHelp = draft.value.purpose === 'setup'
   const currentMode = chatModes.find((item) => item.id === mode)!
-  const currentLiveEdits = mode === 'search' ? searchLiveEdits : liveEdits
+  const currentLiveEdits = setupHelp
+    ? false
+    : mode === 'search'
+      ? searchLiveEdits
+      : liveEdits
   const chatSelectionKey = `lemex-chat:${session.user.id}:${projectId}`
   const preferenceKey = `lemex-chat-options:${session.user.id}:${projectId}`
   const [preferencesLoaded, setPreferencesLoaded] = useState<string | null>(
@@ -195,6 +215,9 @@ export function AssistantPanel({
     projectRuns.some(
       (run) => stoppingIds.includes(run.id) && (run.chatId || null) === chatId,
     )
+  const activeSetup = activeHere && activeRun?.purpose === 'setup'
+  const setupScope = setupHelp || activeSetup
+  const setupWaitingForOrdinaryRun = setupHelp && hasChatActive && !activeSetup
   const acceptingUpdate =
     activeHere &&
     ['queued', 'starting', 'preparing', 'running'].includes(
@@ -233,6 +256,15 @@ export function AssistantPanel({
     )
       return
     handledFocus.current = focusRequest.id
+    if (activeSetup) {
+      setErrors((previous) => ({
+        ...previous,
+        [draft.key]:
+          'Stop setup help before switching to a proof task. Your draft is kept.',
+      }))
+      onFocusHandled?.(focusRequest.id)
+      return
+    }
     // Attaching a proof is an explicit choice of this visible draft. An old
     // startup request must not replace it with the last saved conversation.
     ++navigation.current
@@ -245,7 +277,14 @@ export function AssistantPanel({
     draftRef.current.focusTarget(focusRequest.target, focusRequest.mode)
     document.getElementById('assistant-prompt')?.focus()
     onFocusHandled?.(focusRequest.id)
-  }, [focusRequest, projectId, onFocusHandled, chatSelectionKey])
+  }, [
+    focusRequest,
+    projectId,
+    onFocusHandled,
+    chatSelectionKey,
+    activeSetup,
+    draft.key,
+  ])
   useEffect(() => {
     if (
       !bookRequest ||
@@ -268,6 +307,48 @@ export function AssistantPanel({
     document.getElementById('assistant-prompt')?.focus()
     onBookHandled?.(bookRequest.id)
   }, [bookRequest, projectId, onBookHandled, chatSelectionKey])
+  useEffect(() => {
+    if (
+      !setupHelpRequest ||
+      setupHelpRequest.projectId !== projectId ||
+      handledSetupHelp.current === setupHelpRequest.id
+    )
+      return
+    handledSetupHelp.current = setupHelpRequest.id
+    ++navigation.current
+    setChatBusy(false)
+    try {
+      localStorage.setItem(chatSelectionKey, chatRef.current || 'new')
+    } catch {
+      /* Keep the visible draft when storage is unavailable. */
+    }
+    const current = draftRef.current
+    if (!current.value.text.includes(setupHelpPrompt))
+      current.setText(
+        current.value.text.trim()
+          ? `${current.value.text}\n\n${setupHelpPrompt}`
+          : setupHelpPrompt,
+      )
+    // This explicit setup action chooses a general project task without
+    // changing the model or reasoning effort already visible to the user.
+    setEfforts((previous) => ({
+      ...previous,
+      [reasoningPreferenceKey(providerScope, model, 'search')]: effort || null,
+    }))
+    current.clearTarget()
+    current.setMode('search')
+    current.setPurpose('setup')
+    document.getElementById('assistant-prompt')?.focus()
+    onSetupHelpHandled?.(setupHelpRequest.id)
+  }, [
+    setupHelpRequest,
+    projectId,
+    onSetupHelpHandled,
+    chatSelectionKey,
+    providerScope,
+    model,
+    effort,
+  ])
   const dialogRun = [...runs, ...projectRuns].find(
     (item) => item.id === dialogId,
   )
@@ -636,6 +717,8 @@ export function AssistantPanel({
     event.preventDefault()
     if (
       !canRun ||
+      !!runUnavailableReason ||
+      setupWaitingForOrdinaryRun ||
       !prompt.trim() ||
       busy ||
       (hasChatActive && !acceptingUpdate)
@@ -650,7 +733,8 @@ export function AssistantPanel({
     const settings = {
       model,
       effort: effort || null,
-      liveEdits: currentLiveEdits,
+      liveEdits: captured.purpose === 'setup' ? false : currentLiveEdits,
+      ...(captured.purpose ? { purpose: captured.purpose } : {}),
       file: mode === 'search' ? file : target,
       currentFile: currentFile || null,
       mode,
@@ -796,7 +880,8 @@ export function AssistantPanel({
     [updateRun],
   )
   async function apply() {
-    if (!canRun || !dialogRun || applying || dirty) return
+    if (!canRun || runUnavailableReason || !dialogRun || applying || dirty)
+      return
     setApplying(true)
     setActionError('')
     try {
@@ -824,7 +909,8 @@ export function AssistantPanel({
     setDialogId(null)
   }
   async function undo(id: string) {
-    if (!canRun || undoingId || dirty || hasActive) return
+    if (!canRun || runUnavailableReason || undoingId || dirty || hasActive)
+      return
     setUndoingId(id)
     setStreamError('')
     try {
@@ -872,6 +958,7 @@ export function AssistantPanel({
       : '')
   const canApply =
     canRun &&
+    !runUnavailableReason &&
     !!dialogRun &&
     !dialogRun.liveEdits &&
     dialogRun.status === 'completed' &&
@@ -885,9 +972,9 @@ export function AssistantPanel({
         selectedId={chatId}
         onSelect={(id) => void openChat(id)}
         onNew={() => {
-          if (canRun) void newChat()
+          if (canRun && !runUnavailableReason) void newChat()
         }}
-        newDisabled={!canRun}
+        newDisabled={!canRun || !!runUnavailableReason}
         onDelete={onDeleteChat}
         onRenamed={(renamed) => {
           if (!mounted.current) return
@@ -910,7 +997,10 @@ export function AssistantPanel({
               key={item.id}
               className={mode === item.id ? 'selected' : ''}
               aria-pressed={mode === item.id}
-              onClick={() => draft.setMode(item.id)}
+              disabled={activeSetup}
+              onClick={() => {
+                if (!activeSetup) draft.setMode(item.id)
+              }}
             >
               {item.name}
             </button>
@@ -944,7 +1034,8 @@ export function AssistantPanel({
             [reasoningPreferenceKey(providerScope, model, mode)]: value || null,
           }))
         }
-        liveEdits={currentLiveEdits}
+        liveEdits={setupScope ? false : currentLiveEdits}
+        reviewOnly={setupScope}
         onLiveEdits={mode === 'search' ? setSearchLiveEdits : setLiveEdits}
         active={hasChatActive}
       />
@@ -1072,7 +1163,13 @@ export function AssistantPanel({
                 onReview={(id) => void review(id)}
                 onUndo={(id) => void undo(id)}
                 onInspect={inspect}
-                canUndo={canRun && !dirty && !hasActive && !undoingId}
+                canUndo={
+                  canRun &&
+                  !runUnavailableReason &&
+                  !dirty &&
+                  !hasActive &&
+                  !undoingId
+                }
                 undoing={undoingId === item.id}
                 onOpenTarget={onOpenTarget}
               />
@@ -1123,6 +1220,32 @@ export function AssistantPanel({
           You have viewer access. Your chats stay private. Ask an admin for
           editor access to start an assistant or apply changes.
         </p>
+      )}
+      {canRun && runUnavailableReason && (
+        <p className="field-help" role="status">
+          {runUnavailableReason}
+        </p>
+      )}
+      {canRun && setupScope && (
+        <div className="field-help" role="status">
+          <span>Setup help: review configuration changes before applying.</span>{' '}
+          <button
+            type="button"
+            className="button small subtle"
+            disabled={activeSetup}
+            onClick={() => {
+              if (!activeSetup) draft.setPurpose()
+            }}
+          >
+            Exit setup help
+          </button>
+          {setupWaitingForOrdinaryRun && (
+            <p>
+              Stop the current task before starting setup help. Your draft is
+              kept.
+            </p>
+          )}
+        </div>
       )}
       {canRun && (
         <form className="assistant-composer" onSubmit={submit}>
@@ -1255,6 +1378,8 @@ export function AssistantPanel({
               title={acceptingUpdate ? 'Send update (Enter)' : 'Send (Enter)'}
               aria-keyshortcuts="Enter"
               disabled={
+                !!runUnavailableReason ||
+                setupWaitingForOrdinaryRun ||
                 chatBusy ||
                 !prompt.trim() ||
                 busy ||
@@ -1295,6 +1420,11 @@ export function AssistantPanel({
           busy={applying || discarding}
         >
           <div className="diff-review">
+            {runUnavailableReason && (
+              <p className="field-help" role="status">
+                {runUnavailableReason}
+              </p>
+            )}
             {dialogRun.liveEdits && runIsActive(dialogRun) && (
               <p className="field-help">
                 These edits are saved in the project. Final Lean verification is

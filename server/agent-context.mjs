@@ -7,6 +7,50 @@ import {
 
 const MAX_HISTORY = 60_000
 
+// Setup diagnostics are app reference data, separate from the user's request.
+// A failed environment must not force the user to copy private logs into chat.
+export function projectSetupContext(project, redact = String) {
+  if (
+    project.status === 'ready' &&
+    !project.needsPreparation &&
+    !project.dependencyWarning &&
+    !project.buildWarning
+  )
+    return null
+  const text = (value, limit) => {
+    if (typeof value !== 'string' || !value.trim()) return null
+    let cleaned = redact(value)
+    if (typeof project.root === 'string' && project.root)
+      cleaned = cleaned.split(project.root).join('/workspace')
+    return cleaned.slice(-limit)
+  }
+  return {
+    kind: 'project-setup',
+    status: project.status,
+    needsPreparation: project.needsPreparation === true,
+    // During failed imports this may still be the selected fallback release;
+    // the candidate's lean-toolchain file remains authoritative.
+    toolchainHint: project.toolchain || null,
+    subdirectory: project.subdirectory || '',
+    setupPhase: project.setupPhase || null,
+    error: text(project.error, 4000),
+    warnings: [
+      project.dependencyWarning,
+      project.buildWarning,
+      project.importWarning,
+    ]
+      .map((value) => text(value, 2000))
+      .filter(Boolean),
+    lastRepair: project.setupRepair
+      ? {
+          status: project.setupRepair.status,
+          message: text(project.setupRepair.message, 2000),
+        }
+      : null,
+    outputTail: text(project.log, 8000),
+  }
+}
+
 // One parseable envelope keeps source text and user-supplied labels from
 // impersonating app metadata. null means an automatic app event, not a new user task.
 export function agentMessageContext(

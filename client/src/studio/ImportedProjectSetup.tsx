@@ -16,10 +16,12 @@ export function ImportedProjectSetup({
   project,
   templates,
   onConfigured,
+  onAskSetup,
 }: {
   project: Project
   templates: Preset[]
   onConfigured: (project: Project) => void
+  onAskSetup?: () => void
 }) {
   const environment = useProjectEnvironment(templates)
   const [busy, setBusy] = useState(false)
@@ -97,6 +99,18 @@ export function ImportedProjectSetup({
           {busy ? 'Preparing environment…' : 'Prepare environment'}
         </button>
       </form>
+      {onAskSetup && (
+        <p>
+          <button
+            type="button"
+            className="button secondary"
+            onClick={onAskSetup}
+            disabled={busy}
+          >
+            Ask Lemex to fix setup
+          </button>
+        </p>
+      )}
     </section>
   )
 }

@@ -30,6 +30,7 @@ import {
 } from './lean-check.mjs'
 import { createTexArtifactReceiver } from './tex-artifacts.mjs'
 import { ContainerEngine } from './container-engine.mjs'
+import { localDependencyDirectories } from './dependency-layout.mjs'
 import {
   SharedDependencyCache,
   configurationDigest,
@@ -636,6 +637,14 @@ export class Runtime {
       if (error.code === 'ENOENT') return null
       throw error
     }
+  }
+
+  verifiedDependencyRoot(root) {
+    const actual = this.#root(root)
+    const source = this.dependencyRoot(actual)
+    if (!this.#sharedSource(source)) return null
+    this.#checkSharedBinding(actual, source)
+    return this.dependencyPreparationReason(actual) ? null : source
   }
 
   #dependencyPackages(source) {
@@ -1535,6 +1544,7 @@ export class Runtime {
       signal,
       readOnlyWorkspace = false,
       writeLakeCache = false,
+      writePrivateDependencyCache = false,
       freshHome = false,
       retainHome = false,
       readOnlyHome = false,
@@ -1564,6 +1574,7 @@ export class Runtime {
       [
         readOnlyWorkspace,
         writeLakeCache,
+        writePrivateDependencyCache,
         freshHome,
         retainHome,
         readOnlyHome,
@@ -1576,6 +1587,16 @@ export class Runtime {
       throw new Error('Worker mount options must be booleans')
     if (writeLakeCache && !readOnlyWorkspace)
       throw new Error('A writable Lake cache requires a read-only workspace')
+    if (
+      writePrivateDependencyCache &&
+      (!readOnlyWorkspace ||
+        !writeLakeCache ||
+        kernelCheck ||
+        boundedScratchBytes !== undefined)
+    )
+      throw new Error(
+        'Writable private dependencies require read-only sources and a writable Lake cache outside pure kernel checks',
+      )
     if (retainHome && !freshHome)
       throw new Error('Only a fresh worker home can be retained for export')
     if (
@@ -1687,7 +1708,25 @@ export class Runtime {
     const privatePackages = lakeCache
       ? ensurePrivateDirectory(actual, '.lake/packages')
       : null
-    if (writeLakeCache) writableLakeCache(actual, { mountedPackages: true })
+    const writablePrivatePackages =
+      writePrivateDependencyCache &&
+      (!dependencySource || dependencySource === actual)
+    if (writeLakeCache)
+      writableLakeCache(actual, { mountedPackages: !writablePrivatePackages })
+    const localCaches = []
+    if (writePrivateDependencyCache) {
+      const configuration = readDependencyConfiguration(actual)
+      const manifest = configuration['lake-manifest.json']
+        ? JSON.parse(configuration['lake-manifest.json'])
+        : null
+      for (const relative of localDependencyDirectories(manifest)) {
+        if (relative === '.') continue
+        managedWorkerDirectory(actual, relative, () => {})
+        const packageRoot = path.join(actual, relative)
+        const cache = writableLakeCache(packageRoot)
+        localCaches.push({ relative, cache })
+      }
+    }
     const home = this.#prepareHome(actual, {
       fresh: freshHome,
       clean: cleanHome,
@@ -1849,7 +1888,10 @@ export class Runtime {
         : privatePackages
       if (!directory)
         throw new Error('Selected dependency packages are unavailable')
-      const readonly = dependencySource || readOnlyWorkspace ? ',readonly' : ''
+      const readonly =
+        (dependencySource || readOnlyWorkspace) && !writablePrivatePackages
+          ? ',readonly'
+          : ''
       for (const alias of [
         '/workspace',
         ...(repository ? [repository.selected] : []),
@@ -1867,6 +1909,17 @@ export class Runtime {
           )
       }
     }
+    // Only generated build state of contained path packages becomes writable.
+    // Their source trees retain the workspace's read-only mount in every alias.
+    for (const { relative, cache } of localCaches)
+      for (const alias of [
+        '/workspace',
+        ...(repository ? [repository.selected] : []),
+      ])
+        dockerArgs.push(
+          '--mount',
+          `type=bind,src=${cache},dst=${alias}/${relative}/.lake`,
+        )
     const childEnv = { ...process.env }
     // Lean's executable task pool otherwise uses the host CPU count, even when
     // Docker gives this worker a smaller quota. This is a scheduler setting,
