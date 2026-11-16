@@ -531,14 +531,18 @@ try {
     'HEAD change invalidates preview',
   )
   await preview()
-  await dialog().getByLabel('Repository token', { exact: true }).fill(token)
-  await dialog().getByRole('tab', { name: 'Changes', exact: true }).click()
-  await publishTab().click()
-  assert.equal(
-    await dialog().getByLabel('Repository token', { exact: true }).inputValue(),
-    '',
-    'Switching away retained repository credentials',
-  )
+  for (const targetTab of ['Changes', 'History']) {
+    await dialog().getByLabel('Repository token', { exact: true }).fill(token)
+    await dialog().getByRole('tab', { name: targetTab, exact: true }).click()
+    await publishTab().click()
+    assert.equal(
+      await dialog()
+        .getByLabel('Repository token', { exact: true })
+        .inputValue(),
+      '',
+      `Switching to ${targetTab} retained repository credentials`,
+    )
+  }
   report.checks.push(
     'Publish preview identifies exact commit, destination and history; destination changes invalidate preview; tab changes clear credentials',
   )

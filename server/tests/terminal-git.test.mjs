@@ -14,7 +14,11 @@ import {
   configureAgentGit,
 } from '../terminal-git.mjs'
 
-async function fixture(t, owner = 'alice', { lookup, assertAuthorized } = {}) {
+async function fixture(
+  t,
+  owner = 'alice',
+  { lookup, assertAuthorized, allowedHostRepositories, agentGit = false } = {},
+) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'terminal-git-'))
   const home = path.join(directory, 'h'.repeat(100))
   await fs.mkdir(home)
@@ -24,20 +28,28 @@ async function fixture(t, owner = 'alice', { lookup, assertAuthorized } = {}) {
     ['bob:github.com', { username: 'bob', token: 'fixture-bob-token' }],
     ['alice:gitlab.com', { username: 'oauth2', token: 'fixture-gitlab-token' }],
   ])
-  const broker = await createTerminalGitBroker({
+  const options = {
     home,
     owner,
     assertAuthorized,
+    allowedHostRepositories,
     connections: {
-      async credentials(user, value) {
+      async credentials(user, value, ...options) {
         const host = new URL(value).hostname
-        calls.push({ user, host, value })
-        if (lookup) return await lookup(user, value)
+        calls.push({ user, host, value, options })
+        if (lookup) return await lookup(user, value, ...options)
         const found = credentials.get(`${user}:${host}`)
         return found ? { ...found } : null
       },
     },
-  })
+  }
+  const broker = agentGit
+    ? await configureAgentGit({
+        ...options,
+        identity: { name: 'Alice', email: 'alice@example.test' },
+        allowedRepositories: allowedHostRepositories,
+      })
+    : await createTerminalGitBroker(options)
   const descriptor = await fs.open(home)
   const address = `/proc/self/fd/${descriptor.fd}/.git-credentials.sock`
   t.after(async () => {
@@ -102,6 +114,7 @@ test('agent Git config survives filtered shell environments without storing a to
     owner: 'alice',
     connections: { credentials: async () => ({ username: 'alice', token }) },
     identity: { name: 'Alice "Example"', email: 'alice@example.test' },
+    allowedRepositories: ['https://github.com/team/repo.git'],
   })
   t.after(() => broker.close())
   const execute = promisify(execFile)
@@ -177,6 +190,7 @@ test('terminal Git looks up each HTTPS host and honors changes without restartin
     token: 'fixture-replacement-token',
   })
   assert.equal((await f.request(github)).token, 'fixture-replacement-token')
+  assert(f.calls.every(({ options }) => options.length === 0))
   f.credentials.delete('alice:github.com')
   assert.deepEqual(await f.request(github), {})
   assert.deepEqual(await fs.readdir(f.home), ['.git-credentials.sock'])
@@ -228,6 +242,110 @@ test('terminal Git reuses a saved repository token for pull and push credential 
     'https://github.com/team/repo',
   )
   assert.deepEqual(await f.request(query), {})
+})
+
+test('agent Git only falls back to host credentials at trusted repositories', async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-git-scope-'))
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }))
+  const connections = await new GitConnections({
+    dataDir,
+    validateRepository,
+    resolveHost: async () => [{ address: '140.82.112.3' }],
+  }).init()
+  await connections.connect('alice', {
+    host: 'github.com',
+    provider: 'github',
+    token: 'fixture-host-token',
+  })
+  await connections.connect('alice', {
+    repository: 'https://github.com/team/scoped.git',
+    token: 'fixture-scoped-token',
+  })
+  const lookup = (...args) => connections.credentials(...args)
+  const query = (repository) => ({
+    protocol: 'https',
+    host: 'github.com',
+    path: repository + '.git',
+  })
+  await t.test(
+    'the default denies host fallback and retains exact connections',
+    async (t) => {
+      const f = await fixture(t, 'alice', { agentGit: true, lookup })
+      assert.deepEqual(await f.request(query('team/current')), {})
+      assert.equal(
+        (await f.request(query('team/scoped'))).token,
+        'fixture-scoped-token',
+      )
+      assert(
+        f.calls.every(
+          ({ options }) =>
+            options.length === 1 && !options[0].allowHostFallback,
+        ),
+      )
+    },
+  )
+  await t.test(
+    'current, published and explicitly allowed URLs match exactly',
+    async (t) => {
+      const f = await fixture(t, 'alice', {
+        agentGit: true,
+        lookup,
+        allowedHostRepositories: new Set([
+          'https://github.com/Team/Current/tree/main/src',
+          'https://github.com/team/published.git',
+          'https://github.com/team/requested/',
+          'not a repository',
+        ]),
+      })
+      for (const repository of [
+        'team/current',
+        'team/published',
+        'team/requested',
+      ])
+        assert.equal(
+          (await f.request(query(repository))).token,
+          'fixture-host-token',
+        )
+      for (const repository of [
+        'team/unrelated',
+        'team/current-other',
+        'team/current/nested',
+      ])
+        assert.deepEqual(await f.request(query(repository)), {})
+      assert.equal(
+        (await f.request(query('team/scoped'))).token,
+        'fixture-scoped-token',
+      )
+    },
+  )
+  await t.test(
+    'trusted follow-ups are refreshed and errors deny host fallback',
+    async (t) => {
+      let allowed = ['https://github.com/team/current.git']
+      const f = await fixture(t, 'alice', {
+        agentGit: true,
+        lookup,
+        allowedHostRepositories: async () => {
+          if (allowed === null) throw new Error('Fixture context unavailable')
+          return allowed
+        },
+      })
+      assert.deepEqual(await f.request(query('team/followup')), {})
+      allowed = [...allowed, 'https://github.com/team/followup.git']
+      assert.equal(
+        (await f.request(query('team/followup'))).token,
+        'fixture-host-token',
+      )
+      allowed = []
+      assert.deepEqual(await f.request(query('team/current')), {})
+      allowed = null
+      assert.deepEqual(await f.request(query('team/followup')), {})
+      assert.equal(
+        (await f.request(query('team/scoped'))).token,
+        'fixture-scoped-token',
+      )
+    },
+  )
 })
 
 test('terminal Git rejects malformed credential requests before any lookup', async (t) => {

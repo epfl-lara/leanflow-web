@@ -151,6 +151,8 @@ const GIT_ARGS = [
   '-c',
   'core.hooksPath=/dev/null',
   '-c',
+  'core.fsmonitor=false',
+  '-c',
   'protocol.file.allow=never',
 ]
 const SETUP_EVENT_TYPES = new Set([
@@ -2815,7 +2817,7 @@ export class WorkspaceStore {
     return this.#locked(id, async () => {
       const project = this.requireEditor(id, owner)
       if (project.archivedAt) fail('Project not found', 404)
-      this.#ready(project)
+      this.#ready(project, true)
       assertIdle()
       project.publishingEnabled = true
       this.#save(project)
@@ -2827,11 +2829,16 @@ export class WorkspaceStore {
     if (!project.workingBranch || project.publishingBranchPrepared) return
     const root = this.repositoryRoot(project)
     const run = (args) =>
-      this.runtime.run(root, [...GIT_ARGS, ...args], {
-        network: 'none',
-        timeoutMs: 30000,
-        signal: this.preparationControllers.get(project.id)?.signal,
-      })
+      (this.runtime.runGit || this.runtime.run).call(
+        this.runtime,
+        root,
+        [...GIT_ARGS, ...args],
+        {
+          network: 'none',
+          timeoutMs: 30000,
+          signal: this.preparationControllers.get(project.id)?.signal,
+        },
+      )
     const current = await run(['symbolic-ref', '--quiet', '--short', 'HEAD'])
     const currentBranch = current.code === 0 ? current.stdout.trim() : null
     if (!project.publishingBaseBranch)
@@ -3535,10 +3542,19 @@ export class WorkspaceStore {
       !(await exists(path.join(this.repositoryRoot(project), '.git')))
     ) {
       if (!(await exists(path.join(project.root, '.gitignore'))))
-        await fs.writeFile(path.join(project.root, '.gitignore'), '.lake/\n', {
-          mode: 0o600,
-        })
-      await this.#command(project, [...GIT_ARGS, 'init', '-b', 'main'], 30000)
+        await fs
+          .writeFile(path.join(project.root, '.gitignore'), '.lake/\n', {
+            mode: 0o600,
+            flag: 'wx',
+          })
+          .catch((error) => {
+            if (error.code !== 'EEXIST') throw error
+          })
+      await this.#command(
+        project,
+        [...GIT_ARGS, 'init', '--template=', '-b', 'main'],
+        30000,
+      )
     }
   }
 
@@ -3555,6 +3571,10 @@ export class WorkspaceStore {
     } = {},
   ) {
     const label = setupCommandLabel(args, { gitCommand: args[GIT_ARGS.length] })
+    const run =
+      args[0] === 'git'
+        ? (this.runtime.runGit || this.runtime.run).bind(this.runtime)
+        : runPinnedLake.bind(null, this.runtime)
     const onOutput = (output) =>
       this.#event(
         project,
@@ -3566,8 +3586,7 @@ export class WorkspaceStore {
     const result = await runSetupStep(
       label,
       () =>
-        runPinnedLake(
-          this.runtime,
+        run(
           args[0] === 'git' ? this.repositoryRoot(project) : project.root,
           args,
           {
@@ -5123,10 +5142,35 @@ export class WorkspaceStore {
     })
   }
 
+  async initializeGit(id, owner, { assertIdle = () => {} } = {}) {
+    this.requireEditor(id, owner)
+    return this.#locked(id, async () => {
+      const project = this.requireEditor(id, owner)
+      this.#ready(project, true)
+      assertIdle()
+      const git = path.join(this.repositoryRoot(project), '.git')
+      const metadata = await exists(git)
+      if (metadata) {
+        if (!metadata.isDirectory() || metadata.isSymbolicLink())
+          fail('Use a standalone Git repository for Source control.', 409)
+        return
+      }
+      if (project.repository)
+        fail(
+          'The imported repository is incomplete. Retry its clone or import it again before changing Git history.',
+          409,
+        )
+      await this.#initializeRepository(project)
+    })
+  }
+
   async gitStatus(id, owner, { queue = true } = {}) {
     const project = this.get(id, owner)
-    this.#ready(project)
-    if (!(await exists(path.join(this.repositoryRoot(project), '.git'))))
+    this.#ready(project, true)
+    const metadata = await exists(
+      path.join(this.repositoryRoot(project), '.git'),
+    )
+    if (!metadata)
       return {
         repository: false,
         branch: null,
@@ -5134,6 +5178,8 @@ export class WorkspaceStore {
         changes: [],
         diff: '',
       }
+    if (!metadata.isDirectory() || metadata.isSymbolicLink())
+      fail('Source control requires a standalone Git repository.', 409)
     const status = await this.#command(
       project,
       [
@@ -5150,6 +5196,11 @@ export class WorkspaceStore {
       { queue },
     )
     const records = status.stdout.split('\0').filter(Boolean)
+    if (status.truncated)
+      fail(
+        'Git status is too large to review safely. Ignore generated files or use a separate Git checkout.',
+        413,
+      )
     const branchLine = records[0]?.startsWith('## ')
       ? records.shift().slice(3).split('...')[0]
       : null
@@ -5180,45 +5231,58 @@ export class WorkspaceStore {
       }
     }
     // Restrict diff pathspecs to visible files so accidental secrets cannot leak.
-    const visible = changes
-      .map((c) => c.path)
+    const visible = [
+      ...new Set(changes.flatMap((c) => [c.path, c.from || c.path])),
+    ]
       .filter((p) => !p.startsWith('.lake/'))
       .map((p) => (project.subdirectory ? `${project.subdirectory}/${p}` : p))
-    const head = await this.runtime.run(
+    const head = await (this.runtime.runGit || this.runtime.run).call(
+      this.runtime,
       this.repositoryRoot(project),
       [...GIT_ARGS, 'rev-parse', '--verify', 'HEAD'],
       { network: 'none', timeoutMs: 30000, queue },
     )
+    if (head.truncated)
+      fail(
+        'Git history could not be read completely. Refresh Source control.',
+        409,
+      )
     const revision =
       head.code === 0 && /^[a-f0-9]{40,64}$/.test(head.stdout.trim())
         ? head.stdout.trim()
         : null
-    const diff = visible.length
-      ? (
-          await this.#command(
-            project,
-            [
-              ...GIT_ARGS,
-              'diff',
-              '--no-ext-diff',
-              '--no-textconv',
-              ...(revision ? ['HEAD'] : []),
-              '--',
-              ...visible,
-            ],
-            30000,
-            'none',
-            {},
-            { queue },
-          )
-        ).stdout
-      : ''
+    const difference = visible.length
+      ? await this.#command(
+          project,
+          [
+            ...GIT_ARGS,
+            '--literal-pathspecs',
+            'diff',
+            '--no-ext-diff',
+            '--no-textconv',
+            ...(revision ? ['HEAD'] : []),
+            '--',
+            ...visible,
+          ],
+          30000,
+          'none',
+          {},
+          { queue },
+        )
+      : { stdout: '' }
+    if (difference.truncated)
+      fail(
+        'The Git diff is too large to review safely. Use smaller changes or a separate Git checkout.',
+        413,
+      )
+    const diff = difference.stdout
     return {
       repository: true,
       branch,
       revision,
       changes,
       diff: diff.slice(0, 500000),
+      diffTruncated: diff.length > 500000,
     }
   }
 
@@ -5342,7 +5406,8 @@ export class WorkspaceStore {
       this.requireEditor(id, actor)
       // Private Git metadata never includes the original checkout's history,
       // hooks, sibling folders or credentials. Source control owns publication.
-      const initialized = await this.runtime.run(
+      const initialized = await (this.runtime.runGit || this.runtime.run).call(
+        this.runtime,
         snapshot.root,
         [...GIT_ARGS, 'init', '-b', 'terminal'],
         {

@@ -47,12 +47,17 @@ export function GitConnectionsDialog({
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [retrying, setRetrying] = useState(false)
+  const retryController = useRef<AbortController | null>(null)
   const pending = useRef(false)
   const identityLoaded = useRef(false)
+  const authorNameTouched = useRef(false)
+  const authorEmailTouched = useRef(false)
+  useEffect(() => () => retryController.current?.abort(), [])
   useEffect(() => {
     if (data && !identityLoaded.current) {
-      setName(data.identity.name)
-      setEmail(data.identity.email)
+      if (!authorNameTouched.current) setName(data.identity.name)
+      if (!authorEmailTouched.current) setEmail(data.identity.email)
       identityLoaded.current = true
     }
   }, [data])
@@ -68,8 +73,11 @@ export function GitConnectionsDialog({
     setBusy(action)
     setError('')
     setNotice('')
-    // The request keeps the entered value only for its duration.
-    setToken('')
+    const connectionToken = action === 'Saving connection' ? token : ''
+    // Keep credentials masked and out of the field while a save is pending.
+    // A failed write can restore this value for an explicit retry.
+    if (action === 'Saving connection') setToken('')
+    let saved = false
     try {
       await api<GitConnections>(
         `/api/git-connections${removeHost ? `?host=${encodeURIComponent(removeHost)}${removeRepository ? `&repository=${encodeURIComponent(removeRepository)}` : ''}` : ''}`,
@@ -78,6 +86,7 @@ export function GitConnectionsDialog({
           body: JSON.stringify(body || {}),
         },
       )
+      saved = true
       await refresh()
       gitConnectionsChanged()
       onChanged?.()
@@ -89,10 +98,24 @@ export function GitConnectionsDialog({
             : 'Connection saved for imports, pulls, pushes, terminals and agents.',
       )
     } catch (error) {
+      if (!saved && connectionToken) setToken(connectionToken)
       setError(errorText(error))
     } finally {
       pending.current = false
       setBusy('')
+    }
+  }
+
+  async function retryConnections() {
+    if (retrying || pending.current) return
+    const controller = new AbortController()
+    retryController.current = controller
+    setRetrying(true)
+    try {
+      await refresh(controller.signal)
+    } finally {
+      if (!controller.signal.aborted) setRetrying(false)
+      if (retryController.current === controller) retryController.current = null
     }
   }
 
@@ -134,6 +157,16 @@ export function GitConnectionsDialog({
           <p role="alert" className="error-message">
             {error || loadError}
           </p>
+        )}
+        {loadError && (
+          <button
+            type="button"
+            className="button secondary small"
+            disabled={!!busy || retrying}
+            onClick={() => void retryConnections()}
+          >
+            {retrying ? 'Loading connections…' : 'Retry loading connections'}
+          </button>
         )}
         {notice && <output className="git-notice">{notice}</output>}
         {!!data?.connections.length && (
@@ -307,7 +340,10 @@ export function GitConnectionsDialog({
             <input
               id="connection-author-name"
               value={name}
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => {
+                authorNameTouched.current = true
+                setName(event.target.value)
+              }}
               disabled={!!busy}
               maxLength={200}
               required
@@ -319,7 +355,10 @@ export function GitConnectionsDialog({
               id="connection-author-email"
               type="email"
               value={email}
-              onChange={(event) => setEmail(event.target.value)}
+              onChange={(event) => {
+                authorEmailTouched.current = true
+                setEmail(event.target.value)
+              }}
               disabled={!!busy}
               maxLength={254}
               required

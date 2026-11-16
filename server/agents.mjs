@@ -31,6 +31,7 @@ import { createNativeDiagnosticHandler } from './native-diagnostics.mjs'
 import { createHoverLookupGuard } from './agent-hover-guard.mjs'
 import { LiveMirror } from './agent-live.mjs'
 import { configureAgentGit } from './terminal-git.mjs'
+import { requestedGitRepositories } from './agent-git-policy.mjs'
 import {
   createTexAgentTools,
   texAgentToolSpecs,
@@ -132,6 +133,7 @@ export class AgentManager {
     texBuilds,
     gitConnections,
     gitIdentity,
+    gitContext,
     assertCanStart = () => {},
     optimizationMeasure = async (...args) =>
       (await import('./optimization.mjs')).measureOptimization(...args),
@@ -154,6 +156,7 @@ export class AgentManager {
       texBuilds,
       gitConnections,
       gitIdentity,
+      gitContext,
       assertCanStart,
       optimizationMeasure,
       maxConcurrent,
@@ -890,25 +893,51 @@ export class AgentManager {
           )
       }
       const home = await this.runtime.home(snapshot.root)
+      const gitProject = this.#editableProject(job.projectId, job.owner)
+      let gitContext
+      if (this.gitContext) {
+        try {
+          gitContext = await this.gitContext(job.owner, job.projectId, {
+            sourceRevision: snapshot.sourceRevision,
+            signal: active.controller.signal,
+          })
+        } catch {
+          active.controller.signal.throwIfAborted()
+          this.#editableProject(job.projectId, job.owner)
+          gitContext = {
+            kind: 'git',
+            historyUnavailable:
+              'Saved Git history is unavailable in this run. Do not infer local commits or branches from a fresh remote clone.',
+          }
+        }
+      }
       if (this.gitConnections) {
-        const project = this.#editableProject(job.projectId, job.owner)
         active.gitBroker = await configureAgentGit({
           home,
           owner: job.owner,
           connections: this.gitConnections,
           identity: await this.gitIdentity(job.owner),
+          allowedRepositories: () => [
+            gitProject.repository,
+            gitContext?.repository,
+            gitContext?.pushRepository,
+            ...priorRuns.flatMap(requestedGitRepositories),
+            ...requestedGitRepositories(this.events.getMetadata(id, job.owner)),
+          ],
           assertAuthorized: () => {
             active.controller.signal.throwIfAborted()
             this.#editableProject(job.projectId, job.owner)
           },
         })
+      }
+      if (gitContext || this.gitConnections)
         contextSections.push({
           kind: 'git',
-          repository: project.repository || null,
+          repository: gitProject.repository || null,
           sourceRevision: snapshot.sourceRevision,
-          savedCredentialsAvailable: true,
+          ...gitContext,
+          savedCredentialsAvailable: !!this.gitConnections,
         })
-      }
       const bookInstructions = this.books
         ? await this.books.prepareAgent(home)
         : ''

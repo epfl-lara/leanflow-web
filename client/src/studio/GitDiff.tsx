@@ -13,6 +13,7 @@ export function GitDiff({
   const [source, setSource] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [attempt, setAttempt] = useState(0)
   const change = info.changes?.find((item) => item.path === selected)
   const untracked = change?.status === '??'
   const reviewVersion = info.reviewToken ?? info
@@ -41,7 +42,7 @@ export function GitDiff({
     return () => {
       cancelled = true
     }
-  }, [projectId, selected, untracked, reviewVersion])
+  }, [projectId, selected, untracked, reviewVersion, attempt])
   if (!info.changes?.length)
     return <p className="git-empty">The saved working tree is clean.</p>
   const text = untracked ? source : info.diff || ''
@@ -58,7 +59,16 @@ export function GitDiff({
       {loading ? (
         <p className="git-empty">Loading saved contents…</p>
       ) : error ? (
-        <p className="git-empty">{error}</p>
+        <div className="git-empty" role="alert">
+          <p>{error}</p>
+          <button
+            type="button"
+            className="button secondary small"
+            onClick={() => setAttempt((value) => value + 1)}
+          >
+            Retry preview
+          </button>
+        </div>
       ) : !text ? (
         <p className="git-empty">
           No text diff is available. The file may be binary or a rename with
@@ -89,6 +99,12 @@ export function GitDiff({
         <p className="git-empty">
           The preview is limited to 500,000 characters. Commits include the full
           eligible files.
+        </p>
+      )}
+      {info.diffTruncated && (
+        <p className="git-empty" role="status">
+          The tracked diff preview is incomplete. Commits include the full
+          eligible files, including changes beyond this preview.
         </p>
       )}
     </section>

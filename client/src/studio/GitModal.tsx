@@ -21,6 +21,7 @@ import {
   useGitConnections,
 } from './gitConnections'
 import { RepositoryTokenSaveChoice } from './RepositoryCredentialsFields'
+import { CopyButton } from './CopyButton'
 import './git.css'
 
 const headOf = (info: GitInfo | null) => info?.revision || info?.head || null
@@ -29,6 +30,24 @@ const namedBranch = (branch?: string | null) =>
   branch !== 'HEAD' &&
   !branch.startsWith('HEAD ') &&
   !branch.startsWith('(HEAD')
+
+const gitTabs = ['changes', 'history', 'publish'] as const
+type GitTab = (typeof gitTabs)[number]
+
+function changeStatus(status: string) {
+  if (status === '??') return 'New'
+  if (['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'].includes(status))
+    return 'Conflict'
+  const staged = !!status[0] && status[0] !== ' '
+  const unstaged = !!status[1] && status[1] !== ' '
+  return staged && unstaged
+    ? 'Staged + unstaged'
+    : staged
+      ? 'Staged'
+      : unstaged
+        ? 'Unstaged'
+        : 'Changed'
+}
 
 function providerFromUrl(value: string): GitProvider {
   try {
@@ -68,7 +87,7 @@ export function GitModal({
 }) {
   const [info, setInfo] = useState(initialInfo)
   const [loaded, setLoaded] = useState(false)
-  const [tab, setTab] = useState<'changes' | 'publish'>(initialTab)
+  const [tab, setTab] = useState<GitTab>(initialTab)
   const [selected, setSelected] = useState<string | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
@@ -94,6 +113,12 @@ export function GitModal({
     initialInfo?.pullBranch || initialInfo?.branch || '',
   )
   const pullBranchTouched = useRef(false)
+  const [pullRemoteUrl, setPullRemoteUrl] = useState(
+    initialInfo?.pullRemoteUrl === undefined
+      ? initialInfo?.remoteUrl || ''
+      : initialInfo.pullRemoteUrl || '',
+  )
+  const pullRemoteTouched = useRef(false)
   const preparationNeeded = useRef(false)
   const [preview, setPreview] = useState<GitPushPreview | null>(null)
   const [published, setPublished] = useState<GitPushResult | null>(null)
@@ -112,8 +137,10 @@ export function GitModal({
     gitConnections,
     preview?.remoteUrl || remoteUrl,
   )
+  const pullConnection = findGitConnection(gitConnections, pullRemoteUrl)
   const mounted = useRef(true)
   const busyRef = useRef(busy)
+  const preparingRef = useRef(project.status === 'preparing')
   const refreshing = useRef(false)
   const request = useRef(0)
   const destinationTouched = useRef(false)
@@ -122,10 +149,14 @@ export function GitModal({
     !initialInfo?.remoteUrl,
   )
   busyRef.current = busy
+  preparingRef.current = project.status === 'preparing'
   previewRef.current = preview
   const endpoint = `/api/projects/${encodeURIComponent(project.id)}/git`
   const blockedReason =
     localBlockedReason ||
+    (project.status === 'preparing'
+      ? 'Project setup is running. Stop setup or wait for it to finish before changing source control.'
+      : '') ||
     (info?.mutationBlocked
       ? info.blockedReason ||
         'Finish or stop active Lean checks and Lemex runs first.'
@@ -157,6 +188,12 @@ export function GitModal({
       if (!branchNameTouched.current) setBranchName(value.suggestedBranch || '')
       if (!pullBranchTouched.current)
         setPullBranch(value.pullBranch || value.branch || '')
+      if (!pullRemoteTouched.current)
+        setPullRemoteUrl(
+          value.pullRemoteUrl === undefined
+            ? value.remoteUrl || ''
+            : value.pullRemoteUrl || '',
+        )
       if (
         previewRef.current &&
         (previewRef.current.head !== headOf(value) ||
@@ -189,7 +226,12 @@ export function GitModal({
       if (mounted.current) setError(errorText(error))
     })
     const timer = setInterval(() => {
-      if (!busyRef.current && !refreshing.current && !preparationNeeded.current)
+      if (
+        !busyRef.current &&
+        !preparingRef.current &&
+        !refreshing.current &&
+        !preparationNeeded.current
+      )
         void refresh().catch((error) => {
           if (mounted.current) setError(errorText(error))
         })
@@ -208,7 +250,14 @@ export function GitModal({
     setUsername('')
   }
   async function pull() {
-    if (locked || dirty || !namedBranch(info?.branch) || !info?.reviewToken)
+    if (
+      locked ||
+      dirty ||
+      !namedBranch(info?.branch) ||
+      !info?.reviewToken ||
+      !pullRemoteUrl.trim() ||
+      !pullBranch.trim()
+    )
       return
     setBusy('Pulling changes')
     setError('')
@@ -218,7 +267,7 @@ export function GitModal({
       const result = await post<GitPullResult>(endpoint, {
         action: 'pull',
         reviewToken: info.reviewToken,
-        remoteUrl: remoteUrl.trim(),
+        remoteUrl: pullRemoteUrl.trim(),
         branch: pullBranch.trim(),
       })
       preparationNeeded.current = result.needsPreparation
@@ -246,6 +295,25 @@ export function GitModal({
       await onPulled(result).catch(refreshFailed)
       if (mounted.current && !result.needsPreparation)
         await refresh().catch(refreshFailed)
+    } catch (error) {
+      if (mounted.current) setError(errorText(error))
+    } finally {
+      if (mounted.current) setBusy('')
+    }
+  }
+  async function initialize() {
+    if (locked || info?.repository !== false) return
+    setBusy('Starting version control')
+    setError('')
+    setNotice('')
+    try {
+      await onSave()
+      const value = await post<GitInfo>(endpoint, { action: 'initialize' })
+      if (!mounted.current) return
+      acceptInfo(value)
+      setNotice(
+        'Version control started locally. Review and commit your saved files when ready.',
+      )
     } catch (error) {
       if (mounted.current) setError(errorText(error))
     } finally {
@@ -451,7 +519,11 @@ export function GitModal({
         <div className="git-toolbar">
           <span>
             <Icon name="git" size={15} />
-            {namedBranch(info?.branch) ? info?.branch : 'Detached HEAD'}
+            {info?.repository === false
+              ? 'No Git repository'
+              : namedBranch(info?.branch)
+                ? info?.branch
+                : 'Detached HEAD'}
           </span>
           <code title={headOf(info) || undefined}>
             {headOf(info)?.slice(0, 12) || 'No commits yet'}
@@ -479,8 +551,22 @@ export function GitModal({
             </button>
           )}
         </div>
-        {info?.repository && remoteUrl && (
+        {info?.repository && (
           <section className="git-sync" aria-label="Pull repository changes">
+            <div className="git-pull-source">
+              <label htmlFor="git-pull-repository">Pull from</label>
+              <input
+                id="git-pull-repository"
+                type="url"
+                value={pullRemoteUrl}
+                disabled={locked}
+                placeholder="https://github.com/owner/repository.git"
+                onChange={(event) => {
+                  pullRemoteTouched.current = true
+                  setPullRemoteUrl(event.target.value)
+                }}
+              />
+            </div>
             <label htmlFor="git-pull-branch">Pull branch</label>
             <input
               id="git-pull-branch"
@@ -497,6 +583,7 @@ export function GitModal({
               disabled={
                 locked ||
                 dirty ||
+                !pullRemoteUrl.trim() ||
                 !namedBranch(info.branch) ||
                 !pullBranch.trim() ||
                 !info.reviewToken
@@ -505,6 +592,16 @@ export function GitModal({
             >
               Pull
             </button>
+            {dirty && (
+              <button
+                type="button"
+                className="button secondary small"
+                disabled={locked}
+                onClick={() => void saveAndRefresh()}
+              >
+                Save before pulling
+              </button>
+            )}
             <p className="field-help">
               {dirty
                 ? 'Save your editor before pulling.'
@@ -512,11 +609,16 @@ export function GitModal({
                   ? 'Create a local branch before pulling.'
                   : info.changes?.length
                     ? 'Edits already published by your agent can be pulled directly. Commit other local changes first.'
-                    : `Pulls from ${remoteUrl}. Local commits are preserved; diverging histories need manual reconciliation.`}
+                    : 'Local commits are preserved. Diverging histories need manual reconciliation. The push destination is configured separately in Publish.'}
             </p>
+            <GitConnectionStatus
+              connection={pullConnection}
+              onOpenConnections={onOpenConnections}
+              disabled={locked}
+            />
           </section>
         )}
-        {!preview && (
+        {tab === 'publish' && !preview && info?.repository !== false && (
           <GitConnectionStatus
             connection={connection}
             onOpenConnections={onOpenConnections}
@@ -528,55 +630,66 @@ export function GitModal({
             {connectionError} Git will still try your saved connection.
           </output>
         )}
-        <div
-          className="git-tabs"
-          role="tablist"
-          aria-label="Source control view"
-        >
-          {(['changes', 'publish'] as const).map((value) => (
-            <button
-              key={value}
-              type="button"
-              role="tab"
-              id={`git-tab-${value}`}
-              aria-selected={tab === value}
-              aria-controls={`git-${value}`}
-              tabIndex={tab === value ? 0 : -1}
-              disabled={!!busy}
-              onClick={() => {
-                setTab(value)
-                setError('')
-                if (value === 'changes') {
+        {info?.repository !== false && (
+          <div
+            className="git-tabs"
+            role="tablist"
+            aria-label="Source control view"
+          >
+            {gitTabs.map((value) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                id={`git-tab-${value}`}
+                aria-selected={tab === value}
+                aria-controls={`git-${value}`}
+                tabIndex={tab === value ? 0 : -1}
+                disabled={!!busy}
+                onClick={() => {
+                  setTab(value)
+                  setError('')
+                  if (value !== 'publish') {
+                    setToken('')
+                    setUsername('')
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (
+                    !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(
+                      event.key,
+                    )
+                  )
+                    return
+                  event.preventDefault()
+                  const index = gitTabs.indexOf(value)
+                  const next =
+                    gitTabs[
+                      event.key === 'Home'
+                        ? 0
+                        : event.key === 'End'
+                          ? gitTabs.length - 1
+                          : (index +
+                              (event.key === 'ArrowRight'
+                                ? 1
+                                : gitTabs.length - 1)) %
+                            gitTabs.length
+                    ]
+                  setTab(next)
                   setToken('')
                   setUsername('')
-                }
-              }}
-              onKeyDown={(event) => {
-                if (
-                  !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(
-                    event.key,
-                  )
-                )
-                  return
-                event.preventDefault()
-                const next =
-                  event.key === 'Home'
-                    ? 'changes'
-                    : event.key === 'End'
-                      ? 'publish'
-                      : value === 'changes'
-                        ? 'publish'
-                        : 'changes'
-                setTab(next)
-                setToken('')
-                setUsername('')
-                document.getElementById(`git-tab-${next}`)?.focus()
-              }}
-            >
-              {value === 'changes' ? 'Changes' : 'Publish'}
-            </button>
-          ))}
-        </div>
+                  document.getElementById(`git-tab-${next}`)?.focus()
+                }}
+              >
+                {value === 'changes'
+                  ? 'Changes'
+                  : value === 'history'
+                    ? 'History'
+                    : 'Publish'}
+              </button>
+            ))}
+          </div>
+        )}
         {blockedReason && <p className="git-blocked">{blockedReason}</p>}
         {busy && (
           <output className="git-progress">
@@ -594,7 +707,26 @@ export function GitModal({
         {!loaded && !error && (
           <p className="git-empty">Loading saved source-control state…</p>
         )}
-        {tab === 'changes' ? (
+        {loaded && info?.repository === false ? (
+          <section
+            className="git-initialize"
+            aria-label="Start version control"
+          >
+            <h3>Keep a history of your project</h3>
+            <p>
+              Create a local Git repository to review changes and make commits.
+              Your files are kept and nothing is uploaded.
+            </p>
+            <button
+              type="button"
+              className="button primary"
+              disabled={locked}
+              onClick={() => void initialize()}
+            >
+              Start version control
+            </button>
+          </section>
+        ) : tab === 'changes' ? (
           <div
             id="git-changes"
             className="git-changes-view"
@@ -631,7 +763,8 @@ export function GitModal({
                       onClick={() => setSelected(change.path)}
                     >
                       <code className="git-file-status">
-                        {change.status === '??' ? 'New' : change.status.trim()}
+                        {change.status !== '??' && `${change.status.trim()} · `}
+                        {changeStatus(change.status)}
                       </code>
                       <span title={change.path}>
                         {change.from
@@ -660,9 +793,10 @@ export function GitModal({
                 disabled={locked}
               />
               <p className="field-help">
-                Commits eligible saved project files. Private files and
-                dependencies are excluded. Existing unrelated staged files stay
-                outside this commit.
+                Commits all listed eligible saved project files, including
+                staged and unstaged changes. Private files and dependencies are
+                excluded. Unrelated staged files outside this project stay out
+                of the commit.
               </p>
               <details
                 className="git-author-section"
@@ -778,6 +912,40 @@ export function GitModal({
               )}
             </details>
           </div>
+        ) : tab === 'history' ? (
+          <section
+            id="git-history"
+            className="git-history"
+            role="tabpanel"
+            aria-labelledby="git-tab-history"
+          >
+            <h3>Recent commits</h3>
+            <p className="field-help">
+              Recent local history for the current checkout. These commits are
+              available without publishing or contacting a remote repository.
+            </p>
+            {info?.commits?.length ? (
+              <ul className="git-commit-list" aria-label="Local commit history">
+                {info.commits.map((item) => (
+                  <li key={item.sha}>
+                    <code title={item.sha}>{item.sha.slice(0, 12)}</code>
+                    <span>{item.message}</span>
+                    <CopyButton
+                      text={item.sha}
+                      label={`Copy commit ${item.sha.slice(0, 12)}`}
+                    />
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              loaded && (
+                <p className="git-empty">
+                  No commits to show yet. Commit your saved changes to start the
+                  history.
+                </p>
+              )
+            )}
+          </section>
         ) : (
           <div
             id="git-publish"
