@@ -46,19 +46,33 @@ function parsedManifest(content) {
   }
 }
 
+function dependencySubdirectory(value) {
+  if (value === undefined || value === null || value === '') return '.'
+  if (typeof value !== 'string') return value
+  const normalized = path.posix.normalize(value)
+  return normalized === '/' ? normalized : normalized.replace(/\/$/, '')
+}
+
 export function changedDependencyPin(original, current) {
   for (const dependency of Array.isArray(original?.packages)
     ? original.packages
     : []) {
-    if (dependency?.type !== 'git' || !/^[a-f0-9]{40}$/.test(dependency.rev))
-      continue
+    const git =
+      dependency?.type === 'git' && /^[a-f0-9]{40}$/.test(dependency.rev)
+    if (!git && dependency?.type !== 'path') continue
     const replacement = Array.isArray(current?.packages)
       ? current.packages.find((pkg) => pkg?.name === dependency.name)
       : null
     if (
       !replacement ||
-      replacement.rev !== dependency.rev ||
-      replacement.url !== dependency.url
+      replacement.type !== dependency.type ||
+      (git
+        ? replacement.rev !== dependency.rev ||
+          replacement.url !== dependency.url ||
+          dependencySubdirectory(replacement.subDir) !==
+            dependencySubdirectory(dependency.subDir)
+        : dependencySubdirectory(replacement.dir) !==
+          dependencySubdirectory(dependency.dir))
     )
       return dependency.name || 'unnamed dependency'
   }
@@ -124,7 +138,7 @@ export async function runPinnedLake(runtime, root, args, options = {}) {
       else {
         await restorePinnedText(manifestFile, originalManifest)
         messages.push(
-          'Lake changed a pinned dependency revision. The original lockfile was restored. Check the dependency configuration before retrying setup.',
+          'Lake changed a pinned dependency source. The original lockfile was restored. Check the dependency configuration before retrying setup.',
         )
       }
     }

@@ -28,9 +28,19 @@ async function project(t) {
 const fakeLean = String.raw`#!/usr/bin/env python3
 import json, os, pathlib, stat, sys
 
-if sys.argv[1:3] == ['--deps-json', '--stdin']:
-    paths = sys.stdin.read().splitlines()
-    print(json.dumps({'imports': [{'errors': [], 'result': {'imports': [{'module': name} for name in ['Init', 'Optional.Theorem', 'Optional.Theorem']]}} for _ in paths]}))
+if sys.argv[1:2] == ['--deps-json']:
+    if sys.argv[2:3] == ['--stdin']:
+        text = sys.stdin.read()
+        paths = text.split() if os.environ.get('FIXTURE_LEGACY_IMPORT_HEADERS') else text.splitlines()
+    else:
+        paths = sys.argv[2:]
+    if not all(pathlib.Path(file).is_file() for file in paths):
+        print('fixture compiler could not read one or more source paths', file=sys.stderr)
+        sys.exit(1)
+    headers = [{'errors': [], 'result': {'imports': [{'module': name} for name in ['Init', 'Optional.Theorem', 'Optional.Theorem']]}} for _ in paths]
+    if os.environ.get('FIXTURE_LEGACY_IMPORT_HEADERS'):
+        headers = [{'imports': header['result']['imports'], 'errors': []} for header in headers]
+    print(json.dumps({'imports': headers}))
     sys.exit(0)
 
 if sys.argv[1:2] != ['--deps']:
@@ -465,6 +475,42 @@ test('dependency import requirements are collected before Lake or compiled modul
   assert.equal(runtime.calls[0].options.network, 'none')
   assert.equal(runtime.calls[0].options.cleanHome, true)
   assert.equal(runtime.calls[0].options.readOnlyWorkspace, true)
+})
+
+test('older pinned compilers can report import headers without a result wrapper', async (t) => {
+  const { root } = await project(t)
+  const lean = await fakeToolchain(t)
+  await fs.writeFile(
+    path.join(root, 'Notes.lean'),
+    'import Optional.Theorem\nexample : True := by\n',
+  )
+  const before = await fs.readFile(path.join(root, 'lean-toolchain'), 'utf8')
+  const runtime = workerRuntime(root, lean, {
+    FIXTURE_LEGACY_IMPORT_HEADERS: '1',
+  })
+  assert.deepEqual(await projectImportRequirements(runtime, root), [
+    'Init',
+    'Optional.Theorem',
+  ])
+  assert.equal(
+    await fs.readFile(path.join(root, 'lean-toolchain'), 'utf8'),
+    before,
+  )
+})
+
+test('import collection preserves paths containing whitespace with older compilers', async (t) => {
+  const { root } = await project(t)
+  const lean = await fakeToolchain(t)
+  const source = path.join(root, 'proof sources', 'Notes.lean')
+  await fs.mkdir(path.dirname(source))
+  await fs.writeFile(source, 'import Optional.Theorem\nexample : True := by\n')
+  const runtime = workerRuntime(root, lean, {
+    FIXTURE_LEGACY_IMPORT_HEADERS: '1',
+  })
+  assert.deepEqual(await projectImportRequirements(runtime, root), [
+    'Init',
+    'Optional.Theorem',
+  ])
 })
 
 test('failed or malformed dependency import requirements cannot certify cache coverage', async (t) => {

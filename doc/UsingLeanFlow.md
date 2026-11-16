@@ -40,6 +40,12 @@ Use **Upload** or drag files/folders into the upload area. **Upload** in the Fil
 
 When available on the server, the specialized Lemex setup agent starts automatically after a recoverable setup failure. It diagnoses an isolated copy, proposes configuration repairs and validates them with Lean before they are applied. The progress card shows when repair is queued, its current activity and elapsed time. Repair has a 15-minute default execution budget after an assistant slot and provider key become available; time spent waiting is excluded.
 
+If you need help, choose **Ask Lemex to fix setup**, including before an imported project has a Lean environment. This opens a setup-help draft in **Ask & Search**. Your text, selected model and reasoning effort stay intact. Lemex receives the setup diagnostics directly; you do not need to copy logs into chat. Nothing starts until you choose **Send**.
+
+Setup help proposes only root Lean and Lake configuration changes for review. It preserves existing Lean and dependency pins and cannot change proof sources. Review and apply the proposed configuration, then choose **Retry setup**. If you want source edits or an intentional version change, choose **Exit setup help** and make that request in an ordinary chat. Your chat history and draft stay available while preparation runs; new assistant tasks wait until setup finishes or you stop it.
+
+Automatic repairs also preserve source files and pins. Their configuration updates are saved together. A newer edit or an interrupted save stops acceptance rather than combining old and new configuration.
+
 Setup shows its current stage, from preparing Lean and libraries to testing the environment. If automatic setup needs a configuration repair, **Lemex is repairing setup** appears while Lemex diagnoses the problem. **Testing the setup repair** appears before the checked configuration is accepted and setup retries. You can open another project while this runs.
 
 **Project setup** above the editor shows the setup result, Lean version and a short source revision. Open it for the repository, folder, full revision and any warnings. **Setup output** names each build or check and reports its elapsed time. It belongs to the latest setup attempt, and long output shows a marked tail. The heading stays visible while you scroll the output. Dependency revision hashes include the package name. Lean errors and linter warnings remain visible; a ready environment can still contain project targets that need repair.

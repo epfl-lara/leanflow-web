@@ -14,6 +14,7 @@ export function ChatOptions({
   liveEdits,
   onLiveEdits,
   active,
+  reviewOnly = false,
 }: {
   models: Session['models']
   savedModels?: string[]
@@ -25,6 +26,7 @@ export function ChatOptions({
   liveEdits: boolean
   onLiveEdits: (value: boolean) => void
   active: boolean
+  reviewOnly?: boolean
 }) {
   const selected = models.find((item) => item.id === model)
   const levels = selected?.reasoningEfforts || []
@@ -133,14 +135,15 @@ export function ChatOptions({
           <input
             type="checkbox"
             checked={liveEdits}
+            disabled={reviewOnly}
             onChange={(event) => onLiveEdits(event.target.checked)}
           />
           <span>Edit files live</span>
         </label>
         <HelpTip label="Edit files live">
-          When on, Lemex saves requested edits as it works; stop the run to undo
-          its edits. Turn this off to review changes before applying them. Live
-          edits start on in every mode. This choice applies to the next run.
+          {reviewOnly
+            ? 'Setup help keeps configuration changes separate until you review and apply them.'
+            : 'When on, Lemex saves requested edits as it works; stop the run to undo its edits. Turn this off to review changes before applying them. Live edits start on in every mode. This choice applies to the next run.'}
         </HelpTip>
       </div>
       <p className="field-help">

@@ -32,6 +32,7 @@ export function runMetadata(run) {
     'files',
     'proofTarget',
     'mode',
+    'purpose',
     'model',
     'effort',
     'status',

@@ -175,3 +175,95 @@ test('stored drafts of every chat for this account and project are re-keyed, and
     globalThis.localStorage = previous
   }
 })
+
+test('setup scope survives accepted submissions and restoration without clearing a newer ordinary draft', () => {
+  const { draft } = draftBeforeNextRender()
+  draft.setMode('search')
+  draft.setPurpose('setup')
+  draft.setText('Diagnose this setup.')
+  const submission = draft.capture()
+  assert.equal(submission.purpose, 'setup')
+  draft.clearSubmitted(submission, true)
+  assert.equal(draft.value.text, '')
+  assert.equal(draft.value.purpose, 'setup')
+  draft.restoreSubmitted(submission)
+  assert.equal(draft.value.text, submission.text)
+  assert.equal(draft.value.purpose, 'setup')
+  const next = draft.capture()
+  draft.clearSubmitted(next, true)
+  draft.setPurpose()
+  draft.restoreSubmitted(next)
+  assert.equal(draft.value.text, '')
+  assert.equal(draft.value.purpose, undefined)
+  draft.setText('Work on ordinary project files.')
+  draft.clearSubmitted(submission, true)
+  assert.equal(draft.value.text, 'Work on ordinary project files.')
+})
+
+test('ordinary mode choices and proof focus leave setup scope without losing draft text', () => {
+  const { draft, module } = draftBeforeNextRender()
+  draft.setText('Keep my instructions.')
+  draft.setMode('search')
+  draft.setPurpose('setup')
+  draft.setMode('proofs')
+  assert.equal(draft.value.purpose, undefined)
+  assert.equal(draft.value.text, 'Keep my instructions.')
+  draft.setMode('search')
+  draft.setPurpose('setup')
+  const focused = module.focusDraft(draft.value, target, 'proofs')
+  assert.equal(focused.purpose, undefined)
+  assert.deepEqual(focused.proofTarget, target)
+  assert.equal(focused.text, 'Keep my instructions.')
+})
+
+test('saved setup drafts restore only the known purpose in Ask & Search', () => {
+  const { module, draft } = draftBeforeNextRender()
+  const storage = new Map()
+  const previous = globalThis.localStorage
+  globalThis.localStorage = {
+    getItem: (key) => storage.get(key) ?? null,
+    setItem: (key, value) => storage.set(key, String(value)),
+  }
+  try {
+    draft.setMode('search')
+    draft.setPurpose('setup')
+    draft.setText('Review configuration fixes.')
+    const restored = module.readChatDraft(draft.key)
+    assert.equal(restored.purpose, 'setup')
+    assert.equal(restored.text, 'Review configuration fixes.')
+    storage.set(
+      draft.key,
+      JSON.stringify({ ...restored, purpose: 'unrestricted' }),
+    )
+    assert.equal(module.readChatDraft(draft.key).purpose, undefined)
+    storage.set(draft.key, JSON.stringify({ ...restored, mode: 'proofs' }))
+    assert.equal(module.readChatDraft(draft.key).purpose, undefined)
+    // A same-revision receipt cannot erase a scope changed in another tab.
+    const submission = draft.capture()
+    storage.set(draft.key, JSON.stringify({ ...restored, purpose: undefined }))
+    draft.clearSubmitted(submission, true)
+    assert.equal(draft.value.text, submission.text)
+    assert.equal(
+      module.clearDraftSubmission(
+        { ...restored, purpose: undefined },
+        submission,
+      ),
+      null,
+    )
+    assert.equal(
+      module.restoreDraftSubmission(
+        {
+          ...restored,
+          revision: submission.revision + 1,
+          text: '',
+          files: [],
+          purpose: undefined,
+        },
+        submission,
+      ),
+      null,
+    )
+  } finally {
+    globalThis.localStorage = previous
+  }
+})

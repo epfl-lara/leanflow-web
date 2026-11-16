@@ -41,6 +41,22 @@ The worker-memory check uses two small offline workers. It verifies enforced CPU
 
 The project-setup check covers TOML and Lean Lake files, unfinished proofs, setup repair, refresh, and native targets. It also checks imports outside the default build targets and dependencies stored in local folders. It opens real editor goals and hover information, compiles an assistant snapshot, and starts Lemex without sending a model request. Configuration pins and source files must remain unchanged.
 
+Check different pinned releases with a custom source directory, optional imports,
+and a local dependency package:
+
+```sh
+node --env-file=.env scripts/check-setup-compatibility.mjs \
+  --toolchain leanprover/lean4:v4.13.0 \
+  --toolchain leanprover/lean4:v4.19.0 \
+  --toolchain leanprover/lean4:v4.35.0
+```
+
+Choose the releases your users need. This check builds disposable fixtures and
+opens real editor goals, hover, and the interactive infoview. It makes no model
+requests and removes its projects and any downloaded test toolchains after each
+release. Set `LEAN_TEST_TOOLCHAIN_DIR` to reuse installed toolchains through
+read-only mounts. Small reports remain under `.runtime/setup-compatibility/`.
+
 Include a fresh public dependency download, two simultaneous imports reusing its cache, and the helper's proof checks with:
 
 ```sh

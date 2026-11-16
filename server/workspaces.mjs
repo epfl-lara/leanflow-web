@@ -76,6 +76,8 @@ import {
 } from './shared-dependencies.mjs'
 import { singleFileSource, availablePlaygroundName } from './single-files.mjs'
 import { sourceFingerprint } from './source-fingerprint.mjs'
+import { validateDependencyLayout } from './dependency-layout.mjs'
+import { preparePrivateSetupDependencies } from './setup-dependencies.mjs'
 import { checkEditorImports } from './editor-imports.mjs'
 import {
   hasLeanConfiguration,
@@ -3030,12 +3032,7 @@ export class WorkspaceStore {
       signal,
     })
     signal.throwIfAborted()
-    const allowed = new Set([
-      'lean-toolchain',
-      'lakefile.lean',
-      'lakefile.toml',
-      'lake-manifest.json',
-    ])
+    const allowed = new Set(PROJECT_CONFIGURATION_FILES)
     const before = new Map()
     for (const entry of await this.#walk(candidate, {
       includeLinks: true,
@@ -3092,6 +3089,9 @@ export class WorkspaceStore {
         'Setup repair changed the pinned Lean release. The original environment was preserved.',
         409,
       )
+    await validateDependencyLayout(
+      await this.#dependencyConfiguration({ root: candidate }),
+    )
     await this.#prepareToolchain(repairedToolchain, { signal })
     const commands = []
     if (!(await exists(path.join(candidate, 'lake-manifest.json'))))
@@ -3211,7 +3211,11 @@ export class WorkspaceStore {
     this.#assertRepairDependencyPins(originalManifest, finalManifest)
     const after = new Map(
       (
-        await this.#walk(candidate, { includeLinks: true, limit: Infinity })
+        await this.#walk(candidate, {
+          includeLinks: true,
+          limit: Infinity,
+          signal,
+        })
       ).map((entry) => [entry.path, entry]),
     )
     const changes = []
@@ -3223,7 +3227,7 @@ export class WorkspaceStore {
         (entry?.link === undefined &&
           previous?.hash !==
             (entry
-              ? await fileHash(await guarded(candidate, filename))
+              ? await fileHash(await guarded(candidate, filename), signal)
               : undefined))
       if (!changed) continue
       if (!allowed.has(filename) || entry?.link !== undefined)
@@ -3235,8 +3239,16 @@ export class WorkspaceStore {
         await guarded(project.root, filename, { write: true }),
         true,
       )
+      const beforeHash = previous?.hash ?? null
+      if ((original?.hash ?? null) !== beforeHash)
+        fail(
+          `Setup configuration ${filename} changed during repair. Your current files were preserved. Retry setup with the current configuration.`,
+          409,
+        )
       changes.push({
         path: filename,
+        mode: original?.mode ?? 0o600,
+        beforeHash,
         before: original?.content ?? null,
         after: entry
           ? (await textFile(await guarded(candidate, filename))).content
@@ -3250,39 +3262,86 @@ export class WorkspaceStore {
       !(await exists(path.join(candidate, 'lakefile.toml')))
     )
       fail('Setup repair did not produce a Lake project configuration.')
-    // Keep the original configuration outside every writable worker mount.
-    await fs.writeFile(
-      path.join(container, 'changes.json'),
-      JSON.stringify({
-        projectId: project.id,
-        createdAt: new Date().toISOString(),
-        changes,
-      }),
-      { mode: 0o600 },
-    )
-    for (const change of changes) {
-      const parent = await writeParent(project.root, change.path)
-      try {
-        const destination = `${parent.anchor}/${parent.name}`
-        if (change.after === null) await fs.unlink(destination)
-        else {
-          const temporary = `${parent.anchor}/.setup-${randomUUID()}`
-          try {
-            await fs.writeFile(temporary, change.after, {
-              mode: 0o600,
-              flag: 'wx',
-            })
-            await fs.rename(temporary, destination)
-          } finally {
-            await fs.rm(temporary, { force: true })
-          }
-        }
-      } finally {
-        await parent.handle.close()
-      }
+    const actor = this.preparationActors.get(project.id) || project.owner
+    const repairId = project.setupRepair.id
+    const authorize = () => {
+      signal.throwIfAborted()
+      const current = this.requireEditor(project.id, actor)
+      if (
+        current.root !== project.root ||
+        current.status !== 'preparing' ||
+        current.setupRepair?.id !== repairId
+      )
+        fail(
+          'Project setup changed during repair. Retry setup with the current files.',
+          409,
+        )
     }
+    await this.#locked(project.id, async () => {
+      authorize()
+      // Validate the whole configuration used by the isolated check, including
+      // files the agent left unchanged. Never combine a repair with a newer edit.
+      for (const filename of allowed) {
+        const original = await textFile(
+          await guarded(project.root, filename, { write: true }),
+          true,
+        )
+        if ((original?.hash ?? null) !== (before.get(filename)?.hash ?? null))
+          fail(
+            `Setup configuration ${filename} changed during repair. Your current files were preserved. Retry setup with the current configuration.`,
+            409,
+          )
+      }
+      authorize()
+      // Retain the familiar repair record outside writable worker mounts. The
+      // transaction separately fsyncs original bytes, stages every replacement,
+      // and recovers the whole configuration after an interrupted commit.
+      const record = await fs.open(
+        path.join(container, 'changes.json'),
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_NOFOLLOW,
+        0o600,
+      )
+      try {
+        await record.writeFile(
+          JSON.stringify({
+            projectId: project.id,
+            createdAt: new Date().toISOString(),
+            changes,
+          }),
+        )
+        await record.sync()
+      } finally {
+        await record.close()
+      }
+      const directory = await fs.open(
+        container,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      )
+      try {
+        await directory.sync()
+      } finally {
+        await directory.close()
+      }
+      authorize()
+      if (changes.length) {
+        // Persist the intended protected configuration before any file commit.
+        // Recovery retains this marker only when the committed bytes match it.
+        project.repairedConfiguration = true
+        project.repairedConfigurationDigest =
+          configurationDigest(finalConfiguration)
+        this.#save(project)
+        await this.transactions.apply(project, changes, { authorize })
+      }
+    })
     project.setupRepair.changes = changes.map((change) => change.path)
-    project.repairedConfiguration = true
+    if (changes.length) {
+      project.repairedConfiguration = true
+      project.repairedConfigurationDigest =
+        configurationDigest(finalConfiguration)
+    }
     project.setupRepair.message = changes.length
       ? 'Lemex updated setup files. Checking the Lean environment again.'
       : 'Lemex checked setup without changing configuration. Checking the original project again.'
@@ -3518,7 +3577,11 @@ export class WorkspaceStore {
             queue,
             signal,
             ...(args[0] !== 'git' && project.repairedConfiguration
-              ? { readOnlyWorkspace: true, writeLakeCache: true }
+              ? {
+                  readOnlyWorkspace: true,
+                  writeLakeCache: true,
+                  writePrivateDependencyCache: true,
+                }
               : {}),
             env: {
               GIT_TERMINAL_PROMPT: '0',
@@ -3549,7 +3612,7 @@ export class WorkspaceStore {
   #assertRepairDependencyPins(original, repaired) {
     if (changedDependencyPin(original, repaired))
       fail(
-        'Setup repair changed a pinned dependency revision. The original lockfile was preserved.',
+        'Setup repair changed a pinned dependency source or revision. The original lockfile was preserved.',
         409,
       )
   }
@@ -3629,6 +3692,7 @@ export class WorkspaceStore {
   }
 
   async #validateDependencyRepositories(project) {
+    await validateDependencyLayout(await this.#dependencyConfiguration(project))
     const file = await textFile(
       await guarded(project.root, 'lake-manifest.json'),
       true,
@@ -3822,6 +3886,17 @@ export class WorkspaceStore {
   }
 
   async #prepareProject(project, credentials) {
+    if (project.repairedConfiguration) {
+      const digest = configurationDigest(
+        await this.#dependencyConfiguration(project),
+      )
+      if (!project.repairedConfigurationDigest)
+        project.repairedConfigurationDigest = digest
+      else if (project.repairedConfigurationDigest !== digest) {
+        delete project.repairedConfiguration
+        delete project.repairedConfigurationDigest
+      }
+    }
     let presetImport =
       project.initializedEnvironment && !project.customEnvironment
     if (presetImport) {
@@ -4154,7 +4229,11 @@ export class WorkspaceStore {
               network: 'none',
               signal: this.preparationControllers.get(project.id)?.signal,
               ...(project.repairedConfiguration
-                ? { readOnlyWorkspace: true, writeLakeCache: true }
+                ? {
+                    readOnlyWorkspace: true,
+                    writeLakeCache: true,
+                    writePrivateDependencyCache: true,
+                  }
                 : {}),
               onOutput: (output) =>
                 this.#event(
@@ -4856,6 +4935,19 @@ export class WorkspaceStore {
   }
 
   #requirePreparation(project) {
+    let protectedConfiguration = false
+    if (project.repairedConfiguration && project.repairedConfigurationDigest)
+      try {
+        protectedConfiguration =
+          project.repairedConfigurationDigest ===
+          configurationDigest(readDependencyConfiguration(project.root))
+      } catch {
+        /* Invalid user configuration follows ordinary setup recovery. */
+      }
+    if (!protectedConfiguration) {
+      delete project.repairedConfiguration
+      delete project.repairedConfigurationDigest
+    }
     delete project.log
     project.status = 'error'
     project.needsPreparation = true
@@ -5963,12 +6055,16 @@ export class WorkspaceStore {
         { mode: 0o600, flag: 'wx' },
       )
       const inherit = typeof this.runtime.inheritDependencies === 'function'
+      const reusableDependencies =
+        project.status === 'ready' ||
+        !!this.runtime.verifiedDependencyRoot?.(project.root)
       await copyWorkspace(project.root, root, {
-        omitDependencies: inherit,
+        omitDependencies: inherit || !reusableDependencies,
         signal,
       })
       signal?.throwIfAborted()
-      if (inherit) await this.runtime.inheritDependencies(project.root, root)
+      if (inherit && reusableDependencies)
+        await this.runtime.inheritDependencies(project.root, root)
       signal?.throwIfAborted()
       const files = []
       const links = []
@@ -6815,7 +6911,6 @@ export class WorkspaceStore {
   }
 
   async prepareVerificationConfiguration(snapshot, changes, { signal } = {}) {
-    if (!changes.some((change) => CONFIGURATION_FILES.has(change.path))) return
     const { manifest } = await this.#manifest(snapshot)
     if (manifest.purpose !== 'verification')
       fail('Invalid verification workspace.', 403)
@@ -6823,10 +6918,28 @@ export class WorkspaceStore {
       manifest.projectId,
       manifest.actor || manifest.owner,
     )
+    // Notes and other non-Lean edits do not need a working Lean environment.
+    if (
+      !changes.some(
+        (change) =>
+          change.path.endsWith('.lean') ||
+          CONFIGURATION_FILES.has(change.path.split('/').at(-1)),
+      )
+    )
+      return
     const root = manifest.root
+    const readyDependencies =
+      project.status === 'ready' ||
+      !!this.runtime.verifiedDependencyRoot?.(project.root)
+    if (
+      readyDependencies &&
+      !changes.some((change) => CONFIGURATION_FILES.has(change.path))
+    )
+      return
     // A library/target edit can reuse the existing pinned dependencies. An
     // explicitly changed toolchain or lockfile needs its own prepared inputs.
     if (
+      readyDependencies &&
       !changes.some((change) =>
         ['lean-toolchain', 'lake-manifest.json'].includes(change.path),
       )
@@ -6844,7 +6957,17 @@ export class WorkspaceStore {
     await this.#prepareToolchain(toolchain, { signal })
     signal?.throwIfAborted()
     await this.runtime.clearInheritedDependencies?.(root, { force: true })
-    await this.#sharedDependencies({ ...project, root, toolchain }, signal)
+    await this.#validateDependencyRepositories({ ...project, root })
+    const shared = await this.#sharedDependencies(
+      { ...project, root, toolchain },
+      signal,
+    )
+    if (!shared)
+      await preparePrivateSetupDependencies(this.runtime, root, {
+        toolchain,
+        signal,
+        timeoutMs: this.setupBuildTimeoutMs,
+      })
   }
 
   async #prepareToolchain(toolchain, { signal, onOutput } = {}) {
@@ -6906,7 +7029,12 @@ export class WorkspaceStore {
     })
   }
 
-  async applyChanges(id, owner, changes, { snapshot, agentRunId } = {}) {
+  async applyChanges(
+    id,
+    owner,
+    changes,
+    { snapshot, agentRunId, setupRepair = false } = {},
+  ) {
     this.requireEditor(id, owner)
     if (!Array.isArray(changes) || changes.length > 1000)
       fail('Invalid change set')
@@ -6918,6 +7046,24 @@ export class WorkspaceStore {
       if (snapshot) {
         const { manifest } = await this.#manifest(snapshot)
         await this.#assertCurrent(manifest, project)
+      }
+      if (setupRepair && changes.length) {
+        const configuration = await this.#dependencyConfiguration(project)
+        for (const change of changes) {
+          if (
+            !CONFIGURATION_FILES.has(change?.path) ||
+            (change.after !== null && typeof change.after !== 'string')
+          )
+            fail(
+              'Setup help can apply only the four root Lean configuration files.',
+              400,
+            )
+          if (change.after === null) delete configuration[change.path]
+          else configuration[change.path] = change.after
+        }
+        project.repairedConfiguration = true
+        project.repairedConfigurationDigest = configurationDigest(configuration)
+        this.#save(project)
       }
       return this.#applyLocked(
         project,

@@ -29,7 +29,7 @@ import {
   type TrashItem,
   type TrashDeleteResult,
 } from './api'
-import { AssistantPanel } from './AssistantPanel'
+import { AssistantPanel, type SetupHelpRequest } from './AssistantPanel'
 import { TerminalPanel } from './TerminalPanel'
 import { TerminalRecoveries } from './TerminalRecoveries'
 import { Dialog } from './Dialog'
@@ -465,6 +465,9 @@ export function Studio() {
   const [booksMounted, setBooksMounted] = useState(false)
   const [bookChatRequest, setBookChatRequest] =
     useState<BookChatRequest | null>(null)
+  const [setupHelpRequest, setSetupHelpRequest] =
+    useState<SetupHelpRequest | null>(null)
+  const setupHelpRequestId = useRef(0)
   const [bookPageRequest, setBookPageRequest] = useState<{
     id: number
     url: string
@@ -617,9 +620,16 @@ export function Studio() {
     (project?.status === 'ready' ||
       (project?.status === 'error' &&
         (singleFileMode || project.needsPreparation === true)))
-  useEffect(() => {
-    if (project?.status === 'needs-setup') setToolsOpen(false)
-  }, [project?.id, project?.status])
+  const assistantProjectAvailable =
+    !!project &&
+    (project.status === 'ready' ||
+      project.status === 'needs-setup' ||
+      project.status === 'preparing' ||
+      (project.status === 'error' && project.needsPreparation === true))
+  const canAskSetup =
+    projectCanEdit &&
+    assistantProjectAvailable &&
+    project.status !== 'preparing'
   const currentEditorProof =
     !file?.unavailable && editorProof?.path === file?.path ? editorProof : null
   const sidebarMaximum = Math.min(
@@ -719,6 +729,7 @@ export function Studio() {
       setUploadProjectId(null)
       setLibrarySource(null)
       setProofFocus(null)
+      setSetupHelpRequest(null)
       setEditorProof(null)
       setFocusEditorRequest(null)
       setRevealProof(null)
@@ -2442,6 +2453,16 @@ export function Studio() {
     }
   }
 
+  function askSetup() {
+    if (!project || !canAskSetup) return
+    setSetupHelpRequest({
+      id: ++setupHelpRequestId.current,
+      projectId: project.id,
+    })
+    setToolsOpen(true)
+    setSidebarOpen(false)
+  }
+
   async function prepareProject(
     id: string,
     credentials?: RepositoryCredentials,
@@ -3659,6 +3680,7 @@ export function Studio() {
             key={project.id}
             project={project}
             templates={session.templates}
+            onAskSetup={canAskSetup ? askSetup : undefined}
             onConfigured={(value) =>
               setProjects((previous) =>
                 previous.map((item) => (item.id === value.id ? value : item)),
@@ -3721,7 +3743,10 @@ export function Studio() {
               </>
             )}
             {projectCanEdit && !singleFileMode && (
-              <ProjectSetupDetails project={project} />
+              <ProjectSetupDetails
+                project={project}
+                onAskSetup={canAskSetup ? askSetup : undefined}
+              />
             )}
           </div>
         ) : (
@@ -3744,7 +3769,10 @@ export function Studio() {
               </div>
             )}
             {projectCanEdit && !singleFileMode && (
-              <ProjectSetupPanel project={project} />
+              <ProjectSetupPanel
+                project={project}
+                onAskSetup={canAskSetup ? askSetup : undefined}
+              />
             )}
             <div className="file-toolbar">
               <FileTabs
@@ -4235,7 +4263,7 @@ export function Studio() {
         </header>
         <div className="tools-content" aria-labelledby="lemex-panel-title">
           <div className="tool-view">
-            {project?.status === 'ready' ? (
+            {assistantProjectAvailable ? (
               <AssistantPanel
                 onOpenSettings={() => setSettingsModal(true)}
                 key={`${session.user.id}:${project.id}`}
@@ -4292,6 +4320,17 @@ export function Studio() {
                 }
                 readOnly={file?.readOnly}
                 canRun={projectCanEdit}
+                runUnavailableReason={
+                  project.status === 'preparing'
+                    ? 'Project setup is running. You can keep a draft here. Stop setup or wait for it to finish before sending a new task or applying changes.'
+                    : undefined
+                }
+                setupHelpRequest={setupHelpRequest}
+                onSetupHelpHandled={(id) =>
+                  setSetupHelpRequest((current) =>
+                    current?.id === id ? null : current,
+                  )
+                }
                 session={session}
                 onModelsUpdated={acceptModels}
                 dirty={dirty}

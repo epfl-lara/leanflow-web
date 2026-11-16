@@ -16,7 +16,13 @@ function readyLeanVersion(project: Project) {
     : undefined
 }
 
-export function ProjectSetupPanel({ project }: { project: Project }) {
+export function ProjectSetupPanel({
+  project,
+  onAskSetup,
+}: {
+  project: Project
+  onAskSetup?: () => void
+}) {
   const needsAttention = Boolean(
     project.status === 'error' ||
     project.needsPreparation ||
@@ -55,7 +61,11 @@ export function ProjectSetupPanel({ project }: { project: Project }) {
         )}
       </summary>
       <div className="setup-editor-content">
-        <ProjectSetupDetails project={project} collapsibleOutput={false} />
+        <ProjectSetupDetails
+          project={project}
+          collapsibleOutput={false}
+          onAskSetup={onAskSetup}
+        />
       </div>
     </details>
   )
@@ -64,14 +74,27 @@ export function ProjectSetupPanel({ project }: { project: Project }) {
 export function ProjectSetupDetails({
   project,
   collapsibleOutput = true,
+  onAskSetup,
 }: {
   project: Project
   collapsibleOutput?: boolean
+  onAskSetup?: () => void
 }) {
   const lean = readyLeanVersion(project)
   const output = project.log && <pre className="setup-log">{project.log}</pre>
   return (
     <>
+      {onAskSetup && project.status !== 'preparing' && (
+        <p>
+          <button
+            type="button"
+            className="button secondary"
+            onClick={onAskSetup}
+          >
+            Ask Lemex to fix setup
+          </button>
+        </p>
+      )}
       {project.status === 'preparing' && (
         <ProjectSetupProgress project={project} />
       )}

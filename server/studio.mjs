@@ -113,6 +113,7 @@ const runMetadata = (job) => {
     'currentFile',
     'files',
     'mode',
+    'purpose',
     'model',
     'effort',
     'status',

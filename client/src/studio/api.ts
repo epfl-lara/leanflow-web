@@ -379,6 +379,7 @@ export interface Change {
   beforeHash?: string
 }
 export interface Run {
+  purpose?: 'setup'
   id: string
   projectId?: string
   status: string

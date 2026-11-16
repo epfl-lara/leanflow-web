@@ -1,17 +1,14 @@
-// This is a configuration file for pm2, a production process manager for nodejs
+// PM2 runs the authenticated LeanFlow studio behind an HTTPS reverse proxy.
 module.exports = {
   apps: [
     {
       name: 'lean4web',
-      script: 'server/index.mjs',
+      script: 'server/studio.mjs',
+      cwd: __dirname,
       env: {
         NODE_ENV: 'production',
+        HOST: '127.0.0.1',
         PORT: 8001,
-        NO_BWRAP: false,
-        VITE_COLLAB: true,
-        PROJECTS_BASE_PATH: 'Projects', // relative path to the folder containing all projects
-        SSL_CRT_FILE: undefined,
-        SSL_KEY_FILE: undefined,
       },
     },
   ],

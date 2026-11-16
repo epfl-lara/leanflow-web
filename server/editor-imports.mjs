@@ -171,32 +171,58 @@ if config.get('collectImports'):
     if not sources:
         finish(True, 'No local Lean imports.', [])
     try:
-        proc = subprocess.run(
-            [lean, '--deps-json', '--stdin'],
-            input='\n'.join(str(source) for source in sources) + '\n',
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=max(0.001, deadline - time.monotonic()),
-        )
-        if proc.returncode or len(proc.stdout) > 4 * 1024 * 1024:
-            finish(False, 'Could not inspect project import headers with the pinned Lean compiler. Use Refresh setup and inspect the setup output.')
-        report = json.loads(proc.stdout)
-        headers = report['imports']
-        if not isinstance(headers, list) or len(headers) != len(sources):
-            raise ValueError('Invalid import header report')
+        # Older compilers split stdin filenames on whitespace. Argument batches
+        # preserve exact paths without exceeding the operating-system argv limit.
+        batches = []
+        batch = []
+        batch_bytes = 0
+        for source in sources:
+            name = str(source)
+            size = len(name.encode('utf-8')) + 1
+            if batch and batch_bytes + size > 64 * 1024:
+                batches.append(batch)
+                batch = []
+                batch_bytes = 0
+            batch.append(name)
+            batch_bytes += size
+        if batch:
+            batches.append(batch)
         modules = set()
-        for header in headers:
-            # Malformed source headers remain editable; usable headers still
-            # describe the dependency modules that can be prepared now.
-            if header.get('errors'):
-                continue
-            for item in header['result']['imports']:
-                name = item['module']
-                if not isinstance(name, str):
-                    raise ValueError('Invalid imported module')
-                modules.add(name)
-        if len(modules) > max_files:
-            raise ValueError('Too many imported modules')
+        for batch in batches:
+            if time.monotonic() > deadline:
+                timed_out()
+            proc = subprocess.run(
+                [lean, '--deps-json', *batch], stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding='utf-8', errors='replace',
+                timeout=max(0.001, deadline - time.monotonic()),
+            )
+            if proc.returncode or len(proc.stdout) > 4 * 1024 * 1024:
+                finish(False, 'Could not inspect project import headers with the pinned Lean compiler. Use Refresh setup and inspect the setup output.')
+            report = json.loads(proc.stdout)
+            headers = report['imports']
+            if not isinstance(headers, list) or len(headers) != len(batch):
+                raise ValueError('Invalid import header report')
+            for header in headers:
+                if not isinstance(header, dict):
+                    raise ValueError('Invalid import header')
+                # Malformed source headers remain editable; usable headers still
+                # describe the dependency modules that can be prepared now.
+                if header.get('errors'):
+                    continue
+                # Older pinned Lean releases report imports directly; newer
+                # compilers wrap a successful header in a result object.
+                result = header.get('result', header)
+                imports = result['imports']
+                if not isinstance(imports, list):
+                    raise ValueError('Invalid imported modules')
+                for item in imports:
+                    name = item['module']
+                    if not isinstance(name, str):
+                        raise ValueError('Invalid imported module')
+                    modules.add(name)
+            if len(modules) > max_files:
+                raise ValueError('Too many imported modules')
         finish(True, 'Project import headers inspected.', sorted(modules))
     except subprocess.TimeoutExpired:
         timed_out()

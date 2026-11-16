@@ -6,24 +6,31 @@ import { nodePolyfills } from 'vite-plugin-node-polyfills'
 import { viteStaticCopy } from 'vite-plugin-static-copy'
 import svgr from 'vite-plugin-svgr'
 import { leanClientCompatibility } from './build/lean-client-compat.mjs'
+import { browserStorageCompatibility } from './build/browser-storage-compat.mjs'
 
 const leanClientCompat = leanClientCompatibility()
+const browserStorageCompat = browserStorageCompatibility()
 
 // https://vitejs.dev/config/
 export default defineConfig({
   optimizeDeps: {
     esbuildOptions: {
       // @ts-ignore           // TODO
-      plugins: [importMetaUrlPlugin, leanClientCompat.esbuild],
+      plugins: [
+        importMetaUrlPlugin,
+        leanClientCompat.esbuild,
+        browserStorageCompat.esbuild,
+      ],
     },
     // exclude: ["Projects"],
   },
   build: {
-    // Note: This has to match the path in `server/index.mjs` and in `tsconfig.json`
+    // studio.mjs serves the client/dist output directory.
     outDir: 'dist',
   },
   plugins: [
     leanClientCompat.vite,
+    browserStorageCompat.vite,
     react(),
     tailwindcss(),
     svgr({
