@@ -1,5 +1,6 @@
 import { clusterError } from './state.mjs'
 import { dependencyFailureMessage } from '../pinned-lake.mjs'
+import { clusterEditor } from './editors.mjs'
 
 // Pure checks only. Canonical writers remain on the coordinator.
 export class ClusterChecks {
@@ -30,10 +31,79 @@ export class ClusterChecks {
     this.remoteResults = new WeakSet()
     this.inflight = new Map()
     this.closing = false
+    this.editors = new Set()
+    this.editorWarmup = null
   }
 
   isRemoteResult(result) {
     return this.remoteResults.has(result)
+  }
+
+  openEditor(context, local) {
+    const child = clusterEditor(this, context, local)
+    this.editors.add(child)
+    child.once('close', () => this.editors.delete(child))
+    return child
+  }
+
+  editorCapacity() {
+    return this.mode === 'serve' && this.editorsReady()
+      ? this.controller.editorCapacity?.(this.editorWarmup?.environment) || 0
+      : 0
+  }
+
+  editorsReady() {
+    return !this.editorWarmup || this.editorWarmup.state === 'ready'
+  }
+
+  startEditorWarmup() {
+    if (
+      this.editorWarmup ||
+      this.mode !== 'serve' ||
+      this.controller.status?.().editors?.placement !== 'prefer'
+    )
+      return
+    const abort = new AbortController()
+    const warmup = { abort, state: 'warming', task: null, environment: null }
+    this.editorWarmup = warmup
+    warmup.task = this.#capture(abort.signal, () =>
+      this.inputs.prepareEditorAssets({ signal: abort.signal }),
+    ).then(
+      (result) => {
+        warmup.state = result ? 'ready' : 'unavailable'
+        warmup.environment = result
+        this.#record({
+          mode: this.mode,
+          reason: result ? 'editor-assets-ready' : 'editor-assets-unavailable',
+          ...(result
+            ? { toolchain: result.toolchain, dependencies: result.dependencies }
+            : {}),
+        })
+        if (result)
+          console.info(
+            '[LeanFlow cluster] Editor environment ready: ' +
+              JSON.stringify(result),
+          )
+        if (!result && !this.closing)
+          console.warn(
+            '[LeanFlow cluster] Remote editors remain local: prepare and protect the public Mathlib environment before enabling placement.',
+          )
+      },
+      () => {
+        warmup.state = 'unavailable'
+        this.#record({ mode: this.mode, reason: 'editor-assets-unavailable' })
+        if (!this.closing)
+          console.warn(
+            '[LeanFlow cluster] Remote editor asset preparation failed. Local serving remains available; inspect the protected preset and object-store budgets.',
+          )
+      },
+    )
+  }
+
+  captureEditor(root, signal) {
+    return this.#capture(signal, () =>
+      this.inputs.capture(root, { signal, editor: true }),
+    )
   }
 
   #record(value) {
@@ -262,6 +332,14 @@ export class ClusterChecks {
 
   async close() {
     this.closing = true
+    this.editorWarmup?.abort.abort(
+      clusterError('Editor warm-up stopped.', 'cluster_stopping', 503),
+    )
+    const editorStarts = []
+    for (const child of this.editors) {
+      child.kill()
+      if (child.ready) editorStarts.push(child.ready)
+    }
     for (const abort of this.inflight.keys())
       abort.abort(
         clusterError(
@@ -280,6 +358,8 @@ export class ClusterChecks {
       shutdown,
       this.settleShadows(),
       Promise.allSettled([...this.inflight.values()]),
+      Promise.allSettled(editorStarts),
+      this.editorWarmup?.task,
     ])
     this.inputs.blobs?.close()
     return report

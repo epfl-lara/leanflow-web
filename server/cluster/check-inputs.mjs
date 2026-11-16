@@ -38,21 +38,38 @@ export class CheckInputs {
     this.blobs = blobs
     this.runtime = runtime
     this.assets = new Map()
+    this.readyAssets = new Set()
+  }
+
+  async #assetKey(root, kind) {
+    if ((await fs.realpath(root)) !== root) return null
+    const stat = await fs.stat(root, { bigint: true })
+    return `${kind}:${root}:${stat.dev}:${stat.ino}:${stat.mtimeNs}`
+  }
+
+  async #assetReady(root, kind) {
+    return this.readyAssets.has(await this.#assetKey(root, kind))
   }
 
   async #asset(root, kind, signal) {
-    if ((await fs.realpath(root)) !== root) return null
-    const stat = await fs.stat(root, { bigint: true })
-    const key = `${kind}:${root}:${stat.dev}:${stat.ino}:${stat.mtimeNs}`
+    const key = await this.#assetKey(root, kind)
+    if (!key) return null
     // Only server-managed, immutable toolchains and shared dependencies reach
     // this cache. Mutable project trees are captured afresh for every check.
     if (!this.assets.has(key)) {
-      const task =
+      const capture =
         kind === 'dependencies'
           ? captureDependencies(this.blobs, path.dirname(path.dirname(root)), {
               signal,
+              requireReferences:
+                path.dirname(path.dirname(path.dirname(root))) ===
+                path.join(this.runtime.runtimeDir, 'templates'),
             })
           : captureTree(this.blobs, root, { kind, signal })
+      const task = capture.then((result) => {
+        this.readyAssets.add(key)
+        return result
+      })
       this.assets.set(key, task)
       task.catch(() => {
         if (this.assets.get(key) === task) this.assets.delete(key)
@@ -61,7 +78,34 @@ export class CheckInputs {
     return this.assets.get(key)
   }
 
-  async capture(root, { signal, fingerprint } = {}) {
+  async prepareEditorAssets({
+    signal,
+    root = this.runtime.templateRoot?.('mathlib'),
+  } = {}) {
+    if (!root || this.runtime.transferableDependencyRoot?.(root) !== root)
+      return null
+    const version = (
+      await fs.readFile(path.join(root, 'lean-toolchain'), 'utf8')
+    ).trim()
+    const toolchainRoot = this.runtime.toolchains?.get(version)
+    if (!toolchainRoot) return null
+    // Start this service-owned task before accepting browser requests. A user's
+    // disconnect must never cancel the shared first capture after a restart.
+    const toolchain = await this.#asset(toolchainRoot, 'toolchain', signal)
+    const dependencies = await this.#asset(
+      path.join(root, '.lake/packages'),
+      'dependencies',
+      signal,
+    )
+    return toolchain && dependencies
+      ? {
+          toolchain: { version, manifest: toolchain.hash },
+          dependencies: dependencies.hash,
+        }
+      : null
+  }
+
+  async capture(root, { signal, fingerprint, editor = false } = {}) {
     signal?.throwIfAborted()
     const before = fingerprint || (await sourceFingerprint(root, { signal }))
     const source = await captureTree(this.blobs, root, {
@@ -92,14 +136,28 @@ export class CheckInputs {
       return null
     const toolchainRoot = this.runtime.toolchains?.get(version)
     if (!toolchainRoot) return null
+    if (editor && !(await this.#assetReady(toolchainRoot, 'toolchain')))
+      return null
     const dependenciesRoot = await this.runtime.dependencyRoot(root)
     let dependencies = null
     if (dependenciesRoot) {
       // Personal or legacy mutable .lake trees are not shared as public assets.
       if (
-        path.dirname(dependenciesRoot) !==
-          path.join(this.runtime.runtimeDir, 'shared-dependencies') ||
+        (path.dirname(dependenciesRoot) !==
+          path.join(this.runtime.runtimeDir, 'shared-dependencies') &&
+          !(
+            editor &&
+            this.runtime.transferableDependencyRoot?.(root) === dependenciesRoot
+          )) ||
         this.runtime.dependencyPreparationReason(root)
+      )
+        return null
+      if (
+        editor &&
+        !(await this.#assetReady(
+          path.join(dependenciesRoot, '.lake/packages'),
+          'dependencies',
+        ))
       )
         return null
       const prepared = await this.#asset(

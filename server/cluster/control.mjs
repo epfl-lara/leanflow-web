@@ -6,12 +6,19 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { BlobStore, captureTree } from './blobs.mjs'
 import { ClusterController } from './controller.mjs'
-import { readControllerConfig, resolveExecutionProfile } from './config.mjs'
+import {
+  readControllerConfig,
+  resolveExecutionProfile,
+  registeredToolchainRoot,
+} from './config.mjs'
 import { clusterError, digest } from './state.mjs'
-import { capturePreparedDependencies } from './dependencies.mjs'
+import {
+  capturePreparedDependencies,
+  capturePresetDependencies,
+} from './dependencies.mjs'
 
 const usage =
-  'Usage: node server/cluster/control.mjs status|image|prepare|fixture|gc|trim --config /private/controller.json --data /coordinator/data --image sha256:... [--node id] [--archive /image.tar.gz] [--toolchain leanprover/lean4:v...] [--toolchain-dir /pinned/toolchain | --toolchain-manifest sha256] [--dependency-dir /coordinator/data/runtime/shared-dependencies/DIGEST | --dependencies sha256] [--operation check.build|check.kernel]'
+  'Usage: node server/cluster/control.mjs status|image|prepare|fixture|gc|trim --config /private/controller.json --data /coordinator/data --image sha256:... [--node id] [--archive /image.tar.gz] [--toolchain leanprover/lean4:v...] [--toolchain-dir /pinned/toolchain | --toolchain-manifest sha256] [--dependency-dir /coordinator/data/runtime/shared-dependencies/DIGEST | --dependencies sha256 | --preset mathlib] [--certify true|false] [--operation check.build|check.kernel]'
 
 async function fixtureSource(blobs, version) {
   const files = {
@@ -66,6 +73,8 @@ export async function controlMain(argv = process.argv.slice(2)) {
     '--operation',
     '--dependency-dir',
     '--dependencies',
+    '--preset',
+    '--certify',
   ])
   const flags = new Map()
   for (let index = 0; index < args.length; index += 2) {
@@ -77,12 +86,26 @@ export async function controlMain(argv = process.argv.slice(2)) {
     if (!flags.has(name)) throw clusterError(usage)
   if (!['status', 'gc', 'trim'].includes(command) && !flags.has('--node'))
     throw clusterError('Select an enrolled worker with --node.')
+  const dependencyFlags = [
+    '--dependency-dir',
+    '--dependencies',
+    '--preset',
+  ].filter((flag) => flags.has(flag))
   if (
-    (flags.has('--dependency-dir') || flags.has('--dependencies')) &&
-    (command !== 'prepare' ||
-      (flags.has('--dependency-dir') && flags.has('--dependencies')))
+    dependencyFlags.length &&
+    (command !== 'prepare' || dependencyFlags.length !== 1)
   )
     throw clusterError('Use one dependency directory or manifest with prepare.')
+  if (
+    flags.has('--certify') &&
+    (command !== 'prepare' ||
+      !['true', 'false'].includes(flags.get('--certify')))
+  )
+    throw clusterError('Use --certify true|false only with prepare.')
+  if (flags.has('--preset') && flags.get('--preset') !== 'mathlib')
+    throw clusterError(
+      'Remote editor preset preloading currently supports mathlib only.',
+    )
   const config = await readControllerConfig(flags.get('--config'))
   if (config.mode !== 'off')
     throw clusterError(
@@ -214,7 +237,22 @@ export async function controlMain(argv = process.argv.slice(2)) {
     )
       throw clusterError('Provide the exact official --toolchain pin.')
     let toolchainManifest = flags.get('--toolchain-manifest')
-    if (toolchainManifest) digest(toolchainManifest)
+    if (flags.has('--preset')) {
+      const root = await registeredToolchainRoot(dataDir, version)
+      if (flags.has('--toolchain-dir') && flags.get('--toolchain-dir') !== root)
+        throw clusterError(
+          'The preset toolchain directory must match the coordinator runtime registry.',
+        )
+      const captured = await captureTree(blobs, root, {
+        kind: 'toolchain',
+        signal: abort.signal,
+      })
+      if (toolchainManifest && digest(toolchainManifest) !== captured.hash)
+        throw clusterError(
+          'The provided toolchain manifest differs from the coordinator runtime.',
+        )
+      toolchainManifest = captured.hash
+    } else if (toolchainManifest) digest(toolchainManifest)
     else {
       const root = flags.get('--toolchain-dir')
       if (!root || !path.isAbsolute(root) || (await fs.realpath(root)) !== root)
@@ -230,7 +268,16 @@ export async function controlMain(argv = process.argv.slice(2)) {
     }
     const input = { toolchain: { version, manifest: toolchainManifest } }
     if (command === 'prepare') {
-      if (flags.has('--dependencies'))
+      if (flags.has('--preset'))
+        input.dependencies = (
+          await capturePresetDependencies(blobs, {
+            dataDir,
+            preset: flags.get('--preset'),
+            version,
+            signal: abort.signal,
+          })
+        ).hash
+      else if (flags.has('--dependencies'))
         input.dependencies = digest(flags.get('--dependencies'))
       else if (flags.has('--dependency-dir'))
         input.dependencies = (
@@ -245,7 +292,7 @@ export async function controlMain(argv = process.argv.slice(2)) {
           )
         ).hash
       const report = await controller.prepareNode(nodeId, input, {
-        certify: true,
+        certify: flags.get('--certify') !== 'false',
         signal: abort.signal,
       })
       process.stdout.write(

@@ -16,6 +16,8 @@ import {
 } from './state.mjs'
 import { contentPath } from './blobs.mjs'
 import { controllerConfig } from './config.mjs'
+import { RemoteEditor, EDITOR_CHUNK_BYTES } from './editor-stream.mjs'
+import { editorSource } from './worker-editor.mjs'
 
 export const SSH_BINARY = '/usr/bin/ssh'
 const REMOTE_COMMANDS = new Map([
@@ -68,7 +70,12 @@ const TOOLCHAIN =
   /^leanprover\/lean4:v\d+\.\d+\.\d+(?:-(?:rc\d+|nightly-[0-9-]+))?$/
 const IMAGE = /^sha256:[a-f0-9]{64}$/
 const LABEL = /^[^\x00-\x1f\x7f]{1,200}$/
-const operations = new Set(['check.build', 'check.kernel', 'lean.file'])
+const operations = new Set([
+  'check.build',
+  'check.kernel',
+  'lean.file',
+  'lean.session',
+])
 // Codes a worker sends when it refused attempt.start before recording it.
 const startRefusals = new Set([
   'stale_attempt',
@@ -374,6 +381,7 @@ export class ClusterController {
   #queues = new Map()
   #queued = 0
   #actorLoad = new Map()
+  #editorLoad = new Map()
   #served = new Map()
   #turn = 0
   #active = new Map()
@@ -479,11 +487,13 @@ export class ClusterController {
     request.signal?.throwIfAborted()
     if (!this.canRun(request.operation, request.file)) return null
     const { actor } = request
-    const load = this.#actorLoad.get(actor) ?? 0
+    const loads =
+      request.operation === 'lean.session' ? this.#editorLoad : this.#actorLoad
+    const load = loads.get(actor) ?? 0
     if (load >= this.#config.maxPerActor) throw failure('cluster_actor_limit')
     if (this.#queued >= this.#config.maxQueue)
       throw failure('cluster_queue_full')
-    this.#actorLoad.set(actor, load + 1)
+    loads.set(actor, load + 1)
     return new Promise((resolve, reject) => {
       const entry = {
         request,
@@ -496,11 +506,12 @@ export class ClusterController {
         if (entry.settled) return
         entry.settled = true
         request.signal?.removeEventListener('abort', entry.onAbort)
-        const remaining = (this.#actorLoad.get(actor) ?? 1) - 1
-        if (remaining > 0) this.#actorLoad.set(actor, remaining)
+        const remaining = (loads.get(actor) ?? 1) - 1
+        if (remaining > 0) loads.set(actor, remaining)
         else {
-          this.#actorLoad.delete(actor)
-          this.#served.delete(actor)
+          loads.delete(actor)
+          if (!this.#actorLoad.has(actor) && !this.#editorLoad.has(actor))
+            this.#served.delete(actor)
         }
         action(value)
       }
@@ -522,6 +533,18 @@ export class ClusterController {
           request.sourceBytes = await this.#environment(request)
           request.signal?.throwIfAborted()
           if (entry.settled) return
+          // Editor placement is opportunistic. Never leave an open browser
+          // waiting for a long-lived holder to release a remote slot.
+          if (request.operation === 'lean.session') {
+            const placement = this.#place(request)
+            this.#dequeue(entry)
+            if (placement) {
+              this.#served.set(actor, ++this.#turn)
+              this.#assign(entry, placement)
+            } else entry.resolve(null)
+            this.#pump()
+            return
+          }
           entry.ready = true
           this.#pump()
         } catch (error) {
@@ -531,6 +554,49 @@ export class ClusterController {
       }
       this.#track(validate())
     })
+  }
+
+  openEditor(input, options) {
+    if (
+      this.#config.mode !== 'serve' ||
+      this.#config.editors.placement !== 'prefer'
+    )
+      return Promise.resolve(null)
+    const ready = Promise.withResolvers()
+    let editor
+    const task = this.run(input, {
+      ...options,
+      operation: 'lean.session',
+      file: 'Main.lean',
+      onSession: (child) => {
+        editor = child
+        ready.resolve(child)
+      },
+    })
+    task.then(
+      () => {
+        if (!editor) ready.resolve(null)
+      },
+      (error) => {
+        if (!editor) ready.reject(error)
+      },
+    )
+    return ready.promise
+  }
+
+  editorCapacity(environment) {
+    if (this.#config.editors.placement !== 'prefer') return 0
+    return [...this.#nodes.values()]
+      .filter(
+        (node) =>
+          this.#ready(node) &&
+          node.status.capabilities.includes('lean.session') &&
+          (!environment || this.#warmEditor(node, environment)),
+      )
+      .reduce(
+        (sum, node) => sum + (node.status.editorResources?.maxConcurrent || 0),
+        0,
+      )
   }
 
   // Uploads a pinned environment to one worker and, when asked, has the worker
@@ -585,8 +651,8 @@ export class ClusterController {
           { timeoutMs: TIMEOUTS.certify, signal },
         )
         if (!isRecord(report)) throw invalidReply()
-        await this.#poll(node, control)
       }
+      await this.#poll(node, control)
     } catch (error) {
       const code = safeCode(error)
       throw clusterError(
@@ -614,6 +680,12 @@ export class ClusterController {
       capabilities: [...(node.status?.capabilities ?? [])],
       active: [...this.#active.values()].filter((job) => job.node === node)
         .length,
+      editors: [...this.#active.values()].filter(
+        (job) => job.node === node && job.payload.operation === 'lean.session',
+      ).length,
+      editorCapacity: this.#ready(node)
+        ? node.status.editorResources?.maxConcurrent || 0
+        : 0,
       held: [...this.#grants.values()].filter(
         (grant) => grant.held && grant.nodeId === node.config.id,
       ).length,
@@ -628,17 +700,31 @@ export class ClusterController {
       held: [...this.#grants.values()].filter((grant) => grant.held).length,
       configured: this.#config.nodes.length,
       ready: workers.filter((worker) => worker.state === 'ready').length,
+      editors: {
+        placement: this.#config.editors.placement,
+        capacity: this.editorCapacity(),
+      },
       workers,
     }
   }
 
   canRun(operation, file) {
+    if (
+      operation === 'lean.session' &&
+      this.#config.editors.placement !== 'prefer'
+    )
+      return false
     return (
       this.#accepting &&
       [...this.#nodes.values()].some(
         (node) =>
           this.#ready(node) &&
           node.status.capabilities.includes(operation) &&
+          this.#fits(
+            node,
+            { operation, file, sourceBytes: 0 },
+            this.#persistentGrants(),
+          ) &&
           (!file?.endsWith('.lean') ||
             node.status.capabilities.includes('lean.file')),
       )
@@ -801,7 +887,7 @@ export class ClusterController {
     if (!isRecord(input) || !isRecord(options))
       throw invalidRequest('Invalid cluster check request.')
     const { operation, file, actor, projectId, jobId, timeoutMs } = options
-    const { signal, onOutput } = options
+    const { signal, onOutput, onSession } = options
     if (!operations.has(operation))
       throw invalidRequest('Unsupported cluster operation.')
     const execution = {
@@ -836,6 +922,8 @@ export class ClusterController {
       throw invalidRequest('Invalid cancellation signal.')
     if (onOutput !== undefined && typeof onOutput !== 'function')
       throw invalidRequest('Invalid output handler.')
+    if (operation === 'lean.session' && typeof onSession !== 'function')
+      throw invalidRequest('Missing editor stream handler.')
     return {
       ...execution,
       inputDigest: executionDigest(execution),
@@ -845,6 +933,7 @@ export class ClusterController {
       timeoutMs,
       signal,
       onOutput,
+      onSession,
     }
   }
 
@@ -863,6 +952,8 @@ export class ClusterController {
   // receives inputs that disagree with their pinned toolchain.
   async #environment(request) {
     const source = await this.#localManifest(request.sourceManifest, 'source')
+    if (request.operation === 'lean.session' && !editorSource(source))
+      throw invalidRequest('This project requires a local repository editor.')
     const pin = source.entries.find((entry) => entry.path === 'lean-toolchain')
     let pinned = null
     if (pin?.type === 'file')
@@ -1003,6 +1094,15 @@ export class ClusterController {
   // tmpfs charged to the job's RAM; host source copies also fit this grant
   // and the administrator's aggregate filesystem boundary.
   #grantFor(node, { operation, sourceBytes }) {
+    if (operation === 'lean.session')
+      return {
+        memoryBytes: node.status.editorResources.memoryBytes,
+        cpus: node.status.editorResources.cpus,
+        scratchBytes: Math.max(
+          256 * 1024 ** 2,
+          sourceBytes * 2 + 16 * 1024 ** 2,
+        ),
+      }
     const slots = operation === 'check.kernel' ? 3 : 1
     const { memoryBytes, cpus } = node.status.workerResources
     return {
@@ -1019,6 +1119,24 @@ export class ClusterController {
     const view = this.#view(node)
     if (!view) return null
     if (node.badInputs.has(request.inputDigest)) return null
+    if (request.operation === 'lean.session') {
+      const policy = node.status.editorResources
+      if (!policy) return null
+      if (request.toolchain && !this.#warmEditor(node, request)) return null
+      const editors = grants.filter(
+        (grant) =>
+          grant.nodeId === node.config.id && grant.operation === 'lean.session',
+      )
+      if (
+        editors.length >= policy.maxConcurrent ||
+        (editors.length + 1) * policy.memoryBytes +
+          policy.reservedBatchMemoryBytes >
+          view.budget.memoryBytes ||
+        (editors.length + 1) * policy.cpus + policy.reservedBatchCpus >
+          view.budget.cpus
+      )
+        return null
+    }
     if (request.file && !view.capabilities.includes('lean.file')) return null
     const resources = this.#grantFor(node, request)
     const chosen = chooseNode(
@@ -1036,10 +1154,30 @@ export class ClusterController {
     return chosen ? resources : null
   }
 
+  #warmEditor(node, input) {
+    return (
+      node.status?.assets?.toolchains[input.toolchain.version] ===
+        input.toolchain.manifest &&
+      (!input.dependencies ||
+        node.status.assets.dependencies.includes(input.dependencies))
+    )
+  }
+
   #compatible(request) {
     for (const node of this.#nodes.values())
-      if (this.#fits(node, request, [])) return true
+      if (this.#fits(node, request, this.#persistentGrants())) return true
     return false
+  }
+
+  #persistentGrants() {
+    return [...this.#grants.values()]
+      .filter((grant) => grant.operation === 'lean.session')
+      .map((grant) => ({
+        nodeId: grant.nodeId,
+        operation: grant.operation,
+        state: 'running',
+        resources: grant.resources,
+      }))
   }
 
   #place(request) {
@@ -1142,7 +1280,11 @@ export class ClusterController {
           entry.reject(error)
         },
       )
-      .finally(() => this.#pump())
+      .finally(() => {
+        job.editor?.finish()
+        job.editorRpc?.close()
+        this.#pump()
+      })
     this.#track(job.task)
   }
 
@@ -1185,6 +1327,61 @@ export class ClusterController {
       this.#release(job, 'cancelled', { reason: 'cancelled' })
       throw job.stop.error
     }
+    if (entry.request.operation === 'lean.session') {
+      try {
+        job.editorRpc = await this.#transport(node, 'control')
+        const status = await this.#hello(node, job.editorRpc)
+        if (
+          status.nodeEpoch !== job.payload.nodeEpoch ||
+          job.stop ||
+          job.lost
+        ) {
+          this.#release(job, 'failed', { reason: 'editor-channel-changed' })
+          throw failure('worker_stopped')
+        }
+        job.editor = new RemoteEditor({
+          rpc: job.editorRpc,
+          id: job.id,
+          cancel: () => this.#halt(job, failure('worker_stopped')),
+          sync: async (content, revision) => {
+            const hash = createHash('sha256').update(content).digest('hex')
+            const bytes = Buffer.from(content)
+            for (
+              let offset = 0;
+              offset < bytes.length || (offset === 0 && !bytes.length);
+              offset += EDITOR_CHUNK_BYTES
+            ) {
+              const chunk = bytes.subarray(offset, offset + EDITOR_CHUNK_BYTES)
+              const reply = await job.editorRpc.request('editor.sync', {
+                id: job.id,
+                revision,
+                hash,
+                size: bytes.length,
+                offset,
+                data: chunk.toString('base64'),
+              })
+              if (
+                reply?.offset !== offset + chunk.length ||
+                (reply.offset === bytes.length &&
+                  (reply.revision !== revision || reply.hash !== hash))
+              )
+                throw invalidReply()
+            }
+          },
+        })
+        job.editorRpc.handle('editor.ready', (value) => {
+          if (value?.id !== job.id || job.stop || job.lost || job.editorReady)
+            throw invalidReply()
+          job.editorReady = true
+          entry.request.onSession(job.editor)
+          return { ready: true }
+        })
+      } catch (error) {
+        if (this.#state.get(job.id)?.state === 'assigned')
+          this.#release(job, 'failed', { reason: 'editor-channel-failed' })
+        throw error
+      }
+    }
     if ((await this.#start(job)) === REQUEUE) return REQUEUE
     return this.#follow(job)
   }
@@ -1193,7 +1390,7 @@ export class ClusterController {
     const { node, payload } = job
     let retried = false
     for (;;) {
-      const control = node.control
+      const control = job.editorRpc || node.control
       try {
         if (!control) throw clusterError('closed', 'connection_closed', 503)
         this.#checkAttempt(
@@ -1211,6 +1408,7 @@ export class ClusterController {
           if (job.stop) throw job.stop.error
           if (
             error.code === 'worker_busy' &&
+            job.entry.request.operation !== 'lean.session' &&
             this.#accepting &&
             job.entry.busyRetries++ < 3
           ) {
@@ -1556,6 +1754,16 @@ export class ClusterController {
     const { sourceManifest, dependencies, toolchain } = environment
     const nodeEpoch = node.status?.nodeEpoch
     const bulk = await this.#bulkChannel(node)
+    if (environment.operation === 'lean.session') {
+      if (!this.#warmEditor(node, environment))
+        throw clusterError(
+          'The editor environment must be preloaded.',
+          'assets_missing',
+          409,
+        )
+      await this.#upload(node, bulk, sourceManifest, 'source', signal)
+      return
+    }
     await this.#upload(node, bulk, toolchain.manifest, 'toolchain', signal)
     if (dependencies)
       await this.#upload(node, bulk, dependencies, 'dependencies', signal)
@@ -1834,7 +2042,10 @@ export class ClusterController {
         'release_mismatch',
         409,
       )
-    let budget, workerResources
+    let budget,
+      workerResources,
+      editorResources = null,
+      assets = null
     try {
       identifier(value.nodeEpoch, 'node epoch')
       budget = resourceVector(value.budget)
@@ -1842,6 +2053,55 @@ export class ClusterController {
         memoryBytes: value.workerResources?.memoryBytes,
         cpus: value.workerResources?.cpus,
       })
+      if (value.editorResources != null) {
+        const policy = value.editorResources
+        const grant = resourceVector(policy)
+        if (
+          !Number.isSafeInteger(policy.maxConcurrent) ||
+          policy.maxConcurrent < 1 ||
+          policy.maxConcurrent > 12 ||
+          !Number.isSafeInteger(policy.reservedBatchMemoryBytes) ||
+          policy.reservedBatchMemoryBytes < workerResources.memoryBytes ||
+          !Number.isFinite(policy.reservedBatchCpus) ||
+          policy.reservedBatchCpus < workerResources.cpus ||
+          !Number.isFinite(policy.cpuLimit) ||
+          policy.cpuLimit < grant.cpus ||
+          policy.cpuLimit > budget.cpus ||
+          grant.memoryBytes * policy.maxConcurrent +
+            policy.reservedBatchMemoryBytes >
+            budget.memoryBytes ||
+          grant.cpus * policy.maxConcurrent + policy.reservedBatchCpus >
+            budget.cpus
+        )
+          throw invalidReply()
+        editorResources = {
+          ...grant,
+          maxConcurrent: policy.maxConcurrent,
+          cpuLimit: policy.cpuLimit,
+          reservedBatchMemoryBytes: policy.reservedBatchMemoryBytes,
+          reservedBatchCpus: policy.reservedBatchCpus,
+        }
+      }
+      if (value.assets != null) {
+        if (
+          !isRecord(value.assets.toolchains) ||
+          Object.keys(value.assets.toolchains).length > 64 ||
+          !Array.isArray(value.assets.dependencies) ||
+          value.assets.dependencies.length > 128
+        )
+          throw invalidReply()
+        assets = {
+          toolchains: Object.fromEntries(
+            Object.entries(value.assets.toolchains).map(
+              ([version, manifest]) => [
+                pinnedToolchain({ version, manifest }).version,
+                digest(manifest),
+              ],
+            ),
+          ),
+          dependencies: value.assets.dependencies.map((hash) => digest(hash)),
+        }
+      }
     } catch {
       throw invalidReply()
     }
@@ -1868,6 +2128,8 @@ export class ClusterController {
       capabilities,
       budget,
       workerResources,
+      editorResources,
+      assets,
       leaseMs: value.leaseMs,
       bundleDigest: value.bundleDigest,
       imageDigest: value.imageDigest,

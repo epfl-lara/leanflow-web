@@ -3,6 +3,62 @@ import assert from 'node:assert/strict'
 import { ClusterChecks } from '../cluster/checks.mjs'
 
 const result = { code: 0, stdout: 'verified', stderr: '' }
+
+test('service-owned editor warm-up keeps admission local and does not delay local opens', async () => {
+  const gate = Promise.withResolvers()
+  let observedEnvironment,
+    signal,
+    captures = 0
+  const checks = new ClusterChecks({
+    mode: 'serve',
+    controller: {
+      status: () => ({ editors: { placement: 'prefer' } }),
+      editorCapacity: (environment) => {
+        observedEnvironment = environment
+        return 6
+      },
+      shutdown: async () => ({ unresolved: 0 }),
+    },
+    inputs: {
+      prepareEditorAssets: async (options) => {
+        captures++
+        signal = options.signal
+        return gate.promise
+      },
+    },
+  })
+  checks.startEditorWarmup()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(checks.editorCapacity(), 0)
+  let local = 0
+  const child = new (await import('node:events')).EventEmitter()
+  child.kill = () => child.emit('close')
+  assert.equal(
+    checks.openEditor({ project: { kind: 'single-file' } }, () => {
+      local++
+      return child
+    }),
+    child,
+  )
+  assert.equal(local, 1)
+  assert.equal(captures, 1)
+  assert.equal(signal.aborted, false)
+  const environment = {
+    toolchain: {
+      version: 'leanprover/lean4:v4.35.0',
+      manifest: 'a'.repeat(64),
+    },
+    dependencies: 'b'.repeat(64),
+  }
+  gate.resolve(environment)
+  await checks.editorWarmup.task
+  assert.equal(checks.editorCapacity(), 6)
+  assert.deepEqual(observedEnvironment, environment)
+  assert.deepEqual(checks.audit.at(-1).toolchain, environment.toolchain)
+  assert.equal(checks.audit.at(-1).dependencies, environment.dependencies)
+  await checks.close()
+  assert.equal(signal.aborted, true)
+})
 function fixture(mode, run = async () => result) {
   const calls = []
   let captures = 0,

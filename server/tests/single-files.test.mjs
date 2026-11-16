@@ -5,11 +5,14 @@ import { mkdtempSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { WebSocket } from 'ws'
 import { createStudio } from '../studio.mjs'
 import { WorkspaceStore } from '../workspaces.mjs'
+import { ClusterChecks } from '../cluster/checks.mjs'
+import { loadCapacity } from '../capacity.mjs'
+import { LspFrames, frame } from '../rpc.mjs'
 import {
   configurationDigest,
   readDependencyConfiguration,
@@ -18,7 +21,201 @@ import {
 const TOOLCHAIN = 'leanprover/lean4:v4.35.0-rc4'
 const REVISION = '1'.repeat(40)
 
-async function fixture(t, { deferPreparation = false } = {}) {
+test('real editor sockets share local and remote admission, mirror canonical saves, and retain account isolation', async (t) => {
+  const children = [],
+    remote = [],
+    locals = []
+  const makeChild = () => {
+    const child = new EventEmitter()
+    child.stdin = new PassThrough()
+    child.stdout = new PassThrough()
+    child.stderr = new PassThrough()
+    child.saved = []
+    child.syncMain = async (content, revision) => {
+      child.saved.push({ content, revision })
+    }
+    child.kill = () => {
+      if (child.killed) return false
+      child.killed = true
+      queueMicrotask(() => {
+        child.stdout.end()
+        child.stderr.end()
+        child.emit('close', 0)
+      })
+      return true
+    }
+    const frames = new LspFrames((message) => {
+      if (message.id != null)
+        child.stdout.write(
+          frame({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: { capabilities: {} },
+          }),
+        )
+    })
+    child.stdin.on('data', (bytes) => frames.push(bytes))
+    children.push(child)
+    return child
+  }
+  const checks = new ClusterChecks({
+    mode: 'serve',
+    inputs: {
+      capture: async () => ({ sourceManifest: 'fixture-source' }),
+      blobs: {
+        manifest: async () => ({
+          kind: 'source',
+          totalBytes: 10,
+          entries: [{ path: 'Main.lean', type: 'file' }],
+        }),
+        close() {},
+      },
+    },
+    controller: {
+      canRun: (operation) => operation === 'lean.session',
+      editorCapacity: () => 2,
+      openEditor: async () => {
+        if (remote.filter((child) => !child.killed).length >= 2) return null
+        const child = makeChild()
+        remote.push(child)
+        return child
+      },
+      shutdown: async () => {
+        for (const child of remote) child.kill()
+        return { unresolved: 0 }
+      },
+    },
+  })
+  const f = await fixture(t, {
+    clusterChecks: checks,
+    capacity: loadCapacity({
+      STUDIO_MAX_EDITORS: '1',
+      STUDIO_MAX_EDITORS_PER_USER: '1',
+      STUDIO_MAX_EDITORS_PER_PROJECT: '2',
+    }),
+  })
+  f.runtime.spawn = () => {
+    const child = makeChild()
+    locals.push(child)
+    return child
+  }
+  const projects = [await f.create()]
+  const owner = (
+    await fs.readFile(path.join(f.dataDir, 'auth/owner.token'), 'utf8')
+  ).trim()
+  const tokens = [owner, f.otherToken]
+  for (const name of ['Carol', 'Dave']) {
+    const value = await f.auth.createUser({ id: 'owner' }, { name })
+    tokens.push(value.token)
+  }
+  for (const token of tokens.slice(1)) {
+    const response = await f.request(
+      '/api/projects',
+      { kind: 'single-file' },
+      token,
+    )
+    assert.equal(response.status, 201)
+    const project = await response.json()
+    await f.workspaces.jobs.get(project.id)
+    projects.push(project)
+  }
+  const connect = (token, project) => {
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${f.server.address().port}/websocket/${project.id}`,
+      { headers: { Authorization: 'Bearer ' + token } },
+    )
+    t.after(() => ws.terminate())
+    return ws
+  }
+  const sockets = []
+  for (let index = 0; index < 3; index++) {
+    const ws = connect(tokens[index], projects[index])
+    await once(ws, 'open')
+    const reply = once(ws, 'message')
+    ws.send(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: index + 1,
+        method: 'initialize',
+        params: { rootUri: 'file:///workspace' },
+      }),
+    )
+    assert.equal(JSON.parse((await reply)[0]).id, index + 1)
+    sockets.push(ws)
+  }
+  assert.equal(remote.length, 2)
+  assert.equal(locals.length, 1)
+  const rejected = (token, project) =>
+    new Promise((resolve, reject) => {
+      const ws = connect(token, project)
+      ws.on('error', reject)
+      ws.once('unexpected-response', (_request, response) => {
+        response.resume()
+        ws.terminate()
+        resolve(response.statusCode)
+      })
+    })
+  assert.equal(await rejected(tokens[3], projects[3]), 429)
+  assert.equal(await rejected(tokens[1], projects[0]), 404)
+  const before = await f.workspaces.readFile(
+    projects[0].id,
+    'owner',
+    'Main.lean',
+  )
+  const saved =
+    'import Mathlib\nexample : True := by trivial\n-- mirrored save\n'
+  assert.equal(
+    (
+      await f.request(
+        `/api/projects/${projects[0].id}/file?path=Main.lean`,
+        { content: saved, expectedHash: before.hash },
+        owner,
+        'PUT',
+      )
+    ).status,
+    200,
+  )
+  for (
+    let count = 0;
+    remote[0].saved.at(-1)?.content !== saved && count < 100;
+    count++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(remote[0].saved.at(-1).content, saved)
+  assert.equal(
+    (await f.workspaces.readFile(projects[0].id, 'owner', 'Main.lean')).content,
+    saved,
+  )
+  const closed = once(sockets[0], 'close')
+  sockets[0].close()
+  await closed
+  for (let count = 0; !remote[0].killed && count < 100; count++)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(remote[0].killed, true)
+  assert.equal(sockets[1].readyState, WebSocket.OPEN)
+  assert.equal(sockets[2].readyState, WebSocket.OPEN)
+  checks.controller.openEditor = async () => null
+  f.runtime.spawn = () => {
+    throw Object.assign(
+      new Error(
+        'Interactive worker capacity is full. Close an unused editor or terminal, then retry.',
+      ),
+      { status: 503 },
+    )
+  }
+  const busy = connect(owner, projects[0])
+  const busyClosed = once(busy, 'close')
+  await once(busy, 'open')
+  const [code, reason] = await busyClosed
+  assert.equal(code, 1013)
+  assert.match(reason.toString(), /Interactive worker capacity is full/)
+  assert.equal(f.providerCalls(), 0)
+})
+
+async function fixture(
+  t,
+  { deferPreparation = false, clusterChecks, capacity } = {},
+) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lean-single-file-'))
   const template = path.join(dataDir, 'mathlib-template')
   await fs.mkdir(path.join(template, '.lake/packages/mathlib'), {
@@ -114,6 +311,8 @@ async function fixture(t, { deferPreparation = false } = {}) {
   const studio = await createStudio({
     dataDir,
     runtime,
+    ...(clusterChecks ? { clusterChecks } : {}),
+    ...(capacity ? { capacity } : {}),
     config: {
       provider: {},
       models: [],

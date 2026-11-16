@@ -3,6 +3,10 @@ import { constants } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { clusterError, digest } from './state.mjs'
+import {
+  publicPresetDefinition,
+  verifiedPublicPreset,
+} from '../public-preset.mjs'
 
 // Private coordinator metadata only. Paths never enter snapshot manifests or
 // the worker protocol. Only managed assets register sources; identical content
@@ -58,14 +62,22 @@ export class AssetSources {
     )
       return false
     const relative = path.relative(path.join(this.dataDir, 'runtime'), root)
+    const environment = root.endsWith('/.lake/packages')
+      ? path.dirname(path.dirname(root))
+      : path.dirname(root)
+    const template =
+      (root.endsWith('/.lake/packages') ||
+        root.endsWith('/.dependency-lake-cache')) &&
+      publicPresetDefinition(this.dataDir, environment)
     return kind === 'toolchain'
       ? /^elan\/toolchains\/leanprover--lean4---v\d+\.\d+\.\d+(?:-(?:rc\d+|nightly-[0-9-]+))?$/.test(
           relative,
         )
       : kind === 'dependencies' &&
-          /^shared-dependencies\/[a-f0-9]{64}\/(?:\.lake\/packages|\.dependency-lake-cache)$/.test(
-            relative,
-          )
+          (!!template ||
+            /^shared-dependencies\/[a-f0-9]{64}\/(?:\.lake\/packages|\.dependency-lake-cache)$/.test(
+              relative,
+            ))
   }
 
   async captureRoot(root, kind) {
@@ -82,6 +94,12 @@ export class AssetSources {
       const environment = root.endsWith('/.lake/packages')
         ? path.dirname(path.dirname(root))
         : path.dirname(root)
+      const preset = publicPresetDefinition(this.dataDir, environment)
+      if (preset) {
+        if (!verifiedPublicPreset(environment, preset))
+          throw clusterError('The public preset certificate is invalid.')
+        return this.filename
+      }
       const marker = path.join(environment, '.ready.json')
       const metadata = await fs.lstat(marker)
       if (
@@ -193,8 +211,10 @@ export class AssetSources {
 
 export const pythonAssetSources = String.raw`
 source_rows=tempfile.TemporaryFile(mode='w+t',encoding='utf8',dir=os.path.dirname(sources_filename)) if sources_filename else None
+def source_referenceable(actual):
+ return source_rows is not None and actual.st_nlink==1 and actual.st_uid==os.getuid() and not actual.st_mode&0o022
 def reference_source(relative,actual,hash,size):
- if source_rows is None or actual.st_nlink!=1 or actual.st_uid!=os.getuid() or actual.st_mode&0o022:return False
+ if not source_referenceable(actual):return False
  row=[hash,root,kind,os.path.join(root,relative),size,str(actual.st_dev),str(actual.st_ino),str(actual.st_mtime_ns),str(actual.st_ctime_ns)]
  text=json.dumps(row,separators=(',',':'))+'\n'
  space=os.statvfs(objects)

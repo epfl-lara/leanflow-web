@@ -1,0 +1,58 @@
+{
+  "date": "2026-11-16",
+  "baseRevision": "d587033dccb1de53429ffa3fd2cdb48fe9c6f295",
+  "productionRemoteEditorsEnabled": false,
+  "workerUpgrade": "pending-administrator-maintenance-access",
+  "candidatePolicy": {
+    "workerMemoryBudgetGiB": 24,
+    "workerCpus": 8,
+    "editors": 6,
+    "editorMemoryGiB": 3,
+    "editorCpuCap": 1,
+    "reservedOrdinaryCheckMemoryGiB": 6,
+    "reservedOrdinaryCheckCpus": 2,
+    "localNativeCheckReserveGiB": 18,
+    "publishedCapacityIncreaseAccepted": false
+  },
+  "validation": {
+    "linuxPassed": 2180,
+    "linuxSkipped": 2,
+    "linuxFailed": 0,
+    "typecheck": "passed",
+    "clientBuild": "passed",
+    "browserFixtures": [
+      "editor-imports",
+      "single-file",
+      "workspace-switch",
+      "lean-oversize"
+    ],
+    "leanRuntime": {
+      "toolchain": "leanprover/lean4:v4.35.0",
+      "passed": true
+    },
+    "mathlibRuntime": {
+      "toolchain": "leanprover/lean4:v4.35.0-rc4",
+      "oneCpuProfilePassed": true,
+      "invalidDiagnostic": true,
+      "correctedDiagnostic": true,
+      "savedFileRead": true
+    },
+    "controllerWorkerRuntime": {
+      "passed": true,
+      "hostEnrollmentSimulated": true,
+      "transport": "loopback-framed-rpc",
+      "actualMemoryBytes": 3221225472,
+      "actualCpus": 1,
+      "noPostCompiler": true,
+      "gracefulExit": true,
+      "cleanupConfirmed": true
+    },
+    "inferenceRequestedByHarnesses": false
+  },
+  "pending": [
+    "reviewed worker installation",
+    "public preset protection and preload",
+    "fresh PC06 host certification",
+    "networked multi-user editor diagnostics with mixed checks"
+  ]
+}

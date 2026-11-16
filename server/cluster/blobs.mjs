@@ -983,13 +983,15 @@ export class BlobStore {
 
 const captureScript = String.raw`
 import hashlib,json,os,signal,stat,sys,tempfile
-root,objects,kind,ignore_lake,reserve,budget_filename,max_bytes,max_files,max_entries,sources_filename,max_sources=sys.argv[1:]
+root,objects,kind,ignore_lake,reserve,budget_filename,max_bytes,max_files,max_entries,sources_filename,max_sources,require_refs=sys.argv[1:]
+require_refs=require_refs=='1'
 ignore_lake=ignore_lake=='1'
 reserve=int(reserve)
 max_bytes=int(max_bytes);max_files=int(max_files);max_entries=int(max_entries)
 max_sources=int(max_sources)
 ${pythonBudget}
 ${pythonAssetSources}
+if require_refs and source_rows is None:raise ValueError('Protected managed references are required for editor dependency exports')
 def interrupted(signum,frame):raise InterruptedError('Snapshot stopped')
 signal.signal(signal.SIGTERM,interrupted)
 secret={'.git','.lemex','.codex','.ssh','.aws','.azure','.config','.netrc','.npmrc','.pypirc','credentials','credentials.json','auth.json'}
@@ -1014,6 +1016,7 @@ def walk(fd,prefix=''):
    try:
     actual=os.fstat(child)
     if (before.st_dev,before.st_ino)!=(actual.st_dev,actual.st_ino):raise ValueError('Snapshot directory changed')
+    if require_refs and (actual.st_uid!=os.getuid() or actual.st_mode&0o022):raise ValueError('Editor dependency directories must be service-owned and protected')
     entries.append(dict(path=relative,type='directory'))
     walk(child,relative)
    finally:os.close(child)
@@ -1024,6 +1027,7 @@ def walk(fd,prefix=''):
     actual=os.fstat(source)
     if not stat.S_ISREG(actual.st_mode) or actual.st_size>2*1024**3:raise ValueError('Invalid snapshot input')
     if (before.st_dev,before.st_ino)!=(actual.st_dev,actual.st_ino):raise ValueError('Snapshot input changed')
+    if require_refs and not source_referenceable(actual):raise ValueError('Editor dependency files must use protected managed references; payload copying is disabled')
     h=hashlib.sha256();size=0
     while True:
      chunk=os.read(source,1024*1024)
@@ -1070,7 +1074,12 @@ print(json.dumps(dict(version=1,kind=kind,entries=entries),separators=(',',':'),
 export async function captureTree(
   store,
   root,
-  { kind = 'source', ignoreLake = false, signal } = {},
+  {
+    kind = 'source',
+    ignoreLake = false,
+    signal,
+    requireReferences = false,
+  } = {},
 ) {
   signal?.throwIfAborted()
   if (store.trimming)
@@ -1095,6 +1104,7 @@ export async function captureTree(
         String(manifestLimits(kind).entries),
         sources || '',
         String(store.maxFiles),
+        requireReferences ? '1' : '0',
       ],
       {
         signal,

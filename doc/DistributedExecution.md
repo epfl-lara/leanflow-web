@@ -5,10 +5,14 @@ Linux workers over restricted SSH to run **pure project checks**. The coordinato
 continues to run local work; each worker has its own container engine and local
 storage. No shared writable filesystem or public worker port is required.
 
+An optional [remote editor capability](RemoteEditors.md) also supports managed
+single-file language servers after a reviewed worker upgrade and fresh
+certification. It defaults to off; check its rollout record before counting
+editor capacity on an enrolled worker.
+
 This first rollout distributes build checks, selected-file compilation and native
-kernel checks. Editors, agents, terminals, project setup and canonical writes
-remain on the coordinator. Moving those workloads requires a separate ownership
-and publication protocol. Adding workers does not make the coordinator highly
+kernel checks. Repository editors, agents, terminals, project setup and canonical
+writes remain on the coordinator. Adding workers does not make the coordinator highly
 available.
 
 Use the [operations guide](DistributedOperations.md) for storage layout, scaling,

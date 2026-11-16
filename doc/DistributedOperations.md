@@ -36,8 +36,9 @@ provider limits.
 
 Use [the worker expansion plan](WorkerExpansion.md) to prepare more primary
 workers, including a smaller regular allocation on a shared host. It also
-separates check-worker enrollment from the application work needed for more
-simultaneous live Lean editors.
+separates check-worker enrollment from the [remote editor upgrade](RemoteEditors.md)
+and its application acceptance tests. Count editor slots only after that worker
+has passed its new capability checks and placement has been enabled.
 
 The [ten-user compilation test](releases/2026-11-13-ten-user-compilation.md)
 records 70 successful checks, real browser editing and saving, observed queue

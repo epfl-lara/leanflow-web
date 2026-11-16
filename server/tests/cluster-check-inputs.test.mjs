@@ -6,6 +6,7 @@ import path from 'node:path'
 import { BlobStore, captureTree } from '../cluster/blobs.mjs'
 import { CheckInputs, manifestFingerprint } from '../cluster/check-inputs.mjs'
 import { sourceFingerprint } from '../source-fingerprint.mjs'
+import { registeredToolchainRoot } from '../cluster/config.mjs'
 
 async function fixture(t) {
   const directory = await fs.realpath(
@@ -25,7 +26,9 @@ async function fixture(t) {
     path.join(root, 'Main.lean'),
     'example : True := by trivial\n',
   )
-  const blobs = await new BlobStore(path.join(directory, 'objects')).init()
+  const blobs = await new BlobStore(path.join(directory, 'objects'), {
+    assetDataDir: directory,
+  }).init()
   const runtime = {
     runtimeDir: path.join(directory, 'runtime'),
     toolchains: new Map([['leanprover/lean4:v4.35.0', toolchain]]),
@@ -114,4 +117,74 @@ test('shared immutable dependencies and toolchains are captured once while sourc
   const second = await f.inputs.capture(f.root)
   assert.deepEqual(second, first)
   assert.equal(f.inputs.assets.size, 2)
+})
+
+test('only verified public templates extend dependency eligibility for editor captures', async (t) => {
+  const f = await fixture(t)
+  const environment = path.join(f.runtime.runtimeDir, 'templates', 'lean')
+  await fs.mkdir(path.join(environment, '.lake/packages'), {
+    recursive: true,
+    mode: 0o700,
+  })
+  await fs.writeFile(
+    path.join(environment, '.lake/packages/dependency'),
+    'public',
+    { mode: 0o600 },
+  )
+  await fs.writeFile(
+    path.join(environment, 'lake-manifest.json'),
+    '{"packages":[]}',
+    { mode: 0o600 },
+  )
+  f.runtime.dependencyRoot = () => environment
+  assert.equal(await f.inputs.capture(f.root, { editor: true }), null)
+  f.runtime.transferableDependencyRoot = () => environment
+  assert.equal(
+    await f.inputs.capture(f.root),
+    null,
+    'ordinary check eligibility stays unchanged',
+  )
+  await fs.writeFile(
+    path.join(environment, 'lean-toolchain'),
+    'leanprover/lean4:v4.35.0\n',
+    { mode: 0o600 },
+  )
+  await fs.writeFile(
+    path.join(environment, 'lakefile.toml'),
+    'name = "TemplateFixture"\n',
+    { mode: 0o600 },
+  )
+  await fs.writeFile(
+    path.join(environment, '.ready.json'),
+    '{"code":0,"toolchain":"leanprover/lean4:v4.35.0"}',
+    { mode: 0o600 },
+  )
+  await f.inputs.prepareEditorAssets({ root: environment })
+  assert.ok((await f.inputs.capture(f.root, { editor: true })).dependencies)
+})
+
+test('preset preloading uses the protected toolchain directory registered by the running coordinator', async (t) => {
+  const f = await fixture(t)
+  await fs.mkdir(f.runtime.runtimeDir, { recursive: true, mode: 0o700 })
+  const registry = path.join(f.runtime.runtimeDir, 'toolchains.json')
+  const version = 'leanprover/lean4:v4.35.0'
+  await fs.writeFile(
+    registry,
+    JSON.stringify({ [version]: f.runtime.toolchains.get(version) }),
+    { mode: 0o600 },
+  )
+  assert.equal(
+    await registeredToolchainRoot(f.directory, version),
+    f.runtime.toolchains.get(version),
+  )
+  await fs.chmod(registry, 0o664)
+  await assert.rejects(
+    registeredToolchainRoot(f.directory, version),
+    /protected/,
+  )
+  await fs.chmod(registry, 0o600)
+  await assert.rejects(
+    registeredToolchainRoot(f.directory, 'not-a-version'),
+    /exact official/,
+  )
 })

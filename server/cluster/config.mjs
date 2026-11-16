@@ -160,6 +160,58 @@ export function nodeConfig(value) {
     )
   if (workerCpus > maxCpus)
     throw clusterError('A worker does not fit its CPU budget.')
+  const editors = value.editors
+  if (
+    editors !== undefined &&
+    (!editors || typeof editors !== 'object' || Array.isArray(editors))
+  )
+    throw clusterError('Invalid worker editor policy.')
+  const maxEditors = editors
+    ? positive(editors.maxConcurrent, 1, 'remote editor limit')
+    : 0
+  const editorMemory = editors?.memory || '3g'
+  const editorMemoryBytes = memoryBytes(editorMemory, 'remote editor memory')
+  const editorCpus = positive(editors?.cpus, 2, 'remote editor CPU cap', {
+    integer: false,
+  })
+  const editorCpuReservation = positive(
+    editors?.cpuReservation,
+    editorCpus,
+    'remote editor CPU reservation',
+    { integer: false },
+  )
+  const editorBatchMemory = editors?.reservedBatchMemory || memory
+  const editorBatchMemoryBytes = memoryBytes(
+    editorBatchMemory,
+    'remote editor batch reserve',
+  )
+  const editorBatchCpus = positive(
+    editors?.reservedBatchCpus,
+    workerCpus,
+    'remote editor batch CPU reserve',
+    { integer: false },
+  )
+  if (
+    maxEditors &&
+    (editorMemoryBytes * maxEditors + editorBatchMemoryBytes > budgetBytes ||
+      editorCpuReservation * maxEditors + editorBatchCpus > maxCpus ||
+      editorCpuReservation > editorCpus ||
+      editorCpus > maxCpus ||
+      editorBatchMemoryBytes < memoryLimit ||
+      editorBatchCpus < workerCpus ||
+      maxEditors > 12)
+  )
+    throw clusterError(
+      'Remote editors must fit the worker pool while preserving an ordinary batch worker.',
+    )
+  if (
+    maxEditors &&
+    editorCpus * maxEditors + editorBatchCpus > maxCpus &&
+    parentMaxCpus !== maxCpus
+  )
+    throw clusterError(
+      'Editor CPU bursts must fit the agreed pool or an equally sized enforced parent slice.',
+    )
   const leaseMs = positive(value.leaseMs, 30000, 'worker lease duration')
   if (leaseMs < 5000 || leaseMs > 120000)
     throw clusterError(
@@ -186,6 +238,21 @@ export function nodeConfig(value) {
     throw clusterError(
       'Automatic certification requires an official pinned toolchain.',
     )
+  const maxConcurrent = Math.min(
+    positive(
+      value.maxConcurrent,
+      maxEditors ? maxEditors + 1 : Math.floor(budgetBytes / memoryLimit),
+      'worker concurrency',
+    ),
+    Math.floor(
+      budgetBytes /
+        (maxEditors ? Math.min(memoryLimit, editorMemoryBytes) : memoryLimit),
+    ),
+  )
+  if (maxEditors && maxConcurrent < maxEditors + 1)
+    throw clusterError(
+      'Worker concurrency must fit the editor limit and an ordinary batch worker.',
+    )
   return {
     version: 1,
     nodeId: value.nodeId,
@@ -205,15 +272,28 @@ export function nodeConfig(value) {
     parentMaxCpus,
     workerCpus,
     maxCpus,
+    maxEditors,
+    editorMemory,
+    editorMemoryBytes,
+    editorCpus,
+    editorCpuReservation,
+    editorBatchMemory,
+    editorBatchMemoryBytes,
+    editorBatchCpus,
+    ...(maxEditors
+      ? {
+          editors: {
+            maxConcurrent: maxEditors,
+            memory: editorMemory,
+            cpus: editorCpus,
+            cpuReservation: editorCpuReservation,
+            reservedBatchMemory: editorBatchMemory,
+            reservedBatchCpus: editorBatchCpus,
+          },
+        }
+      : {}),
     leaseMs,
-    maxConcurrent: Math.min(
-      positive(
-        value.maxConcurrent,
-        Math.floor(budgetBytes / memoryLimit),
-        'worker concurrency',
-      ),
-      Math.floor(budgetBytes / memoryLimit),
-    ),
+    maxConcurrent,
     scratchBytes: positive(
       value.scratchBytes,
       128 * 1024 ** 3,
@@ -248,6 +328,42 @@ export async function readNodeConfig(filename) {
   )
     throw clusterError('Worker configuration must be a protected regular file.')
   return nodeConfig(JSON.parse(await fs.readFile(filename, 'utf8')))
+}
+
+export async function registeredToolchainRoot(dataDir, version) {
+  if (
+    typeof dataDir !== 'string' ||
+    !path.isAbsolute(dataDir) ||
+    (await fs.realpath(dataDir)) !== dataDir
+  )
+    throw clusterError('Use the real absolute coordinator data directory.')
+  if (
+    !/^leanprover\/lean4:v\d+\.\d+\.\d+(?:-(?:rc\d+|nightly-[0-9-]+))?$/.test(
+      version || '',
+    )
+  )
+    throw clusterError('Choose an exact official toolchain.')
+  const filename = path.join(dataDir, 'runtime/toolchains.json')
+  const stat = await fs.lstat(filename)
+  if (
+    !stat.isFile() ||
+    stat.nlink !== 1 ||
+    stat.uid !== process.getuid() ||
+    stat.mode & 0o022 ||
+    stat.size > 256 * 1024 ||
+    (await fs.realpath(filename)) !== filename
+  )
+    throw clusterError('The coordinator toolchain registry must be protected.')
+  const root = JSON.parse(await fs.readFile(filename, 'utf8'))[version]
+  if (
+    typeof root !== 'string' ||
+    !path.isAbsolute(root) ||
+    (await fs.realpath(root)) !== root
+  )
+    throw clusterError(
+      'Prepare this official toolchain in the coordinator runtime first.',
+    )
+  return root
 }
 
 export async function readControllerConfig(filename) {
@@ -314,11 +430,15 @@ export function controllerConfig(value) {
   if (!['off', 'shadow', 'serve'].includes(mode))
     throw clusterError('Invalid cluster execution mode.')
   const executionProfile = pinnedExecutionProfile(value.executionProfile)
+  const editorPlacement = value.editors?.placement || 'off'
+  if (!['off', 'prefer'].includes(editorPlacement))
+    throw clusterError('Invalid remote editor placement policy.')
   return {
     version: 1,
     lineage: value.lineage,
     mode,
     executionProfile,
+    editors: { placement: editorPlacement },
     nodes,
     allowReserve: value.allowReserve === true,
     maxQueue: positive(value.maxQueue, 128, 'cluster queue limit'),

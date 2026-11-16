@@ -221,6 +221,10 @@ Never commit `.env`, `.data`, tokens, or certificate keys. Use trusted collabora
 ## Editor capacity and memory
 
 Set `STUDIO_MAX_EDITORS` for language-server connections, not signed-in people.
+This is the local admission ceiling. Explicitly enabled, certified remote editor
+slots add to it; see [remote editor operation](RemoteEditors.md). Unavailable,
+disabled and unenrolled workers add nothing. Actual local/remote RAM and CPU
+admission still applies to every connection.
 Each open project can start a Lean language server. `STUDIO_MAX_EDITORS_PER_USER`
 and `STUDIO_MAX_EDITORS_PER_PROJECT` keep one account or project from consuming
 all connections. The per-user default is the global editor maximum.

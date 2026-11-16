@@ -26,6 +26,7 @@ import { certifyWorker } from './conformance.mjs'
 import { inspectBoundary } from './boundary.mjs'
 import { acquireServerLease } from '../lease.mjs'
 import { StorageCapacity } from '../storage-capacity.mjs'
+import { WorkerEditor, editorSource } from './worker-editor.mjs'
 
 const execute = promisify(execFile)
 const terminal = new Set([
@@ -35,7 +36,12 @@ const terminal = new Set([
   'interrupted',
   'lost',
 ])
-const operations = new Set(['check.build', 'check.kernel', 'lean.file'])
+const operations = new Set([
+  'check.build',
+  'check.kernel',
+  'lean.file',
+  'lean.session',
+])
 
 function safeWorkerError(error) {
   if (
@@ -73,6 +79,12 @@ export class WorkerNode {
         memory: this.config.workerMemory,
         memoryBudget: this.config.memoryBudget,
         cpus: this.config.workerCpus,
+        editorMemory: this.config.editorMemory,
+        editorCpus: this.config.editorCpus,
+        batchMemoryReserved: this.config.maxEditors
+          ? this.config.editorBatchMemory
+          : null,
+        batchReserved: this.config.maxEditors ? 1 : 0,
         maxConcurrent: this.config.maxConcurrent,
         cgroupParent: this.config.cgroupParent,
         scope: 'node',
@@ -248,6 +260,25 @@ export class WorkerNode {
         memoryBytes: this.config.memoryBytes,
         cpus: this.config.workerCpus,
       },
+      editorResources: this.config.maxEditors
+        ? {
+            maxConcurrent: this.config.maxEditors,
+            memoryBytes: this.config.editorMemoryBytes,
+            cpus: this.config.editorCpuReservation,
+            cpuLimit: this.config.editorCpus,
+            reservedBatchMemoryBytes: this.config.editorBatchMemoryBytes,
+            reservedBatchCpus: this.config.editorBatchCpus,
+          }
+        : null,
+      assets: {
+        toolchains: Object.fromEntries(
+          Object.entries(this.state.meta('toolchains') || {}).slice(0, 64),
+        ),
+        dependencies: Object.keys(this.state.meta('dependencies') || {}).slice(
+          0,
+          128,
+        ),
+      },
       boundary: this.boundary || null,
       certified: !!certified,
       error:
@@ -260,9 +291,16 @@ export class WorkerNode {
 
   attach(readable, writable) {
     const rpc = new FramedRpc(readable, writable)
-    const context = { identity: null }
+    const context = { identity: null, peer: rpc }
     this.peers.add(rpc)
-    rpc.on('close', () => this.peers.delete(rpc))
+    rpc.on('close', () => {
+      this.peers.delete(rpc)
+      for (const record of this.running.values())
+        if (record.editor?.peer === rpc)
+          record.controller.abort(
+            clusterError('Editor channel closed.', 'editor_closed', 409),
+          )
+    })
     const handle = (method, action, authenticated = true) =>
       rpc.handle(method, async (value) => {
         try {
@@ -383,8 +421,28 @@ export class WorkerNode {
       return this.status()
     })
     handle('attempt.start', (value, current) =>
-      this.start(value, current.identity),
+      this.start(value, current.identity, current.peer),
     )
+    for (const [method, action] of [
+      ['editor.input', 'input'],
+      ['editor.sync', 'sync'],
+      ['editor.end', 'end'],
+    ])
+      handle(method, (value, current) => {
+        const record = this.running.get(value?.id)
+        if (
+          !record?.editor ||
+          record.editor.peer !== current.peer ||
+          record.lineage !== current.identity.lineage ||
+          record.epoch !== current.identity.epoch
+        )
+          throw clusterError(
+            'This editor does not belong to this channel.',
+            'editor_protocol',
+            403,
+          )
+        return record.editor[action](value)
+      })
     handle('attempt.get', (value) => {
       const attempt = this.state.get(value?.id)
       if (!attempt)
@@ -601,7 +659,7 @@ export class WorkerNode {
     }
   }
 
-  start(value, identity) {
+  start(value, identity, peer) {
     const status = this.status()
     if (
       !value ||
@@ -618,8 +676,14 @@ export class WorkerNode {
         409,
       )
     const existing = this.state.get(value.id)
-    if (existing)
+    if (existing) {
+      if (
+        value.operation === 'lean.session' &&
+        this.running.get(value.id)?.editor?.peer !== peer
+      )
+        throw clusterError('Editor channel changed.', 'editor_protocol', 409)
       return this.state.create({ ...value, state: 'assigned' }).attempt
+    }
     if (
       status.status !== 'ready' ||
       !status.capabilities.includes(value.operation)
@@ -642,14 +706,38 @@ export class WorkerNode {
       throw clusterError('Invalid worker deadline.')
     const slots = value.operation === 'check.kernel' ? 3 : 1
     const resources = resourceVector(value.resources)
+    const editor = value.operation === 'lean.session'
     if (
-      resources.memoryBytes !== this.config.memoryBytes * slots ||
-      resources.cpus !== this.config.workerCpus * slots ||
+      resources.memoryBytes !==
+        (editor
+          ? this.config.editorMemoryBytes
+          : this.config.memoryBytes * slots) ||
+      resources.cpus !==
+        (editor
+          ? this.config.editorCpuReservation
+          : this.config.workerCpus * slots) ||
       resources.scratchBytes < (slots === 3 ? 9 * 1024 ** 3 : 256 * 1024 ** 2)
     )
       throw clusterError(
         'Worker resource grant does not match the certified operation.',
       )
+    const editors = [...this.running.values()].filter(
+      (record) => record.operation === 'lean.session',
+    )
+    if (
+      editor &&
+      (!peer ||
+        peer.closed ||
+        !this.config.maxEditors ||
+        value.file !== 'Main.lean' ||
+        editors.length >= this.config.maxEditors ||
+        (editors.length + 1) * resources.memoryBytes +
+          this.config.editorBatchMemoryBytes >
+          status.budget.memoryBytes ||
+        (editors.length + 1) * resources.cpus + this.config.editorBatchCpus >
+          status.budget.cpus)
+    )
+      throw clusterError('Remote editor capacity is full.', 'worker_busy', 429)
     if (
       (value.operation === 'lean.file' || value.file != null) &&
       (typeof value.file !== 'string' || !value.file.endsWith('.lean'))
@@ -695,6 +783,12 @@ export class WorkerNode {
       task: null,
       child: null,
     }
+    if (editor)
+      record.editor = new WorkerEditor({
+        id: value.id,
+        peer,
+        abort: record.controller,
+      })
     this.running.set(attempt.id, record)
     record.task = this.#execute(value, record)
       .catch((error) => {
@@ -721,6 +815,12 @@ export class WorkerNode {
       const source = await this.blobs.manifest(value.sourceManifest, 'source')
       if (source.kind !== 'source')
         throw clusterError('Invalid source manifest kind.')
+      if (record.editor && !editorSource(source))
+        throw clusterError(
+          'This project requires a local repository editor.',
+          'editor_unsupported',
+          409,
+        )
       if (source.totalBytes + 16 * 1024 ** 2 > value.resources.scratchBytes)
         throw clusterError(
           'The source snapshot exceeds its scratch grant.',
@@ -777,7 +877,8 @@ export class WorkerNode {
         cleanHome: true,
         maxOutputBytes: this.config.maxOutputBytes,
         boundedScratchBytes: value.resources.scratchBytes - source.totalBytes,
-        ...(value.file && value.operation !== 'lean.file'
+        ...(value.file &&
+        ['check.build', 'check.kernel'].includes(value.operation)
           ? { postCheckFile: value.file }
           : {}),
         onSpawn: (child) => {
@@ -818,8 +919,12 @@ export class WorkerNode {
           }
         },
       }
-      let result =
-        value.operation === 'check.kernel'
+      let result = record.editor
+        ? await record.editor.run(this.runtime, workspace, {
+            ...options,
+            onOutput: undefined,
+          })
+        : value.operation === 'check.kernel'
           ? await this.runtime.checkProject(workspace, options)
           : await this.runtime.run(
               workspace,

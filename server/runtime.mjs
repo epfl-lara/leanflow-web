@@ -7,10 +7,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
-import {
-  PreparedPresetCache,
-  readPresetConfiguration,
-} from './prepared-presets.mjs'
+import { PreparedPresetCache } from './prepared-presets.mjs'
+import { presetTemplatePaths, verifiedPublicPreset } from './public-preset.mjs'
 import { PresetInstaller } from './preset-installer.mjs'
 import { LeanReleases } from './lean-releases.mjs'
 import { KernelStorageBudget } from './kernel-storage-budget.mjs'
@@ -649,6 +647,22 @@ export class Runtime {
     return this.dependencyPreparationReason(actual) ? null : source
   }
 
+  transferableDependencyRoot(root) {
+    const source = this.dependencyRoot(root)
+    if (!source) return null
+    if (this.#sharedSource(source)) return this.verifiedDependencyRoot(root)
+    // templateRoot validates the server-owned marker and pinned preset config.
+    // A project's own .lake directory or an arbitrary registered tree never
+    // becomes a public asset merely because an editor asks to use it.
+    return presetDefinitions.some(
+      (preset) =>
+        this.templateRoot(preset.id) === source &&
+        verifiedPublicPreset(source, this.presetDefinition(preset.id)),
+    )
+      ? source
+      : null
+  }
+
   #dependencyPackages(source) {
     // Worker-created symlinks must never expand a selected project's mount
     // to another owned project. Check each ancestor, including dangling links.
@@ -1039,28 +1053,9 @@ export class Runtime {
   templateRoot(id) {
     const preset = this.presetDefinition(id)
     if (!preset) return null
-    for (const root of [
-      this.templateInstallRoot(id),
-      path.join(this.runtimeDir, 'templates', id),
-    ]) {
-      try {
-        if (fs.realpathSync(root) !== root) continue
-        const marker = path.join(root, '.ready.json')
-        const stat = fs.lstatSync(marker)
-        if (!stat.isFile() || stat.size > 64 * 1024) continue
-        const metadata = JSON.parse(fs.readFileSync(marker, 'utf8'))
-        if (
-          metadata.code === 0 &&
-          metadata.toolchain === preset.toolchain &&
-          (!preset.revision || metadata.revision === preset.revision)
-        ) {
-          readPresetConfiguration(root, preset)
-          return root
-        }
-      } catch {
-        /* Missing or incomplete installations are not ready. */
-      }
-    }
+    for (const root of presetTemplatePaths(this.runtimeDir, preset))
+      if (verifiedPublicPreset(root, preset, { protectedMetadata: false }))
+        return root
     return null
   }
 

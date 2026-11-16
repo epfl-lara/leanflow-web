@@ -232,14 +232,14 @@ current measured limits in that report, rather than the earlier four-editor
 snapshot or an aggregate total across the PCs. Twenty repository editors at
 6 GiB still have 120 GiB of combined caps, exceeding the coordinator budget.
 
-The next expansion milestone is a remote LSP capability, following the
-measured local editor allocation. Remote sessions need explicit ownership and leases, bounded framed
-stdin/stdout transport, document-version synchronization from the coordinator,
-isolated per-session working copies and writable caches, and idle/cancellation/
-reconnect cleanup. Canonical source and collaboration stay on the coordinator;
-worker-local copies are disposable. Private/unsupported environments need an
-explicit local path. These capabilities are planned, not present in this worker
-protocol. Any helper/protocol change needs a reviewed pin and fresh certification.
+The [remote editor integration](RemoteEditors.md) adds a certified live-session
+capability for managed single-file workspaces. Placement defaults to off; the
+currently enrolled worker needs the reviewed upgrade, preloaded environments and
+fresh certification before it can serve editors. Follow the
+[rollout record](releases/2026-11-16-remote-editors.md) for measured acceptance.
+Canonical source and collaboration stay on the coordinator; worker-local copies
+are disposable. Repository and private/unsupported environments use the local
+path. A helper change always needs a reviewed pin and fresh certification.
 
 Share each host's CPU/RAM budget across interactive and batch work; do not count
 one allocation twice. Keep larapc2 within its small primary allocation when

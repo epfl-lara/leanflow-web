@@ -52,5 +52,6 @@ export async function loadClusterChecks({
     maxQueue: config.maxQueue,
     maxPerActor: config.maxPerActor,
   })
+  checks.startEditorWarmup()
   return checks
 }

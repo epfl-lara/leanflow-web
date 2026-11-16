@@ -189,6 +189,7 @@ const chatTranscript = (job, eventCursor, reasoningBlocks) => ({
 export async function createStudio({
   dataDir = process.env.STUDIO_DATA_DIR || path.join(projectDir, '.data'),
   runtime: suppliedRuntime,
+  clusterChecks: suppliedClusterChecks,
   storage: suppliedStorage,
   config: suppliedConfig,
   gitConnections: suppliedGitConnections,
@@ -248,9 +249,10 @@ export async function createStudio({
       storage,
     })
   await runtime.init()
-  let clusterChecks = null
+  let clusterChecks = suppliedClusterChecks || null
   try {
-    clusterChecks = await loadClusterChecks({ dataDir, runtime })
+    if (suppliedClusterChecks === undefined)
+      clusterChecks = await loadClusterChecks({ dataDir, runtime })
   } catch {
     console.warn(
       '[LeanFlow cluster] Distributed checks are unavailable. Local serving remains active; inspect the private cluster configuration and worker image.',
@@ -707,7 +709,10 @@ export async function createStudio({
       user: auth.public(req.user),
       eventTransport:
         process.env.STUDIO_EVENT_TRANSPORT === 'poll' ? 'poll' : 'sse',
-      capacity,
+      capacity: {
+        ...capacity,
+        editors: capacity.editors + (clusterChecks?.editorCapacity() || 0),
+      },
       runtime: runtime.info(),
       storage: await storage.status(),
       models: modelAccess.models,
@@ -1724,7 +1729,8 @@ export async function createStudio({
       })
     }
     if (
-      sockets.size >= capacity.editors ||
+      sockets.size >=
+        capacity.editors + (clusterChecks?.editorCapacity() || 0) ||
       [...socketActors.values()].filter((actor) => actor === user.id).length >=
         (capacity.editorsPerUser ?? capacity.editors) ||
       (languageServers.get(project.id) || 0) >= capacity.editorsPerProject
@@ -1744,17 +1750,21 @@ export async function createStudio({
       lastActivity = Date.now()
     let requests, progress, editPolicy, widgetPolicy, transport
     try {
-      child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
-        workload: 'interactive',
-        // Keep repository editors at their existing worker size. The smaller
-        // allocation was measured for managed single-file Mathlib workspaces.
-        editor: project.kind === 'single-file',
-        network: 'none',
-        readOnlyWorkspace: true,
-        writeLakeCache: true,
-        freshHome: true,
-        cleanHome: true,
-      })
+      const localEditor = () =>
+        runtime.spawn(project.root, ['lake', 'serve', '--'], {
+          workload: 'interactive',
+          // Keep repository editors at their existing worker size. The smaller
+          // allocation was measured for managed single-file Mathlib workspaces.
+          editor: project.kind === 'single-file',
+          network: 'none',
+          readOnlyWorkspace: true,
+          writeLakeCache: true,
+          freshHome: true,
+          cleanHome: true,
+        })
+      child = clusterChecks
+        ? clusterChecks.openEditor({ project, actor, workspaces }, localEditor)
+        : localEditor()
       transport = leanTransport(ws, child)
       const sendToClient = (message) => {
         if (!isAuthenticated(request, actor)) {
@@ -1799,7 +1809,14 @@ export async function createStudio({
       )
       child.on('error', () => ws.close(1011, 'Lean could not start.'))
       child.on('close', () =>
-        ws.close(1011, 'Lean stopped. Reopen the project to reconnect.'),
+        ws.close(
+          child.startupError ? 1013 : 1011,
+          child.startupError
+            ? Buffer.from(config.redact(child.startupError.message))
+                .subarray(0, 100)
+                .toString('utf8')
+            : 'Lean stopped. Reopen the project to reconnect.',
+        ),
       )
       child.stdin.on('error', () => ws.close(1011, 'Lean connection closed.'))
       ws.on('message', (data) => {

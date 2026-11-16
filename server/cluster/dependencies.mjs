@@ -7,8 +7,32 @@ import { captureTree, MAX_ENTRIES, MAX_MANIFEST } from './blobs.mjs'
 import { clusterError } from './state.mjs'
 import { pythonBudget } from './budget.mjs'
 import { sharedDependencyCacheSchema } from '../shared-dependencies.mjs'
+import {
+  publicPreset,
+  presetTemplatePaths,
+  verifiedPublicPreset,
+} from '../public-preset.mjs'
 
 const execute = promisify(execFile)
+
+export async function capturePresetDependencies(
+  store,
+  { dataDir, preset: id, version, signal } = {},
+) {
+  const preset = publicPreset(id)
+  if (!preset || preset.toolchain !== version)
+    throw clusterError(
+      'Choose a public preset and its exact official toolchain.',
+    )
+  const root = presetTemplatePaths(path.join(dataDir, 'runtime'), preset).find(
+    (candidate) => verifiedPublicPreset(candidate, preset),
+  )
+  if (!root)
+    throw clusterError(
+      'Prepare and protect the pinned public preset before export.',
+    )
+  return captureDependencies(store, root, { signal, requireReferences: true })
+}
 
 export async function capturePreparedDependencies(
   store,
@@ -128,7 +152,11 @@ entries=[dict(path=name,type='directory') for name in sorted(directories)]+entri
 print(json.dumps(entries,separators=(',',':'),ensure_ascii=True))
 `
 
-export async function captureDependencies(store, environment, { signal } = {}) {
+export async function captureDependencies(
+  store,
+  environment,
+  { signal, requireReferences = false } = {},
+) {
   const packages = path.join(environment, '.lake/packages')
   const manifest = JSON.parse(
     await fs.readFile(path.join(environment, 'lake-manifest.json'), 'utf8'),
@@ -164,6 +192,7 @@ export async function captureDependencies(store, environment, { signal } = {}) {
   const captured = await captureTree(store, packages, {
     kind: 'dependencies',
     signal,
+    requireReferences,
   })
   const entries = new Map(
     captured.manifest.entries.map((entry) => [
@@ -204,6 +233,7 @@ export async function captureDependencies(store, environment, { signal } = {}) {
     const cache = await captureTree(store, cacheRoot, {
       kind: 'dependencies',
       signal,
+      requireReferences,
     })
     generated.push(
       { path: '.dependency-lake-cache', type: 'directory' },

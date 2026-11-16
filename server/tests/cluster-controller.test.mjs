@@ -3,7 +3,8 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { PassThrough } from 'node:stream'
+import { PassThrough, Writable } from 'node:stream'
+import { EventEmitter } from 'node:events'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { BlobStore, captureTree } from '../cluster/blobs.mjs'
@@ -15,6 +16,7 @@ import {
 import { WorkerNode } from '../cluster/node.mjs'
 import { FramedRpc, RpcError } from '../cluster/protocol.mjs'
 import { sha256 } from '../cluster/state.mjs'
+import { LspFrames, frame } from '../rpc.mjs'
 
 const GIB = 1024 ** 3
 const IMAGE = `sha256:${'a'.repeat(64)}`
@@ -49,6 +51,380 @@ const options = (overrides = {}) => ({
 
 const counts = ({ active, held, queued }) => ({ active, held, queued })
 
+const editorNode = (patch = {}) => ({
+  id: 'node-a',
+  capabilities: [...ALL, 'lean.session'],
+  editors: { maxConcurrent: 2, memory: '1g', cpus: 1, cpuReservation: 1 },
+  ...patch,
+})
+
+test('remote editors stream framed messages, mirror bounded saves, and retain canonical snapshots', async (t) => {
+  const f = await cluster(t, { nodes: [editorNode()] })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  assert.equal(f.controller.editorCapacity(), 2)
+  const editor = await f.controller.openEditor(
+    f.input,
+    options({ jobId: 'editor-a' }),
+  )
+  assert(editor)
+  const messages = []
+  const frames = new LspFrames((message) => messages.push(message))
+  editor.stdout.on('data', (bytes) => frames.push(bytes))
+  editor.stderr.resume()
+  const message = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { rootUri: 'file:///workspace' },
+  }
+  editor.stdin.write(frame(message))
+  await until(() => messages.length === 1)
+  assert.deepEqual(messages[0].result, message.params)
+  const { worker, runtime } = f.workers.get('node-a')
+  const child = runtime.editorChildren[0]
+  const original = await fsp.readFile(
+    path.join(child.workspace, 'Main.lean'),
+    'utf8',
+  )
+  const saved = ' -- unicode λ\n'.repeat(140000)
+  await editor.syncMain(saved, 1)
+  assert.equal(
+    await fsp.readFile(path.join(child.workspace, 'Main.lean'), 'utf8'),
+    saved,
+  )
+  const source = await f.blobs.manifest(f.input.sourceManifest, 'source')
+  const canonical = source.entries.find((entry) => entry.path === 'Main.lean')
+  assert.equal((await f.blobs.read(canonical.hash)).toString(), original)
+  await assert.rejects(editor.syncMain('stale', 1), { code: 'editor_protocol' })
+  const attempt = [...worker.running.keys()][0]
+  const control = f.transport.opened.find(
+    (entry) => entry.channel === 'control',
+  ).rpc
+  await assert.rejects(
+    control.request('editor.input', {
+      id: attempt,
+      sequence: 2,
+      data: Buffer.from('x').toString('base64'),
+    }),
+    { code: 'editor_protocol', status: 403 },
+  )
+  assert.equal(
+    worker.state.events(attempt, 0, 100).length,
+    0,
+    'LSP content must not be retained in the check journal',
+  )
+  editor.kill()
+  await until(
+    () => f.controller.status().active === 0 && worker.running.size === 0,
+  )
+  assert.equal(f.controller.status().held, 0)
+  await assert.rejects(fsp.stat(child.workspace), { code: 'ENOENT' })
+})
+
+test('persistent editor grants share the check pool and keep an ordinary batch reserve', async (t) => {
+  const f = await cluster(t, { nodes: [editorNode()] })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  const one = await f.controller.openEditor(
+    f.input,
+    options({ jobId: 'editor-a' }),
+  )
+  const two = await f.controller.openEditor(
+    f.input,
+    options({ jobId: 'editor-b', actor: 'bob' }),
+  )
+  assert(one && two)
+  one.stdout.resume()
+  one.stderr.resume()
+  two.stdout.resume()
+  two.stderr.resume()
+  assert.equal(
+    await f.controller.openEditor(
+      f.input,
+      options({ jobId: 'editor-c', actor: 'carol' }),
+    ),
+    null,
+  )
+  assert.equal(
+    f.controller.canRun('check.kernel'),
+    false,
+    'a native check must fall back rather than queue behind persistent holders',
+  )
+  assert.equal(
+    await f.controller.run(f.input, options({ operation: 'check.kernel' })),
+    null,
+  )
+  const result = await f.controller.run(f.input, options({ jobId: 'check-a' }))
+  assert.equal(result.code, 0)
+  assert.equal(f.controller.status().active, 2)
+  one.kill()
+  two.kill()
+  await until(() => f.controller.status().active === 0)
+  assert.equal(f.controller.canRun('check.kernel'), true)
+})
+
+test('closing a dedicated editor channel kills only its owner and confirms cleanup before releasing resources', async (t) => {
+  const f = await cluster(t, { nodes: [editorNode()] })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  const first = await f.controller.openEditor(
+    f.input,
+    options({ jobId: 'editor-a' }),
+  )
+  const second = await f.controller.openEditor(
+    f.input,
+    options({ jobId: 'editor-b', actor: 'bob' }),
+  )
+  first.stdout.resume()
+  first.stderr.resume()
+  second.stdout.resume()
+  second.stderr.resume()
+  const { worker, runtime } = f.workers.get('node-a')
+  const cleanup = Promise.withResolvers()
+  runtime.editorCleanup = () => cleanup.promise
+  first.rpc.close()
+  await until(() => runtime.editorChildren[0].killed)
+  assert.equal(runtime.editorChildren[1].killed, undefined)
+  assert.equal(f.controller.status().active, 2)
+  assert.equal(worker.running.size, 2)
+  cleanup.resolve()
+  await until(() => f.controller.status().active === 1)
+  second.kill()
+  await until(
+    () => f.controller.status().active === 0 && worker.running.size === 0,
+  )
+})
+
+test('unsupported repository snapshots never start a remote editor', async (t) => {
+  const f = await cluster(t, {
+    nodes: [editorNode()],
+    files: { 'Main.lean': 'import Helper', 'Helper.lean': 'def value := 1' },
+  })
+  await f.ready()
+  await assert.rejects(f.controller.openEditor(f.input, options()), {
+    code: 'invalid_request',
+  })
+  assert.equal(f.workers.get('node-a').runtime.editorChildren.length, 0)
+})
+
+test('a cold editor environment falls back without uploading assets on the browser path', async (t) => {
+  const f = await cluster(t, { nodes: [editorNode()] })
+  await f.ready()
+  assert.equal(f.controller.editorCapacity(f.input), 0)
+  assert.equal(await f.controller.openEditor(f.input, options()), null)
+  assert.equal(
+    f.transport.requests.some(
+      (call) =>
+        call.method === 'assets.prepare' || call.method === 'objects.put',
+    ),
+    false,
+  )
+  assert.equal(f.workers.get('node-a').runtime.editorChildren.length, 0)
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  assert.equal(f.controller.editorCapacity(f.input), 2)
+  assert.equal(
+    f.controller.editorCapacity({
+      ...f.input,
+      toolchain: { ...f.input.toolchain, manifest: 'f'.repeat(64) },
+    }),
+    0,
+  )
+})
+
+test('read-only dependency and configuration documents remain usable through a remote editor', async (t) => {
+  const f = await cluster(t, { nodes: [editorNode()] })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  const editor = await f.controller.openEditor(f.input, options())
+  editor.stdout.resume()
+  editor.stderr.resume()
+  for (const filename of [
+    '.lake/packages/mathlib/Mathlib.lean',
+    'lakefile.lean',
+    'Main.lean',
+  ])
+    editor.stdin.write(
+      frame({
+        jsonrpc: '2.0',
+        method: 'textDocument/didOpen',
+        params: {
+          textDocument: {
+            uri: 'file:///workspace/' + filename,
+            languageId: 'lean4',
+            version: 1,
+            text: '-- read-only navigation',
+          },
+        },
+      }),
+    )
+  const { runtime } = f.workers.get('node-a')
+  await until(() => runtime.editorChildren[0].messages.length === 3)
+  assert.equal(runtime.editorChildren[0].killed, undefined)
+  editor.kill()
+  await until(() => f.controller.status().active === 0)
+})
+
+test('late saves after a natural editor exit cannot race disposable workspace removal', async (t) => {
+  const f = await cluster(t, { nodes: [editorNode()] })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  const editor = await f.controller.openEditor(f.input, options())
+  editor.stdout.resume()
+  editor.stderr.resume()
+  const { runtime, worker } = f.workers.get('node-a')
+  runtime.editorChildren[0].kill()
+  await until(() =>
+    [...worker.running.values()].every((record) => record.editor.closed),
+  )
+  await assert.rejects(editor.syncMain('late save', 1), (error) =>
+    ['editor_protocol', 'connection_closed', 'connection_failed'].includes(
+      error.code,
+    ),
+  )
+  await until(
+    () => f.controller.status().active === 0 && worker.running.size === 0,
+  )
+  assert.equal(f.controller.status().held, 0)
+})
+
+test('editor EOF is ordered after acknowledged input and remains bound to its channel', async (t) => {
+  const f = await cluster(t, { nodes: [editorNode()] })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  const editor = await f.controller.openEditor(f.input, options())
+  editor.stdout.resume()
+  editor.stderr.resume()
+  const { runtime, worker } = f.workers.get('node-a')
+  const id = [...worker.running.keys()][0]
+  const control = f.transport.opened.find(
+    (entry) => entry.channel === 'control',
+  ).rpc
+  await assert.rejects(control.request('editor.end', { id, sequence: 0 }), {
+    code: 'editor_protocol',
+    status: 403,
+  })
+  editor.stdin.end(
+    frame({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { rootUri: 'file:///workspace' },
+    }),
+  )
+  await until(
+    () => f.controller.status().active === 0 && worker.running.size === 0,
+  )
+  assert.equal(runtime.editorChildren[0].messages.length, 1)
+  assert.equal(f.controller.status().held, 0)
+})
+
+test('open editors do not consume the account check quota', async (t) => {
+  const f = await cluster(t, {
+    nodes: [editorNode()],
+    config: { maxPerActor: 2 },
+  })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  const editor = await f.controller.openEditor(f.input, options())
+  editor.stdout.resume()
+  editor.stderr.resume()
+  const gate = Promise.withResolvers()
+  f.workers.get('node-a').runtime.behavior = async () => {
+    await gate.promise
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const first = f.controller.run(f.input, options({ jobId: 'first-check' }))
+  const second = f.controller.run(f.input, options({ jobId: 'second-check' }))
+  first.catch(() => {})
+  second.catch(() => {})
+  await until(() => f.controller.status().active === 3)
+  gate.resolve()
+  assert.equal((await first).code, 0)
+  assert.equal((await second).code, 0)
+  editor.kill()
+  await until(() => f.controller.status().active === 0)
+})
+
+test('an editor bypasses its account queued native check when an interactive grant fits', async (t) => {
+  const f = await cluster(t, { nodes: [editorNode()] })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  const gate = Promise.withResolvers()
+  f.workers.get('node-a').runtime.behavior = async () => {
+    await gate.promise
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  const running = f.controller.run(
+    f.input,
+    options({
+      operation: 'check.kernel',
+      actor: 'bob',
+      jobId: 'running-native',
+    }),
+  )
+  running.catch(() => {})
+  await until(() => f.controller.status().active === 1)
+  const queued = f.controller.run(
+    f.input,
+    options({ operation: 'check.kernel', jobId: 'queued-native' }),
+  )
+  queued.catch(() => {})
+  await until(() => f.controller.status().queued === 1)
+  const editor = await f.controller.openEditor(
+    f.input,
+    options({ jobId: 'interactive', signal: AbortSignal.timeout(3000) }),
+  )
+  assert(editor)
+  editor.stdout.resume()
+  editor.stderr.resume()
+  assert.equal(f.controller.status().queued, 1)
+  gate.resolve()
+  assert.equal((await running).code, 0)
+  assert.equal((await queued).code, 0)
+  editor.kill()
+  await until(() => f.controller.status().active === 0)
+})
+
+test('invalid workspace URIs are rejected on the node before the Lean process sees them', async (t) => {
+  const f = await cluster(t, { nodes: [editorNode()] })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  const editor = await f.controller.openEditor(f.input, options())
+  editor.stdout.resume()
+  editor.stderr.resume()
+  editor.stdin.write(
+    frame({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { rootUri: 'file:///etc' },
+    }),
+  )
+  await until(() => f.controller.status().active === 0)
+  assert.equal(f.workers.get('node-a').runtime.editorChildren[0].killed, true)
+  assert.equal(f.controller.status().held, 0)
+})
+
+test('editor leases expire when renewals stop while the channel stays open', async (t) => {
+  const f = await cluster(t, { nodes: [editorNode()] })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  const editor = await f.controller.openEditor(f.input, options())
+  editor.stdout.resume()
+  editor.stderr.resume()
+  f.transport.hook = ({ method, request, params, options }) =>
+    method === 'lease.renew'
+      ? Promise.resolve({ renewed: [] })
+      : request(method, params, options)
+  const { worker } = f.workers.get('node-a')
+  for (const record of worker.running.values()) record.deadline = 0
+  await until(
+    () => f.controller.status().active === 0 && worker.running.size === 0,
+  )
+  assert.equal(f.controller.status().held, 0)
+})
+
 const refuseCancel = ({ method, params, options, request }) =>
   method === 'attempt.cancel'
     ? Promise.reject(
@@ -64,6 +440,8 @@ class FakeRuntime {
   toolchains = new Map()
   instance = null
   runs = []
+  editorChildren = []
+  editorCleanup = async () => {}
   behavior = async () => ({
     code: 0,
     stdout: 'ok',
@@ -88,6 +466,66 @@ class FakeRuntime {
   run(workspace, args, options) {
     this.runs.push(path.basename(workspace))
     return this.behavior(options, args)
+  }
+
+  spawn(workspace, args, options) {
+    assert.deepEqual(args, ['lake', 'serve', '--'])
+    assert.equal(options.network, 'none')
+    assert.equal(options.readOnlyWorkspace, true)
+    assert.equal(options.editor, true)
+    assert.equal(
+      options.postCheckFile,
+      undefined,
+      'an editor must not run a compiler after lake serve',
+    )
+    const child = new EventEmitter()
+    child.workspace = workspace
+    child.stdout = new PassThrough()
+    child.stderr = new PassThrough()
+    child.messages = []
+    const frames = new LspFrames((message) => {
+      child.messages.push(message)
+      if (message.id != null)
+        child.stdout.write(
+          frame({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: message.params ?? null,
+          }),
+        )
+    })
+    child.stdin = new Writable({
+      write(bytes, _encoding, callback) {
+        try {
+          frames.push(bytes)
+          callback()
+        } catch (error) {
+          callback(error)
+        }
+      },
+    })
+    const closed = Promise.withResolvers()
+    child.kill = () => {
+      if (child.killed) return false
+      child.killed = true
+      queueMicrotask(() => {
+        child.stdout.end()
+        child.stderr.end()
+        child.emit('close', 0)
+        closed.resolve()
+      })
+      return true
+    }
+    child.cleanupWorker = async () => {
+      await closed.promise
+      await this.editorCleanup()
+    }
+    child.workerStopped = child.cleanupWorker()
+    child.workerStopped.catch(() => {})
+    child.stdin.on('finish', () => child.kill())
+    options.signal.addEventListener('abort', () => child.kill(), { once: true })
+    this.editorChildren.push(child)
+    return child
   }
 
   checkProject(workspace, options) {
@@ -156,6 +594,9 @@ async function startWorker(root, spec) {
       parentMaxCpus: 8,
       workerCpus: 1,
       leaseMs: 5000,
+      ...(spec.editors
+        ? { editors: spec.editors, maxConcurrent: spec.maxConcurrent ?? 4 }
+        : {}),
     },
     runtime,
     verifyToolchain: async () => {},
@@ -247,6 +688,9 @@ async function cluster(t, settings = {}) {
     version: 1,
     lineage: LINEAGE,
     mode: 'serve',
+    ...(nodes.some((node) => node.editors)
+      ? { editors: { placement: 'prefer' } }
+      : {}),
     nodes: nodes.map(({ id, role }) => ({
       id,
       role,

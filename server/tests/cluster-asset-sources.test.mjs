@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { BlobStore, captureTree } from '../cluster/blobs.mjs'
 import { sha256 } from '../cluster/state.mjs'
+import { capturePresetDependencies } from '../cluster/dependencies.mjs'
 
 async function writeProtected(filename, data, options = {}) {
   return fs.writeFile(filename, data, { mode: 0o600, ...options })
@@ -81,6 +82,135 @@ test('managed toolchain captures keep exact bytes available without duplicating 
   assert.deepEqual(await store.read(hash), bytes)
   assert.equal((await store.manifest(captured.hash)).kind, 'toolchain')
   assert.equal(store.maxBytes, options.maxBytes)
+})
+
+test('pinned public preset dependencies use protected backings without a second VM payload copy', async (t) => {
+  const { store, data } = await fixture(t, { maxBytes: 4096 })
+  const preset = JSON.parse(
+    await fs.readFile(new URL('../presets.json', import.meta.url), 'utf8'),
+  ).find((value) => value.id === 'mathlib')
+  const environment = path.join(data, 'runtime/templates/mathlib')
+  const packages = path.join(environment, '.lake/packages')
+  await fs.mkdir(packages, { recursive: true, mode: 0o700 })
+  await writeProtected(
+    path.join(environment, 'lean-toolchain'),
+    preset.toolchain + '\n',
+  )
+  await writeProtected(
+    path.join(environment, 'lakefile.toml'),
+    'name = "PublicPresetFixture"\n',
+  )
+  await writeProtected(
+    path.join(environment, 'lake-manifest.json'),
+    JSON.stringify({
+      packages: [{ name: preset.package, rev: preset.revision }],
+    }),
+  )
+  await writeProtected(
+    path.join(environment, '.ready.json'),
+    JSON.stringify({
+      code: 0,
+      toolchain: preset.toolchain,
+      revision: preset.revision,
+    }),
+  )
+  const bytes = Buffer.alloc(600000, 72),
+    hash = sha256(bytes)
+  await writeProtected(path.join(packages, 'public.olean'), bytes)
+  await captureTree(store, packages, { kind: 'dependencies' })
+  assert.equal(store.assetSources.usage().files, 1)
+  assert(store.usage().bytes < 4096)
+  await assert.rejects(fs.stat(store.object(hash)), { code: 'ENOENT' })
+  assert.deepEqual(await store.read(hash), bytes)
+  await writeProtected(
+    path.join(environment, 'lake-manifest.json'),
+    JSON.stringify({
+      packages: [{ name: preset.package, rev: '0'.repeat(40) }],
+    }),
+  )
+  await assert.rejects(
+    captureTree(store, packages, { kind: 'dependencies' }),
+    /preset certificate/,
+  )
+})
+
+test('the maintenance preload path exports the exact protected public preset manifest', async (t) => {
+  const { store, data } = await fixture(t)
+  const environment = path.join(data, 'runtime/templates/lean')
+  await fs.mkdir(path.join(environment, '.lake/packages'), {
+    recursive: true,
+    mode: 0o700,
+  })
+  const version = 'leanprover/lean4:v4.35.0'
+  for (const [filename, content] of Object.entries({
+    'lean-toolchain': version + '\n',
+    'lakefile.toml': 'name = "PresetFixture"\n',
+    'lake-manifest.json': '{"packages":[]}',
+    '.ready.json': JSON.stringify({ code: 0, toolchain: version }),
+  }))
+    await writeProtected(path.join(environment, filename), content)
+  await writeProtected(
+    path.join(environment, '.lake/packages/public.olean'),
+    'public bytes',
+  )
+  const exported = await capturePresetDependencies(store, {
+    dataDir: data,
+    preset: 'lean',
+    version,
+  })
+  const manifest = await store.manifest(exported.hash, 'dependencies')
+  assert.equal(manifest.kind, 'dependencies')
+  assert(
+    manifest.entries.some(
+      (entry) => entry.path === '.lake/packages/public.olean',
+    ),
+  )
+  const payload = path.join(environment, '.lake/packages/public.olean')
+  const physicalBefore = store.usage().bytes
+  await fs.chmod(payload, 0o664)
+  await assert.rejects(
+    capturePresetDependencies(store, {
+      dataDir: data,
+      preset: 'lean',
+      version,
+    }),
+    /protected managed references/,
+  )
+  assert.equal(
+    store.usage().bytes,
+    physicalBefore,
+    'an unprotected payload must not be copied to the VM store',
+  )
+  await fs.chmod(payload, 0o600)
+  const nested = path.join(environment, '.lake/packages/unprotected')
+  await fs.mkdir(nested, { mode: 0o700 })
+  await fs.chmod(nested, 0o775)
+  await assert.rejects(
+    capturePresetDependencies(store, {
+      dataDir: data,
+      preset: 'lean',
+      version,
+    }),
+    /directories must be service-owned and protected/,
+  )
+  await fs.chmod(nested, 0o700)
+  await assert.rejects(
+    capturePresetDependencies(store, {
+      dataDir: data,
+      preset: 'lean',
+      version: 'leanprover/lean4:v4.34.1',
+    }),
+    /exact official toolchain/,
+  )
+  await fs.chmod(path.join(environment, '.ready.json'), 0o664)
+  await assert.rejects(
+    capturePresetDependencies(store, {
+      dataDir: data,
+      preset: 'lean',
+      version,
+    }),
+    /protect/,
+  )
 })
 
 test('private project sources, results and assets outside managed roots remain physical', async (t) => {

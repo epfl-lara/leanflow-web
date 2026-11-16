@@ -7,6 +7,7 @@ import { Runtime } from '../runtime.mjs'
 import { clusterError } from './state.mjs'
 import { inspectBoundary } from './boundary.mjs'
 import { hostAppArmorEnabled } from '../container-engine.mjs'
+import { editorConformance } from './editor-conformance.mjs'
 
 const execute = promisify(execFile)
 
@@ -366,6 +367,8 @@ time.sleep(4)
       memory: worker.config.workerMemory,
       memoryBudget: worker.config.memoryBudget,
       cpus: worker.config.workerCpus,
+      editorMemory: worker.config.editorMemory,
+      editorCpus: worker.config.editorCpus,
       maxConcurrent: 3,
       scope: 'conformance',
       cgroupParent: worker.config.cgroupParent,
@@ -450,6 +453,51 @@ time.sleep(4)
         valid: valid.code,
         invalid: invalid.code,
         binary: binary.stdout.trim(),
+      }
+      if (worker.config.maxEditors) {
+        try {
+          let placement
+          report.checks.editor = await editorConformance(leanRuntime, root, {
+            ...options,
+            timeoutMs: 180000,
+            boundedScratchBytes: 256 * 1024 ** 2,
+            checkPlacement: () => placement,
+            onSpawn: (child) => {
+              placement = (async () => {
+                await verifyContainerParent(
+                  worker,
+                  child,
+                  boundary,
+                  256 * 1024 ** 2,
+                )
+                const { stdout } = await execute(
+                  worker.config.engineExecutable,
+                  [
+                    'inspect',
+                    '--format',
+                    '{{json .HostConfig}}',
+                    child.containerName,
+                  ],
+                  { timeout: 5000, maxBuffer: 1024 * 1024 },
+                )
+                const config = JSON.parse(stdout)
+                if (
+                  config.Memory !== worker.config.editorMemoryBytes ||
+                  config.MemorySwap !== worker.config.editorMemoryBytes ||
+                  config.NanoCpus !== Math.round(worker.config.editorCpus * 1e9)
+                )
+                  throw new Error(
+                    'Editor resource caps do not match its configured profile.',
+                  )
+              })()
+              placement.catch(() => {})
+            },
+          })
+          await placement
+          report.capabilities.push('lean.session')
+        } catch (error) {
+          report.failures.editor = error.detail || error.message
+        }
       }
       if (await leanRuntime.leanCheckSupported(root)) {
         const kernelScript = String.raw`

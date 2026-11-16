@@ -4,6 +4,7 @@ import {
   controllerConfig,
   resolveExecutionProfile,
   workerBundleDigest,
+  nodeConfig,
 } from '../cluster/config.mjs'
 import { PROTOCOL_VERSION } from '../cluster/protocol.mjs'
 
@@ -14,6 +15,44 @@ const old = {
   imageDigest: 'sha256:' + 'b'.repeat(64),
 }
 const current = 'sha256:' + 'c'.repeat(64)
+
+test('shared worker editor CPU caps fit the agreed pool and normalized policies survive reload', () => {
+  const value = {
+    version: 1,
+    nodeId: 'node',
+    controllerLineage: 'lineage',
+    dataDir: '/private/worker',
+    image: current,
+    workerMemory: '6g',
+    memoryBudget: '24g',
+    maxCpus: 8,
+    parentMaxCpus: 16,
+    editors: {
+      maxConcurrent: 6,
+      memory: '3g',
+      cpus: 1,
+      cpuReservation: 1,
+      reservedBatchMemory: '6g',
+      reservedBatchCpus: 2,
+    },
+  }
+  const parsed = nodeConfig(value)
+  assert.equal(parsed.maxConcurrent, 7)
+  assert.deepEqual(nodeConfig(parsed), parsed)
+  assert.throws(
+    () => nodeConfig({ ...value, editors: { ...value.editors, cpus: 2 } }),
+    /CPU bursts/,
+  )
+  assert.equal(
+    nodeConfig({
+      ...value,
+      parentMaxCpus: 8,
+      editors: { ...value.editors, cpus: 2 },
+    }).editorCpus,
+    2,
+  )
+  assert.throws(() => nodeConfig({ ...value, maxConcurrent: 6 }), /concurrency/)
+})
 
 test('a certified worker execution profile stays pinned across coordinator image and source updates', async () => {
   const normalized = controllerConfig({ ...config, executionProfile: old })
