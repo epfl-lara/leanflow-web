@@ -41,6 +41,11 @@ export function loadCapacity(env = process.env) {
   const workerMemoryBudget = env.STUDIO_WORKER_MEMORY_BUDGET?.trim() || null
   if (workerMemoryBudget)
     memoryBytes(workerMemoryBudget, 'STUDIO_WORKER_MEMORY_BUDGET')
+  const editorMemory = env.STUDIO_EDITOR_MEMORY?.trim() || null
+  if (editorMemory) memoryBytes(editorMemory, 'STUDIO_EDITOR_MEMORY')
+  const batchMemoryReserved = env.STUDIO_RESERVED_BATCH_MEMORY?.trim() || null
+  if (batchMemoryReserved)
+    memoryBytes(batchMemoryReserved, 'STUDIO_RESERVED_BATCH_MEMORY')
   return {
     workers: positiveNumber(env, 'STUDIO_MAX_WORKERS', 6),
     workerQueue: positiveNumber(env, 'STUDIO_MAX_WORKER_QUEUE', 24),
@@ -52,6 +57,11 @@ export function loadCapacity(env = process.env) {
     batchWorkers: nonnegativeInteger(env, 'STUDIO_RESERVED_BATCH_WORKERS', 3),
     editors: positiveNumber(env, 'STUDIO_MAX_EDITORS', 4),
     editorsPerProject: positiveNumber(env, 'STUDIO_MAX_EDITORS_PER_PROJECT', 2),
+    editorsPerUser: positiveNumber(
+      env,
+      'STUDIO_MAX_EDITORS_PER_USER',
+      positiveNumber(env, 'STUDIO_MAX_EDITORS', 4),
+    ),
     terminals: positiveNumber(env, 'STUDIO_MAX_TERMINALS', 2),
     terminalsPerProject: positiveNumber(
       env,
@@ -107,6 +117,14 @@ export function loadCapacity(env = process.env) {
     workerCpus: positiveNumber(env, 'STUDIO_WORKER_CPUS', 2, false),
     workerMemory,
     workerMemoryBudget,
+    editorMemory,
+    editorCpus: positiveNumber(
+      env,
+      'STUDIO_EDITOR_CPUS',
+      positiveNumber(env, 'STUDIO_WORKER_CPUS', 2, false),
+      false,
+    ),
+    batchMemoryReserved,
     kernelExportMaxBytes: positiveNumber(
       env,
       'STUDIO_KERNEL_EXPORT_MAX_BYTES',

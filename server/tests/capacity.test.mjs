@@ -22,6 +22,7 @@ test('invalid capacity settings fail before startup rather than disabling admiss
     'STUDIO_MAX_WORKER_QUEUE',
     'STUDIO_MAX_EDITORS',
     'STUDIO_MAX_EDITORS_PER_PROJECT',
+    'STUDIO_MAX_EDITORS_PER_USER',
     'STUDIO_MAX_TERMINALS',
     'STUDIO_MAX_TERMINALS_PER_PROJECT',
     'STUDIO_MAX_AGENTS',
@@ -52,6 +53,23 @@ test('invalid capacity settings fail before startup rather than disabling admiss
     loadCapacity({ STUDIO_WORKER_MEMORY: '8192m' }).workerMemory,
     '8192m',
   )
+  for (const name of ['STUDIO_EDITOR_MEMORY', 'STUDIO_RESERVED_BATCH_MEMORY'])
+    assert.throws(() => loadCapacity({ [name]: '0g' }), new RegExp(name))
+  assert.throws(
+    () => loadCapacity({ STUDIO_EDITOR_CPUS: '0' }),
+    /STUDIO_EDITOR_CPUS/,
+  )
+  const expanded = loadCapacity({
+    STUDIO_EDITOR_MEMORY: '1280m',
+    STUDIO_EDITOR_CPUS: '0.2',
+    STUDIO_RESERVED_BATCH_MEMORY: '12g',
+    STUDIO_MAX_EDITORS: '25',
+    STUDIO_MAX_EDITORS_PER_USER: '3',
+  })
+  assert.equal(expanded.editorMemory, '1280m')
+  assert.equal(expanded.editorCpus, 0.2)
+  assert.equal(expanded.batchMemoryReserved, '12g')
+  assert.equal(expanded.editorsPerUser, 3)
 })
 
 async function fixture(

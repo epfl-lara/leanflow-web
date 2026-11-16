@@ -1,3 +1,4 @@
+import * as apiTransport from './apiTransport.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
@@ -14,7 +15,14 @@ function clientApi() {
     },
   )
   const module = { exports: {} }
-  new Function('module', 'exports', outputText)(module, module.exports)
+  new Function('module', 'exports', 'require', outputText)(
+    module,
+    module.exports,
+    (name) => {
+      if (name === './apiTransport.mjs') return apiTransport
+      throw new Error('Unexpected module ' + name)
+    },
+  )
   return module.exports
 }
 

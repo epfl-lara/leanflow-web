@@ -1,3 +1,4 @@
+import * as apiTransport from './apiTransport.mjs'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
@@ -39,7 +40,9 @@ function transpile(name, imports = {}) {
   return module.exports
 }
 const { WorkspaceBuffers } = transpile('./workspaceBuffers.ts')
-const { ApiError } = transpile('./api.ts')
+const { ApiError } = transpile('./api.ts', {
+  './apiTransport.mjs': apiTransport,
+})
 const { refreshChangedBuffers } = transpile('./workspaceFiles.ts', {
   './api': { ApiError },
 })

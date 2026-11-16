@@ -1,3 +1,4 @@
+import { withApiRetries } from './apiTransport.mjs'
 import type { ProofTarget } from './proofTarget'
 import type { ReasoningBlock } from '../../../shared/reasoning-timeline.mjs'
 export type { ReasoningBlock } from '../../../shared/reasoning-timeline.mjs'
@@ -78,6 +79,7 @@ export interface Session {
     batchWorkers: number
     editors: number
     editorsPerProject: number
+    editorsPerUser: number
     terminals: number
     terminalsPerProject: number
     agents: number
@@ -94,6 +96,9 @@ export interface Session {
     workerCpus: number
     workerMemory: string
     workerMemoryBudget: string | null
+    editorMemory: string | null
+    editorCpus: number
+    batchMemoryReserved: string | null
   }
   lemex?: {
     revision?: string
@@ -457,6 +462,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly retryAfterMs?: number,
   ) {
     super(message)
   }
@@ -525,6 +531,16 @@ async function request(
 }
 
 async function responseData(response: Response): Promise<unknown> {
+  const retryHeader = response.headers.get('retry-after')
+  const retryAfter =
+    retryHeader == null
+      ? NaN
+      : /^\d+$/.test(retryHeader)
+        ? Number(retryHeader) * 1000
+        : Date.parse(retryHeader) - Date.now()
+  const retryAfterMs = Number.isFinite(retryAfter)
+    ? Math.max(0, retryAfter)
+    : undefined
   const text = await response.text()
   let data: unknown
   try {
@@ -535,6 +551,7 @@ async function responseData(response: Response): Promise<unknown> {
         ? 'The server returned an unreadable response.'
         : `Request failed (${response.status}).`,
       response.status,
+      retryAfterMs,
     )
   }
   if (!response.ok) {
@@ -550,103 +567,116 @@ async function responseData(response: Response): Promise<unknown> {
             typeof data.message === 'string'
           ? data.message
           : `Request failed (${response.status}).`
-    throw new ApiError(error, response.status)
+    throw new ApiError(error, response.status, retryAfterMs)
   }
   return data
+}
+
+async function requestResult<T>(
+  path: string,
+  options: RequestInit,
+  read: (response: Response) => Promise<T>,
+): Promise<T> {
+  const requestUserId = sessionUserId
+  return withApiRetries(
+    async () => {
+      const value = await read(await request(path, options))
+      requireCurrentSession(requestUserId)
+      return value
+    },
+    {
+      method: options.method,
+      signal: options.signal,
+      beforeAttempt: () => requireCurrentSession(requestUserId),
+    },
+  )
 }
 
 export async function api<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const requestUserId = sessionUserId
-  const data = await responseData(await request(path, options))
-  requireCurrentSession(requestUserId)
-  return data as T
+  return requestResult(path, options, responseData) as Promise<T>
 }
 
 export async function apiPdf(path: string, signal: AbortSignal): Promise<Blob> {
-  const requestUserId = sessionUserId
-  const response = await request(path, { signal })
-  if (!response.ok) await responseData(response)
-  if (
-    response.headers.get('content-type')?.split(';')[0].trim() !==
-    'application/pdf'
-  )
-    throw new Error(
-      'This file could not be opened as a PDF. Choose a PDF document.',
+  return requestResult(path, { signal }, async (response) => {
+    if (!response.ok) await responseData(response)
+    if (
+      response.headers.get('content-type')?.split(';')[0].trim() !==
+      'application/pdf'
     )
-  const blob = await response.blob()
-  requireCurrentSession(requestUserId)
-  return blob
+      throw new Error(
+        'This file could not be opened as a PDF. Choose a PDF document.',
+      )
+    const blob = await response.blob()
+    return blob
+  })
 }
 
 export async function apiImage(
   path: string,
   signal: AbortSignal,
 ): Promise<Blob> {
-  const requestUserId = sessionUserId
-  const response = await request(path, { signal })
-  if (!response.ok) await responseData(response)
-  const mime = response.headers.get('content-type')?.split(';')[0].trim()
-  if (
-    !mime ||
-    !/^image\/(?:png|jpeg|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon|svg\+xml)$/i.test(
-      mime,
+  return requestResult(path, { signal }, async (response) => {
+    if (!response.ok) await responseData(response)
+    const mime = response.headers.get('content-type')?.split(';')[0].trim()
+    if (
+      !mime ||
+      !/^image\/(?:png|jpeg|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon|svg\+xml)$/i.test(
+        mime,
+      )
     )
-  )
-    throw new Error(
-      'This file could not be opened as an image. Choose a supported image file.',
-    )
-  const blob = await response.blob()
-  requireCurrentSession(requestUserId)
-  return blob
+      throw new Error(
+        'This file could not be opened as an image. Choose a supported image file.',
+      )
+    const blob = await response.blob()
+    return blob
+  })
 }
 
 export async function apiHtml(
   path: string,
   signal: AbortSignal,
 ): Promise<string> {
-  const requestUserId = sessionUserId
-  const response = await request(path, { signal })
-  if (!response.ok) await responseData(response)
-  if (
-    response.headers.get('content-type')?.split(';')[0].trim() !== 'text/html'
-  )
-    throw new Error(
-      'This file could not be opened as HTML. Choose an HTML document.',
+  return requestResult(path, { signal }, async (response) => {
+    if (!response.ok) await responseData(response)
+    if (
+      response.headers.get('content-type')?.split(';')[0].trim() !== 'text/html'
     )
-  const html = await response.text()
-  requireCurrentSession(requestUserId)
-  return html
+      throw new Error(
+        'This file could not be opened as HTML. Choose an HTML document.',
+      )
+    const html = await response.text()
+    return html
+  })
 }
 
 export async function apiDownload(
   path: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<{ blob: Blob; filename: string | null }> {
-  const requestUserId = sessionUserId
-  const response = await request(path, options)
-  if (!response.ok) await responseData(response)
-  const disposition = response.headers.get('content-disposition') || ''
-  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1]
-  const quoted = /filename="((?:[^"\\]|\\.)*)"/i.exec(disposition)?.[1]
-  let filename = quoted?.replace(/\\(.)/g, '$1') || null
-  if (encoded) {
-    try {
-      filename = decodeURIComponent(encoded)
-    } catch {
-      // A malformed filename must not prevent downloading the file itself.
+  return requestResult(path, options, async (response) => {
+    if (!response.ok) await responseData(response)
+    const disposition = response.headers.get('content-disposition') || ''
+    const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1]
+    const quoted = /filename="((?:[^"\\]|\\.)*)"/i.exec(disposition)?.[1]
+    let filename = quoted?.replace(/\\(.)/g, '$1') || null
+    if (encoded) {
+      try {
+        filename = decodeURIComponent(encoded)
+      } catch {
+        // A malformed filename must not prevent downloading the file itself.
+      }
     }
-  }
-  filename =
-    filename
-      ?.split(/[\\/]/)
-      .at(-1)
-      ?.replace(/[\x00-\x1f\x7f]/g, '') || null
-  const blob = await response.blob()
-  requireCurrentSession(requestUserId)
-  return { blob, filename }
+    filename =
+      filename
+        ?.split(/[\\/]/)
+        .at(-1)
+        ?.replace(/[\x00-\x1f\x7f]/g, '') || null
+    const blob = await response.blob()
+    return { blob, filename }
+  })
 }
 
 export const post = <T>(path: string, body: unknown = {}) =>

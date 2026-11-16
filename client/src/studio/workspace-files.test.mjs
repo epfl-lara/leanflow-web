@@ -1,3 +1,4 @@
+import * as apiTransport from './apiTransport.mjs'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
@@ -24,7 +25,7 @@ function load(name, imports = {}) {
   )
   return module.exports
 }
-const { ApiError } = load('./api.ts')
+const { ApiError } = load('./api.ts', { './apiTransport.mjs': apiTransport })
 const { WorkspaceBuffers } = load('./workspaceBuffers.ts')
 const { reconcileMissingBuffers, refreshChangedBuffers } = load(
   './workspaceFiles.ts',

@@ -40,8 +40,9 @@ export function loadTestSetting(name) {
 }
 
 // These scripts create check jobs and the browser test edits fixture sources.
-// Require explicit opt-in, ten non-admin fixture identities and private tokens.
-export async function compileLoadFixture() {
+// Require explicit opt-in, distinct non-admin fixture identities and private tokens.
+export async function compileLoadFixture({ users = 10 } = {}) {
+  assert(Number.isSafeInteger(users) && users >= 1 && users <= 64)
   assert.equal(
     process.env.STUDIO_RUN_LIVE_LOAD_TEST,
     '1',
@@ -59,8 +60,8 @@ export async function compileLoadFixture() {
   assert(stat.size <= 1024 * 1024)
   const state = JSON.parse(await fs.readFile(filename, 'utf8'))
   assert(/^LF load \d{8} [a-f0-9]{8}$/.test(state.runTag))
-  assert.equal(state.accounts.length, 10)
-  assert.equal(new Set(state.accounts.map((account) => account.id)).size, 10)
+  assert.equal(state.accounts.length, users)
+  assert.equal(new Set(state.accounts.map((account) => account.id)).size, users)
   for (const [index, account] of state.accounts.entries()) {
     assert(/^[a-f0-9]{24}$/.test(account.id))
     assert.equal(

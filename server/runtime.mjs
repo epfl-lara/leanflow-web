@@ -15,7 +15,7 @@ import { PresetInstaller } from './preset-installer.mjs'
 import { LeanReleases } from './lean-releases.mjs'
 import { KernelStorageBudget } from './kernel-storage-budget.mjs'
 import { dependencyBuildPlan } from './dependency-targets.mjs'
-import { workerMemoryCapacity } from './worker-memory.mjs'
+import { memoryBytes, workerMemoryCapacity } from './worker-memory.mjs'
 import { projectImportRequirements } from './editor-imports.mjs'
 import {
   managedWorkerDirectory,
@@ -191,6 +191,9 @@ export class Runtime {
     cpus = 2,
     memory = '4g',
     memoryBudget = null,
+    editorMemory = null,
+    editorCpus = null,
+    batchMemoryReserved = null,
     kernelExportMaxBytes = 8 * 1024 ** 3,
     pidsLimit = 512,
     cgroupParent,
@@ -223,6 +226,16 @@ export class Runtime {
     this.cpus = cpus
     this.memory = memory
     this.memoryBudget = memoryBudget
+    this.workerMemoryBytes = memoryBytes(memory, 'worker memory')
+    this.editorMemory = editorMemory || memory
+    this.editorMemoryBytes = memoryBytes(this.editorMemory, 'editor memory')
+    this.editorCpus = editorCpus ?? cpus
+    if (!Number.isFinite(this.editorCpus) || this.editorCpus <= 0)
+      throw new Error('Editor CPU limit must be positive.')
+    this.batchMemoryReserved =
+      batchMemoryReserved == null
+        ? null
+        : memoryBytes(batchMemoryReserved, 'reserved batch memory')
     this.memoryCapacity = null
     this.capacityError = null
     if (
@@ -367,6 +380,25 @@ export class Runtime {
           memoryBudget: this.memoryBudget,
           hostMemory: engine.MemTotal,
         })
+        const editorCapacity = workerMemoryCapacity({
+          memory: this.editorMemory,
+          memoryBudget: this.memoryBudget,
+          hostMemory: engine.MemTotal,
+        })
+        // Container count and RAM are separate limits when editors use a
+        // smaller sandbox. Every launch still charges its actual memory cap.
+        this.memoryCapacity.slots = Math.max(
+          this.memoryCapacity.slots,
+          editorCapacity.slots,
+        )
+        if (
+          this.batchMemoryReserved != null &&
+          this.batchMemoryReserved + this.editorMemoryBytes >
+            this.memoryCapacity.memoryBudgetBytes
+        )
+          throw new Error(
+            'Reserved batch memory must leave room for an editor.',
+          )
       } catch (error) {
         this.capacityError = error.message
         throw error
@@ -871,6 +903,20 @@ export class Runtime {
       queued: this.queue.length,
       maxConcurrent: this.#slotLimit(),
       configuredMaxConcurrent: this.maxConcurrent,
+      availability: {
+        editor:
+          this.ready &&
+          !this.stopping &&
+          this.#hasCapacity({ workload: 'interactive', editor: true }),
+        batch:
+          this.ready &&
+          !this.stopping &&
+          this.#hasCapacity({ workload: 'batch' }),
+        kernel:
+          this.ready &&
+          !this.stopping &&
+          this.#hasCapacity({ workload: 'batch', kernelCheck: true }),
+      },
       compilerReservedSlots: this.#compilerReserve(),
       workloads: {
         ...this.#workloadLimits(),
@@ -893,6 +939,10 @@ export class Runtime {
         pids: this.pidsLimit,
         memoryBudgetBytes: this.memoryCapacity?.memoryBudgetBytes ?? null,
         hostMemoryBytes: this.memoryCapacity?.hostMemoryBytes ?? null,
+        editorMemory: this.editorMemory,
+        editorCpus: this.editorCpus,
+        usedMemoryBytes: this.#usedMemory(),
+        reservedBatchMemoryBytes: this.#reservedBatchMemory(),
       },
       toolchains: [...this.toolchains.keys()],
     }
@@ -1257,9 +1307,59 @@ export class Runtime {
     return {
       interactiveReserved,
       batchReserved,
-      interactiveLimit: slots - batchReserved,
-      batchLimit: slots - interactiveReserved,
+      interactiveLimit: Math.min(
+        slots - batchReserved,
+        Math.floor(
+          (this.#memoryBudget() - this.#reservedBatchMemory(batchReserved)) /
+            this.editorMemoryBytes,
+        ),
+      ),
+      batchLimit: Math.min(
+        slots - interactiveReserved,
+        Math.floor(
+          (this.#memoryBudget() -
+            Math.min(
+              interactiveReserved * this.editorMemoryBytes,
+              Math.max(0, this.#memoryBudget() - this.workerMemoryBytes),
+            )) /
+            this.workerMemoryBytes,
+        ),
+      ),
     }
+  }
+
+  #memoryBudget() {
+    return (
+      this.memoryCapacity?.memoryBudgetBytes ??
+      this.#slotLimit() * this.workerMemoryBytes
+    )
+  }
+
+  #reservedBatchMemory(
+    count = Math.min(this.batchReserved, Math.max(0, this.#slotLimit() - 1)),
+  ) {
+    return Math.min(
+      this.batchMemoryReserved ?? count * this.workerMemoryBytes,
+      Math.max(0, this.#memoryBudget() - this.editorMemoryBytes),
+    )
+  }
+
+  #memoryFor(options = {}) {
+    return options.editor
+      ? this.editorMemoryBytes
+      : this.workerMemoryBytes * this.#workerSlots(options)
+  }
+
+  #usedMemory(workload) {
+    return [...this.children]
+      .filter((child) => !workload || child.workload === workload)
+      .reduce(
+        (sum, child) =>
+          sum +
+          (child.workerMemoryBytes ??
+            this.workerMemoryBytes * (child.workerSlots || 1)),
+        0,
+      )
   }
 
   #workload(options = {}) {
@@ -1347,7 +1447,17 @@ export class Runtime {
     return (
       longTotal + this.#compilerReserve() + slots > this.#slotLimit() ||
       longBatch + this.#compilerReserve() + slots >
-        this.#workloadLimits().batchLimit
+        this.#workloadLimits().batchLimit ||
+      holds.reduce(
+        (sum, child) =>
+          sum +
+          (child.workerMemoryBytes ??
+            this.workerMemoryBytes * child.workerSlots),
+        0,
+      ) +
+        this.#memoryFor(head.options) +
+        this.#compilerReserve() * this.workerMemoryBytes >
+        this.#memoryBudget()
     )
   }
 
@@ -1403,7 +1513,14 @@ export class Runtime {
       this.#usedSlots(workload) +
         slots +
         (workload === 'batch' ? compilerReserve : 0) <=
-        limit
+        limit &&
+      this.#usedMemory() +
+        this.#memoryFor(options) +
+        compilerReserve * this.workerMemoryBytes <=
+        this.#memoryBudget() &&
+      (workload !== 'interactive' ||
+        this.#usedMemory('interactive') + this.#memoryFor(options) <=
+          this.#memoryBudget() - this.#reservedBatchMemory())
     )
   }
 
@@ -1428,6 +1545,7 @@ export class Runtime {
       boundedScratchBytes,
       postCheckFile,
       workload = 'batch',
+      editor = false,
       [scheduledWorker]: scheduled = false,
       [kernelStorageReservation]: storageReservation,
       [agentWorkerRole]: agentRole,
@@ -1452,6 +1570,7 @@ export class Runtime {
         cleanHome,
         kernelCheck,
         emptyRepositoryClone,
+        editor,
       ].some((value) => typeof value !== 'boolean')
     )
       throw new Error('Worker mount options must be booleans')
@@ -1506,9 +1625,18 @@ export class Runtime {
     if (!['none', 'bridge'].includes(network))
       throw new Error('Only isolated or outbound worker networks are supported')
     this.#workload({ kernelCheck, workload })
+    if (
+      editor &&
+      (workload !== 'interactive' ||
+        JSON.stringify(args) !== JSON.stringify(['lake', 'serve', '--']))
+    )
+      throw new Error(
+        'Editor resources are only available to the fixed Lean server command.',
+      )
     const admission = {
       kernelCheck,
       workload,
+      editor,
       timeoutMs,
       [agentWorkerRole]: agentRole,
     }
@@ -1526,7 +1654,7 @@ export class Runtime {
         { status: 503 },
       )
     const workerSlots = this.#workerSlots({ kernelCheck, workload })
-    let workerMemory = this.memory
+    let workerMemory = editor ? this.editorMemory : this.memory
     if (kernelCheck) {
       if (this.storage && !storageReservation)
         throw new Error(
@@ -1595,7 +1723,10 @@ export class Runtime {
       'ALL',
       '--security-opt',
       'no-new-privileges',
-      ...this.#resourceArgs(workerMemory, this.cpus * workerSlots),
+      ...this.#resourceArgs(
+        workerMemory,
+        editor ? this.editorCpus : this.cpus * workerSlots,
+      ),
       '--network',
       network,
       ...(boundedScratchBytes !== undefined
@@ -1784,6 +1915,7 @@ export class Runtime {
       workerSlots,
       kernelCheck,
       workload,
+      editor,
       storageReservation,
       [agentWorkerRole]: agentRole,
     })
@@ -1804,6 +1936,7 @@ export class Runtime {
       workerSlots = 1,
       kernelCheck = false,
       workload = 'batch',
+      editor = false,
       storageReservation,
       [dependentWorkerParent]: dependencyParent,
       [agentWorkerRole]: agentRole,
@@ -1813,6 +1946,7 @@ export class Runtime {
       !this.#hasCapacity({
         kernelCheck,
         workload,
+        editor,
         timeoutMs,
         [agentWorkerRole]: agentRole,
         [dependentWorkerParent]: dependencyParent,
@@ -1829,6 +1963,8 @@ export class Runtime {
     })
     child.workerHome = home
     child.workerSlots = workerSlots
+    child.workerMemoryBytes = this.#memoryFor({ kernelCheck, workload, editor })
+    child.editor = editor
     child.kernelCheck = kernelCheck
     child.workload = workload
     child.dependentWorker = Boolean(dependencyParent)

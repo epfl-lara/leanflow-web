@@ -663,6 +663,62 @@ test('viewer writes and owner controls are rejected while editor saves retain st
   )
 })
 
+test('Lean editor admission limits one account across projects and releases its slot on close', async (t) => {
+  const f = await fixture(t, {
+    capacity: loadCapacity({
+      STUDIO_MAX_EDITORS: '4',
+      STUDIO_MAX_EDITORS_PER_PROJECT: '3',
+      STUDIO_MAX_EDITORS_PER_USER: '1',
+    }),
+  })
+  const second = await f.workspaces.create(f.owner.id, {
+    name: 'Another private project',
+    preset: 'lean',
+  })
+  await f.workspaces.jobs.get(second.id)
+  const connect = (actor, project) => {
+    const ws = new WebSocket(
+      f.origin.replace('http:', 'ws:') + `/websocket/${project.id}`,
+      { headers: { Authorization: `Bearer ${actor.token}` } },
+    )
+    t.after(() => ws.terminate())
+    return ws
+  }
+  const first = connect(f.owner, f.project)
+  await once(first, 'open')
+  const other = connect(f.editor, f.project)
+  await once(other, 'open')
+  const rejected = connect(f.owner, second)
+  const status = await new Promise((resolve, reject) => {
+    rejected.on('error', reject)
+    rejected.once('unexpected-response', (_request, response) => {
+      response.resume()
+      rejected.terminate()
+      resolve(response.statusCode)
+    })
+  })
+  assert.equal(status, 429)
+  assert.equal(f.spawned.length, 2)
+  assert(
+    f.spawned.every(
+      ({ args, options }) =>
+        JSON.stringify(args) === JSON.stringify(['lake', 'serve', '--']) &&
+        options.editor === true &&
+        options.workload === 'interactive',
+    ),
+  )
+  const closed = once(first, 'close')
+  first.close()
+  await closed
+  for (let i = 0; !f.spawned[0].child.killed && i < 100; i++)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.equal(f.spawned[0].child.killed, true)
+  const reopened = connect(f.owner, second)
+  await once(reopened, 'open')
+  assert.equal(f.spawned.length, 3)
+  assert.equal(other.readyState, WebSocket.OPEN)
+})
+
 test('editor terminals use the initiating account’s private Git credentials and identity', async (t) => {
   const f = await fixture(t)
   const credentialActors = [],

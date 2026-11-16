@@ -240,6 +240,9 @@ export async function createStudio({
       cpus: capacity.workerCpus,
       memory: capacity.workerMemory,
       memoryBudget: capacity.workerMemoryBudget,
+      editorMemory: capacity.editorMemory,
+      editorCpus: capacity.editorCpus,
+      batchMemoryReserved: capacity.batchMemoryReserved,
       kernelExportMaxBytes: capacity.kernelExportMaxBytes,
       storage,
     })
@@ -1694,6 +1697,8 @@ export async function createStudio({
     }
     if (
       sockets.size >= capacity.editors ||
+      [...socketActors.values()].filter((actor) => actor === user.id).length >=
+        (capacity.editorsPerUser ?? capacity.editors) ||
       (languageServers.get(project.id) || 0) >= capacity.editorsPerProject
     )
       return reject('429 Too Many Requests')
@@ -1713,6 +1718,7 @@ export async function createStudio({
     try {
       child = runtime.spawn(project.root, ['lake', 'serve', '--'], {
         workload: 'interactive',
+        editor: true,
         network: 'none',
         readOnlyWorkspace: true,
         writeLakeCache: true,

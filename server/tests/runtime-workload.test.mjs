@@ -83,6 +83,119 @@ const kernelOptions = {
   freshHome: true,
 }
 
+test('smaller editor sandboxes serve 25 connections while charging actual RAM and preserving build headroom', async (t) => {
+  const { runtime, root } = await fixture(t, {
+    maxConcurrent: 28,
+    memoryBudget: '45g',
+    editorMemory: '1280m',
+    editorCpus: 0.2,
+    cpus: 1,
+    batchMemoryReserved: '12g',
+  })
+  runtime.memoryCapacity = { slots: 36, memoryBudgetBytes: 45 * 1024 ** 3 }
+  let output = ''
+  const editors = Array.from({ length: 25 }, (_, index) =>
+    runtime.spawn(root, ['lake', 'serve', '--'], {
+      workload: 'interactive',
+      editor: true,
+      ...(index === 0
+        ? {
+            onOutput: (text) => {
+              output += text
+            },
+          }
+        : {}),
+    }),
+  )
+  await until(() => output.includes('--memory'))
+  const args = JSON.parse(output.trim())
+  assert.equal(args[args.indexOf('--memory') + 1], '1280m')
+  assert.equal(args[args.indexOf('--memory-swap') + 1], '1280m')
+  assert.equal(args[args.indexOf('--cpus') + 1], '0.2')
+  assert.equal(runtime.info().limits.usedMemoryBytes, 25 * 1280 * 1024 ** 2)
+  assert.equal(runtime.info().workloads.interactiveLimit, 25)
+  assert.equal(runtime.info().availability.editor, false)
+  assert.equal(runtime.info().availability.batch, true)
+  assert.equal(runtime.info().availability.kernel, false)
+  assert.throws(
+    () =>
+      runtime.spawn(root, ['lake', 'serve', '--'], {
+        workload: 'interactive',
+        editor: true,
+      }),
+    { status: 503 },
+  )
+  assert.throws(
+    () => runtime.spawn(root, ['hold-terminal'], { workload: 'interactive' }),
+    { status: 503 },
+  )
+  assert.equal(
+    (await runtime.run(root, ['quick'], { timeoutMs: 1000 })).code,
+    0,
+  )
+  assert.equal(runtime.info().active, 25)
+  await Promise.all(editors.map(stop))
+  assert.equal(runtime.info().limits.usedMemoryBytes, 0)
+})
+
+test('RAM-blocked native checks permit bounded backfill, then resume as editors release memory', async (t) => {
+  const { runtime, root } = await fixture(t, {
+    maxConcurrent: 28,
+    memoryBudget: '45g',
+    editorMemory: '1280m',
+    editorCpus: 0.2,
+    cpus: 1,
+    batchMemoryReserved: '12g',
+  })
+  runtime.memoryCapacity = { slots: 36, memoryBudgetBytes: 45 * 1024 ** 3 }
+  const editors = Array.from({ length: 25 }, () =>
+    runtime.spawn(root, ['lake', 'serve', '--'], {
+      workload: 'interactive',
+      editor: true,
+    }),
+  )
+  const pending = runtime.spawnWhenAvailable(
+    root,
+    ['lake', 'check'],
+    kernelOptions,
+  )
+  pending.catch(() => {})
+  assert.equal(
+    (await runtime.run(root, ['quick'], { timeoutMs: 1000 })).code,
+    0,
+  )
+  assert.equal(runtime.info().queued, 1)
+  await Promise.all(editors.splice(0, 4).map(stop))
+  const native = await pending
+  assert.equal(native.workerMemoryBytes, 18 * 1024 ** 3)
+  assert.equal(
+    runtime.info().limits.usedMemoryBytes,
+    21 * 1280 * 1024 ** 2 + 18 * 1024 ** 3,
+  )
+  await Promise.all([native, ...editors].map(stop))
+})
+
+test('editor resource selection rejects other commands and keeps terminal sandboxes at normal size', async (t) => {
+  const { runtime, root } = await fixture(t, {
+    editorMemory: '1280m',
+    editorCpus: 0.2,
+  })
+  assert.throws(
+    () =>
+      runtime.spawn(root, ['bash'], { workload: 'interactive', editor: true }),
+    /fixed Lean server/,
+  )
+  assert.throws(
+    () => runtime.spawn(root, ['lake', 'serve', '--'], { editor: true }),
+    /fixed Lean server/,
+  )
+  const terminal = runtime.spawn(root, ['hold-terminal'], {
+    workload: 'interactive',
+  })
+  assert.equal(terminal.workerMemoryBytes, 6 * 1024 ** 3)
+  await stop(terminal)
+})
+
 test('worker reservation settings validate nonnegative integers and keep bounded defaults', () => {
   assert.equal(loadCapacity({}).interactiveWorkers, 1)
   assert.equal(loadCapacity({}).batchWorkers, 3)

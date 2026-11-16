@@ -52,6 +52,7 @@ try {
     })
     const { page, state } = fixture
     let attempts = 0
+    let recovering = false
     let releaseFirst
     let accountSwitched = false
     let releaseSwitchedList
@@ -76,10 +77,12 @@ try {
         })
         return route.fulfill({ json: [] })
       }
-      if (attempts === 1) {
-        await new Promise((resolve) => {
-          releaseFirst = resolve
-        })
+      if (!recovering) {
+        if (attempts === 1) {
+          await new Promise((resolve) => {
+            releaseFirst = resolve
+          })
+        }
         return route.fulfill({
           status: 503,
           json: { error: 'Project list is temporarily unavailable.' },
@@ -124,7 +127,7 @@ try {
         .getByRole('alert')
         .filter({ hasText: 'Project list is temporarily unavailable.' })
         .waitFor()
-      assert.equal(attempts, 1)
+      assert.equal(attempts, 3)
       assert.equal(
         await page
           .getByRole('heading', {
@@ -134,6 +137,7 @@ try {
           .count(),
         0,
       )
+      recovering = true
       await page
         .getByRole('button', { name: 'Retry loading projects', exact: true })
         .click()
