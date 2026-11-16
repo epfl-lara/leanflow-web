@@ -18,7 +18,8 @@ settings are recorded below after acceptance.
   waits to the caller. Stop on cancellation or an explicit account change.
 - Never replay writes or assistant actions automatically. An interrupted write
   reports that its outcome is unknown, so the interface does not claim it saved.
-- Preserve the deployed soft-launch, browser-storage and project-setup fixes.
+- Preserve the deployed soft-launch, browser-storage, project-setup and Git
+  integration fixes, including the update installed during this rollout.
 
 ## Investigation
 
@@ -80,3 +81,16 @@ node scripts/check-editor-load-live.mjs
 Create the private output directory with mode 0700 first. The script has no
 production URL or token default. Remove its projects, account credentials and
 containers after all test jobs stop; retain only token-free result summaries.
+
+## Verification before the live load test
+
+The integrated Linux application suite passed 2,153 tests, with two skipped.
+Type checking and the production client build passed; lint completed with
+existing warnings. Real Chromium recovery fixtures cover connection resets,
+short Retry-After, persistent project-list failures and explicit retry.
+
+Claude Code (Opus 5.5, maximum review effort) independently reviewed admission
+and browser retry safety. Its reservation-clamping and terminal-RAM findings
+were fixed and covered by regressions. The originally proposed 12-GiB reserve
+was replaced by an 18-GiB reserve. Follow-up tests exercise the actual API wiring,
+write non-replay, interrupted bodies, account revisits and unacknowledged saves.

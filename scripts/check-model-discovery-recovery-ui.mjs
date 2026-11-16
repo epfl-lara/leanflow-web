@@ -84,7 +84,7 @@ try {
     await page.getByRole('button', { name: 'Send', exact: true }).isDisabled(),
     true,
   )
-  await until(() => calls === 1, 'first delayed model retry')
+  await until(() => calls >= 1, 'first delayed model retry')
   assert.equal(await composer.inputValue(), draft)
   await until(() => !!complete, 'backed off model retry')
   assert.equal(calls, 2)

@@ -1,5 +1,9 @@
 # Soft-launch readiness review — 15–16 November 2026
 
+For current settings and measured editor resources, see the
+[16 November availability rollout](2026-11-16-availability.md). The four-editor
+limit below is the earlier deployment snapshot.
+
 Target: about **25 simultaneous users**. Complete the hardware acceptance checks
 below before treating that number as supported capacity.
 

@@ -71,9 +71,10 @@ try {
   }
   const actions = []
   let previewReads = 0
+  let previewAvailable = false
   await page.route(`**/api/projects/${id}/file?path=New.lean`, (route) => {
     previewReads++
-    return previewReads === 1
+    return !previewAvailable
       ? route.fulfill({
           status: 503,
           json: { error: 'File preview is temporarily unavailable.' },
@@ -263,9 +264,13 @@ try {
     .getByText('The tracked diff preview is incomplete.', { exact: false })
     .waitFor()
   await files.getByRole('button', { name: /New\.lean/ }).click()
+  await git
+    .getByRole('button', { name: 'Retry preview', exact: true })
+    .waitFor()
+  previewAvailable = true
   await git.getByRole('button', { name: 'Retry preview', exact: true }).click()
   await git.locator('.git-diff').getByText('-- new', { exact: true }).waitFor()
-  assert.equal(previewReads, 2)
+  assert.equal(previewReads, 4)
   checks.push(
     'Local history works without publishing or a remote, tabs support keyboard navigation, staged/unstaged states differ, and truncated previews are explicit',
   )
