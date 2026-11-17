@@ -114,6 +114,7 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
       120000,
     )
     timer.unref?.()
+    let fallback
     try {
       current()
       const input = await checks.captureEditor(project.root, combined)
@@ -130,27 +131,26 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
           await checks.inputs.blobs.manifest(input.sourceManifest, 'source'),
         )
       ) {
-        unsubscribe()
-        return local({ unsupported: true })
+        fallback = { unsupported: true }
+      } else {
+        combined.throwIfAborted()
+        child = await checks.controller.openEditor(input, {
+          actor,
+          projectId: project.id,
+          jobId: randomUUID(),
+          signal: combined,
+          timeoutMs: 6 * 60 * 60 * 1000,
+        })
       }
-      child = await checks.controller.openEditor(input, {
-        actor,
-        projectId: project.id,
-        jobId: randomUUID(),
-        signal: combined,
-        timeoutMs: 6 * 60 * 60 * 1000,
-      })
       combined.throwIfAborted()
-      if (!child) {
-        unsubscribe()
-        return local()
+      if (child) {
+        child.once('close', unsubscribe)
+        child.beforeInput = sync
+        dirty = true
+        await sync()
+        combined.throwIfAborted()
+        return child
       }
-      child.once('close', unsubscribe)
-      child.beforeInput = sync
-      dirty = true
-      await sync()
-      combined.throwIfAborted()
-      return child
     } catch (error) {
       unsubscribe()
       child?.kill()
@@ -174,9 +174,10 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
             )
           : reason
       }
-      return local()
     } finally {
       clearTimeout(timer)
     }
+    unsubscribe()
+    return local(fallback)
   })
 }

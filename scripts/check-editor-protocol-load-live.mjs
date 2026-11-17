@@ -18,10 +18,15 @@ const expectedCapacity = Number(
 )
 assert(Number.isSafeInteger(expectedCapacity) && expectedCapacity >= users)
 const { state, directory, origin } = await compileLoadFixture({ users })
+const arrivalBatch = Number(process.env.STUDIO_LOAD_EDITOR_ARRIVAL_BATCH || 3)
+assert(
+  Number.isSafeInteger(arrivalBatch) && arrivalBatch >= 1 && arrivalBatch <= 64,
+)
 const report = {
   passed: false,
   kind: 'API and LSP, no browsers',
   users,
+  arrivalBatch,
   runTag: state.runTag,
   inferenceRequests: 0,
   sessions: [],
@@ -253,10 +258,10 @@ try {
           })
       }, 2000)
   }
-  for (let index = 0; index < state.accounts.length; index += 3) {
+  for (let index = 0; index < state.accounts.length; index += arrivalBatch) {
     const opened = await Promise.allSettled(
       state.accounts
-        .slice(index, index + 3)
+        .slice(index, index + arrivalBatch)
         .map((account, offset) => openSession(account, index + offset)),
     )
     const failed = opened.find((result) => result.status === 'rejected')

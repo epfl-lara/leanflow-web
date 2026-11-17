@@ -1246,16 +1246,21 @@ export class WorkspaceStore {
     return JSON.parse(row.data)
   }
 
-  get(id, actor) {
+  // Editor traffic needs current authorization on every message. Load setup
+  // history and inspect dependency files only for callers requesting details.
+  accessibleProject(id, actor) {
     validateId(id)
     validateOwner(actor)
     this.assertActorActive?.(actor)
-    const row = this.db.prepare('SELECT data FROM projects WHERE id=?').get(id)
-    if (!row) fail('Project not found', 404)
-    const project = JSON.parse(row.data)
+    const project = this.#record(id)
     const accessRole = this.memberships.role(id, actor)
     if (!accessRole || project.archivedAt) fail('Project not found', 404)
     project.accessRole = accessRole
+    return project
+  }
+
+  get(id, actor) {
+    const project = this.accessibleProject(id, actor)
     this.#dependencyStatus(project)
     project.log = this.#setupLog(project)
     return project

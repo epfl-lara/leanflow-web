@@ -48,7 +48,7 @@ function child() {
   return value
 }
 
-function fixture(t, patch = {}) {
+function fixture(t, patch = {}, startLocal = (worker) => worker) {
   const remote = child(),
     local = child()
   const project = {
@@ -108,9 +108,9 @@ function fixture(t, patch = {}) {
   const result = clusterEditor(
     checks,
     { project, actor: 'alice', workspaces },
-    () => {
+    (fallback) => {
       data.localStarts++
-      return local
+      return startLocal(local, fallback)
     },
   )
   result.stdin.on('error', () => {})
@@ -206,6 +206,43 @@ test('private or unsupported captures fall back locally and remove their source 
   assert.equal(await f.result.ready, f.local)
   assert.equal(f.data.remoteStarts, 0)
   assert.equal(f.data.localStarts, 1)
+  assert.equal(f.listeners.size, 0)
+})
+
+test('a busy local-only fallback reports one failed start to the waiting list', async (t) => {
+  const busy = Object.assign(new Error('Local editor busy'), { status: 503 })
+  const f = fixture(
+    t,
+    { captureEditor: async () => null },
+    (_child, fallback) => {
+      assert.deepEqual(fallback, { unsupported: true })
+      throw busy
+    },
+  )
+  await assert.rejects(f.result.ready, (error) => error === busy)
+  assert.equal(f.data.localStarts, 1)
+  assert.equal(f.listeners.size, 0)
+})
+
+test('closing a browser during manifest inspection never starts a fallback editor', async (t) => {
+  const inspecting = Promise.withResolvers()
+  const manifest = Promise.withResolvers()
+  const f = fixture(t, {
+    inputs: {
+      blobs: {
+        manifest: () => {
+          inspecting.resolve()
+          return manifest.promise
+        },
+      },
+    },
+  })
+  await inspecting.promise
+  f.result.kill()
+  manifest.resolve({ kind: 'source', totalBytes: 0, entries: [] })
+  await assert.rejects(f.result.ready)
+  assert.equal(f.data.localStarts, 0)
+  assert.equal(f.data.remoteStarts, 0)
   assert.equal(f.listeners.size, 0)
 })
 

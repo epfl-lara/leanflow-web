@@ -1,6 +1,6 @@
 import { DeferredEditor } from './cluster/editor-stream.mjs'
 
-function stopped(child) {
+export function editorStopped(child) {
   if (child.workerReleased) return child.workerReleased
   if (child.workerStopped) return child.workerStopped
   if (child.closed || typeof child.exitCode === 'number')
@@ -44,7 +44,7 @@ export function queuedEditor({
         actual = child.ready ? await child.ready : child
         signal.throwIfAborted()
         onStatus({ state: 'active' })
-        stopped(actual).then(release, () => {
+        editorStopped(actual).then(release, () => {
           // Unconfirmed cleanup cannot release capacity for a second process.
           console.warn('[LeanFlow] Editor cleanup remains unconfirmed.')
         })
@@ -57,7 +57,7 @@ export function queuedEditor({
         child?.kill()
         if (actual) {
           try {
-            await stopped(actual)
+            await editorStopped(actual)
           } catch {
             throw error
           }

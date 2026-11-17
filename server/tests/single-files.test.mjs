@@ -229,17 +229,15 @@ test('real editor sockets share local and remote admission, mirror canonical sav
   )
   assert.equal(children.length, 4)
   assert.equal(waiting.readyState, WebSocket.OPEN)
-  checks.controller.openEditor = async () => null
-  checks.controller.canOpenEditor = () => false
-  f.runtime.canSpawnEditor = () => false
-  f.runtime.spawn = () => {
-    throw Object.assign(
-      new Error(
-        'Interactive worker capacity is full. Close an unused editor or terminal, then retry.',
-      ),
-      { status: 503 },
-    )
+  let unsupportedCaptures = 0
+  checks.inputs.capture = async () => {
+    unsupportedCaptures++
+    return null
   }
+  // A remote node advertises generic capacity, but this project requires a
+  // local editor. The ordinary runtime pool has room beyond the local ceiling.
+  checks.controller.canOpenEditor = () => true
+  f.runtime.canSpawnEditor = () => true
   const busy = connect(owner, projects[0])
   const busyMessages = []
   busy.on('message', (bytes) => busyMessages.push(JSON.parse(bytes)))
@@ -249,20 +247,19 @@ test('real editor sockets share local and remote admission, mirror canonical sav
   await waitingClosed
   for (
     let i = 0;
-    !busyMessages.some((message) => message.params?.state === 'waiting') &&
-    i < 100;
+    (!unsupportedCaptures ||
+      busyMessages.at(-1)?.params?.state !== 'waiting') &&
+    i < 200;
     i++
   )
     await new Promise((resolve) => setTimeout(resolve, 5))
   assert(busyMessages.some((message) => message.params?.state === 'waiting'))
   assert.equal(busy.readyState, WebSocket.OPEN)
   assert.equal(children.length, 4)
-  f.runtime.spawn = () => {
-    const child = makeChild()
-    locals.push(child)
-    return child
-  }
-  f.runtime.canSpawnEditor = () => true
+  assert.equal(unsupportedCaptures, 1)
+  const localClosed = once(sockets[2], 'close')
+  sockets[2].close()
+  await localClosed
   busy.send(
     JSON.stringify({
       jsonrpc: '2.0',
@@ -273,12 +270,41 @@ test('real editor sockets share local and remote admission, mirror canonical sav
   )
   for (
     let i = 0;
-    !busyMessages.some((message) => message.id === 5) && i < 200;
+    !busyMessages.some((message) => message.id === 5) && i < 600;
     i++
   )
     await new Promise((resolve) => setTimeout(resolve, 5))
   assert(busyMessages.some((message) => message.id === 5))
   assert.equal(busy.readyState, WebSocket.OPEN)
+  assert.equal(
+    unsupportedCaptures,
+    1,
+    'A local-only retry should reuse its placement decision',
+  )
+  assert.equal(locals.length, 2)
+  let environmentReads = 0
+  f.runtime.dependencyPreparationReason = () => {
+    environmentReads++
+    return null
+  }
+  const hovered = once(busy, 'message')
+  busy.send(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'textDocument/hover',
+      params: {
+        textDocument: { uri: 'file:///workspace/Main.lean' },
+        position: { line: 0, character: 0 },
+      },
+    }),
+  )
+  assert.equal(JSON.parse((await hovered)[0]).id, 6)
+  assert.equal(
+    environmentReads,
+    0,
+    'Serving a hover should not reread the project environment',
+  )
   assert.equal(f.providerCalls(), 0)
 })
 

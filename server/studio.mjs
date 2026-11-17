@@ -36,7 +36,7 @@ import { searchDeclarations } from './search.mjs'
 import { LspFrames, validateClientUris } from './rpc.mjs'
 import { leanTransport } from './lean-transport.mjs'
 import { EditorAdmission } from './editor-admission.mjs'
-import { queuedEditor } from './queued-editor.mjs'
+import { editorStopped, queuedEditor } from './queued-editor.mjs'
 import { EDITOR_QUEUE_METHOD } from '../shared/editor-queue.mjs'
 import { LeanRequests } from './lean-requests.mjs'
 import { LeanProgress } from './lean-progress.mjs'
@@ -450,6 +450,7 @@ export async function createStudio({
     sockets = new Set(),
     socketProjects = new Map(),
     socketActors = new Map()
+  let localEditors = 0
   const editorAdmission = new EditorAdmission({
     capacity: () =>
       capacity.editors +
@@ -1822,7 +1823,14 @@ export async function createStudio({
             new Error('This project is stopping. Wait a moment.'),
             { status: 503 },
           )
-        return runtime.spawn(current.root, ['lake', 'serve', '--'], {
+        if (localEditors >= capacity.editors)
+          throw Object.assign(
+            new Error(
+              'Local Lean editor capacity is full. Waiting for an editor.',
+            ),
+            { status: 503 },
+          )
+        const local = runtime.spawn(current.root, ['lake', 'serve', '--'], {
           workload: 'interactive',
           // Keep repository editors at their existing worker size. The smaller
           // allocation was measured for managed single-file Mathlib workspaces.
@@ -1833,6 +1841,14 @@ export async function createStudio({
           freshHome: true,
           cleanHome: true,
         })
+        localEditors++
+        editorStopped(local).then(
+          () => localEditors--,
+          () => {
+            // Keep the slot if the runtime could not confirm cleanup.
+          },
+        )
+        return local
       }
       child = queuedEditor({
         admission: editorAdmission,
@@ -1844,10 +1860,11 @@ export async function createStudio({
           if (activity.isStopping(actor, project.id)) return false
           return (
             (remoteAllowed && clusterChecks?.canOpenEditor?.(current)) ||
-            (runtime.canSpawnEditor?.({
-              editor: current.kind === 'single-file',
-            }) ??
-              true)
+            (localEditors < capacity.editors &&
+              (runtime.canSpawnEditor?.({
+                editor: current.kind === 'single-file',
+              }) ??
+                true))
           )
         },
         start: () => {
@@ -1857,7 +1874,7 @@ export async function createStudio({
               new Error('This project is stopping. Wait a moment.'),
               { status: 503 },
             )
-          return clusterChecks
+          return remoteAllowed && clusterChecks
             ? clusterChecks.openEditor(
                 { project: current, actor, workspaces },
                 localEditor,
@@ -1929,7 +1946,7 @@ export async function createStudio({
             child?.kill()
             return
           }
-          workspaces.get(project.id, actor)
+          workspaces.accessibleProject(project.id, actor)
           const message = validateClientUris(JSON.parse(data.toString()))
           // Re-send after initialize so the client's early notification handler
           // observes waiting even if it attached after the socket opened.
