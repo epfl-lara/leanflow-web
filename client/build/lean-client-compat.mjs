@@ -30,6 +30,16 @@ const cancellableSocket = `const pendingSignal = lcConfig.leanflowPendingSignal;
                     };
                 }`
 const guardedCreation = `const leanflowQueueNotice = this.languageClientConfig?.options?.leanflowQueue;
+        const proofDiagnostics = this.languageClientConfig?.options?.leanflowProofDiagnostics?.();
+        const writer = this.messageTransports?.writer;
+        if (proofDiagnostics && writer) {
+            const write = writer.write.bind(writer);
+            writer.write = (message) => {
+                if (message.method === 'textDocument/didOpen' || message.method === 'textDocument/didChange' || message.method === 'textDocument/didClose')
+                    proofDiagnostics.sent(message.method, message.params);
+                return write(message);
+            };
+        }
         if (typeof leanflowQueueNotice === 'function') {
             const previousStrategy = mlcConfig.clientOptions.connectionOptions?.messageStrategy;
             mlcConfig.clientOptions.connectionOptions = {
@@ -40,6 +50,8 @@ const guardedCreation = `const leanflowQueueNotice = this.languageClientConfig?.
                             leanflowQueueNotice(message.params);
                             return;
                         }
+                        if (message.method === 'textDocument/publishDiagnostics' || message.method === '$/lean/fileProgress')
+                            proofDiagnostics?.received(message.method, message.params);
                         return previousStrategy ? previousStrategy.handleMessage(message, next) : next(message);
                     }
                 }
@@ -63,6 +75,7 @@ const expected = `this.messageTransports?.reader.onClose(async () => {
             await this.languageClient?.stop();`
 const replacement = `this.messageTransports?.reader.onClose(async () => {
             transportClosed = true;
+            proofDiagnostics?.closed();
             // Transport closure already cancels initialization and cleans the
             // language client. Sending shutdown here cannot receive a reply.`
 
@@ -74,6 +87,8 @@ const replacement = `this.messageTransports?.reader.onClose(async () => {
 // Queue notifications must be observed while initialize is still waiting. The
 // upstream onCall hook runs after initialize; install only this notification's
 // handler through the existing connection strategy before the client starts.
+// Observe versioned compiler snapshots on the same channel without replacing
+// VS Code’s diagnostic handler or adding another WebSocket listener.
 // The wrapper otherwise retains a pending socket outside the provider's client
 // list. Cancel pending starts promptly. Once initialized, leave the socket open
 // for didClose, shutdown and exit until its owner finishes bounded disposal.

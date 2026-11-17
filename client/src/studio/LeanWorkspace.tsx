@@ -17,6 +17,7 @@ import {
   useEffect,
   useCallback,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -27,6 +28,7 @@ import { connectInfoviewTheme } from './infoviewTheme'
 import { leanEditorTheme } from './leanEditorTheme'
 import './leanEditorTheme.css'
 import { ResizeHandle } from './ResizeHandle'
+import { proofCheckMark, proofCheckMarks } from './proofCheckMarks'
 import { DEFAULT_LAYOUT, useMediaQuery } from './layout'
 import { isMarkdownPath } from './fileReading'
 import { texLanguage } from './texBuilds'
@@ -54,8 +56,11 @@ import {
   documentOffsetAfterEdit,
 } from '../../../shared/document-text.mjs'
 import type { ChatMode } from './chatModes'
+import { ProofDiagnostics, proofCheckStatuses } from './proofDiagnostics'
+import { MacroProofDeclarations } from './macroProofDeclarations'
 import {
-  proofDeclarations,
+  outlineCode,
+  proofDeclarationsFromCode,
   proofTargetForSelection,
   type ProofDeclaration,
   type EditorProofState,
@@ -65,6 +70,7 @@ import {
 } from './proofTarget'
 
 class BrowserLeanMonaco extends LeanMonaco {
+  readonly proofDiagnostics = new ProofDiagnostics()
   private readonly pendingConnections = new AbortController()
   private readonly disposedConnections = new AbortController()
 
@@ -105,6 +111,9 @@ class BrowserLeanMonaco extends LeanMonaco {
   protected override getWebSocketOptions(
     options: Parameters<LeanMonaco['start']>[0],
   ): WebSocketConfigOptionsUrl & {
+    leanflowProofDiagnostics: () => ReturnType<
+      ProofDiagnostics['openConnection']
+    >
     leanflowQueue: (params: unknown) => void
     leanflowPendingSignal: AbortSignal
     leanflowDisposeSignal: AbortSignal
@@ -125,6 +134,7 @@ class BrowserLeanMonaco extends LeanMonaco {
     const prepareRenameSources = this.prepareRenameSources
     return {
       ...settings,
+      leanflowProofDiagnostics: () => this.proofDiagnostics.openConnection(),
       leanflowPendingSignal: this.pendingConnections.signal,
       leanflowDisposeSignal: this.disposedConnections.signal,
       leanflowQueue(params: unknown) {
@@ -360,7 +370,9 @@ export function LeanWorkspace({
   const themeRef = useRef(theme)
   const onFocusProofRef = useRef(onFocusProof)
   const declarationsRef = useRef<ProofDeclaration[]>([])
-  const [declarations, setDeclarations] = useState<ProofDeclaration[]>([])
+  const [checkedDeclarations, setDeclarations] = useState<ProofDeclaration[]>(
+    [],
+  )
   const [outlineStatus, setOutlineStatus] = useState<
     'loading' | 'ready' | 'unavailable'
   >('loading')
@@ -392,6 +404,27 @@ export function LeanWorkspace({
   const [requestIssue, setRequestIssue] = useState('')
   const [renameIssue, setRenameIssue] = useState('')
   const [loading, setLoading] = useState(true)
+  const proofChecksPaused = !!(
+    sleeping ||
+    restarting ||
+    refreshingImports ||
+    editorQueue ||
+    connectionIssue ||
+    failure ||
+    (file?.path && importsStale === file.path)
+  )
+  const declarations = useMemo(
+    () =>
+      proofChecksPaused
+        ? checkedDeclarations.map((item) =>
+            item.checkStatus
+              ? { ...item, checkStatus: 'pending' as const }
+              : item,
+          )
+        : checkedDeclarations,
+    [proofChecksPaused, checkedDeclarations],
+  )
+
   const stacked = useMediaQuery('(max-width: 1250px)')
   fileRef.current = file
   onChangeRef.current = onChange
@@ -1086,6 +1119,80 @@ export function LeanWorkspace({
             ),
           )
         }
+        const diagnostics = active.lean.proofDiagnostics
+        const macros = new MacroProofDeclarations()
+        let outlineVersion: number | undefined
+        let outlineSession: object | undefined
+        let baseDeclarations: ProofDeclaration[] = []
+        let displayedOutline: ProofDeclaration[] | undefined
+        let awaiting: ReturnType<ProofDiagnostics['document']>
+        const updateChecks = (changedUri?: string) => {
+          if (
+            (changedUri && changedUri !== uri) ||
+            outlineDisposed ||
+            cancelled ||
+            model.isDisposed() ||
+            outlineVersion === undefined ||
+            model.getVersionId() !== outlineVersion
+          )
+            return
+          const doc = diagnostics.document(uri, outlineVersion)
+          if (doc && doc.session !== outlineSession) {
+            scheduleOutline()
+            return
+          }
+          const next = proofCheckStatuses(baseDeclarations, doc)
+          if (
+            displayedOutline !== baseDeclarations ||
+            next.some(
+              (item, index) =>
+                item.checkStatus !==
+                declarationsRef.current[index]?.checkStatus,
+            )
+          ) {
+            displayedOutline = baseDeclarations
+            declarationsRef.current = next
+            setDeclarations(next)
+          }
+          // An empty progress range can precede asynchronous diagnostics. The
+          // pinned Lean server acknowledges this request after its reporter and
+          // command tasks finish. Reuse the editor's version cancellation token.
+          if (
+            !doc ||
+            !doc.hasDiagnostics ||
+            !doc.progressDone ||
+            doc.confirmed ||
+            doc === awaiting ||
+            !request ||
+            request.token.isCancellationRequested ||
+            !next.some((item) => item.checkStatus !== undefined)
+          )
+            return
+          const client = active.lean.clientProvider
+            ?.getClients()
+            .find((item) => item.isRunning())
+          if (!client) return
+          awaiting = doc
+          const cancellation = request
+          void client
+            .sendRequest(
+              'textDocument/waitForDiagnostics',
+              { uri, version: outlineVersion },
+              cancellation.token,
+            )
+            .then(() => {
+              if (awaiting === doc) awaiting = undefined
+              if (
+                !cancelled &&
+                !outlineDisposed &&
+                !model.isDisposed() &&
+                !cancellation.token.isCancellationRequested &&
+                model.getVersionId() === doc.version
+              )
+                diagnostics.confirm(uri, doc)
+            })
+            .catch(() => {}) // A failed/unsupported request leaves the proof pending.
+        }
         const loadOutline = async (retries = 0) => {
           if (
             outlineDisposed ||
@@ -1107,6 +1214,7 @@ export function LeanWorkspace({
           }
           setOutlineStatus('loading')
           const version = model.getVersionId()
+          const session = diagnostics.document(uri, version)?.session
           const cancellation = new CancellationTokenSource()
           request?.cancel()
           request?.dispose()
@@ -1124,16 +1232,49 @@ export function LeanWorkspace({
               model.getVersionId() !== version
             )
               return
-            const next = proofDeclarations(
+            if (session !== diagnostics.document(uri, version)?.session) {
+              scheduleOutline()
+              return
+            }
+            const source = model.getValue().replace(/\r\n?/g, '\n')
+            const code = outlineCode(source)
+            const next = proofDeclarationsFromCode(
               symbols,
               uri,
               model.getLineCount(),
-              model.getValue(),
+              code,
             )
-            declarationsRef.current = next
-            setDeclarations(next)
-            setOutlineStatus('ready')
-            updateFocus()
+            const publish = (items: ProofDeclaration[]) => {
+              baseDeclarations = items
+              outlineVersion = version
+              outlineSession = session
+              updateChecks()
+              setOutlineStatus('ready')
+              updateFocus()
+            }
+            publish(next)
+            if (session)
+              await macros.collect(
+                source,
+                code,
+                session,
+                symbols,
+                next,
+                (position) =>
+                  client.sendRequest(
+                    'textDocument/hover',
+                    { textDocument: { uri }, position },
+                    cancellation.token,
+                  ),
+                () =>
+                  cancelled ||
+                  outlineDisposed ||
+                  cancellation.token.isCancellationRequested ||
+                  model.isDisposed() ||
+                  model.getVersionId() !== version ||
+                  diagnostics.document(uri, version)?.session !== session,
+                publish,
+              )
           } catch {
             if (
               !outlineDisposed &&
@@ -1147,6 +1288,8 @@ export function LeanWorkspace({
         const scheduleOutline = () => {
           clearTimeout(timer)
           request?.cancel()
+          outlineVersion = undefined
+          awaiting = undefined
           // Never attach a proof using ranges from an older buffer version.
           declarationsRef.current = []
           setDeclarations([])
@@ -1154,6 +1297,7 @@ export function LeanWorkspace({
           updateFocus()
           timer = setTimeout(() => void loadOutline(), 500)
         }
+        const unsubscribeDiagnostics = diagnostics.subscribe(updateChecks)
         const selectionSubscription =
           editor.onDidChangeCursorSelection(updateFocus)
         const contentSubscription = model.onDidChangeContent(scheduleOutline)
@@ -1172,6 +1316,7 @@ export function LeanWorkspace({
           clearTimeout(timer)
           request?.cancel()
           request?.dispose()
+          unsubscribeDiagnostics()
           selectionSubscription.dispose()
           contentSubscription.dispose()
           clientAddedSubscription?.dispose()
@@ -1523,6 +1668,41 @@ export function LeanWorkspace({
     failure,
     onProofStateChange,
   ])
+
+  useLayoutEffect(() => {
+    const workspace = runtime.current?.editor
+    const model = workspace?.editor?.getModel()
+    if (
+      !workspace ||
+      workspace.disposed ||
+      !model ||
+      model.uri.path !== `/workspace/${file?.path}`
+    )
+      return
+    const marks: monacoEditor.IModelDeltaDecoration[] = []
+    for (const item of declarations) {
+      const status = proofCheckMark(item)
+      if (!status) continue
+      marks.push({
+        range: {
+          startLineNumber: item.headerLine ?? item.startLine,
+          endLineNumber: item.headerLine ?? item.startLine,
+          startColumn: item.startColumn,
+          endColumn: item.startColumn,
+        },
+        options: {
+          glyphMarginClassName: `proof-check-mark proof-mark-${status} proof-gutter-${status}`,
+          glyphMarginHoverMessage: { value: proofCheckMarks[status].title },
+          // Multiple declarations can start on one line. Surface its highest severity.
+          zIndex: proofCheckMarks[status].priority,
+          // Keep Lean’s own line diagnostics visible alongside the declaration.
+          glyphMargin: { position: monacoEditor.GlyphMarginLane.Right },
+        },
+      })
+    }
+    workspace.proofMarks ??= workspace.editor.createDecorationsCollection()
+    workspace.proofMarks.set(marks)
+  }, [declarations, file?.path])
 
   async function refreshImports() {
     const active = runtime.current

@@ -104,6 +104,8 @@ Choose an HTML file to view its static page, including inline styles and local p
 
 Project images also display inside Markdown documents and assistant replies, using links such as `![Diagram](figures/diagram.svg)`. Choose an image to open it in **Files**. Ask Lemex to save generated diagrams as SVG; uploaded raster images can be linked as well. New raster output in an assistant's private copy is not published as a project file. External images stay links until you choose to open them.
 
+To inspect a figure in chat, choose **Enlarge** in its caption. Choose **Actual size** to see the original detail or **Fit image** to see the whole figure. Press **Escape** to return to the conversation.
+
 Show a project image beneath a Lean comment by referencing its path relative to the Lean file:
 
 ```lean
@@ -171,6 +173,8 @@ Close the terminal before preparing, changing or publishing Git history, or uplo
 1. Open a Lean file. In **Outline**, click a declaration to navigate, then **+ Chat** to attach it.
 2. Or highlight lines in the editor, open **Select context** in chat, and choose **Use selected lines**. The same menu lists declarations and accepts ranges such as `70–74`. Highlighted lines keep that exact line range, even inside a theorem.
 3. Check **Focused on**, write your request, and send. Click the target to revisit it, or clear it to remove focus.
+
+Look beside each theorem, lemma, or example in the editor or **Outline** for its current Lean status. A green check means Lean finished checking it without errors or warnings. An amber triangle marks a warning or a proof placeholder such as `sorry`. A red cross marks an error. A clock means Lean has yet to finish checking this version. Put the cursor on a reported problem to see details in **Goals & diagnostics**.
 
 Targets belong to their chat. **Ask Lemex** uses the current proof or selection; **Optimize** also selects optimization mode. Save changed lines before sending a focused update during a run.
 

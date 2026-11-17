@@ -66,6 +66,7 @@ const workspaceSuites = [
   'terminal-opening',
   'editor-startup',
   'editor-queue',
+  'proof-status',
   'editor-sleep',
   'lean-comment-images',
   'file-lifecycle',

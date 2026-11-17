@@ -6,6 +6,7 @@ import { createModelReference } from 'vscode/monaco'
 export class WorkspaceEditor {
   editor!: editor.IStandaloneCodeEditor
   modelRef!: Awaited<ReturnType<typeof createModelReference>>
+  proofMarks?: editor.IEditorDecorationsCollection
   disposed = false
 
   async start(

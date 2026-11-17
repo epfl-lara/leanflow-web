@@ -33,6 +33,14 @@ A separate mobile Chromium session used production token sign-in, confirmed a di
 
 The earlier eight-request limit forced 17 of 25 simultaneous small saves to retry in an isolated test. The production setting now allows 32 small source requests, with at most two per account. The bulk lane keeps its existing two slots. All 25 competition saves passed on the first attempt. This serving profile also increased the assistant waiting limit from 12 to 32.
 
+## Proof feedback and chat
+
+The editor and file outline show a check, warning triangle, error mark or clock beside each theorem, lemma and example that Lean identifies. A check requires Lean to finish reporting diagnostics for the current file version. Editing a proof clears an earlier result. An explicit `sorry` stays visible as a warning even when Lean’s placeholder warning is disabled. Project verification remains available separately.
+
+Mathlib’s `lemma` command can be missing from Lean’s outline. The editor asks Lean for the ranges of those commands, with at most four lookups in flight per editor. A real Lean 4.35 test with 120 Mathlib lemmas made 120 lookups on first open and two after editing the final lemma. Editing the first lemma required checking all 120 ranges again. These measurements used a local compiler.
+
+Chat work steps keep their tool icon and show a text result alongside a distinct status mark. Project diagrams open at actual size inside the conversation. Desktop and phone browser tests covered keyboard disclosure, reduced motion, diagram panning, and focus restoration when closing a figure. The [participant guide](../UsingLeanFlow.md) describes both features.
+
 ## Operations and reproduction
 
 The coordinator restarted after two idle checks. All 32 slots were ready in 20.9 seconds. The previous release, its fingerprinted browser assets, and private rollback backups were retained. All three remote workers kept their running processes and certifications. Cleanup removed 50 fixture projects, revoked all 25 rehearsal accounts and the separate browser account, and removed the test credentials.

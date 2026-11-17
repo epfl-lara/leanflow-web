@@ -244,6 +244,7 @@ test('outline labels Lean command kinds without guessing declaration boundaries'
   assert.deepEqual(result[1], {
     name: 'actual',
     kind: 'theorem',
+    headerLine: 3,
     startLine: 2,
     startColumn: 1,
     endLine: 3,
@@ -355,5 +356,39 @@ test('cursor on an import navigates without implicitly setting a proof target', 
       items,
     ).target.source,
     'import Mathlib',
+  )
+})
+
+test('suppressed placeholder warnings survive only for executable tokens in parser-provided proof ranges', () => {
+  const commands = [
+    'theorem incomplete : True := by sorry',
+    'lemma incompleteToo : True := by admit',
+    'example : True := sorryAx True false',
+    'theorem sorryExample : True := by trivial -- sorry',
+    'theorem complete : True := by /- admit /- sorry -/ -/ trivial',
+    'example : "sorry" = "sorry" := rfl',
+    'def note := "admit"',
+  ]
+  const entries = commands.map((command, line) => ({
+    name: 'test' + line,
+    kind: 6,
+    range: {
+      start: { line, character: 0 },
+      end: { line, character: command.length },
+    },
+  }))
+  assert.deepEqual(
+    proofDeclarations(entries, uri, commands.length, commands.join('\n')).map(
+      (item) => item.checkStatus,
+    ),
+    [
+      'warning',
+      'warning',
+      'warning',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ],
   )
 })

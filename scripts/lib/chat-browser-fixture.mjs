@@ -487,8 +487,9 @@ export async function chatBrowserFixture({
     report.sockets.push(socket.url())
     socket.onMessage((raw) => {
       const message = JSON.parse(String(raw))
-      state.onLeanMessage?.(message, socket.url(), socket)
-      if (!('id' in message)) return
+      // A fixture can hold a request and send its response after a user action.
+      if (state.onLeanMessage?.(message, socket.url(), socket) === true) return
+      if (!('id' in message) || !message.method) return
       let result = null
       if (message.method === 'initialize')
         result = {

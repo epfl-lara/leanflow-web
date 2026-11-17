@@ -2,6 +2,7 @@ import { useId, useState } from 'react'
 import { Icon } from './Icons'
 import type { ChatMode } from './chatModes'
 import type { ProofDeclaration, ProofTarget } from './proofTarget'
+import { proofCheckMark, proofCheckMarks } from './proofCheckMarks'
 import './proof-outline.css'
 
 export function ProofOutline({
@@ -78,6 +79,8 @@ export function ProofOutline({
           >
             {filtered.map((item) => {
               const kind = item.kind || 'other'
+              const mark = proofCheckMark(item)
+              const line = item.headerLine ?? item.startLine
               const active =
                 item.kind !== 'import' &&
                 target &&
@@ -94,7 +97,7 @@ export function ProofOutline({
                   <button
                     type="button"
                     className="proof-outline-entry"
-                    title={`${item.name} · ${kind} · line ${item.startLine}`}
+                    title={`${item.name} · ${kind} · line ${line}${mark ? '\n' + proofCheckMarks[mark].title : ''}`}
                     disabled={disabled}
                     aria-current={active ? 'location' : undefined}
                     onClick={() => onSelect(item)}
@@ -105,7 +108,18 @@ export function ProofOutline({
                       {kind === 'other' ? 'symbol' : kind}
                     </span>
                     <span className="proof-outline-name">{item.name}</span>
-                    <small>L{item.startLine}</small>
+                    <small>
+                      {mark && (
+                        <span
+                          className={`proof-check-mark proof-mark-${mark}`}
+                          data-proof-status={mark}
+                          role="img"
+                          aria-label={proofCheckMarks[mark].label}
+                          title={proofCheckMarks[mark].title}
+                        />
+                      )}
+                      L{line}
+                    </small>
                   </button>
                   {kind !== 'import' && onUseDeclaration && (
                     <button

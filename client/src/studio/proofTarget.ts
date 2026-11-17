@@ -17,7 +17,9 @@ export interface ProofFocusRequest {
 
 export interface ProofDeclaration {
   name: string
+  headerLine?: number
   kind?: ProofDeclarationKind
+  checkStatus?: 'pending' | 'checked' | 'warning' | 'error'
   startLine: number
   startColumn: number
   endLine: number
@@ -68,7 +70,7 @@ export const MAX_PROOF_SOURCE_LENGTH = 64_000
 // This lexical mask only labels ranges already supplied by Lean and recognizes
 // the import header. It never guesses the extent of a proof. Keeping newlines
 // and UTF-16 offsets intact lets masked source retain the editor's coordinates.
-function outlineCode(content: string): string {
+export function outlineCode(content: string): string {
   const characters = content.split('')
   const blank = (start: number, end: number) => {
     for (let index = start; index < end; index++) {
@@ -158,7 +160,9 @@ const declarationKinds = new Set<ProofDeclarationKind>([
   'instance',
 ])
 
-function declarationKind(source: string): ProofDeclarationKind {
+export function declarationKeyword(
+  source: string,
+): { kind: ProofDeclarationKind; offset: number } | undefined {
   // Skip attributes and modifiers before looking at the command's first token.
   // A keyword in the body, type or a quotation must not classify the command.
   let index = 0
@@ -175,7 +179,7 @@ function declarationKind(source: string): ProofDeclarationKind {
       continue
     }
     const token = /^[\p{L}_][\p{L}\p{N}_']*/u.exec(source.slice(index))?.[0]
-    if (!token) return 'other'
+    if (!token) return undefined
     if (
       [
         'private',
@@ -192,10 +196,17 @@ function declarationKind(source: string): ProofDeclarationKind {
       continue
     }
     return declarationKinds.has(token as ProofDeclarationKind)
-      ? (token as ProofDeclarationKind)
-      : 'other'
+      ? { kind: token as ProofDeclarationKind, offset: index }
+      : undefined
   }
-  return 'other'
+  return undefined
+}
+
+export function placeholderWarning(command: string) {
+  // Lean can suppress its warning for an explicit proof placeholder.
+  return /(?<![\p{L}\p{N}_'])(?:sorry|admit|sorryAx)(?![\p{L}\p{N}_'])/u.test(
+    command,
+  )
 }
 
 function importDeclarations(code: string): ProofDeclaration[] {
@@ -232,11 +243,23 @@ export function proofDeclarations(
   lineCount: number,
   content?: string,
 ): ProofDeclaration[] {
-  const result: ProofDeclaration[] = []
-  const code =
+  return proofDeclarationsFromCode(
+    symbols,
+    uri,
+    lineCount,
     content === undefined
       ? undefined
-      : outlineCode(content.replace(/\r\n?/g, '\n'))
+      : outlineCode(content.replace(/\r\n?/g, '\n')),
+  )
+}
+
+export function proofDeclarationsFromCode(
+  symbols: unknown,
+  uri: string,
+  lineCount: number,
+  code?: string,
+): ProofDeclaration[] {
+  const result: ProofDeclaration[] = []
   const lines = code?.split('\n')
   const visit = (items: unknown, prefix = '', depth = 0) => {
     if (!Array.isArray(items) || depth > 64) return
@@ -275,25 +298,31 @@ export function proofDeclarations(
         (end.line > start.line ||
           (end.line === start.line && end.character > start.character))
       ) {
+        const command = lines
+          ?.slice(start.line, end.line + 1)
+          .map((line, index) =>
+            line.slice(
+              index ? 0 : start.character,
+              start.line + index === end.line ? end.character : undefined,
+            ),
+          )
+          .join('\n')
+        const keyword =
+          command === undefined ? undefined : declarationKeyword(command)
+        const kind =
+          command === undefined ? undefined : (keyword?.kind ?? 'other')
+        const proof =
+          kind === 'theorem' || kind === 'lemma' || kind === 'example'
+        const headerLine =
+          proof && keyword && command
+            ? start.line + command.slice(0, keyword.offset).split('\n').length
+            : undefined
+        const placeholder = proof && placeholderWarning(command ?? '')
         result.push({
           name: displayName,
-          ...(lines
-            ? {
-                kind: declarationKind(
-                  lines
-                    .slice(start.line, end.line + 1)
-                    .map((line, index) =>
-                      line.slice(
-                        index ? 0 : start.character,
-                        start.line + index === end.line
-                          ? end.character
-                          : undefined,
-                      ),
-                    )
-                    .join('\n'),
-                ),
-              }
-            : {}),
+          ...(kind && { kind }),
+          ...(headerLine && { headerLine }),
+          ...(placeholder && { checkStatus: 'warning' as const }),
           startLine: start.line + 1,
           startColumn: start.character + 1,
           endLine: end.line + 1,

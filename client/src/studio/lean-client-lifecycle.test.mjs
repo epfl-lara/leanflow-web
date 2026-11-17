@@ -410,7 +410,15 @@ test('the actual wrapper receives queue notices before initialization and preser
   const install = new Function('mlcConfig', patched.slice(begin, end))
   const notices = [],
     previous = [],
-    normal = []
+    normal = [],
+    observations = [],
+    writes = []
+  const writer = {
+    write(message) {
+      writes.push(message)
+      return message.id
+    },
+  }
   const config = {
     clientOptions: {
       connectionOptions: {
@@ -426,8 +434,17 @@ test('the actual wrapper receives queue notices before initialization and preser
   }
   install.call(
     {
+      messageTransports: { writer },
       languageClientConfig: {
-        options: { leanflowQueue: (notice) => notices.push(notice) },
+        options: {
+          leanflowQueue: (notice) => notices.push(notice),
+          leanflowProofDiagnostics: () => ({
+            sent: (method, params) =>
+              observations.push(['sent', method, params]),
+            received: (method, params) =>
+              observations.push(['received', method, params]),
+          }),
+        },
       },
     },
     config,
@@ -449,6 +466,28 @@ test('the actual wrapper receives queue notices before initialization and preser
   )
   assert.deepEqual(previous, [response])
   assert.deepEqual(normal, [response])
+  const doc = { uri: 'file:///workspace/Main.lean', version: 3 }
+  const change = {
+    method: 'textDocument/didChange',
+    params: { textDocument: doc },
+  }
+  const diagnostic = {
+    method: 'textDocument/publishDiagnostics',
+    params: { ...doc, diagnostics: [] },
+  }
+  writer.write(change)
+  assert.equal(writer.write(response), 1)
+  config.clientOptions.connectionOptions.messageStrategy.handleMessage(
+    diagnostic,
+    (message) => normal.push(message),
+  )
+  assert.deepEqual(writes, [change, response])
+  assert.deepEqual(observations, [
+    ['sent', change.method, change.params],
+    ['received', diagnostic.method, diagnostic.params],
+  ])
+  assert.deepEqual(previous, [response, diagnostic])
+  assert.deepEqual(normal, [response, diagnostic])
   assert.equal(
     config.clientOptions.connectionOptions.cancellationStrategy,
     'preserved',
@@ -464,9 +503,7 @@ test('the actual patched wrapper handles channel closure before and after initia
     'utf8',
   )
   const patched = patchLeanClientWrapper(source)
-  const start = patched.indexOf(
-    'this.languageClient = new MonacoLanguageClient(mlcConfig);',
-  )
+  const start = patched.indexOf('const leanflowQueueNotice =')
   const end = patched.indexOf('\n        try {', start)
   const install = new Function(
     'MonacoLanguageClient',
@@ -476,7 +513,8 @@ test('the actual patched wrapper handles channel closure before and after initia
   for (const running of [false, true]) {
     let listener,
       stops = 0,
-      closed = 0
+      closed = 0,
+      diagnosticsClosed = 0
     const raw = {
       isRunning: () => running,
       stop: async () => {
@@ -495,6 +533,9 @@ test('the actual patched wrapper handles channel closure before and after initia
       languageClientConfig: {
         options: {
           $type: 'WebSocketUrl',
+          leanflowProofDiagnostics: () => ({
+            closed: () => diagnosticsClosed++,
+          }),
           stopOptions: {
             onCall() {
               closed++
@@ -520,6 +561,7 @@ test('the actual patched wrapper handles channel closure before and after initia
       'The reader must not send shutdown over its closed channel',
     )
     assert.equal(closed, 1)
+    assert.equal(diagnosticsClosed, 1)
     await raw.stop()
     assert.equal(
       stops,

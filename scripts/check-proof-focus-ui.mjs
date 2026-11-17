@@ -177,7 +177,8 @@ try {
   browser = fixture.browser
   let documentSymbols = symbols
   // Feed the real compiler's symbols into the browser's normal Lean client.
-  await page.routeWebSocket('**/websocket/**', (socket) => {
+  const isLeanSocket = (url) => url.pathname === `/websocket/${projectId}`
+  await page.routeWebSocket(isLeanSocket, (socket) => {
     report.sockets.push(socket.url())
     socket.onMessage((raw) => {
       const message = JSON.parse(String(raw))
@@ -216,6 +217,23 @@ try {
   assert.deepEqual(
     await list.locator('.proof-outline-kind').allTextContents(),
     ['import', 'theorem', 'def', 'theorem', 'example'],
+  )
+  const firstMark = page.locator('.monaco-editor .proof-check-mark').first()
+  assert.match(await entry('Demo.first').innerText(), /L6/)
+  await firstMark.waitFor()
+  const markBox = await firstMark.boundingBox()
+  const headerBox = await page
+    .locator('.monaco-editor .view-line')
+    .filter({ hasText: 'theorem first (n : Nat)' })
+    .boundingBox()
+  assert(
+    markBox &&
+      headerBox &&
+      Math.abs(
+        markBox.y + markBox.height / 2 - (headerBox.y + headerBox.height / 2),
+      ) <
+        headerBox.height / 2,
+    'The proof mark belongs on the theorem keyword, below its documentation.',
   )
   assert.match(await entry('Std').innerText(), /L1/)
   assert.equal(

@@ -120,11 +120,53 @@
   white-space: nowrap;
 }
 .proof-outline-entry > small {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   flex-shrink: 0;
   margin-left: auto;
   color: var(--muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
+}
+.proof-outline-entry .proof-check-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+}
+.proof-check-mark::before {
+  content: '';
+  display: block;
+  width: 14px;
+  height: 14px;
+  background-color: currentColor;
+  mask: var(--proof-mark) center / contain no-repeat;
+}
+.proof-mark-checked {
+  color: var(--success);
+  --proof-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m2.5 8 3.3 3.4 7.6-8' fill='none' stroke='black' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.proof-mark-warning {
+  color: #905a08;
+  --proof-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.6 15 14H1Z' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='M8 6v3m0 2v.4' stroke='black' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+:root[data-theme='dark'] .proof-mark-warning {
+  color: #e9b85e;
+}
+.proof-mark-error {
+  color: var(--danger);
+  --proof-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6.5' stroke='black' fill='none' stroke-width='1.6'/%3E%3Cpath d='m5.8 5.8 4.4 4.4m0-4.4-4.4 4.4' stroke='black' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+.proof-mark-pending {
+  color: var(--muted);
+  --proof-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6.5' stroke='black' fill='none' stroke-width='1.5'/%3E%3Cpath d='M8 4v4l2.8 1.6' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+@media (forced-colors: active) {
+  .proof-check-mark::before {
+    forced-color-adjust: none;
+    background-color: CanvasText;
+  }
 }
 .proof-outline-kind {
   flex-shrink: 0;
