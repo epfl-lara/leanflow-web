@@ -22,9 +22,11 @@ const fixture = await chatBrowserFixture({
   },
   projects: [
     { id: 'discovery-project', name: 'Discovery project', status: 'ready' },
+    { id: 'second-project', name: 'Second project', status: 'ready' },
   ],
   files: {
     'discovery-project': { 'Main.lean': 'example : True := by trivial\n' },
+    'second-project': { 'Main.lean': 'example : 1 = 1 := rfl\n' },
   },
   chats: [
     {
@@ -38,6 +40,14 @@ const fixture = await chatBrowserFixture({
 const { page, browser, report } = fixture
 let calls = 0
 let complete
+const projectId = 'discovery-project'
+const checkLog = 'Main.lean:5: unsolved goals'
+await page.route(`**/api/projects/${projectId}/check`, (route) =>
+  route.fulfill({
+    status: 202,
+    json: { id: 'proof-check', status: 'failed', log: checkLog },
+  }),
+)
 await page.route('**/api/models', async (route) => {
   calls++
   if (calls === 1)
@@ -89,6 +99,15 @@ try {
   await until(() => !!complete, 'backed off model retry')
   assert.equal(calls, 2)
   assert.equal(await composer.inputValue(), draft)
+  await page.getByRole('button', { name: 'Check Project', exact: true }).click()
+  const output = page
+    .locator('.build-output')
+    .getByText(checkLog, { exact: true })
+  await output.waitFor()
+  const projectLists = () =>
+    report.requests.filter((request) => request.endpoint === '/api/projects')
+      .length
+  const listsBefore = projectLists()
   complete()
   await until(
     async () =>
@@ -96,6 +115,15 @@ try {
     'model discovery recovers Send',
   )
   assert.equal(await composer.inputValue(), draft)
+  assert(
+    await output.isVisible(),
+    'Discovering models must keep the latest Lean check output visible',
+  )
+  assert.equal(
+    projectLists(),
+    listsBefore,
+    'Discovering models must not reload the project list',
+  )
   await page.locator('.chat-options').evaluate((element) => {
     element.open = true
   })
@@ -112,9 +140,51 @@ try {
     'high',
   )
   assert.equal(calls, 2)
+  const selectProject = (name) =>
+    page
+      .locator('.project-item')
+      .and(page.getByTitle(name, { exact: true }))
+      .click()
+  await selectProject('Second project')
+  await page
+    .getByLabel('Open files')
+    .getByRole('tab', { name: 'Main.lean' })
+    .waitFor()
+  assert.equal(await page.locator('.build-output').count(), 0)
+  await selectProject('Discovery project')
+  const check = page.getByRole('button', { name: 'Check Project', exact: true })
+  await check.click()
+  await output.waitFor()
+
+  await page.route('**/api/logout', (route) =>
+    route.fulfill({ json: { ok: true } }),
+  )
+  await page.route('**/api/login', (route) => {
+    const user = { id: 'second-participant', name: 'Second participant' }
+    fixture.state.session = {
+      ...fixture.state.session,
+      user,
+      lemex: { configured: true },
+      models: [{ id: 'recovered-model', name: 'Recovered model' }],
+    }
+    return route.fulfill({ json: { user } })
+  })
+  await page.getByRole('button', { name: 'Sign out', exact: true }).click()
+  await page.getByLabel('Access token', { exact: true }).fill('fixture-only')
+  await page
+    .getByRole('button', { name: 'Open workspace', exact: true })
+    .click()
+  await check.waitFor()
+  assert.equal(
+    await page.locator('.user-name').innerText(),
+    'Second participant',
+  )
+  assert.equal(await page.locator('.build-output').count(), 0)
   fixture.assertClean()
   report.checks.push(
     'Temporary startup congestion retries with backoff, preserves the draft, and restores model access without changing its advertised reasoning level.',
+    'Model discovery preserves the current Lean check result without reloading the participant’s project list.',
+    'Switching projects and signing into another account clear the previous Lean check output.',
   )
   report.passed = true
   console.log(JSON.stringify({ passed: true, checks: report.checks }))

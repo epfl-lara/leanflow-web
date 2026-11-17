@@ -765,7 +765,8 @@ export function Studio() {
     (p) =>
       p.preparationState === 'queued' || p.preparationState === 'preparing',
   )
-  const sessionUser = session?.user.id
+  const account = session?.user
+  const sessionUser = account?.id
   const acceptModels = useCallback(
     (access: ModelAccess) => {
       setSession((current) =>
@@ -829,7 +830,6 @@ export function Studio() {
     writeStoredValue('local', 'lemex-theme', theme)
   }, [theme])
 
-  const sessionOwner = session?.user.id
   const loadProjects = useCallback(async () => {
     const value = await api<Project[]>('/api/projects')
     const selected = value.findIndex((item) => item.id === projectIdRef.current)
@@ -841,7 +841,7 @@ export function Studio() {
       if (
         metadata.status !== 'preparing' &&
         cached &&
-        cached.owner === sessionOwner &&
+        cached.owner === sessionUser &&
         cached.project.id === metadata.id &&
         cached.project.status === metadata.status &&
         cached.project.setupStartedAt === metadata.setupStartedAt &&
@@ -854,16 +854,16 @@ export function Studio() {
           `/api/projects/${encodeURIComponent(metadata.id)}`,
         )
         value[selected] = detail
-        if (detail.status !== 'preparing' && sessionOwner)
-          setupLogRef.current = { owner: sessionOwner, project: detail }
+        if (detail.status !== 'preparing' && sessionUser)
+          setupLogRef.current = { owner: sessionUser, project: detail }
       }
     }
     setProjects(value)
     return value
-  }, [sessionOwner])
+  }, [sessionUser])
 
   useEffect(() => {
-    if (!session || invitationToken) return
+    if (!account || invitationToken) return
     let cancelled = false
     setProjectListLoading(true)
     setProjectListError('')
@@ -890,7 +890,7 @@ export function Studio() {
     return () => {
       cancelled = true
     }
-  }, [session, setProjectId, invitationToken, bufferStore, projectListAttempt])
+  }, [account, setProjectId, invitationToken, bufferStore, projectListAttempt])
 
   const preparing = projects.some((item) => item.status === 'preparing')
   useEffect(() => {
@@ -899,12 +899,21 @@ export function Studio() {
       void loadProjects().catch((error) => setError(errorText(error)))
   }, [projectId, loadProjects])
   useEffect(() => {
-    if (!session || !preparing) return
-    const timer = setInterval(() => {
-      void loadProjects().catch((error) => setError(errorText(error)))
+    if (!sessionUser || !preparing) return
+    let polling = false
+    const timer = setInterval(async () => {
+      if (polling) return
+      polling = true
+      try {
+        await loadProjects()
+      } catch (error) {
+        setError(errorText(error))
+      } finally {
+        polling = false
+      }
     }, 3000)
     return () => clearInterval(timer)
-  }, [session, preparing, loadProjects])
+  }, [sessionUser, preparing, loadProjects])
 
   const loadFiles = useCallback(
     async (id: string) => {
@@ -1800,15 +1809,12 @@ export function Studio() {
   }
 
   useEffect(() => {
-    setJob(null)
-    if (!projectId || !session) return
+    if (!projectId || !sessionUser) return
     let cancelled = false
     void api<Job[]>(`/api/projects/${encodeURIComponent(projectId)}/checks`)
       .then((active) => {
         if (!cancelled && active.length)
-          setJob((current) =>
-            current && !terminalJob(current) ? current : active[0],
-          )
+          setJob((current) => current || active[0])
       })
       .catch((error) => {
         if (!cancelled) setError(errorText(error))
@@ -1816,24 +1822,38 @@ export function Studio() {
     return () => {
       cancelled = true
     }
-  }, [projectId, session])
+  }, [projectId, sessionUser])
 
   useEffect(() => {
     if (!job || terminalJob(job)) return
     const id = job.id
     let cancelled = false
-    const timer = setInterval(() => {
-      void api<Job>(`/api/jobs/${encodeURIComponent(id)}`)
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const refresh = () => {
+      void api<Job>(`/api/jobs/${encodeURIComponent(id)}`, {
+        signal: controller.signal,
+      })
         .then((value) => {
-          if (!cancelled) setJob(value)
+          if (!cancelled)
+            setJob((current) =>
+              current?.id === id && current.status === job.status
+                ? value
+                : current,
+            )
         })
         .catch((error) => {
           if (!cancelled) setError(errorText(error))
         })
-    }, 2000)
+        .finally(() => {
+          if (!cancelled) timer = setTimeout(refresh, 2000)
+        })
+    }
+    timer = setTimeout(refresh, 2000)
     return () => {
       cancelled = true
-      clearInterval(timer)
+      controller.abort()
+      clearTimeout(timer)
     }
   }, [job?.id, job?.status])
 

@@ -64,6 +64,18 @@ try {
   const work = page.locator('.chat-current-work')
   await work.getByText('Waiting for RCP key', { exact: true }).waitFor()
   await work.getByText(RCP_WAIT_MESSAGE, { exact: true }).waitFor()
+  const elapsed = work.getByRole('timer', { name: 'Elapsed time' })
+  const firstTime = await elapsed.innerText()
+  assert.match(firstTime, /^\d+:\d{2}$/)
+  await until(
+    async () => (await elapsed.innerText()) !== firstTime,
+    'elapsed queue time advances',
+  )
+  assert.equal(await work.getByRole('status').getByRole('timer').count(), 0)
+  await work
+    .getByRole('status')
+    .filter({ hasText: 'Waiting for RCP key' })
+    .waitFor()
   assert(
     await work.getByRole('button', { name: 'Stop', exact: true }).isEnabled(),
   )
@@ -76,6 +88,7 @@ try {
   await work.waitFor({ state: 'hidden' })
   report.checks.push(
     'Queued RCP work explains automatic start and can be stopped immediately',
+    'The elapsed timer advances independently of the announced queue status.',
   )
 
   run.status = 'running'

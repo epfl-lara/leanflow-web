@@ -69,6 +69,23 @@ export interface SetupHelpRequest {
 const setupHelpPrompt =
   'Help me get this project ready. Diagnose its Lean setup and propose configuration fixes while preserving the pinned Lean version, dependency revisions, and my source files. Explain what you change and test the environment. I will review the changes before applying them.'
 
+function RunElapsedTime({ createdAt }: { createdAt?: string }) {
+  const started = Date.parse(createdAt || '')
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    if (!Number.isFinite(started)) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [started])
+  if (!Number.isFinite(started)) return null
+  const seconds = Math.max(0, Math.floor((now - started) / 1000))
+  return (
+    <span className="chat-elapsed" role="timer" aria-label="Elapsed time">
+      {`${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`}
+    </span>
+  )
+}
+
 export function AssistantPanel({
   projectId,
   file,
@@ -143,7 +160,7 @@ export function AssistantPanel({
   const [backgroundErrors, setBackgroundErrors] = useState<
     Record<string, string>
   >({})
-  const backgroundRequests = useRef(new Map<string, number>())
+  const backgroundRequests = useRef(new Map<string, symbol>())
   const backgroundErrorsRef = useRef(backgroundErrors)
   backgroundErrorsRef.current = backgroundErrors
   const [dialogId, setDialogId] = useState<string | null>(null),
@@ -159,8 +176,7 @@ export function AssistantPanel({
     [undoingId, setUndoingId] = useState<string | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false),
     [discarding, setDiscarding] = useState(false)
-  const [stoppingIds, setStoppingIds] = useState<string[]>([]),
-    [now, setNow] = useState(Date.now())
+  const [stoppingIds, setStoppingIds] = useState<string[]>([])
   const mounted = useRef(true),
     navigation = useRef(0),
     chatNamesRevision = useRef(0),
@@ -373,7 +389,7 @@ export function AssistantPanel({
   }, [])
   const recoverBackground = useCallback(
     async <T,>(source: string, request: () => Promise<T>) => {
-      const revision = (backgroundRequests.current.get(source) || 0) + 1
+      const revision = Symbol()
       backgroundRequests.current.set(source, revision)
       try {
         const value = await request()
@@ -384,6 +400,9 @@ export function AssistantPanel({
         if (backgroundRequests.current.get(source) === revision)
           backgroundError(source, error)
         throw error
+      } finally {
+        if (backgroundRequests.current.get(source) === revision)
+          backgroundRequests.current.delete(source)
       }
     },
     [backgroundError],
@@ -418,7 +437,7 @@ export function AssistantPanel({
     [reconcileFollowups],
   )
   const loadChats = useCallback(async () => {
-    const revision = chatNamesRevision.current
+    const revision = ++chatNamesRevision.current
     const values = await recoverBackground('chats', () =>
       api<ChatChoice[]>(`/api/projects/${encodeURIComponent(projectId)}/chats`),
     )
@@ -655,11 +674,17 @@ export function AssistantPanel({
   useEffect(() => {
     const refresh = () => {
       if (document.hidden) return
+      // Poll each source independently so a slow request does not accumulate
+      // duplicates or delay updates from the other endpoints.
+      const pending = backgroundRequests.current
+      if (!pending.has('chats')) void loadChats().catch(() => undefined)
+      if (pending.has('project')) return
       void loadProject()
         .then((values) => {
           const selected = chatRef.current
           if (
             selected &&
+            !pending.has(`history:${selected}`) &&
             (backgroundErrorsRef.current[`history:${selected}`] ||
               values.some(
                 (value) =>
@@ -676,7 +701,6 @@ export function AssistantPanel({
             return loadHistory(selected)
         })
         .catch(() => undefined)
-      void loadChats().catch(() => undefined)
     }
     const timer = setInterval(refresh, 4000)
     document.addEventListener('visibilitychange', refresh)
@@ -696,11 +720,6 @@ export function AssistantPanel({
       window.removeEventListener('lemex-chats-changed', chatsChanged)
     }
   }, [loadProject, loadHistory, loadChats, openChat])
-  useEffect(() => {
-    if (!statusRun?.id) return
-    const timer = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(timer)
-  }, [statusRun?.id])
   const connection = useRunStream(activeRun?.id || null, {
     onRun: updateRun,
     onFilesUpdated: (paths, runId) =>
@@ -937,10 +956,6 @@ export function AssistantPanel({
       setDiscarding(false)
     }
   }
-  const elapsedSeconds = statusRun?.createdAt
-    ? Math.max(0, Math.floor((now - Date.parse(statusRun.createdAt)) / 1000))
-    : 0
-  const elapsed = `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, '0')}`
   const stopping =
     !!statusRun &&
     (statusRun.status === 'stopping' || stoppingIds.includes(statusRun.id))
@@ -1062,21 +1077,25 @@ export function AssistantPanel({
         </p>
       )}
       {statusRun && (
-        <div className="chat-current-work" role="status" aria-live="polite">
+        <div className="chat-current-work">
           <div>
             <span className="spinner" />
             <strong>
-              {stopping
-                ? 'Stopping…'
-                : currentStep?.label ||
-                  statusRun.progress?.label ||
-                  runStatusLabel(statusRun)}
+              <output>
+                {stopping
+                  ? 'Stopping…'
+                  : currentStep?.label ||
+                    statusRun.progress?.label ||
+                    runStatusLabel(statusRun)}
+              </output>
             </strong>
-            <span className="chat-elapsed">{elapsed}</span>
+            <RunElapsedTime createdAt={statusRun.createdAt} />
           </div>
-          {currentWorkDetail && !stopping && <p>{currentWorkDetail}</p>}
+          {currentWorkDetail && !stopping && (
+            <p aria-live="polite">{currentWorkDetail}</p>
+          )}
           {!stopping && (liveEditStatus(statusRun) || connection) && (
-            <p className="chat-work-meta">
+            <p className="chat-work-meta" aria-live="polite">
               <span
                 className="chat-edit-status"
                 title={

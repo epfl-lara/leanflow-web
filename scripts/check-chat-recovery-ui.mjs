@@ -617,6 +617,51 @@ try {
     'A late startup list cannot redirect the first send or remove its newly created chat option',
   )
 
+  let releaseLists
+  const held = new Promise((resolve) => {
+    releaseLists = resolve
+  })
+  const calls = { chats: 0, runs: 0 }
+  for (const key of Object.keys(calls)) {
+    await page.route(
+      (url) => url.pathname === `/api/projects/${projectId}/${key}`,
+      async (route) => {
+        if (route.request().method() !== 'GET') return route.fallback()
+        calls[key]++
+        await held
+        return route.fallback()
+      },
+    )
+  }
+  const showTab = () =>
+    page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await showTab()
+  await until(
+    () => calls.chats > 0 && calls.runs > 0,
+    'slow chat and activity requests',
+  )
+  try {
+    await showTab()
+    await showTab()
+    await composer.fill('Keep typing while activity is slow.')
+    // Include a real four-second poll tick while both requests are in flight.
+    await sleep(4500)
+    assert.deepEqual(calls, { chats: 1, runs: 1 })
+    assert.equal(
+      await composer.inputValue(),
+      'Keep typing while activity is slow.',
+    )
+  } finally {
+    releaseLists()
+  }
+  await until(
+    () => calls.chats > 1 && calls.runs > 1,
+    'polling resumes after the slow responses',
+  )
+  report.checks.push(
+    'A slow network keeps at most one background request per list across poll ticks and tab switches while the participant can keep typing.',
+  )
+
   fixture.assertClean()
   report.passed = true
   console.log(
