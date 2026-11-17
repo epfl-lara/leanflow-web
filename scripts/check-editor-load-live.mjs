@@ -265,6 +265,7 @@ try {
       session.sockets.length === 1 && session.row.webSocketCloses.length === 0,
   ).length
   assert.equal(report.allEditorsActive, users, 'All Lean editors must coexist')
+  console.log(`All ${users} editors returned real initial diagnostics`)
   await Promise.all(
     sessions.map(async (session) => {
       const baseline = session.version,
@@ -287,6 +288,7 @@ try {
       session.row.errorDiagnosticsMs = performance.now() - start
     }),
   )
+  console.log(`All ${users} editors returned error diagnostics`)
   await Promise.all(
     sessions.map(async (session) => {
       const baseline = session.version,
@@ -326,6 +328,7 @@ try {
       session.row.saved = true
     }),
   )
+  console.log(`All ${users} corrections and distinct durable saves passed`)
   await Promise.all(
     sessions.map(async (session) => {
       const kind = session.index % 2 ? 'native' : 'mathlib',
@@ -358,6 +361,9 @@ try {
       )
     }),
   )
+  console.log(
+    `Submitted ${report.jobs.length} mixed checks with editors held open`,
+  )
   const jobsStarted = Date.now()
   await until(
     async () => {
@@ -377,6 +383,7 @@ try {
     900000,
   )
   report.compileBurstMs = Date.now() - jobsStarted
+  console.log(`Mixed checks finished in ${report.compileBurstMs} ms`)
   for (const session of sessions) {
     assert.equal(session.job.status, 'completed', JSON.stringify(session.job))
     assert.equal(session.job.code, 0)
@@ -399,6 +406,14 @@ try {
 } finally {
   clearInterval(probeTimer)
   await probeTask
+  report.webSocketClosesBeforeCleanup = sessions.reduce(
+    (sum, session) => sum + session.row.webSocketCloses.length,
+    0,
+  )
+  for (const session of sessions)
+    session.row.diagnostics = session.diagnostics.map(
+      ({ version, errors }) => ({ version, errors }),
+    )
   if (!report.passed)
     for (const session of sessions) {
       if (session.job && !terminal.has(session.job.status))

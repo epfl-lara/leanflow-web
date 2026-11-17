@@ -75,7 +75,7 @@ Each account may have up to `STUDIO_MAX_AGENT_QUEUE_PER_USER` waiting assistant 
 
 Use the `STUDIO_MAX_*` settings in [`.env.example`](../.env.example) to set editor, agent, search, worker, and queue limits. Set `STUDIO_WORKER_CPUS` and `STUDIO_WORKER_MEMORY` for each worker; defaults are 2 CPUs and 4 GiB.
 
-Optional remote pure checks use `STUDIO_CLUSTER_CONFIG`, an absolute path to a protected controller JSON file. Execution stays local when it is unset or its mode is `off`. See [distributed execution](DistributedExecution.md) for enrollment, independent worker budgets, shadow checks and rollout limits. This setting does not move editors, agents or terminals.
+Optional remote pure checks use `STUDIO_CLUSTER_CONFIG`, an absolute path to a protected controller JSON file. Execution stays local when it is unset or its mode is `off`. See [distributed execution](DistributedExecution.md) for enrollment, independent worker budgets, shadow checks and rollout limits. Certified remote editors additionally require `editors.placement: "prefer"` and exact environment qualification; follow [remote editor operations](RemoteEditors.md). Agents and terminals use the coordinator.
 
 Workers have hard CPU, memory, and process limits. Their combined RAM and swap allowance equals the memory limit, so workers cannot use host swap. These limits cover the whole worker process tree, including Lean, Lake, native tools, and assistant commands. Project settings cannot raise the worker's hard limit. LeanFlow does not add a fixed `-M1536` or `-j1` to project Lake files: a per-process Lean limit can reject larger proofs and does not bound all the processes in a build.
 
@@ -86,6 +86,12 @@ Editors and terminals use interactive slots; agents, toolchain installation, set
 A running Ask & Search assistant with LaTeX tools protects one additional shared compiler slot from other work. Its compiler inherits the assistant’s priority so it can finish even when a full check is waiting for the assistant to release its slot. The compiler uses the same total CPU and memory budget; this reserve adds no extra workers. With fewer than two effective batch slots, Ask & Search still works and the LaTeX tool explains that compilation must run from the project PDF panel after the assistant finishes.
 
 The authenticated `/api/session` response reports the effective slot count, memory budget, class limits, active slots, and queue counts in `runtime`. `STUDIO_MAX_TERMINALS` defaults to 2 across the server; `STUDIO_MAX_TERMINALS_PER_PROJECT` defaults to 1. Editor and terminal settings are upper bounds, subject to shared interactive capacity. Startup logs explain when the effective interactive limit is smaller than the configured editor maximum. A terminal refuses startup before making a private copy when that class is full; a terminal queued for shared capacity displays a waiting notice. For example, with seven effective workers and the default reserves, four editors can stay open while a full check uses three slots; opening a terminal then requires closing an unused editor. All waiting work shares `STUDIO_MAX_WORKER_QUEUE`; when that queue has at least two places and reservations are enabled, each class leaves one waiting place available for the other.
+
+`runtime` counts the coordinator's workers. With distributed editors enabled,
+`capacity.editors` also includes eligible, qualified remote slots. Measure actual
+per-host placement alongside those local counters; the
+[accepted distributed rollout](releases/2026-11-16-remote-editors.md) observed
+nine local and six remote editors at the same time.
 
 There is no memory limit that fits every Lean project. To support larger projects, increase `STUDIO_WORKER_MEMORY`; the shared budget then permits fewer simultaneous workers. Measure representative repositories, including cold builds and full proof checks. The automatic budget applies to one LeanFlow runtime; it does not reserve RAM against unrelated processes or another installation. Reduce its budget for shared hosts and other concurrent runtimes. Apply changes during an idle restart, then check the intended workload and provider quotas. A larger server needs its own capacity settings and a load test.
 

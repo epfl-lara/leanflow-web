@@ -12,9 +12,9 @@ the underlying services. Scheduling, leases and artifact transfer remain custom
 LeanFlow code; this is not a third-party cluster orchestrator or a highly
 available coordinator.
 
-Remote placement is **off by default**. The existing enrolled worker continues
-serving checks until it has been upgraded and the controller explicitly enables
-editors. Installation and acceptance are tracked in the
+Remote placement is **off by default** for new installations. Enable a worker's
+editor slots after its reviewed upgrade and acceptance. Current installation,
+enabled machines and measured capacity are tracked in the
 [rollout record](releases/2026-11-16-remote-editors.md).
 
 ## Eligible editors
@@ -60,8 +60,8 @@ Configure editor admission inside the worker's agreed pool. RAM uses the full
 container cap for every admission. On a shared machine whose outer slice is
 larger than the agreed pool, the sum of container CPU caps must also fit the pool.
 
-For an existing **24 GiB / 8 CPU** worker pool, this candidate policy leaves an
-ordinary check worker available:
+For an existing **24 GiB / 8 CPU** worker pool, the policy accepted in the rollout
+leaves an ordinary check worker available:
 
 ```json
 {
@@ -192,6 +192,44 @@ ordinary accounts for real browser diagnostics, saves and mixed checks across
 the installed machines. Inspect actual per-host placement, CPU, memory, OOMs,
 capture latency, isolation and cleanup. Run the twenty-user case only when enough
 workers are enrolled and accepted.
+
+Run browser capacity tests on a Linux server with explicit resource limits.
+Keep deployments and heavy acceptance runs on the server. Budget the load
+generator separately from application workers; record when they share a host.
+The accepted run used the matching
+[official Playwright container](https://playwright.dev/docs/docker) at an 8 GiB /
+two-CPU limit. A laptop-hosted attempt exhausted client resources and was excluded.
+
+From a Linux checkout with `npm ci` completed, prepare a private ordinary-account
+fixture in the format checked by
+[`compile-load-fixture.mjs`](../scripts/lib/compile-load-fixture.mjs). Set absolute
+paths in `LEANFLOW_LOAD_FIXTURE` and `LEANFLOW_LOAD_OUTPUT`, and explicitly set
+`LEANFLOW_LOAD_ORIGIN` to the deployment being tested. Keep the fixture mode 0600
+and its parent and output directories mode 0700. Match the image version to the
+checkout's Playwright dependency:
+
+```sh
+docker run --rm --init --memory=8g --memory-swap=8g --cpus=2 \
+  --pids-limit=2048 --read-only --cap-drop=ALL \
+  --security-opt=no-new-privileges --shm-size=2g \
+  --tmpfs=/tmp:rw,nosuid,nodev,size=2g,mode=1777 \
+  --user "$(id -u):$(id -g)" --env=HOME=/tmp \
+  --mount "type=bind,source=$(pwd),target=/work,readonly" \
+  --mount "type=bind,source=$LEANFLOW_LOAD_FIXTURE,target=/fixture.json,readonly" \
+  --mount "type=bind,source=$LEANFLOW_LOAD_OUTPUT,target=/output" \
+  --workdir=/work --env=STUDIO_RUN_LIVE_LOAD_TEST=1 \
+  --env=STUDIO_LOAD_USERS=15 --env=STUDIO_LOAD_FIXTURE=/fixture.json \
+  --env=STUDIO_LOAD_OUTPUT=/output \
+  --env "STUDIO_LOAD_ORIGIN=$LEANFLOW_LOAD_ORIGIN" \
+  mcr.microsoft.com/playwright:v1.64.1-noble \
+  node scripts/check-editor-load-live.mjs
+```
+
+Inspect actual container memory/CPU limits, peak memory and OOM events as well as
+the browser report. Require worker placement, all diagnostics and distinct saves,
+mixed checks and confirmed cleanup. Purge only the fixture's projects, revoke its
+accounts and remove plaintext tokens after the run. Keep sanitized results in
+the repository; retain private receipts separately.
 
 Each session owns one SSH channel and a leased attempt. Output is acknowledged
 in bounded chunks; LSP text is not persisted in the check-event journal. The

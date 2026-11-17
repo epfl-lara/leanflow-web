@@ -1,92 +1,140 @@
 {
   "date": "2026-11-16",
-  "baseRevision": "d587033dccb1de53429ffa3fd2cdb48fe9c6f295",
-  "coordinatorRevision": "67657d47d9078401fb58adaa52fa4b8207020b9f",
+  "acceptedDate": "2026-11-17",
+  "coordinatorRevision": "7dfb78aec33f54f1ce1483e30c069b020cbdb0b8",
   "coordinatorDeployment": "deployed-and-verified",
-  "workerBundleDigest": "72bb931b89a8eabb6968286f07fd24f5c7017ab3e8085bba7241a107dc75fbc5",
-  "productionRemoteEditorsEnabled": false,
-  "workerUpgrade": "installed-and-certified; cold-start gate upgrade pending",
-  "candidatePolicy": {
-    "workerMemoryBudgetGiB": 24,
-    "workerCpus": 8,
-    "editors": 6,
-    "editorMemoryGiB": 3,
-    "editorCpuCap": 1,
+  "workerBundleDigest": "cc7080df981d0ddb00c30c0d8b511b53e4c245c4b82a96b76843b2753a70ddb2",
+  "workerImageDigest": "sha256:0ef38c7e4ec01c43f82152aee50557730180111413a51dd01418aaf741c2a85d",
+  "workerUpgrade": "installed-certified-qualified-and-accepted",
+  "productionRemoteEditorsEnabled": true,
+  "workerMaintenanceAccess": "administrator-approved-long-term-key-retained",
+  "hosts": {
+    "coordinator": "icvm0135.xaas.epfl.ch",
+    "activeWorker": "larapc06.epfl.ch",
+    "larapc05": "disabled-awaiting-administrator",
+    "pc2": "not-enrolled"
+  },
+  "policy": {
+    "pc06MemoryBudgetGiB": 24,
+    "pc06Cpus": 8,
+    "remoteEditors": 6,
+    "remoteEditorMemoryGiB": 3,
+    "remoteEditorCpuCap": 1,
     "reservedOrdinaryCheckMemoryGiB": 6,
     "reservedOrdinaryCheckCpus": 2,
+    "localManagedEditors": 9,
     "localNativeCheckReserveGiB": 18,
-    "publishedCapacityIncreaseAccepted": false
+    "publishedManagedEditorCapacity": 15,
+    "twentyUserCapacityValidated": false
+  },
+  "publicEnvironment": {
+    "toolchain": {
+      "version": "leanprover/lean4:v4.35.0-rc4",
+      "manifest": "081f8cb2fb69e2b6ac5e45b0e9aabd4994a04372388c1c00f679b70d8b9d49c5"
+    },
+    "dependencies": "b6874cdcbadfb2529dce414270d230da4ec5de717f6c0c4979123ca3fae16693",
+    "editorSource": "2a675323ecd19a239f7e7da1766bf0e021308ed8d8b580067c8c3f0e57197137"
   },
   "validation": {
-    "ci": "https://github.com/epfl-lara/leanflow-web/actions/runs/43888718356",
-    "securityChecks": "https://github.com/epfl-lara/leanflow-web/actions/runs/43888718479",
-    "productionSmoke": {
-      "passed": true,
-      "publicHttpsHealth": true,
-      "ordinaryAccount": true,
-      "nativeKernelCheckCompletedOnPc06": true,
-      "localMathlibInvalidAndCorrectedDiagnostics": true,
-      "canonicalSave": true,
-      "testProjectsPurged": 2,
-      "testAccountRevoked": true,
-      "plaintextFixtureRemoved": true,
-      "inferenceRequests": 0,
-      "publishedEditorLimitUnchanged": 9
-    },
-    "linuxPassed": 2192,
-    "linuxSkipped": 2,
-    "linuxFailed": 0,
-    "typecheck": "passed",
-    "clientBuild": "passed",
-    "browserFixtures": [
-      "editor-imports",
-      "single-file",
-      "workspace-switch",
-      "lean-oversize"
-    ],
-    "leanRuntime": {
-      "toolchain": "leanprover/lean4:v4.35.0",
-      "passed": true
-    },
-    "mathlibRuntime": {
-      "toolchain": "leanprover/lean4:v4.35.0-rc4",
-      "oneCpuProfilePassed": true,
-      "invalidDiagnostic": true,
-      "correctedDiagnostic": true,
-      "savedFileRead": true
-    },
-    "controllerWorkerRuntime": {
-      "passed": true,
-      "hostEnrollmentSimulated": true,
-      "transport": "loopback-framed-rpc",
-      "actualMemoryBytes": 3221225472,
-      "actualCpus": 1,
-      "noPostCompiler": true,
-      "gracefulExit": true,
-      "cleanupConfirmed": true
-    },
-    "inferenceRequestedByHarnesses": false,
+    "ci": "https://github.com/epfl-lara/leanflow-web/actions/runs/43956277842",
+    "securityChecks": "https://github.com/epfl-lara/leanflow-web/actions/runs/43956277807",
+    "linuxApplicationPassed": 2194,
+    "linuxApplicationSkipped": 1,
+    "linuxApplicationFailed": 0,
+    "ciReportingHelperTestsPassed": 7,
+    "nodeVersions": [24, 26],
     "focusedWorkerControllerPassed": 64,
-    "coldStart": {
-      "initialColdDiagnosticTimedOutSeconds": 240,
-      "sameProfileAfterCompilerWarmupPassed": true,
-      "editorOomEstablished": false,
-      "qualificationGateDeployment": "pending",
-      "firstDiagnosticAcceptanceLimitSeconds": 90
-    },
+    "finalPresetRegressionPassed": 27,
     "claudeReview": {
       "model": "claude-opus-5-5",
       "effort": "max",
-      "correctionsVerified": true,
-      "offInstallationAndTemporaryAcceptance": "go",
-      "permanentEnablement": "conditional-on-live-acceptance"
+      "correctionsVerified": true
+    },
+    "qualificationTimingsMs": {
+      "compilerMs": 6131,
+      "editorMs": 25740
+    },
+    "liveLoad": {
+      "passed": true,
+      "users": 15,
+      "remoteEditors": 6,
+      "combinedEditors": 15,
+      "localEditors": 9,
+      "mixedChecks": 15,
+      "nativeChecks": 8,
+      "mathlibBuilds": 7,
+      "nativeFallbackWhileEditorsActive": true,
+      "compileBurstMs": 110606,
+      "allDistinctCanonicalSaves": true,
+      "webSocketClosesBeforeCleanup": 0,
+      "errors": [],
+      "inferenceRequests": 0,
+      "httpProbeSummary": {
+        "count": 181,
+        "p50Ms": 10.075,
+        "p95Ms": 245.895,
+        "maxMs": 13939.467
+      },
+      "pc06MaximumGrantedGiB": 18.0,
+      "pc06MaximumGrantedCpus": 6,
+      "maximumLocalGrantedGiB": 45.0
+    },
+    "loadGenerator": {
+      "location": "coordinator VM",
+      "coLocatedWithApplication": true,
+      "image": "sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f",
+      "memoryLimitGiB": 8,
+      "cpuLimit": 2,
+      "peakMemoryGiB": 7.144,
+      "oomEvents": 0,
+      "oomKilled": false,
+      "laptopBrowserProcesses": 0
+    },
+    "freshEditors": {
+      "afterLoadPassed": true,
+      "afterLoadInvalidDiagnosticMsIncludingNativeSmoke": 53801,
+      "idleSecondsBeforeFreshSession": 315.96,
+      "afterIdlePassed": true,
+      "afterIdleInvalidDiagnosticMsIncludingNativeSmoke": 34725,
+      "acceptanceLimitMs": 90000,
+      "nativeChecksCompletedOnPc06": true,
+      "mirroredSavedFileReadByLean": true
+    },
+    "cleanup": {
+      "passed": true,
+      "projectsPurged": 30,
+      "accountsRevoked": 15,
+      "otherAccountRecordsPreserved": true,
+      "plaintextFixtureRemoved": true
+    },
+    "finalVerification": {
+      "passed": true,
+      "publishedManagedEditorCapacity": 15,
+      "pc06OomKillDelta": 0,
+      "vmWorkerOomEvents": 0,
+      "lateDiagnosticErrors": 0,
+      "activeOrHeldAttempts": 0,
+      "runtimeIdle": true,
+      "testCredentialsRemoved": true,
+      "maintenanceCarrierStopped": true,
+      "productionProtocolKeyStillRestricted": true,
+      "longTermMaintenanceKeyRetained": true
+    },
+    "restart": {
+      "passed": true,
+      "readyAfterSeconds": 61.85,
+      "freshNodeEpoch": true,
+      "environmentRequalified": true
     }
   },
-  "pending": [
-    "cold-start qualification gate installation",
-    "exact-environment qualification and restart timing",
-    "15-account networked editor acceptance with mixed checks",
-    "fresh remote diagnostics after mixed load and idle"
+  "limitations": [
+    "Measured managed single-file Mathlib workload, not arbitrary repository editors.",
+    "The load generator shared the coordinator; HTTP probes included a 13.94-second outlier.",
+    "A preceding laptop-hosted run was discarded as a capacity result after client resource exhaustion."
   ],
-  "workerMaintenanceAccess": "administrator-approved-long-term-key-retained"
+  "pending": [
+    "Administrator preparation and enrollment of larapc05.",
+    "Administrator preparation and enrollment of PC2.",
+    "Expanded acceptance on newly enrolled workers before a twenty-user claim."
+  ]
 }

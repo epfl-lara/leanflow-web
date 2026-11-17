@@ -235,7 +235,7 @@ Adding check workers alone does not increase language-server capacity.
 [The availability rollout](releases/2026-11-16-availability.md) separates local
 resources for managed single-file editors and measures their real Mathlib
 diagnostics. Repository editors retain the ordinary worker size. Use the
-current measured limits in that report, rather than the earlier four-editor
+measured local and distributed limits in the rollout records, rather than the earlier four-editor
 snapshot or an aggregate total across the PCs. Twenty repository editors at
 6 GiB still have 120 GiB of combined caps, exceeding the coordinator budget.
 

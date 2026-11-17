@@ -8,7 +8,7 @@ Choose a persistent directory for accounts, projects, and caches. For a separate
 
 Expanding an existing filesystem makes its extra space available automatically. Moving existing data to another volume requires a planned migration. Additional disk space does not increase CPU, memory, or worker limits; review [capacity settings](Configuration.md#worker-capacity) for the intended workload. Keep private backups of the data directory and configuration; see [upgrade guidance](Configuration.md#back-up-before-upgrading).
 
-To add Linux machines for pure project checks, follow [Add execution workers](DistributedExecution.md). The coordinator retains saved files and interactive workloads. Certify each worker and measure representative load before enabling remote traffic.
+To add Linux machines for pure project checks, follow [Add execution workers](DistributedExecution.md). Add certified live Lean sessions through [remote editor operations](RemoteEditors.md). The coordinator retains canonical files, collaboration, agents and terminals. Certify each worker and measure representative load before enabling remote traffic.
 
 Use [distributed operations](DistributedOperations.md) for scaling, worker disk
 usage, cache maintenance, acceptance and rollback. The
@@ -19,9 +19,11 @@ Keep editors responsive during checks by reserving worker capacity in both direc
 
 Full checks keep their priority as slots become available. While open editors or agents prevent a full check from starting, bounded jobs can use the otherwise idle slots. New agents cannot use that exception. An assistant’s LaTeX compiler has a protected shared slot and inherits its parent’s priority, so a waiting check cannot block the compiler that lets the assistant finish. Cancelling queued work releases its place without stopping unrelated work. Capacity status reports effective class limits and active and queued slots. Before a larger rollout, run concurrent project checks on representative Lean projects with the intended hardware and provider limits; the deterministic worker-load regressions validate admission and cancellation, not a hardware sizing guarantee.
 
-For the measured production editor profile and compilation burst results, see
-[the availability rollout](releases/2026-11-16-availability.md). The four-editor
-example above describes the earlier equal-size worker pool.
+The [accepted distributed rollout](releases/2026-11-16-remote-editors.md) records
+15 concurrent managed Mathlib editors: nine on the VM and six on PC06, with a
+mixed compilation burst. The [local availability rollout](releases/2026-11-16-availability.md)
+records the coordinator profile. The four-editor example above describes an
+equal-size worker pool; use the measured workload-specific limits for production.
 
 ## Run as a service
 
