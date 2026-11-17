@@ -1,5 +1,5 @@
 .monaco-host .collaborator-cursor {
-  border-left: 1px solid;
+  border-left: 2px solid;
   pointer-events: none;
 }
 
@@ -9,13 +9,13 @@
   min-width: 0;
   color: #fff;
   border-radius: 2px 2px 2px 0;
-  padding: 0 3px;
-  max-width: 124px;
+  padding: 1px 5px;
+  max-width: 156px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font:
-    10px/12px system-ui,
+    600 12px/14px system-ui,
     sans-serif;
   pointer-events: none;
 }
