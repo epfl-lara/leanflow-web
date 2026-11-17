@@ -7,6 +7,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Runtime } from '../server/runtime.mjs'
 import { WorkspaceStore } from '../server/workspaces.mjs'
+import { EventStore, JobManager } from '../server/events.mjs'
 import { checkEditorImports } from '../server/editor-imports.mjs'
 import { runPinnedLake } from '../server/pinned-lake.mjs'
 
@@ -164,6 +165,59 @@ try {
     await fs.readFile(path.join(ready.root, 'lean-toolchain'), 'utf8'),
     toolchain + '\n',
   )
+  const files = {
+    'Main.lean': 'import Helper\nexample : False := by exact True.intro\n',
+    'Notes.lean':
+      'import Helper.Optional\nexample : optionalValue = 9 := by rfl\n',
+    [optional]: 'def optionalValue : Nat := 9\n',
+  }
+  for (const [filename, content] of Object.entries(files)) {
+    const original = await store.readFile(
+      project.id,
+      'imports-fixture',
+      filename,
+    )
+    await store.writeFile(
+      project.id,
+      'imports-fixture',
+      filename,
+      content,
+      original.hash,
+    )
+  }
+  const events = new EventStore(path.join(reportDir, 'data'))
+  const jobs = new JobManager({ events, runtime, workspaces: store })
+  try {
+    const selected = async (file) => {
+      const job = jobs.check('imports-fixture', project.id, file, 'file')
+      await jobs.active.get(job.id)
+      return events.get(job.id, 'imports-fixture')
+    }
+    const valid = await selected('Notes.lean')
+    assert.equal(valid.status, 'completed', valid.log)
+    assert.equal(valid.checkMethod, 'lean-file')
+    const invalid = await selected('Main.lean')
+    assert.equal(invalid.status, 'failed', invalid.log)
+    await store.writeFile(
+      project.id,
+      'imports-fixture',
+      'Missing.lean',
+      'import Std.LeanFlowMissingModule\nexample : True := by trivial\n',
+      null,
+    )
+    const missingImport = await selected('Missing.lean')
+    assert.equal(missingImport.status, 'failed', missingImport.log)
+    assert.match(missingImport.log, /LeanFlowMissingModule/)
+    report.checks.push(
+      'A missing public module produces a pinned compiler error for the selected file.',
+    )
+    report.checks.push(
+      'Check File rebuilt a changed imported module and passed despite a broken sibling. Checking that sibling separately reported its error.',
+    )
+  } finally {
+    await jobs.shutdown()
+    events.close()
+  }
   report.passed = true
 } catch (error) {
   report.error = error.stack

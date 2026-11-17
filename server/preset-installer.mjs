@@ -11,6 +11,7 @@ import {
   setupFailureMessage,
 } from './pinned-lake.mjs'
 import { readPresetConfiguration } from './prepared-presets.mjs'
+import { publicPresetLakefile } from './public-preset.mjs'
 
 // The server and provisioning CLI share one installer and an atomic lease.
 // A killed installer can be resumed without two processes writing one cache.
@@ -196,11 +197,10 @@ export class PresetInstaller {
         path.join(root, 'lean-toolchain'),
         preset.toolchain + '\n',
       )
-      let lakefile =
-        'name = "ProofWorkspace"\nversion = "0.1.0"\ndefaultTargets = ["Main"]\n\n[[lean_lib]]\nname = "Main"\n'
-      if (preset.repository)
-        lakefile += `\n[[require]]\nname = ${JSON.stringify(preset.package)}\ngit = ${JSON.stringify(preset.repository)}\nrev = ${JSON.stringify(preset.revision)}\n`
-      await fs.writeFile(path.join(root, 'lakefile.toml'), lakefile)
+      await fs.writeFile(
+        path.join(root, 'lakefile.toml'),
+        publicPresetLakefile(preset),
+      )
       const imports = ['cslib', 'physlib'].includes(preset.id)
         ? ['Mathlib', preset.import]
         : [preset.import]

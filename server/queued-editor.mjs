@@ -19,8 +19,6 @@ export function queuedEditor({
   onStatus,
 }) {
   return new DeferredEditor(async (signal) => {
-    let retryAfter = 0
-    const deadline = Date.now() + admission.maxWaitMs
     let retry = null
     for (;;) {
       const release = await (retry ||
@@ -29,9 +27,8 @@ export function queuedEditor({
           projectId,
           signal,
           onStatus,
-          deadline,
           reserveStart: true,
-          canStart: () => Date.now() >= retryAfter && canStart(),
+          canStart,
         }))
       retry = null
       let child, actual
@@ -64,7 +61,6 @@ export function queuedEditor({
         } else if (error?.workerReleased) {
           await error.workerReleased
         }
-        retryAfter = Date.now() + 1000
         if (
           signal.aborted ||
           error?.workerCleanup ||
@@ -78,7 +74,7 @@ export function queuedEditor({
           throw error
         }
         // Reuse the same queue entry, deadline and reserved waiting place.
-        retry = release.retry()
+        retry = release.retry(1000)
       } finally {
         signal.removeEventListener('abort', abort)
       }

@@ -15,7 +15,7 @@ export function CheckControls({
   starting: boolean
   activeJob: { createdAt: string; status: string } | null
   stopping: boolean
-  onCheck: () => void
+  onCheck: (scope: 'file' | 'project') => void
   onStop: () => void
 }) {
   const [now, setNow] = useState(Date.now)
@@ -32,10 +32,25 @@ export function CheckControls({
 
   return (
     <>
+      {!singleFile && !starting && !activeJob && (
+        <button
+          className="button small subtle"
+          onClick={() => onCheck('file')}
+          disabled={disabled}
+          title="Save your changes and compile the selected Lean file"
+        >
+          Check File
+        </button>
+      )}
       <button
         className="button small subtle lean-check-button"
-        onClick={onCheck}
+        onClick={() => onCheck(singleFile ? 'file' : 'project')}
         disabled={disabled || starting || !!activeJob}
+        title={
+          singleFile
+            ? 'Save your changes and compile the selected Lean file'
+            : 'Check the project’s default targets and the selected Lean file'
+        }
       >
         <Icon name="check" size={14} />
         {activeJob

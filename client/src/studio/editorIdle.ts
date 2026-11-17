@@ -3,7 +3,7 @@ import { listenForUserActivity } from './userActivity'
 export const EDITOR_IDLE_MS = 30 * 60_000
 
 // One deadline, rescheduled only when it expires. High-frequency editing does
-// not create a timer per keypress, and server traffic never touches this clock.
+// not create a timer per keypress. A worker gets a fresh deadline on admission.
 export function editorIdle(
   sleep: () => void,
   wake: () => void,
@@ -27,6 +27,9 @@ export function editorIdle(
   }
   timer = setTimeout(check, idleMs)
   return {
+    resetDeadline() {
+      if (!disposed && !sleeping) lastActivity = Date.now()
+    },
     activity() {
       if (disposed) return
       lastActivity = Date.now()
@@ -81,11 +84,14 @@ export function watchEditorIdle(
   const frames = new MutationObserver(attachFrames)
   frames.observe(infoview, { childList: true, subtree: true })
   attachFrames()
-  return () => {
-    idle.dispose()
-    stopActivity()
-    frames.disconnect()
-    frameCleanups.forEach((cleanup) => cleanup())
-    frameCleanups.clear()
+  return {
+    resetDeadline: idle.resetDeadline,
+    dispose() {
+      idle.dispose()
+      stopActivity()
+      frames.disconnect()
+      frameCleanups.forEach((cleanup) => cleanup())
+      frameCleanups.clear()
+    },
   }
 }

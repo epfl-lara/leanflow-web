@@ -72,6 +72,8 @@ An open terminal receives saved file moves and clean file updates automatically.
 
 Choose **Share project** to find an account or create an Editor or Viewer link. Project roles are **Admin**, **Editor**, and **Viewer**. Admins manage access and deletion; granting another Admin requires acknowledging those powers. Keep at least one Admin.
 
+For a competition in one repository, give each participant an **Editor** invitation to the same project. In **Files**, double-click each Lean file you want to keep open. Switch between the file tabs above the editor. They share one Lean connection in that browser workspace. Everyone with edit access can change the shared source, including when two people work in the same file.
+
 Concurrent browser edits merge live. Each person's chats, API key, provider, model, and Git connections stay private. Editors can run their own agents, use their own credentials, and prepare the project. Terminals use private copies and publish checked file changes. A conflicting terminal copy can be downloaded with **Recover terminal files**.
 
 Revoking an invitation link stops new joins. Remove existing members separately. See [Project sharing](ProjectSharing.md) for permissions, conflict handling, and terminal recovery.
@@ -148,7 +150,9 @@ Numeric shifts (`n <<< bits`), `#eval`, `#reduce`, IO, and ordinary Lean metapro
 
 An interactive program such as LeanTui's `#eval chessMain []` waits for keyboard input. Remove that command, then use **Restart Lean** to recover the editor. Unsaved edits stay in the editor. Save your changes and open **Terminal** to run the project's executable, for example `lake exe chess-demo`.
 
-**Check Project** uses the project's pinned native `lake check` when available. It builds the default targets and independently rechecks every project declaration and its complete dependency chain, including referenced Mathlib declarations. Unused imported declarations are excluded. Older releases keep their existing build check. The selected file is also compiled if it is outside the default targets. Single-file playgrounds retain **Check File**. See [Project checks and Lean caches](ProjectChecks.md) for scope, compatibility and worker setup.
+Choose **Check File** to save your changes and compile the selected `.lean` file. If you’re waiting for live Lean feedback, **Check this file** in the queue notice submits the same check. You can keep editing and switching tabs while it runs. The result below the editor names the file you checked. If it says **earlier version**, it applies to the saved copy Lean checked. Select that file and run the check again for current sources.
+
+Choose **Check Project** to check the project’s default targets. It uses the project's pinned native `lake check` when available to independently recheck each project declaration and its complete dependency chain, including referenced Mathlib declarations. Unused imported declarations are excluded. Older releases keep their existing build check. The selected file is also compiled if it is outside the default targets. See [Project checks and Lean caches](ProjectChecks.md) for scope, compatibility and worker setup.
 
 While a project or file check runs, **Checking…** shows the elapsed wall-clock time in minutes. Use **Stop check** beside it to cancel the check and wait for its worker to stop. Fix or remove the blocking command before checking again.
 

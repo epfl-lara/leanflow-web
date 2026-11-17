@@ -5,23 +5,16 @@ import path from 'node:path'
 import test from 'node:test'
 import { WebSocket } from 'ws'
 import * as Y from 'yjs'
+import {
+  connectProjectDocumentPeer,
+  waitForDocument as until,
+  encodeDocument as encode,
+} from '../../scripts/lib/project-document-peer.mjs'
 import { createStudio } from '../studio.mjs'
 import { fixtureModelDiscovery } from './fixtures/model-discovery.mjs'
 
 const TOOLCHAIN = 'leanprover/lean4:v4.34.1'
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-async function until(check, message, timeout = 5000) {
-  const deadline = Date.now() + timeout
-  while (Date.now() < deadline) {
-    const result = await check()
-    if (result) return result
-    await delay(10)
-  }
-  throw new Error(`Timed out: ${message}`)
-}
-const encode = (update) => Buffer.from(update).toString('base64')
-const decode = (update) => new Uint8Array(Buffer.from(update, 'base64'))
-
 async function fixture(t) {
   const dataDir = await fs.mkdtemp(
     path.join(os.tmpdir(), 'leanflow-sharing-adversarial-'),
@@ -114,84 +107,11 @@ async function fixture(t) {
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
-  const connect = async (
-    actor,
-    {
-      id = project.id,
-      name = 'Main.lean',
-      open = true,
-      doc = new Y.Doc(),
-    } = {},
-  ) => {
-    const peer = { packets: [], doc, requestId: 0, id: null }
-    const ws = new WebSocket(
-      origin.replace('http:', 'ws:') + `/websocket/collaboration/${id}`,
-      { headers: { Authorization: `Bearer ${actor.token}`, Origin: origin } },
+  const connect = (actor, options) =>
+    connectProjectDocumentPeer(
+      { origin, projectId: project.id, token: actor.token, sockets },
+      options,
     )
-    sockets.add(ws)
-    peer.ws = ws
-    ws.on('error', () => {})
-    ws.on('message', (bytes) => {
-      const packet = JSON.parse(bytes.toString())
-      if (peer.ignorePackets) return
-      peer.packets.push(packet)
-      if (packet.type === 'document') {
-        peer.id = packet.documentId
-        Y.applyUpdate(peer.doc, decode(packet.update))
-      }
-    })
-    await new Promise((resolve, reject) => {
-      ws.once('open', resolve)
-      ws.once('error', reject)
-      ws.once('unexpected-response', (_req, res) => {
-        res.resume()
-        reject(
-          Object.assign(new Error('Handshake denied'), {
-            status: res.statusCode,
-          }),
-        )
-      })
-    })
-    await until(
-      () => peer.packets.some((item) => item.type === 'ready'),
-      'collaboration ready',
-    )
-    if (open) {
-      ws.send(JSON.stringify({ type: 'open', path: name }))
-      await until(
-        () =>
-          peer.packets.some(
-            (item) => item.type === 'document' && item.path === name,
-          ),
-        'document opened',
-      )
-    }
-    peer.send = (body) => ws.send(JSON.stringify(body))
-    peer.edit = (change) => {
-      const vector = Y.encodeStateVector(peer.doc)
-      change(peer.doc.getText('source'))
-      const requestId = ++peer.requestId
-      peer.send({
-        type: 'update',
-        path: name,
-        documentId: peer.id,
-        update: encode(Y.encodeStateAsUpdate(peer.doc, vector)),
-        requestId,
-      })
-      return requestId
-    }
-    peer.ack = (requestId) =>
-      until(
-        () =>
-          peer.packets.find(
-            (item) =>
-              item.ack === requestId ||
-              (item.requestId === requestId && item.type === 'error'),
-          ),
-        `ack ${requestId}`,
-      )
-    return peer
-  }
   const file = () =>
     studio.workspaces.readFile(project.id, admin.id, 'Main.lean')
   return {
@@ -214,6 +134,70 @@ async function fixture(t) {
     },
   }
 }
+
+test('25 participants concurrently edit two files in one shared project and converge on both saved sources', async (t) => {
+  const f = await fixture(t)
+  const files = ['Main.lean', 'Second.lean']
+  await f.studio.workspaces.writeFile(
+    f.project.id,
+    f.users.admin.id,
+    files[1],
+    '-- second\n',
+    null,
+  )
+  const peers = await Promise.all(
+    Array.from({ length: 25 }, async (_, index) => {
+      const { user, token } = await f.studio.auth.createUser(f.users.admin, {
+        name: `Participant ${index + 1}`,
+      })
+      await f.studio.workspaces.setMember(
+        f.project.id,
+        f.users.admin.id,
+        user.id,
+        'editor',
+      )
+      return f.connect({ id: user.id, token })
+    }),
+  )
+  t.after(() => {
+    for (const peer of peers)
+      for (const { doc } of peer.documents.values()) doc.destroy()
+  })
+  await Promise.all(peers.map((peer) => peer.open(files[1])))
+  const marker = (path, index) => `-- ${path} participant ${index + 1}\n`
+  await Promise.all(
+    peers.flatMap((peer, index) =>
+      files.map(async (path) => {
+        const request = peer.edit(
+          (source) => source.insert(0, marker(path, index)),
+          path,
+        )
+        const ack = await peer.ack(request)
+        assert.equal(ack.type, 'document', ack.message)
+        assert.equal(ack.path, path)
+      }),
+    ),
+  )
+  for (const path of files) {
+    const { content } = await f.studio.workspaces.readFile(
+      f.project.id,
+      f.users.admin.id,
+      path,
+    )
+    const expectedLines = peers.map((_, index) => marker(path, index).trimEnd())
+    expectedLines.push(path === 'Main.lean' ? 'base text' : '-- second')
+    assert.deepEqual(content.trimEnd().split('\n').sort(), expectedLines.sort())
+    await until(
+      () =>
+        peers.every(
+          (peer) =>
+            peer.documents.get(path).doc.getText('source').toString() ===
+            content,
+        ),
+      `${path} convergence across 25 editors`,
+    )
+  }
+})
 
 test('real WebSocket peers converge under seeded concurrent insert/delete/paste rounds and server restart', async (t) => {
   const f = await fixture(t)

@@ -83,6 +83,70 @@ const kernelOptions = {
   freshHome: true,
 }
 
+test('the 45-GiB coordinator queues a third assistant under competition editor load and preserves dependent compiler capacity', async (t) => {
+  for (const small of [true, false]) {
+    await t.test(
+      small ? 'nine managed editors' : 'four repository editors',
+      async (t) => {
+        const { runtime, root } = await fixture(t, {
+          maxConcurrent: 12,
+          editorMemory: '3g',
+          batchMemoryReserved: '18g',
+        })
+        runtime.memoryCapacity = {
+          slots: 12,
+          memoryBudgetBytes: 45 * 1024 ** 3,
+        }
+        assert.equal(runtime.fileCheckCapacity(), 6)
+        const editors = Array.from({ length: small ? 9 : 4 }, () =>
+          runtime.spawn(root, ['lake', 'serve', '--'], {
+            workload: 'interactive',
+            editor: small,
+          }),
+        )
+        const first = await runtime.spawnAgentWhenAvailable(
+          root,
+          ['first-agent'],
+          { dependentTools: true },
+        )
+        assert.equal(runtime.fileCheckCapacity(), 1)
+        assert(
+          runtime.info().availability.batch,
+          'An ordinary standalone check fits beside one agent',
+        )
+        const second = await runtime.spawnAgentWhenAvailable(
+          root,
+          ['second-agent'],
+          { dependentTools: true },
+        )
+        assert.equal(runtime.info().compilerReservedSlots, 1)
+        assert.equal(runtime.fileCheckCapacity(), 0)
+        assert.equal(runtime.info().availability.batch, false)
+        const third = runtime.spawnAgentWhenAvailable(root, ['third-agent'], {
+          dependentTools: true,
+        })
+        third.catch(() => {})
+        assert.equal(runtime.info().queued, 1)
+        // Free 6 GiB of interactive memory. Only the waiting agent consumes it.
+        await stop(editors.pop())
+        if (small) await stop(editors.pop())
+        const promoted = await third
+        assert.equal(runtime.info().queued, 0)
+        assert.equal(runtime.info().compilerReservedSlots, 1)
+        assert.equal(runtime.info().availability.batch, false)
+        assert.equal(runtime.info().availability.kernel, false)
+        // Returning one agent's resources admits a real independent one-slot check.
+        await stop(promoted)
+        assert.equal(
+          (await runtime.run(root, ['quick'], { timeoutMs: 5000 })).code,
+          0,
+        )
+        await Promise.all([...editors, first, second].map(stop))
+      },
+    )
+  }
+})
+
 test('fake-engine admission charges actual RAM for 25 small editor workers while preserving build headroom', async (t) => {
   const { runtime, root } = await fixture(t, {
     maxConcurrent: 28,

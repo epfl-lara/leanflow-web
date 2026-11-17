@@ -249,7 +249,7 @@ interface Runtime {
   viewStates: Map<string, monacoEditor.ICodeEditorViewState>
   disabledRenameAction?: { dispose(): void }
   clientLifecycle?: ReturnType<typeof installLeanClientLifecycle>
-  idleCleanup?: () => void
+  idle?: ReturnType<typeof watchEditorIdle>
   collaborativeUndo?: ReturnType<typeof installCollaborativeEditorUndo>
   collaboratorCursors?: CollaboratorCursors
   commentImages?: LeanCommentImagePreviews
@@ -264,6 +264,7 @@ interface ConnectionClient {
 
 export function LeanWorkspace({
   projectId,
+  queuedFileCheck,
   files,
   file,
   buffers,
@@ -296,6 +297,7 @@ export function LeanWorkspace({
   joining = false,
 }: {
   projectId: string
+  queuedFileCheck?: { submit: () => void; saving: boolean; inProgress: boolean }
   files: readonly FileEntry[]
   file: OpenFile | null
   buffers: ReadonlyMap<string, OpenFile>
@@ -500,6 +502,7 @@ export function LeanWorkspace({
         (notice) => {
           if (cancelled) return
           const queued = notice.state === 'active' ? null : notice
+          if (!queued && editorQueueRef.current) own?.idle?.resetDeadline()
           editorQueueRef.current = queued
           setEditorQueue(queued)
           if (notice.state === 'waiting')
@@ -588,7 +591,7 @@ export function LeanWorkspace({
               },
             )
             const active = own
-            active.idleCleanup = watchEditorIdle(
+            active.idle = watchEditorIdle(
               document,
               infoEl.current,
               () => {
@@ -634,7 +637,7 @@ export function LeanWorkspace({
                       )
                   })
               },
-              () => editorQueueRef.current?.state !== 'waiting',
+              () => editorQueueRef.current === null,
             )
             own.connectionSubscriptions.push(
               provider.clientAdded((client: ConnectionClient) => {
@@ -710,7 +713,7 @@ export function LeanWorkspace({
     return () => {
       cancelled = true
       own?.lean.cancelPendingConnections()
-      own?.idleCleanup?.()
+      own?.idle?.dispose()
       void serialize(async () => {
         own?.subscription?.dispose()
         own?.outlineCleanup?.()
@@ -1784,16 +1787,35 @@ export function LeanWorkspace({
     >
       <div className="source-pane proof-source-pane">
         {editorQueue && (
-          <output
-            className="lean-connection-notice"
-            role="status"
-            aria-live="polite"
+          <div
+            className="lean-connection-notice lean-queue-notice"
             data-editor-queue={editorQueue.state}
           >
-            {editorQueue.state === 'waiting'
-              ? `Waiting for a Lean editor slot — position ${editorQueue.position} of ${editorQueue.total}. You will connect automatically. You can keep editing and saving; closing this project leaves the queue.`
-              : 'A Lean slot is available. Starting Lean…'}
-          </output>
+            <output aria-live="polite">
+              {editorQueue.state === 'waiting'
+                ? `Waiting for live Lean feedback — position ${editorQueue.position} of ${editorQueue.total}. You can edit and save. Lean will connect automatically if you keep this project open.`
+                : 'A Lean slot is available. Starting Lean…'}
+            </output>
+            {editorQueue.state === 'waiting' &&
+              queuedFileCheck &&
+              (queuedFileCheck.inProgress ? (
+                <span>Follow your check below the editor.</span>
+              ) : (
+                <div className="queue-file-check">
+                  <button
+                    type="button"
+                    className="button small secondary"
+                    disabled={queuedFileCheck.saving}
+                    onClick={queuedFileCheck.submit}
+                  >
+                    Check this file
+                  </button>
+                  <span>
+                    Compile the saved file and keep your place in the queue.
+                  </span>
+                </div>
+              ))}
+          </div>
         )}
         {sleeping && (
           <output className="lean-connection-notice">

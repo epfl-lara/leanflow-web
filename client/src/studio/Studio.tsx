@@ -143,13 +143,19 @@ interface DeleteTarget {
 }
 
 interface Job {
-  checkMethod?: 'lake-check' | 'lake-build'
+  checkMethod?: 'lake-check' | 'lake-build' | 'lean-file'
+  checkScope?: 'file' | 'project'
+  file?: string
   id: string
   projectId: string
   createdAt: string
   status: string
   log?: string
-  result?: unknown
+  result?: {
+    checkedSnapshot?: string
+    sourceChanged?: boolean
+    [key: string]: unknown
+  }
   error?: string
   [key: string]: unknown
 }
@@ -516,6 +522,19 @@ export function Studio() {
   const projectKindRef = useRef(project?.kind)
   projectKindRef.current = project?.kind
   const singleFileMode = project?.kind === 'single-file'
+  const checkAvailable =
+    projectCanEdit &&
+    project?.status === 'ready' &&
+    !project.needsPreparation &&
+    !!file?.path.endsWith('.lean') &&
+    !file.unavailable
+  const activeCheck = job && !terminalJob(job) ? job : null
+  const earlierFileResult =
+    job?.checkScope === 'file' &&
+    (job.status === 'completed' || job.status === 'failed') &&
+    typeof job.result?.checkedSnapshot === 'string' &&
+    !!job.result.checkedSnapshot &&
+    job.result.sourceChanged === true
   const gitProjectAvailable =
     projectCanEdit &&
     !singleFileMode &&
@@ -1754,24 +1773,32 @@ export function Studio() {
     }
   }
 
-  async function check() {
-    if (!projectCanEdit) return
-    if (!projectId || !file || checkRequest.current) return
+  async function check(checkScope: 'file' | 'project') {
+    if (
+      !checkAvailable ||
+      !projectId ||
+      !file ||
+      checkRequest.current ||
+      activeCheck
+    )
+      return
     const id = projectId
+    const expected = bufferStore.getSnapshot().scope
     checkRequest.current = true
     setStartingCheck(true)
     setError('')
     try {
       await saveCompletely()
+      if (!bufferStore.isCurrent(expected)) return
       if (bufferStore.getSnapshot().file?.unavailable)
         throw new Error(
           'This file was deleted or moved. Choose a saved Lean file to check.',
         )
       const value = await post<Job>(
         `/api/projects/${encodeURIComponent(id)}/check`,
-        { path: file.path },
+        { path: file.path, ...(checkScope === 'file' && { scope: 'file' }) },
       )
-      if (projectIdRef.current === id) {
+      if (bufferStore.isCurrent(expected)) {
         setJob(value)
         setJobOpen(true)
       }
@@ -3853,19 +3880,12 @@ export function Studio() {
                   </button>
                 )}
                 <CheckControls
-                  onCheck={() => void check()}
+                  onCheck={(scope) => void check(scope)}
                   onStop={() => void stopCheck()}
-                  disabled={
-                    !projectCanEdit ||
-                    project.status !== 'ready' ||
-                    project.needsPreparation ||
-                    !file?.path.endsWith('.lean') ||
-                    file.unavailable ||
-                    saving
-                  }
+                  disabled={!checkAvailable || saving}
                   singleFile={singleFileMode}
                   starting={startingCheck}
-                  activeJob={job && !terminalJob(job) ? job : null}
+                  activeJob={activeCheck}
                   stopping={stoppingCheck}
                 />
               </div>
@@ -3882,6 +3902,15 @@ export function Studio() {
             >
               {project.status === 'ready' ? (
                 <LeanWorkspace
+                  queuedFileCheck={
+                    checkAvailable
+                      ? {
+                          submit: () => void check('file'),
+                          saving,
+                          inProgress: startingCheck || !!activeCheck,
+                        }
+                      : undefined
+                  }
                   key={`editor:${project.id}`}
                   projectId={project.id}
                   files={files}
@@ -4038,16 +4067,28 @@ export function Studio() {
               <section className={`build-output ${jobOpen ? 'expanded' : ''}`}>
                 <button
                   className="build-caption"
+                  aria-expanded={jobOpen}
                   onClick={() => setJobOpen((value) => !value)}
                 >
                   <Icon name="log" size={14} />
-                  <strong>Lean check</strong>
-                  <span
+                  <strong
+                    title={job.checkScope === 'file' ? job.file : undefined}
+                  >
+                    {job.checkScope === 'file'
+                      ? `File check${job.file ? ` · ${job.file}` : ''}`
+                      : singleFileMode
+                        ? 'File check'
+                        : 'Project check'}
+                  </strong>
+                  <output
+                    aria-live="polite"
                     className={`tag ${job.status === 'completed' ? 'success' : job.status === 'failed' ? 'danger' : ''}`}
                   >
                     {!terminalJob(job) && <span className="spinner" />}
-                    {job.status}
-                  </span>
+                    {earlierFileResult
+                      ? `${job.status === 'completed' ? 'Passed' : 'Failed'} · earlier version`
+                      : job.status}
+                  </output>
                   <Icon
                     name="chevron"
                     size={13}
@@ -4056,6 +4097,13 @@ export function Studio() {
                 </button>
                 {jobOpen && (
                   <>
+                    {earlierFileResult && (
+                      <p className="field-help">
+                        Project files changed while Lean checked this saved
+                        version. Select <b>{job.file}</b> and choose{' '}
+                        <b>Check File</b> again to check current sources.
+                      </p>
+                    )}
                     {job.checkMethod === 'lake-check' && (
                       <p className="field-help">
                         Builds the default targets and independently checks

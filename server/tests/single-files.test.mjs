@@ -58,10 +58,14 @@ test('real editor sockets share local and remote admission, mirror canonical sav
     children.push(child)
     return child
   }
+  let captures = 0
   const checks = new ClusterChecks({
     mode: 'serve',
     inputs: {
-      capture: async () => ({ sourceManifest: 'fixture-source' }),
+      capture: async () => {
+        captures++
+        return { sourceManifest: 'fixture-source' }
+      },
       blobs: {
         manifest: async () => ({
           kind: 'source',
@@ -148,6 +152,11 @@ test('real editor sockets share local and remote admission, mirror canonical sav
   }
   assert.equal(remote.length, 2)
   assert.equal(locals.length, 1)
+  assert.equal(
+    captures,
+    2,
+    'A full remote pool must not delay a local start with another snapshot',
+  )
   const rejected = (token, project) =>
     new Promise((resolve, reject) => {
       const ws = connect(token, project)

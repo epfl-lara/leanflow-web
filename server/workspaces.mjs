@@ -76,6 +76,8 @@ import {
 } from './shared-dependencies.mjs'
 import { singleFileSource, availablePlaygroundName } from './single-files.mjs'
 import { sourceFingerprint } from './source-fingerprint.mjs'
+import { FileCheckSlots } from './file-check-slots.mjs'
+import { SharedSourceRead } from './shared-source-read.mjs'
 import { validateDependencyLayout } from './dependency-layout.mjs'
 import { preparePrivateSetupDependencies } from './setup-dependencies.mjs'
 import { checkEditorImports } from './editor-imports.mjs'
@@ -508,14 +510,21 @@ async function fileHash(filename, signal) {
   }
 }
 
+const unsupportedFileCheckCopy = Symbol('unsupported file check input')
+
 async function copyWorkspace(
   source,
   target,
-  { omitDependencies = false, omitFiles = [], signal } = {},
+  { omitDependencies = false, omitFiles = [], signal, checkSourceBytes } = {},
 ) {
+  let entries = 0,
+    bytes = 0
   const visit = async (from, to, prefix = '', depth = 0) => {
     signal?.throwIfAborted()
-    if (depth > 64) fail('Project directory nesting exceeds 64 levels', 413)
+    if (depth > 64) {
+      if (checkSourceBytes !== undefined) throw unsupportedFileCheckCopy
+      fail('Project directory nesting exceeds 64 levels', 413)
+    }
     const directory = await fs.open(
       from,
       constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
@@ -531,22 +540,53 @@ async function copyWorkspace(
       for (const entry of await fs.readdir(anchor, { withFileTypes: true })) {
         signal?.throwIfAborted()
         const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+        // Match the source fingerprint, never share prior project build output.
+        if (
+          checkSourceBytes !== undefined &&
+          ['.git', '.lake'].includes(entry.name)
+        )
+          continue
         if (
           entry.name === 'node_modules' ||
           entry.name === '.ready.json' ||
           isSecret(entry.name) ||
           omitFiles.includes(relative) ||
           (omitDependencies && relative === '.lake/packages')
-        )
+        ) {
+          if (checkSourceBytes !== undefined) throw unsupportedFileCheckCopy
           continue
+        }
+        if (checkSourceBytes !== undefined && ++entries > MAX_FILES)
+          throw unsupportedFileCheckCopy
         const original = path.join(from, entry.name)
         const anchored = path.join(anchor, entry.name)
         const destination = path.join(to, entry.name)
         if (entry.isDirectory())
           await visit(original, destination, relative, depth + 1)
-        else if (entry.isSymbolicLink())
-          await fs.symlink(await fs.readlink(anchored), destination)
-        else if (entry.isFile()) {
+        else if (entry.isSymbolicLink()) {
+          const link = await fs.readlink(anchored)
+          if (checkSourceBytes !== undefined) {
+            const resolved = await fs.realpath(anchored).catch((error) => {
+              if (['ENOENT', 'ENOTDIR', 'ELOOP'].includes(error.code))
+                return null
+              throw error
+            })
+            if (
+              path.isAbsolute(link) ||
+              !path
+                .resolve('/workspace', path.relative(source, from), link)
+                .startsWith('/workspace/') ||
+              !resolved ||
+              !resolved.startsWith(source + path.sep) ||
+              path
+                .relative(source, resolved)
+                .split(path.sep)
+                .some((part) => part === '.git' || part === '.lake')
+            )
+              throw unsupportedFileCheckCopy
+          }
+          await fs.symlink(link, destination)
+        } else if (entry.isFile()) {
           const file = await fs.open(
             anchored,
             constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -555,6 +595,11 @@ async function copyWorkspace(
             if ((await fs.realpath(`/proc/self/fd/${file.fd}`)) !== original)
               fail('Source file changed during snapshot', 409)
             const stat = await file.stat()
+            if (
+              checkSourceBytes !== undefined &&
+              (bytes += stat.size) > checkSourceBytes
+            )
+              throw unsupportedFileCheckCopy
             if (!stat.isFile()) fail('Source file changed during snapshot', 409)
             await fs.copyFile(
               `/proc/self/fd/${file.fd}`,
@@ -565,7 +610,8 @@ async function copyWorkspace(
           } finally {
             await file.close()
           }
-        }
+        } else if (checkSourceBytes !== undefined)
+          throw unsupportedFileCheckCopy
       }
     } finally {
       await directory.close()
@@ -816,6 +862,9 @@ export class WorkspaceStore {
     this.dataDir = path.resolve(dataDir)
     this.runtime = runtime
     this.storage = storage
+    this.fileCheckSlots = new FileCheckSlots(
+      () => this.runtime.fileCheckCapacity?.() ?? 2,
+    )
     this.referenceUpdateAdmission = new ReferenceUpdateAdmission(
       referenceUpdateCapacity,
     )
@@ -829,6 +878,7 @@ export class WorkspaceStore {
     this.trashDir = path.join(this.dataDir, 'trash')
     this.jobs = new Map()
     this.locks = new Map()
+    this.fingerprintReads = new WeakMap()
     this.preparationControllers = new Map()
     this.preparationActors = new Map()
     this.preparationAllocations = new Map()
@@ -6033,10 +6083,85 @@ export class WorkspaceStore {
     }
   }
 
-  checkFingerprint(id, owner, options) {
-    return this.#locked(id, () =>
-      sourceFingerprint(this.get(id, owner).root, options),
-    )
+  async withFileCheckWorkspace(id, actor, { signal }, check) {
+    return this.fileCheckSlots.run(signal, async (holdThroughCleanup) => {
+      const parent = path.join(this.dataDir, 'file-checks')
+      await fs.mkdir(parent, { recursive: true, mode: 0o700 })
+      if ((await fs.realpath(parent)) !== parent)
+        fail('Invalid file check directory.', 403)
+      const root = await fs.mkdtemp(path.join(parent, 'check-'))
+      let claimed = false,
+        workerReleased
+      try {
+        await this.runtime.claimTemporaryWorkspace?.(root)
+        claimed = true
+        // Writers own this lock only while files and dependency bindings are
+        // copied. Participants can save throughout the Lean run.
+        await this.#locked(id, async () => {
+          signal?.throwIfAborted()
+          const project = this.get(id, actor)
+          this.#ready(project)
+          await copyWorkspace(project.root, root, {
+            signal,
+            checkSourceBytes: Math.min(
+              this.storage?.allocationBytes ?? Infinity,
+              128 * 1024 ** 2,
+            ),
+          })
+          await this.runtime.inheritDependencies?.(project.root, root)
+        })
+        const fingerprint = await sourceFingerprint(root, { signal })
+        signal?.throwIfAborted()
+        this.get(id, actor)
+        return await check(root, fingerprint, (child) => {
+          workerReleased = child.workerReleased
+        })
+      } catch (error) {
+        if (error !== unsupportedFileCheckCopy) throw error
+      } finally {
+        if (claimed && this.runtime.releaseTemporaryWorkspace) {
+          const removed = await this.runtime.releaseTemporaryWorkspace(root)
+          if (removed === false && workerReleased)
+            holdThroughCleanup(
+              workerReleased.then(() =>
+                this.runtime.releaseTemporaryWorkspace(root),
+              ),
+            )
+        } else await removeDisposableTree(root)
+      }
+      // Keep the existing whole-project freshness guard for inputs we cannot
+      // copy completely within the source and storage limits.
+      signal?.throwIfAborted()
+      return check(this.get(id, actor).root)
+    })
+  }
+
+  async checkFingerprint(id, owner, options = {}) {
+    const { signal } = options
+    signal?.throwIfAborted()
+    const project = this.get(id, owner)
+    if (options.timeoutMs !== undefined)
+      return this.#locked(id, () =>
+        sourceFingerprint(this.get(id, owner).root, options),
+      )
+    // A save or access change enqueues a different lock tail immediately. Only
+    // readers in this exact position can use the same scan, and all must have
+    // requested it before traversal starts, including post-check verification.
+    let read = this.fingerprintReads.get(this.locks.get(id))
+    if (!read?.active) {
+      let lock
+      read = new SharedSourceRead((scanSignal) =>
+        this.#locked(id, () => {
+          this.fingerprintReads.delete(lock)
+          return sourceFingerprint(project.root, { signal: scanSignal })
+        }),
+      )
+      lock = this.locks.get(id)
+      this.fingerprintReads.set(lock, read)
+    }
+    const digest = await read.wait(signal)
+    this.get(id, owner)
+    return digest
   }
 
   async #cleanupIncompleteCapture(project, runId, actor, createdContainer) {

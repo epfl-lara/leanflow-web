@@ -48,8 +48,9 @@ export class TemporaryWorkspaces {
   }
   async release(root) {
     if (!this.allowed(root)) throw new Error('Invalid temporary workspace path')
-    if (!(await this.cleanup(root))) return
+    if (!(await this.cleanup(root))) return false
     await fs.rm(path.join(this.directory, key(root) + '.json'), { force: true })
+    return true
   }
   async sweep(mountedRoots) {
     let names

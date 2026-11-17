@@ -53,11 +53,11 @@ export class EditorAdmission {
     const nonnegative = (value) => Number.isSafeInteger(value) && value >= 0
     if (
       typeof capacity !== 'function' ||
-      ![maxPerUser, maxPerProject, maxWaitMs, pollMs].every(positive) ||
-      ![maxQueued, maxQueuedPerUser].every(nonnegative)
+      ![maxPerUser, maxPerProject, pollMs].every(positive) ||
+      ![maxQueued, maxQueuedPerUser, maxWaitMs].every(nonnegative)
     )
       throw new Error(
-        'Editor admission needs a capacity probe, positive active and wait limits and nonnegative queue limits.',
+        'Editor admission needs a capacity probe, positive active and polling limits and nonnegative queue and wait limits.',
       )
     this.#capacity = capacity
     Object.assign(this, {
@@ -103,37 +103,36 @@ export class EditorAdmission {
       if (entry.deadline <= now) this.#settle(entry, expired())
   }
 
-  // A request blocked by its project, account or worker placement holds back
-  // only later requests that share its project or account.
+  // Consider the oldest tab per eligible account. A participant at their
+  // limit cannot hold up other participants in the same shared project.
   #next() {
     if (this.#closed || this.#starting || this.#active >= this.#limit())
       return null
     const projects = new Set(),
       actors = new Set()
+    const now = Date.now()
     for (const entry of [...this.#queue]) {
       const { actor, projectId } = entry
-      if (entry.settled || projects.has(projectId) || actors.has(actor))
+      if (
+        entry.settled ||
+        actors.has(actor) ||
+        (this.#users.get(actor) || 0) >= this.maxPerUser
+      )
         continue
-      projects.add(projectId)
       actors.add(actor)
       if (
-        (this.#users.get(actor) || 0) >= this.maxPerUser ||
+        entry.retryAt > now ||
+        projects.has(projectId) ||
         (this.#projects.get(projectId) || 0) >= this.maxPerProject
       )
         continue
-      let ready = false
       try {
-        ready = entry.canStart() === true
+        if (entry.canStart() === true && !entry.settled) return entry
       } catch (error) {
         this.#settle(entry, error)
       }
-      if (!entry.settled) {
-        if (ready) return entry
-        continue
-      }
-      // A refused or cancelled request no longer holds back later ones.
-      projects.delete(projectId)
-      actors.delete(actor)
+      if (entry.settled) actors.delete(actor)
+      else projects.add(projectId)
     }
     return null
   }
@@ -175,7 +174,7 @@ export class EditorAdmission {
       this.#reservedWaiting.delete(entry)
       release.startingDone()
     }
-    release.retry = () => {
+    release.retry = (delayMs = 0) => {
       if (released || confirmed)
         return Promise.reject(
           new Error('Editor startup is no longer retryable.'),
@@ -186,7 +185,13 @@ export class EditorAdmission {
         return Promise.reject(signal?.aborted ? signal.reason : closing())
       }
       return new Promise((resolve, reject) => {
-        Object.assign(entry, { resolve, reject, settled: false, shown: '' })
+        Object.assign(entry, {
+          resolve,
+          reject,
+          settled: false,
+          shown: '',
+          retryAt: Date.now() + delayMs,
+        })
         signal?.addEventListener('abort', entry.abort, { once: true })
         this.#queue.push(entry)
         this.#queue.sort((a, b) => a.order - b.order)
@@ -296,7 +301,7 @@ export class EditorAdmission {
     signal,
     canStart = () => true,
     onStatus = () => {},
-    deadline = Date.now() + this.maxWaitMs,
+    deadline = Infinity,
     reserveStart = false,
   }) {
     if (this.#closed) return Promise.reject(closing())
@@ -314,6 +319,7 @@ export class EditorAdmission {
       const entry = {
         actor,
         order: ++this.#sequence,
+        retryAt: 0,
         reserveStart,
         projectId,
         signal,
@@ -321,7 +327,9 @@ export class EditorAdmission {
         onStatus,
         resolve,
         reject,
-        deadline: Math.min(deadline, Date.now() + this.maxWaitMs),
+        deadline: this.maxWaitMs
+          ? Math.min(deadline, Date.now() + this.maxWaitMs)
+          : deadline,
         waiting: false,
         settled: false,
         shown: '',

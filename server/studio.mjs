@@ -1499,7 +1499,12 @@ export async function createStudio({
   })
   app.post('/api/projects/:id/check', (req, res) => {
     requireNoGit(req.params.id, req.user.id)
-    const job = jobs.check(req.user.id, req.params.id, req.body.path)
+    const job = jobs.check(
+      req.user.id,
+      req.params.id,
+      req.body.path,
+      req.body.scope,
+    )
     res.status(202).json(publicJob(events.snapshot(job.id, req.user.id)))
   })
   app.get('/api/projects/:id/checks', (req, res) => {
@@ -1874,7 +1879,11 @@ export async function createStudio({
               new Error('This project is stopping. Wait a moment.'),
               { status: 503 },
             )
-          return remoteAllowed && clusterChecks
+          // A local-only grant should not capture project sources or wait
+          // behind remote snapshot preparations before starting its worker.
+          return remoteAllowed &&
+            clusterChecks &&
+            (clusterChecks.canOpenEditor?.(current) ?? true)
             ? clusterChecks.openEditor(
                 { project: current, actor, workspaces },
                 localEditor,

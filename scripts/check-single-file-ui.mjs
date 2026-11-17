@@ -199,6 +199,36 @@ try {
   await newSingle()
   await awaitSingle()
   assert.deepEqual(requests[0], { kind: 'single-file' })
+  let compileInput
+  await page.route('**/api/projects/*/check', async (route) => {
+    compileInput = route.request().postDataJSON()
+    const projectId = new URL(route.request().url()).pathname.split('/')[3]
+    await route.fulfill({
+      status: 202,
+      json: {
+        id: 'playground-check',
+        projectId,
+        createdAt: new Date().toISOString(),
+        status: 'completed',
+        file: 'Main.lean',
+        checkScope: 'file',
+        checkMethod: 'lean-file',
+        log: 'Playground source compiled.',
+      },
+    })
+  })
+  await page.getByRole('button', { name: 'Check File', exact: true }).click()
+  await page
+    .locator('.build-output')
+    .getByText('Playground source compiled.', { exact: true })
+    .waitFor()
+  assert.deepEqual(compileInput, { scope: 'file', path: 'Main.lean' })
+  assert.equal(
+    await page
+      .getByRole('button', { name: 'Check Project', exact: true })
+      .count(),
+    0,
+  )
   assert.equal(await page.getByRole('dialog').count(), 0)
   assert.equal(
     await page.getByRole('region', { name: 'Files', exact: true }).count(),

@@ -179,6 +179,7 @@ async function checkFixture(
     result = { code: 0, stdout: 'checked', stderr: '' },
     changed = false,
     changedDuringProbe = false,
+    scope,
     kind = 'project',
     file,
   } = {},
@@ -186,7 +187,8 @@ async function checkFixture(
   const base = await directory(t),
     root = path.join(base, 'project'),
     events = new EventStore(base),
-    calls = []
+    calls = [],
+    preparation = []
   await fs.mkdir(root)
   await fs.writeFile(
     path.join(root, 'Main.lean'),
@@ -197,6 +199,7 @@ async function checkFixture(
     workspaces: {
       get: () => ({ root, status: 'ready', kind }),
       readFile: async () => {},
+      markDependencyPreparation: (...args) => preparation.push(args),
       checkFingerprint: () => sourceFingerprint(root),
     },
     runtime: {
@@ -221,9 +224,9 @@ async function checkFixture(
     await manager.shutdown()
     events.close()
   })
-  const job = manager.check('owner', 'project', file)
+  const job = manager.check('owner', 'project', file, scope)
   await manager.active.get(job.id)
-  return { job: events.get(job.id, 'owner'), calls }
+  return { job: events.get(job.id, 'owner'), calls, preparation }
 }
 
 test('new projects use the project-root native checker once, old releases build, and single-file checks stay lightweight', async (t) => {
@@ -300,6 +303,98 @@ test('selected files outside default targets still compile and changed source ca
   })
   assert.equal(changedToolchain.job.status, 'failed')
   assert.equal(changedToolchain.job.result.sourceChanged, true)
+})
+
+test('explicit file checks use the pinned dependency-aware compiler without starting a project check', async (t) => {
+  const selected = await checkFixture(t, { scope: 'file', file: 'Main.lean' })
+  assert.equal(selected.job.status, 'completed')
+  assert.equal(selected.job.checkScope, 'file')
+  assert.equal(selected.job.checkMethod, 'lean-file')
+  assert.deepEqual(
+    selected.calls.map((call) => call.args),
+    [['lake', 'lean', './Main.lean', '--', '--json', '-Dwarn.sorry=true']],
+  )
+  assert.equal(selected.calls[0].options.network, 'none')
+  const changed = await checkFixture(t, {
+    scope: 'file',
+    file: 'Main.lean',
+    changed: true,
+  })
+  assert.equal(changed.job.result.sourceChanged, true)
+  const dependencyResult = {
+    code: 1,
+    stdout: '',
+    stderr: 'object file .lake/packages/example/library.olean does not exist',
+  }
+  const isolated = await checkFixture(t, {
+    scope: 'file',
+    file: 'Main.lean',
+    result: dependencyResult,
+  })
+  assert.equal(isolated.job.status, 'failed')
+  assert.equal(
+    isolated.preparation.length,
+    0,
+    'one file check cannot block the project for the other participants',
+  )
+  assert.equal(
+    (await checkFixture(t, { result: dependencyResult })).preparation.length,
+    1,
+  )
+})
+
+test('a frozen remote selected-file result retains its actual verdict and identifies the earlier saved snapshot', async (t) => {
+  const root = await directory(t),
+    events = new EventStore(root)
+  const before = 'a'.repeat(64),
+    after = 'b'.repeat(64)
+  const workerResults = new WeakSet()
+  let current = before,
+    code = 0
+  const manager = new JobManager({
+    events,
+    workspaces: {
+      get: () => ({ id: 'course', root, status: 'ready' }),
+      readFile: async () => {},
+      checkFingerprint: async () => current,
+    },
+    runtime: {},
+    checkExecutor: {
+      async execute(context) {
+        assert.equal(context.fileOnly, true)
+        assert.equal(context.fingerprint, before)
+        current = after
+        const result = {
+          code,
+          stdout: 'saved source',
+          stderr: code ? 'type mismatch' : '',
+        }
+        workerResults.add(result)
+        return result
+      },
+      isRemoteResult: (result) => workerResults.has(result),
+    },
+  })
+  t.after(() => events.close())
+  for (code of [0, 1]) {
+    current = before
+    const job = manager.check('participant', 'course', 'Notes.lean', 'file')
+    await manager.active.get(job.id)
+    const final = events.get(job.id, 'participant')
+    assert.equal(final.status, code === 0 ? 'completed' : 'failed')
+    assert.equal(final.result.code, code)
+    assert.equal(final.result.checkedSnapshot, before)
+    assert.equal(final.result.sourceChanged, true)
+    assert.match(final.log, /earlier saved sources/)
+  }
+  for (const file of [undefined, 'README.md', '/Main.lean', '../Other.lean'])
+    assert.throws(() => manager.check('participant', 'course', file, 'file'), {
+      status: 400,
+    })
+  assert.throws(
+    () => manager.check('participant', 'course', 'Notes.lean', 'other'),
+    { status: 400 },
+  )
 })
 
 test('input fingerprints include auxiliary sources and links but exclude rebuildable cache files', async (t) => {

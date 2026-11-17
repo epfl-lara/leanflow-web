@@ -237,7 +237,12 @@ disabled and unenrolled workers add nothing. Actual local/remote RAM and CPU
 admission still applies to every connection.
 Each open project can start a Lean language server. `STUDIO_MAX_EDITORS_PER_USER`
 and `STUDIO_MAX_EDITORS_PER_PROJECT` keep one account or project from consuming
-all connections. The per-user default is the global editor maximum.
+all connections. The per-user default is the global editor maximum. Files opened
+in the same project and browser tab share a connection. A second browser tab
+can start its own. For a group working in one project, size the per-project
+limit for the group. A connected, authorized participant can keep their place
+without an elapsed waiting deadline when `STUDIO_EDITOR_QUEUE_WAIT_MS=0`.
+See [waiting for an editor](RemoteEditors.md#waiting-for-an-editor).
 
 `STUDIO_EDITOR_MEMORY` and `STUDIO_EDITOR_CPUS` optionally give the fixed
 `lake serve --` command its own limits for managed single-file workspaces.

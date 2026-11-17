@@ -186,7 +186,7 @@ test('local fallback is available only before assignment and never masks uncerta
   assert.equal(uncertain.counts().localCalls, 0)
 })
 
-test('source changes and cancellations do not fall through to another check', async () => {
+test('a change during capture keeps project checks anchored and permits a fresh local selected-file check', async () => {
   const f = fixture('serve')
   f.inputs.capture = async () => {
     throw Object.assign(new Error('Changed'), { code: 'source_changed' })
@@ -195,6 +195,16 @@ test('source changes and cancellations do not fall through to another check', as
     code: 'source_changed',
   })
   assert.equal(f.counts().localCalls, 0)
+  assert.equal(
+    (await f.executor.execute({ ...f.context, fileOnly: true }, f.local))
+      .stdout,
+    'local',
+  )
+  assert.equal(
+    f.calls.length,
+    0,
+    'no remote check began before the new local snapshot',
+  )
   const cancellation = new AbortController()
   cancellation.abort(new Error('Stopped'))
   f.context.options.signal = cancellation.signal
@@ -282,4 +292,100 @@ test('closing stops and drains shared asset captures before their store closes',
   drained.resolve()
   await closing
   assert.deepEqual(order, ['assets-stopping', 'assets-drained', 'store-closed'])
+})
+
+test('25 checks share a frozen source capture across two files, each keeping its own execution and identity', async () => {
+  const f = fixture('serve')
+  const { promise, resolve } = Promise.withResolvers()
+  let captures = 0
+  f.inputs.capture = async (_root, options) => {
+    assert.equal(options.fingerprint, 'a'.repeat(64))
+    captures++
+    await promise
+    return f.input
+  }
+  const jobs = Array.from({ length: 25 }, (_, i) =>
+    f.executor.execute(
+      {
+        ...f.context,
+        fingerprint: 'a'.repeat(64),
+        owner: 'participant' + i,
+        jobId: 'check' + i,
+        file: i % 2 ? 'Main.lean' : 'Main/Facts.lean',
+      },
+      f.local,
+    ),
+  )
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(captures, 1)
+  resolve()
+  await Promise.all(jobs)
+  assert.equal(new Set(f.calls.map((c) => c.options.jobId)).size, 25)
+  assert.equal(new Set(f.calls.map((c) => c.options.actor)).size, 25)
+  assert.equal(new Set(f.calls.map((c) => c.options.file)).size, 2)
+  await f.executor.execute(
+    { ...f.context, fingerprint: 'a'.repeat(64) },
+    f.local,
+  )
+  assert.equal(captures, 2, 'later jobs prepare a fresh immutable source')
+})
+
+test('source captures are isolated by project and fingerprint and the last cancellation stops the shared read', async () => {
+  const f = fixture('serve')
+  const captureSignals = []
+  f.inputs.capture = async (_root, { signal }) => {
+    captureSignals.push(signal)
+    return await new Promise((_, reject) =>
+      signal.addEventListener('abort', () => reject(signal.reason), {
+        once: true,
+      }),
+    )
+  }
+  const aborts = Array.from({ length: 4 }, () => new AbortController())
+  f.executor.maxCaptures = 4
+  const jobs = aborts.map((abort, i) =>
+    f.executor.execute(
+      {
+        ...f.context,
+        owner: 'reader' + i,
+        jobId: 'shared' + i,
+        project:
+          i === 3 ? { ...f.context.project, id: 'another' } : f.context.project,
+        fingerprint: (i === 2 ? 'b' : 'a').repeat(64),
+        options: { ...f.context.options, signal: abort.signal },
+      },
+      f.local,
+    ),
+  )
+  const stopped = jobs.map((job) => assert.rejects(job, /participant left/))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(captureSignals.length, 3)
+  aborts[0].abort(new Error('participant left'))
+  await stopped[0]
+  assert(!captureSignals[0].aborted)
+  aborts.slice(1).forEach((abort) => abort.abort(new Error('participant left')))
+  await Promise.all(stopped)
+  assert(captureSignals.every((signal) => signal.aborted))
+  assert.equal(f.calls.length, 0)
+  assert.equal(f.executor.checkCaptures.size, 0)
+})
+
+test('a file-only request uses the existing worker single-file operation only for matching frozen inputs', async (t) => {
+  const f = fixture('serve')
+  const context = { ...f.context, fileOnly: true }
+  f.inputs.mayCheckFile = async () => false
+  const capture = f.inputs.capture
+  f.inputs.capture = () =>
+    assert.fail('an incompatible project must not be captured')
+  assert.equal((await f.executor.execute(context, f.local)).stdout, 'local')
+  f.inputs.capture = capture
+  f.inputs.mayCheckFile = async () => true
+  f.inputs.canCheckFile = async () => false
+  assert.equal((await f.executor.execute(context, f.local)).stdout, 'local')
+  assert.equal(f.calls.length, 0)
+  f.inputs.canCheckFile = async (snapshot, file) =>
+    snapshot === f.input && file === 'Main.lean'
+  await f.executor.execute(context, f.local)
+  assert.equal(f.calls[0].options.operation, 'lean.file')
+  assert.equal(f.calls[0].options.file, 'Main.lean')
 })

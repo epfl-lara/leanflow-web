@@ -1,5 +1,7 @@
 # Editor waiting list rollout — 17 November 2026
 
+For the current shared-project settings and rehearsal, see [25 participants in a shared project](2026-11-18-shared-competition.md).
+
 Deployed `27fffa307d6f2c726121a20ec72ece7d95ec78d1` after an idle-work
 check. Overflow editor connections now wait with a visible position and connect
 automatically. Previously they were rejected at the editor admission limit.

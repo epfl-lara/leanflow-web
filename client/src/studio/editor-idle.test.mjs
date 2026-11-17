@@ -36,8 +36,12 @@ test('waiting for admission does not put a worker-free editor to sleep', (t) => 
   )
   t.mock.timers.tick(300)
   assert.equal(sleeps, 0)
+  t.mock.timers.tick(99)
   waiting = false
-  t.mock.timers.tick(100)
+  idle.resetDeadline()
+  t.mock.timers.tick(99)
+  assert.equal(sleeps, 0)
+  t.mock.timers.tick(1)
   assert.equal(sleeps, 1)
   idle.dispose()
 })

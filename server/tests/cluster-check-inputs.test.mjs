@@ -9,7 +9,11 @@ import { CheckInputs, manifestFingerprint } from '../cluster/check-inputs.mjs'
 import { ClusterChecks } from '../cluster/checks.mjs'
 import { sourceFingerprint } from '../source-fingerprint.mjs'
 import { registeredToolchainRoot } from '../cluster/config.mjs'
-import { publicPreset, presetTemplatePaths } from '../public-preset.mjs'
+import {
+  publicPreset,
+  publicPresetLakefile,
+  presetTemplatePaths,
+} from '../public-preset.mjs'
 
 async function fixture(t) {
   const directory = await fs.realpath(
@@ -318,7 +322,7 @@ test('with one request slot, a held asset capture never blocks editor or check s
 })
 
 for (const versioned of [false, true])
-  test(`only verified ${versioned ? 'versioned' : 'legacy'} public templates extend dependency eligibility for editor captures`, async (t) => {
+  test(`only verified ${versioned ? 'versioned' : 'legacy'} public templates serve exact matching checks after warm-up`, async (t) => {
     const f = await fixture(t)
     const preset = publicPreset('lean')
     f.runtime.toolchains.set(
@@ -346,13 +350,34 @@ for (const versioned of [false, true])
       JSON.stringify({ packages: [] }),
       { mode: 0o600 },
     )
+    const mathlibPackage = path.join(
+      environment,
+      '.lake/packages/mathlib/.lake/build/lib/lean/Mathlib/Data/Real',
+    )
+    const stdLibrary = path.join(
+      f.runtime.toolchains.get(preset.toolchain),
+      'lib/lean/Std/Data',
+    )
+    for (const directory of [mathlibPackage, stdLibrary])
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 })
+    await fs.writeFile(
+      path.join(mathlibPackage, 'Basic.olean'),
+      'public module',
+      { mode: 0o600 },
+    )
+    await fs.writeFile(
+      path.join(stdLibrary, 'Fixture.olean'),
+      'public module',
+      { mode: 0o600 },
+    )
+    assert.equal(await f.inputs.mayCheckFile(f.root), false)
     f.runtime.dependencyRoot = () => environment
     assert.equal(await f.inputs.capture(f.root, { editor: true }), null)
     f.runtime.transferableDependencyRoot = () => environment
     assert.equal(
       await f.inputs.capture(f.root),
       null,
-      'ordinary check eligibility stays unchanged',
+      'cold public templates cannot trigger a batch-job asset upload',
     )
     await fs.writeFile(
       path.join(environment, 'lean-toolchain'),
@@ -361,7 +386,7 @@ for (const versioned of [false, true])
     )
     await fs.writeFile(
       path.join(environment, 'lakefile.toml'),
-      'name = "TemplateFixture"\n',
+      publicPresetLakefile(preset),
       { mode: 0o600 },
     )
     await fs.writeFile(
@@ -393,6 +418,88 @@ for (const versioned of [false, true])
     const captured = await f.inputs.capture(f.root, { editor: true })
     assert.ok(captured.dependencies)
     assert.ok(captured.editorSource)
+    assert.equal(
+      await f.inputs.capture(f.root),
+      null,
+      'matching toolchain alone cannot authorize a different project configuration',
+    )
+    for (const filename of ['lakefile.toml', 'lake-manifest.json'])
+      await fs.copyFile(
+        path.join(environment, filename),
+        path.join(f.root, filename),
+      )
+    await fs.writeFile(
+      path.join(f.root, 'Independent.lean'),
+      'import Lean\n\ntheorem independent : True := by trivial\n',
+    )
+    await fs.writeFile(
+      path.join(f.root, 'Main.lean'),
+      'import Independent\ntheorem other : True := independent\n',
+    )
+    await fs.writeFile(
+      path.join(f.root, 'Geometry.lean'),
+      '/- header /- nested -/ -/\nimport Mathlib.Data.Real.Basic Std.Data.Fixture -- public libraries\nexample : True := by trivial\n',
+    )
+    await fs.writeFile(
+      path.join(f.root, 'Unknown.lean'),
+      'import Mathlib.Data.Real.NoSuchModule\nexample : True := by trivial\n',
+    )
+    await fs.writeFile(
+      path.join(f.root, 'Malformed.lean'),
+      'import Mathlib..Basic\nexample : True := by trivial\n',
+    )
+    assert.equal(await f.inputs.mayCheckFile(f.root), true)
+    const batch = await f.inputs.capture(f.root)
+    assert.equal(await f.inputs.canCheckFile(batch, 'Geometry.lean'), true)
+    assert.equal(await f.inputs.canCheckFile(batch, 'Unknown.lean'), false)
+    assert.equal(await f.inputs.canCheckFile(batch, 'Malformed.lean'), false)
+    assert.equal(batch.dependencies, captured.dependencies)
+    assert.equal(batch.editorSource, undefined)
+    assert.equal(await f.inputs.canCheckFile(batch, 'Independent.lean'), true)
+    assert.equal(
+      await f.inputs.canCheckFile(batch, 'Main.lean'),
+      false,
+      'a project import needs Lake to rebuild it',
+    )
+    await fs.writeFile(
+      path.join(f.root, 'Lean.lean'),
+      '-- shadowed public module',
+    )
+    assert.equal(
+      await f.inputs.canCheckFile(
+        await f.inputs.capture(f.root),
+        'Independent.lean',
+      ),
+      false,
+    )
+    assert.equal(
+      await f.inputs.canCheckFile(
+        await f.inputs.capture(f.root),
+        'Geometry.lean',
+      ),
+      false,
+    )
+    await fs.unlink(path.join(f.root, 'Lean.lean'))
+    await fs.writeFile(
+      path.join(f.root, 'Independent.lean'),
+      'import MathlibLean\nexample : True := by trivial',
+    )
+    assert.equal(
+      await f.inputs.canCheckFile(
+        await f.inputs.capture(f.root),
+        'Independent.lean',
+      ),
+      false,
+    )
+    await fs.appendFile(
+      path.join(f.root, 'lakefile.toml'),
+      '\n[leanOptions]\nautoImplicit = false\n',
+    )
+    assert.equal(
+      await f.inputs.capture(f.root),
+      null,
+      'project compiler settings stay bound to their own environment',
+    )
     const prepared = f.inputs.editorEnvironment
     f.inputs.editorEnvironment = undefined
     assert.equal(await f.inputs.capture(f.root, { editor: true }), null)

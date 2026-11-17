@@ -239,6 +239,65 @@ test('a tab that cannot be placed yet holds back only its account and starts whe
   assert.deepEqual(admission.info(), { active: 3, queued: 0, maxQueued: 128 })
 })
 
+test('waiting for a shared project holds a participant’s later tabs without blocking another project', async (t) => {
+  const { open } = editors(t, {
+    capacity: 4,
+    maxPerUser: 1,
+    maxPerProject: 1,
+  })
+  const first = open('alice', 'shared', { canStart: () => false })
+  const shared = open('bob', 'shared')
+  const secondTab = open('bob', 'another')
+  const collaborator = open('carol', 'another')
+  const independent = open('dave', 'separate')
+  await Promise.all([independent.settled, collaborator.settled])
+  assert.deepEqual(independent.notices, [STARTING])
+  assert.deepEqual(secondTab.notices.at(-1), waiting(3, 3))
+  assert.deepEqual(collaborator.notices, [STARTING])
+
+  first.controller.abort()
+  await Promise.all([first.settled, shared.settled])
+  assert.equal(started(secondTab), false)
+  shared.release()
+  assert.equal(started(secondTab), false)
+  collaborator.release()
+  await secondTab.settled
+  secondTab.release()
+  independent.release()
+})
+
+test('an account at its limit can queue extra tabs without starving 24 other members of the same competition', async (t) => {
+  const { open, admission } = editors(t, {
+    capacity: 25,
+    maxPerUser: 1,
+    maxPerProject: 25,
+  })
+  const owner = open('owner', 'competition')
+  const secondTab = open('owner', 'competition')
+  const thirdTab = open('owner', 'competition')
+  const participants = Array.from({ length: 24 }, (_, index) =>
+    open('member-' + index, 'competition'),
+  )
+  assert(
+    participants.every(started),
+    'Every eligible member starts on free hardware',
+  )
+  await Promise.all([
+    owner.settled,
+    ...participants.map((item) => item.settled),
+  ])
+  assert.deepEqual(admission.info(), { active: 25, queued: 2, maxQueued: 128 })
+  participants[0].release()
+  assert.equal(started(secondTab), false)
+  owner.release()
+  await secondTab.settled
+  assert.equal(started(thirdTab), false)
+  secondTab.release()
+  await thirdTab.settled
+  thirdTab.release()
+  for (const participant of participants.slice(1)) participant.release()
+})
+
 test('an account with every allowed editor open may queue three more tabs but no more', async (t) => {
   const { admission, open } = editors(t, { capacity: 3, maxPerUser: 3 })
   const active = ['a', 'b', 'c'].map((project) => open('alice', project))
@@ -353,6 +412,25 @@ test('a cancelled or expired tab leaves the queue at once and never starts later
   const retry = open('carol', 'three')
   await retry.settled
   assert.deepEqual(retry.notices, [STARTING])
+})
+
+test('a connected participant can wait through a long event when the wait timeout is disabled', async (t) => {
+  let now = 1000
+  t.mock.method(Date, 'now', () => now)
+  const { admission, open } = editors(t, { maxWaitMs: 0 })
+  const first = open('alice', 'shared')
+  const second = open('bob', 'shared')
+  const departed = open('carol', 'shared')
+  await first.settled
+  now += 8 * 60 * 60_000
+  departed.controller.abort()
+  await departed.settled
+  assert.deepEqual(admission.info(), { active: 1, queued: 1, maxQueued: 128 })
+  first.release()
+  await second.settled
+  assert.equal(started(second), true)
+  assert.equal(started(departed), false)
+  second.release()
 })
 
 test('an overdue tab cannot start when a release arrives before the next poll', async (t) => {
@@ -507,10 +585,10 @@ test('invalid limits, probes or tab identities are rejected before admitting edi
   const valid = { capacity: () => 1, maxPerUser: 1, maxPerProject: 1 }
   assert.throws(() => new EditorAdmission({ ...valid, capacity: 1 }))
   assert.throws(() => new EditorAdmission({ ...valid, maxPerUser: undefined }))
-  for (const key of ['maxPerUser', 'maxPerProject', 'maxWaitMs', 'pollMs'])
+  for (const key of ['maxPerUser', 'maxPerProject', 'pollMs'])
     for (const value of [0, -1, 1.5, NaN, Infinity, '2'])
       assert.throws(() => new EditorAdmission({ ...valid, [key]: value }))
-  for (const key of ['maxQueued', 'maxQueuedPerUser'])
+  for (const key of ['maxQueued', 'maxQueuedPerUser', 'maxWaitMs'])
     for (const value of [-1, 1.5, NaN, Infinity, '2'])
       assert.throws(() => new EditorAdmission({ ...valid, [key]: value }))
   const admission = new EditorAdmission({

@@ -810,11 +810,12 @@ test('parallel chat mirrors save different files and verification captures both 
   )
 })
 
-test('parallel chat mirrors editing the same file pause the conflicting chat and preserve its candidate without overwriting the winner', async (t) => {
+test('parallel members editing the same file pause the conflicting chat and preserve its candidate without overwriting the winner', async (t) => {
   const { store, project } = await workspaceFixture(t)
+  await store.setMember(project.id, 'alice', 'bob', 'editor')
   const candidates = await Promise.all([
     store.snapshot(project.id, 'alice', 'overlap-first'),
-    store.snapshot(project.id, 'alice', 'overlap-second'),
+    store.snapshot(project.id, 'bob', 'overlap-second'),
   ])
   const sources = [
     'theorem first_chat : True := by trivial\n',

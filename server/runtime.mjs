@@ -311,6 +311,7 @@ export class Runtime {
         path.join(this.runtimeDir, 'template-check'),
         path.join(this.runtimeDir, 'shared-dependency-stages'),
         path.join(this.dataDir, 'setup-repairs'),
+        path.join(this.dataDir, 'file-checks'),
       ],
       cleanup: (root) => this.#removeTemporaryWorkspace(root),
     })
@@ -344,6 +345,7 @@ export class Runtime {
       path.join(this.runtimeDir, 'template-check'),
       path.join(this.runtimeDir, 'shared-dependency-stages'),
       path.join(this.dataDir, 'setup-repairs'),
+      path.join(this.dataDir, 'file-checks'),
     ]
     this.lemexCommit = null
     this.lemexNativeBuildCommit = null
@@ -531,7 +533,7 @@ export class Runtime {
   }
 
   async releaseTemporaryWorkspace(root) {
-    await this.temporaryWorkspaces.release(root)
+    return this.temporaryWorkspaces.release(root)
   }
 
   async #removeTemporaryWorkspace(root) {
@@ -905,6 +907,31 @@ export class Runtime {
   toolchainSourceRoot(toolchain) {
     const root = this.toolchains.get(toolchain)
     return root ? path.join(root, 'src', 'lean') : null
+  }
+
+  fileCheckCapacity() {
+    // Short-lived workers drain via the normal scheduler. Account for the
+    // editors and assistants that can stay connected throughout a check.
+    const holders = [...this.children].filter((child) => child.longLived)
+    const slots = holders.reduce((sum, child) => sum + child.workerSlots, 0)
+    const batch = holders.reduce(
+      (sum, child) =>
+        sum + (child.workload === 'batch' ? child.workerSlots : 0),
+      0,
+    )
+    const bytes = holders.reduce(
+      (sum, child) => sum + child.workerMemoryBytes,
+      0,
+    )
+    const compiler = this.#compilerReserve()
+    return Math.max(
+      0,
+      Math.min(
+        this.#slotLimit() - slots,
+        this.#workloadLimits().batchLimit - batch,
+        Math.floor((this.#memoryBudget() - bytes) / this.workerMemoryBytes),
+      ) - compiler,
+    )
   }
 
   canSpawnEditor({ editor = true } = {}) {

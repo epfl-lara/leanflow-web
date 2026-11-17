@@ -66,7 +66,7 @@ export function loadCapacity(env = process.env) {
       'STUDIO_MAX_EDITOR_QUEUE_PER_USER',
       3,
     ),
-    editorQueueWaitMs: positiveNumber(
+    editorQueueWaitMs: nonnegativeInteger(
       env,
       'STUDIO_EDITOR_QUEUE_WAIT_MS',
       60 * 60_000,

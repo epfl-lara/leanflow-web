@@ -6,6 +6,8 @@ import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { PassThrough, Writable } from 'node:stream'
 import { AgentManager } from '../agents.mjs'
+import { ChatStore } from '../chats.mjs'
+import { RcpKeyLimits } from '../provider-limits.mjs'
 import { EventStore } from '../events.mjs'
 import { WorkspaceStore } from '../workspaces.mjs'
 import { Runtime } from '../runtime.mjs'
@@ -187,7 +189,7 @@ async function fixture(
                       : {},
               })
               if (request.method === 'turn/start')
-                void edit(workspace).then(
+                void edit(workspace, request.params).then(
                   () => {
                     send({
                       method: 'item/agentMessage/delta',
@@ -297,6 +299,128 @@ async function fixture(
     runtime,
   }
 }
+
+test('25 members run private proof and search chats in one shared project while worker and per-key limits hold', async (t) => {
+  const release = Promise.withResolvers()
+  const activeKeys = new Set()
+  let peak = 0
+  const f = await fixture(t, async (workspace, turn) => {
+    const { userMessage } = JSON.parse(turn.input[0].text)
+    const index = Number(/^Participant (\d+) /.exec(userMessage)[1])
+    const key = index % 3
+    assert(!activeKeys.has(key), 'A second run cannot use the occupied key')
+    activeKeys.add(key)
+    peak = Math.max(peak, activeKeys.size)
+    try {
+      await release.promise
+      if (index % 2 === 0)
+        await fs.writeFile(
+          path.join(workspace, 'Answer' + index + '.lean'),
+          'theorem answer' + index + ' : True := by trivial\n',
+        )
+    } finally {
+      activeKeys.delete(key)
+    }
+  })
+  const manager = f.manager
+  manager.maxConcurrent = 3
+  manager.maxQueue = 32
+  manager.config.providerForUser = async (owner) => ({
+    LEMEX_API_KEY: 'fixture-key-' + (Number(owner.slice(7)) % 3),
+  })
+  manager.providerRequests.limits = new RcpKeyLimits({
+    fetchImpl: async () =>
+      Response.json({ info: { max_parallel_requests: 1 } }),
+  })
+  const chats = new ChatStore({
+    dataDir: f.workspaces.dataDir,
+    workspaces: f.workspaces,
+    events: f.events,
+  })
+  chats.init()
+  manager.chats = chats
+  t.after(() => chats.close())
+  f.runtime.home = async (workspace) => {
+    const home = path.resolve(workspace, '..', 'assistant-home')
+    await fs.mkdir(path.join(home, '.lemex'), { recursive: true })
+    return home
+  }
+  const participants = Array.from({ length: 25 }, (_, i) => 'member-' + i)
+  const invite = await f.workspaces.createShareLink(
+    f.project.id,
+    'alice',
+    'editor',
+  )
+  await Promise.all(
+    participants.map((owner) =>
+      f.workspaces.joinShareLink(owner, invite.token),
+    ),
+  )
+  const rooms = participants.map((owner) =>
+    chats.create(owner, f.project.id, { title: 'Competition' }),
+  )
+  let jobs
+  try {
+    jobs = await Promise.all(
+      participants.map((owner, i) =>
+        manager.start(owner, f.project.id, {
+          chatId: rooms[i].id,
+          mode: i % 2 === 0 ? 'proofs' : 'search',
+          prompt:
+            'Participant ' +
+            i +
+            (i % 2 === 0
+              ? ' prove True in your own Answer file.'
+              : ' explain the proof without editing.'),
+          liveEdits: true,
+        }),
+      ),
+    )
+    await t.waitFor(() => assert.equal(peak, 3), { timeout: 15_000 })
+    assert.equal(manager.running, 3)
+    assert.equal(manager.queue.length, 22)
+  } finally {
+    release.resolve()
+  }
+  await t.waitFor(
+    () => assert.equal(manager.queue.length + manager.running, 0),
+    { timeout: 30_000 },
+  )
+  for (const [i, job] of jobs.entries()) {
+    const owner = participants[i]
+    const result = f.events.get(job.id, owner)
+    assert.equal(
+      result.status,
+      'completed',
+      JSON.stringify({
+        owner,
+        error: result.error,
+        log: result.log?.slice(-1500),
+      }),
+    )
+    assert.deepEqual(
+      chats.history(rooms[i].id, owner).runs.map((run) => run.id),
+      [job.id],
+    )
+    assert.throws(
+      () => chats.history(rooms[i].id, participants[(i + 1) % 25]),
+      { status: 404 },
+    )
+    if (i % 2 === 0) {
+      assert.equal(result.verification.complete, true)
+      assert.equal(
+        (
+          await f.workspaces.readFile(
+            f.project.id,
+            owner,
+            'Answer' + i + '.lean',
+          )
+        ).content,
+        'theorem answer' + i + ' : True := by trivial\n',
+      )
+    } else assert.equal(result.liveChanges?.length ?? 0, 0)
+  }
+})
 
 test('project instruction files stay in the private workspace while the app supplies their scope rules', async (t) => {
   const rootInstructions =

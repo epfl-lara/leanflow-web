@@ -228,6 +228,35 @@ test('a pre-start capacity race queues with backoff but cannot reset the origina
   assert.equal(f.admission.info().queued, 0)
 })
 
+test('one shared editor retrying placement leaves other members free to use ready workers', async (t) => {
+  const f = fixture(t, { capacity: () => 2, maxPerProject: 2 })
+  let now = Date.now(),
+    attempts = 0
+  t.mock.method(Date, 'now', () => now)
+  const first = f.open('competition', {
+    actor: 'alice',
+    start: () => {
+      if (++attempts === 1)
+        throw Object.assign(new Error('Worker filled during placement'), {
+          status: 503,
+        })
+      return f.spawn()
+    },
+  })
+  await flush()
+  const other = f.open('competition', { actor: 'bob' })
+  await flush()
+  assert.equal(f.children.length, 1, 'Bob starts while Alice waits to retry')
+  await other.ready
+  assert.equal(attempts, 1)
+  assert.equal(f.admission.info().queued, 1)
+  now += 1001
+  await new Promise((resolve) => setTimeout(resolve, 15))
+  await first.ready
+  assert.equal(attempts, 2)
+  assert.equal(f.admission.info().active, 2)
+})
+
 test('uncertain cleanup failures never retry another process on a second worker', async (t) => {
   const f = fixture(t)
   let calls = 0

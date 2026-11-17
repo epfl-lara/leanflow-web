@@ -25,7 +25,6 @@ test('invalid capacity settings fail before startup rather than disabling admiss
     'STUDIO_MAX_EDITORS_PER_USER',
     'STUDIO_MAX_EDITOR_QUEUE',
     'STUDIO_MAX_EDITOR_QUEUE_PER_USER',
-    'STUDIO_EDITOR_QUEUE_WAIT_MS',
     'STUDIO_MAX_TERMINALS',
     'STUDIO_MAX_TERMINALS_PER_PROJECT',
     'STUDIO_MAX_AGENTS',
@@ -43,6 +42,15 @@ test('invalid capacity settings fail before startup rather than disabling admiss
     for (const value of ['0', '-1', 'NaN', 'Infinity', '1.5'])
       assert.throws(() => loadCapacity({ [name]: value }), new RegExp(name))
   }
+  assert.equal(
+    loadCapacity({ STUDIO_EDITOR_QUEUE_WAIT_MS: '0' }).editorQueueWaitMs,
+    0,
+  )
+  for (const value of ['-1', 'Infinity', 'NaN', '1.5'])
+    assert.throws(
+      () => loadCapacity({ STUDIO_EDITOR_QUEUE_WAIT_MS: value }),
+      /STUDIO_EDITOR_QUEUE_WAIT_MS/,
+    )
   assert.throws(
     () => loadCapacity({ STUDIO_WORKER_MEMORY: '0g' }),
     /STUDIO_WORKER_MEMORY/,

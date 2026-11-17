@@ -12,6 +12,14 @@ export function publicPreset(id) {
   return presets.find((preset) => preset.id === id) || null
 }
 
+export function publicPresetLakefile(preset) {
+  let lakefile =
+    'name = "ProofWorkspace"\nversion = "0.1.0"\ndefaultTargets = ["Main"]\n\n[[lean_lib]]\nname = "Main"\n'
+  if (preset.repository)
+    lakefile += `\n[[require]]\nname = ${JSON.stringify(preset.package)}\ngit = ${JSON.stringify(preset.repository)}\nrev = ${JSON.stringify(preset.revision)}\n`
+  return lakefile
+}
+
 export function presetTemplatePaths(runtimeDir, preset) {
   const key = createHash('sha256')
     .update(JSON.stringify(preset))

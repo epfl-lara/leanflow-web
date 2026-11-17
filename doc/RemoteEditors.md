@@ -23,7 +23,7 @@ PC05/06 and five on PC2. The preceding
 See [cache reuse](Caching.md) for shared Lean artifacts, incremental editor
 sessions, coordinator improvements and measured limits.
 
-See the [25-participant competition rehearsal](releases/2026-11-17-competition-readiness.md) for same-time opening, saving and proof-check timings.
+See [25 participants in a shared project](releases/2026-11-18-shared-competition.md) for two-file collaboration and queued file checks. The [individual-playground rehearsal](releases/2026-11-17-competition-readiness.md) covers participants working in separate playgrounds.
 
 ## Eligible editors
 
@@ -33,6 +33,14 @@ is supported when its exact public environment has been preloaded. Source
 snapshots containing private files, symbolic links, additional Lean modules or
 more than 16 MiB stay local. Repository editors stay local while their project
 module build-cache synchronization is developed.
+
+Participants can submit **Check File** from a multi-file project while waiting
+for an editor. Shared check workers can compile a saved file when the project
+matches the warmed public configuration and its imports use the prepared
+Mathlib or standard libraries. A project-local import, custom Lake configuration,
+or missing library module uses the coordinator's pinned Lake compiler, which
+builds the dependencies of the selected file. Check Project can also use the
+shared check workers for projects with the exact warmed public configuration.
 
 A worker must advertise the certified `lean.session` capability and already
 hold the exact toolchain, dependency and qualified public configuration manifests.
@@ -111,7 +119,7 @@ nothing. These ceilings describe admission, not a measured concurrency promise.
 ## Waiting for an editor
 
 The [17 November rollout report](releases/2026-11-17-editor-queue.md) records
-the live limits, acceptance tests and known limitations.
+the original limits and acceptance tests.
 
 Open the project normally. If its editor cannot start yet, LeanFlow shows its
 position in a waiting list and connects automatically when capacity is available.
@@ -128,13 +136,14 @@ editors still use their existing larger allocation.
 
 The default waiting room holds 128 connections, at most three per account, for
 up to one hour. These limits are separate from active per-account and
-per-project limits. The next eligible request starts in arrival order. A request
-blocked by its account, project or placement does not block unrelated accounts
-and projects; order is preserved within each account and project. A pre-start
-capacity race keeps its original queue place and deadline during a short
-backoff. Its waiting place remains reserved until startup succeeds, so a full
-queue cannot evict a tab already waiting. Only one resource reservation is being
-started at a time; already running editors execute in parallel. Failed starts
+per-project limits. The next eligible request starts in arrival order. Extra
+tabs from an account at its limit keep their place while other participants
+use available slots in the same shared project. Each account's tabs start in
+order. A project waiting for worker capacity leaves other projects free to
+start. If a worker fills during startup, the tab keeps its original place and
+deadline during a short retry delay. Its place remains reserved until startup
+succeeds, even if the waiting room fills. The coordinator starts one resource
+reservation at a time. Running editors execute in parallel. Failed starts
 retain only their own slot and waiting place while cleanup is unconfirmed;
 healthy workers can continue starting other tabs. An unavailable worker's held
 grants are counted separately from its lost capacity, avoiding a second capacity
@@ -146,6 +155,7 @@ running sessions. Resource changes are checked every 500 ms while tabs wait.
 
 Configure `STUDIO_MAX_EDITOR_QUEUE`, `STUDIO_MAX_EDITOR_QUEUE_PER_USER` and
 `STUDIO_EDITOR_QUEUE_WAIT_MS` as shown in [.env.example](../.env.example).
+A wait time of `0` keeps a connected, authorized tab on the list until capacity opens or the participant leaves. Account and service queue limits still apply.
 Only a full waiting room, its account limit, or an expired wait rejects overflow;
 closing unused tabs makes room. Waiting state is in memory: a service restart
 closes those sockets, and reopening the project joins the new waiting list.

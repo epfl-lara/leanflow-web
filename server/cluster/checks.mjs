@@ -1,6 +1,11 @@
 import { clusterError } from './state.mjs'
 import { dependencyFailureMessage } from '../pinned-lake.mjs'
 import { clusterEditor } from './editors.mjs'
+import { SharedSourceRead } from '../shared-source-read.mjs'
+
+function checkOperation({ fileOnly, kernelCheck }) {
+  return fileOnly ? 'lean.file' : kernelCheck ? 'check.kernel' : 'check.build'
+}
 
 // Pure checks only. Canonical writers remain on the coordinator.
 export class ClusterChecks {
@@ -27,6 +32,7 @@ export class ClusterChecks {
     this.actors = new Map()
     this.captures = 0
     this.captureQueue = []
+    this.checkCaptures = new Map()
     this.background = new Map()
     this.remoteResults = new WeakSet()
     this.inflight = new Map()
@@ -168,7 +174,7 @@ export class ClusterChecks {
         'cluster_stopping',
         503,
       )
-    const operation = context.kernelCheck ? 'check.kernel' : 'check.build'
+    const operation = checkOperation(context)
     if (
       this.mode === 'off' ||
       this.controller.canRun?.(operation, context.file) === false
@@ -307,27 +313,56 @@ export class ClusterChecks {
     }
   }
 
-  async #remote(context, onOutput) {
-    const { project, owner, jobId, file, kernelCheck, fingerprint, options } =
-      context
-    let input
-    try {
-      input = await this.#capture(options.signal, () =>
+  #captureCheck(project, fingerprint, signal) {
+    const capture = (captureSignal) =>
+      this.#capture(captureSignal, () =>
         this.inputs.capture(project.root, {
           fingerprint,
-          signal: options.signal,
+          signal: captureSignal,
         }),
       )
+    // Only a coordinator-computed content digest identifies the exact shared
+    // tree. Each compiler still runs independently, with its own actor and job.
+    if (!/^[a-f0-9]{64}$/.test(fingerprint)) return capture(signal)
+    const key = JSON.stringify([project.id, project.root, fingerprint])
+    let read = this.checkCaptures.get(key)
+    if (!read?.active) {
+      read = new SharedSourceRead(capture)
+      this.checkCaptures.set(key, read)
+      const clear = () => {
+        if (this.checkCaptures.get(key) === read) this.checkCaptures.delete(key)
+      }
+      read.task.then(clear, clear)
+    }
+    return read.wait(signal)
+  }
+
+  async #remote(context, onOutput) {
+    const { project, owner, jobId, file, fingerprint, options } = context
+    let input
+    try {
+      if (
+        context.fileOnly &&
+        (await this.inputs.mayCheckFile?.(project.root)) === false
+      )
+        return null
+      input = await this.#captureCheck(project, fingerprint, options.signal)
+      if (
+        !input ||
+        (context.fileOnly && !(await this.inputs.canCheckFile?.(input, file)))
+      )
+        return null
     } catch (error) {
       options.signal?.throwIfAborted()
-      if (error.code === 'source_changed') throw error
+      // A selected-file job can take a fresh locked local copy if a save
+      // raced capture. A full project verification keeps its original contract.
+      if (error.code === 'source_changed' && !context.fileOnly) throw error
       this.#record({ jobId, reason: 'snapshot-unavailable', mode: this.mode })
       return null
     }
-    if (!input) return null
     options.signal?.throwIfAborted()
     const result = await this.controller.run(input, {
-      operation: kernelCheck ? 'check.kernel' : 'check.build',
+      operation: checkOperation(context),
       ...(file?.endsWith('.lean') ? { file } : {}),
       actor: owner,
       projectId: project.id,

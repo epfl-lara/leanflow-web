@@ -25,7 +25,15 @@ is outside the default targets; independent replay covers the default targets.
 Older releases retain `lake build` and selected-file compilation. The output
 identifies which check was used. A failed kernel check, missing sandbox or
 unavailable worker is reported as a failure; it never triggers a build-only
-fallback. **Check File** in a single-file playground retains its compiler check.
+fallback.
+
+Choose **Check File** in a project or Mathlib Playground to compile the
+selected `.lean` file using the pinned environment. Use the file result for
+feedback on that source and **Check Project** when you need independent kernel
+verification of the default targets. Each participant can submit a separate
+file check while waiting for an interactive editor slot.
+
+On the coordinator, available worker capacity sets how many file checks can take private source copies, up to six. Each copy can hold up to 128 MiB of source or the lower configured storage allowance. The compiler reuses the project’s prepared dependencies. If the project contains too much source, excluded private files or links that cannot be copied faithfully, Lean checks the saved project in place. Run an in-place check again if someone edits the project before it finishes.
 
 Checks run offline, with source and toolchains read only and the project's
 private `.lake` build cache writable. If files change during a check, its result

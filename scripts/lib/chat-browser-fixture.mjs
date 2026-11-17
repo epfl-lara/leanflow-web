@@ -10,6 +10,30 @@ import {
 
 export const sleep = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds))
+export async function installEditorClock(page) {
+  await page.clock.install()
+  await page.addInitScript(() => {
+    // Playwright's simulated clock returns performance measures without storing
+    // them. Monaco's typing metrics expect getEntriesByName to find each one.
+    const entries = new Map()
+    const measure = performance.measure.bind(performance)
+    const getEntries = performance.getEntriesByName.bind(performance)
+    const clearMeasures = performance.clearMeasures.bind(performance)
+    performance.measure = (name, ...args) => {
+      const entry = measure(name, ...args)
+      entries.set(name, [entry])
+      return entry
+    }
+    performance.getEntriesByName = (name, type) =>
+      entries.get(name) || getEntries(name, type)
+    performance.clearMeasures = (name) => {
+      if (name === undefined) entries.clear()
+      else entries.delete(name)
+      clearMeasures(name)
+    }
+  })
+}
+
 export async function until(check, label, timeout = 15000) {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {

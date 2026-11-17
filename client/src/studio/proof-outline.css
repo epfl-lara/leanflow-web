@@ -286,3 +286,16 @@
   margin: 4px 0 0;
   line-height: 1.4;
 }
+.lean-queue-notice {
+  display: grid;
+  gap: 6px;
+}
+.queue-file-check {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.queue-file-check span {
+  color: var(--muted);
+}

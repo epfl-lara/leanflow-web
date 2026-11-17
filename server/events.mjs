@@ -446,7 +446,7 @@ export class JobManager {
     this.controllers = new Map()
     this.stopping = false
   }
-  check(owner, projectId, file) {
+  check(owner, projectId, file, scope = 'project') {
     if (this.stopping)
       throw Object.assign(
         new Error(
@@ -460,7 +460,28 @@ export class JobManager {
         new Error('Prepare this project before checking it.'),
         { status: 409 },
       )
-    const job = this.events.create(owner, { kind: 'check', projectId, file })
+    if (scope !== 'project' && scope !== 'file')
+      throw Object.assign(new Error('Choose a file or project check.'), {
+        status: 400,
+      })
+    const fileOnly = scope === 'file'
+    if (
+      fileOnly &&
+      (typeof file !== 'string' ||
+        !file.endsWith('.lean') ||
+        /[\\\x00-\x1f]/.test(file) ||
+        file.split('/').some((part) => !part || part === '.' || part === '..'))
+    )
+      throw Object.assign(
+        new Error('Choose a Lean source file in this project.'),
+        { status: 400 },
+      )
+    const job = this.events.create(owner, {
+      kind: 'check',
+      projectId,
+      file,
+      ...(fileOnly && { checkScope: 'file', checkMethod: 'lean-file' }),
+    })
     const controller = new AbortController()
     this.controllers.set(job.id, controller)
     const task = Promise.resolve()
@@ -476,21 +497,28 @@ export class JobManager {
             { signal: controller.signal },
           )
           const kernelCheck =
+            !fileOnly &&
             project.kind !== 'single-file' &&
             !!(await this.runtime.leanCheckSupported?.(project.root, {
               signal: controller.signal,
             }))
           controller.signal.throwIfAborted()
-          const checkMethod = kernelCheck ? 'lake-check' : 'lake-build'
+          const checkMethod = fileOnly
+            ? 'lean-file'
+            : kernelCheck
+              ? 'lake-check'
+              : 'lake-build'
           this.events.updateMetadata(job.id, { checkMethod })
           this.events.append(
             job.id,
             'log',
-            kernelCheck
-              ? 'Building the default targets and independently checking every project declaration and its full dependency chain with the pinned Lean kernel. Unused declarations from imported libraries are outside this check.\n'
-              : project.kind === 'single-file'
-                ? 'Checking this file with the pinned Lean compiler.\n'
-                : 'This pinned Lean release does not provide lake check. Using the existing project build check.\n',
+            fileOnly
+              ? 'Checking the saved file and its imports with the pinned Lean compiler.\n'
+              : kernelCheck
+                ? 'Building the default targets and independently checking every project declaration and its full dependency chain with the pinned Lean kernel. Unused declarations from imported libraries are outside this check.\n'
+                : project.kind === 'single-file'
+                  ? 'Checking this file with the pinned Lean compiler.\n'
+                  : 'This pinned Lean release does not provide lake check. Using the existing project build check.\n',
             'activity',
           )
           const options = {
@@ -505,7 +533,36 @@ export class JobManager {
               this.events.append(job.id, 'log', text, 'activity'),
           }
           this.workspaces.get(projectId, owner)
+          let localSnapshotFingerprint
           const local = async () => {
+            if (fileOnly) {
+              const check = async (root, digest, onSpawn) => {
+                const result = await this.runtime.run(
+                  root,
+                  [
+                    'lake',
+                    'lean',
+                    './' + file,
+                    '--',
+                    '--json',
+                    '-Dwarn.sorry=true',
+                  ],
+                  digest
+                    ? { ...options, writePrivateDependencyCache: true, onSpawn }
+                    : options,
+                )
+                localSnapshotFingerprint = digest
+                return result
+              }
+              return this.workspaces.withFileCheckWorkspace
+                ? this.workspaces.withFileCheckWorkspace(
+                    projectId,
+                    owner,
+                    { signal: controller.signal },
+                    check,
+                  )
+                : check(project.root)
+            }
             let result = kernelCheck
               ? await this.runtime.checkProject(project.root, {
                   ...options,
@@ -538,6 +595,7 @@ export class JobManager {
                   jobId: job.id,
                   file,
                   kernelCheck,
+                  fileOnly,
                   fingerprint,
                   options,
                 },
@@ -547,22 +605,39 @@ export class JobManager {
           controller.signal.throwIfAborted()
           const remoteResult =
             this.checkExecutor?.isRemoteResult?.(result) === true
-          if (
-            fingerprint !== undefined &&
-            fingerprint !==
+          const checkedSnapshot = fileOnly
+            ? remoteResult
+              ? fingerprint
+              : localSnapshotFingerprint
+            : undefined
+          const checkedFingerprint = checkedSnapshot ?? fingerprint
+          const sourceChanged =
+            checkedFingerprint !== undefined &&
+            checkedFingerprint !==
               (await this.workspaces.checkFingerprint(projectId, owner, {
                 signal: controller.signal,
               }))
-          ) {
-            result = { ...result, code: 1, sourceChanged: true }
-          }
+          if (checkedSnapshot || sourceChanged)
+            result = {
+              ...result,
+              ...(checkedSnapshot && { checkedSnapshot }),
+              ...(sourceChanged && { sourceChanged: true }),
+              ...(sourceChanged && !checkedSnapshot && { code: 1 }),
+            }
+          if (checkedSnapshot && sourceChanged)
+            this.events.append(
+              job.id,
+              'log',
+              'Project files changed during this check. This result applies to the earlier saved sources. Check again for the current version.\n',
+              'activity',
+            )
           this.events.updateMetadata(job.id, {
             status: result.code === 0 ? 'completed' : 'failed',
             result,
             error:
               result.code === 0
                 ? undefined
-                : result.sourceChanged
+                : result.sourceChanged && !checkedSnapshot
                   ? 'Project files changed during this check. Run the check again to check the current files.'
                   : result.timedOut
                     ? 'Lean checking reached its time limit. Inspect the last module in the build output, then retry or ask the administrator to review the check limits.'
@@ -573,9 +648,14 @@ export class JobManager {
                         : setupFailureMessage(result) ||
                           (kernelCheck
                             ? 'The independent Lean project check did not pass. Inspect the check output; a kernel or sandbox failure is not replaced by a build-only result.'
-                            : 'Lean build failed. See the build output.'),
+                            : fileOnly
+                              ? 'Lean reported an error in the file or its imports. See the check output.'
+                              : 'Lean build failed. See the build output.'),
           })
-          const dependency = !remoteResult && dependencyFailureMessage(result)
+          // A selected file may run in its own earlier workspace. Its output
+          // cannot invalidate the active shared project's preparation.
+          const dependency =
+            !fileOnly && !remoteResult && dependencyFailureMessage(result)
           if (dependency)
             this.workspaces.markDependencyPreparation?.(
               projectId,

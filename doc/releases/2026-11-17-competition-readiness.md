@@ -1,5 +1,7 @@
 # Competition readiness for 25 participants
 
+For the current shared-project settings and rehearsal, see [25 participants in a shared project](2026-11-18-shared-competition.md).
+
 The deployed release `df68441` passed a same-time start with 25 ordinary accounts, each working in a separate managed Mathlib playground. All 25 editors stayed connected through a round of corrections, durable saves and proof checks. The service advertised 32 qualified editor slots during the rehearsal.
 
 ## What participants experienced

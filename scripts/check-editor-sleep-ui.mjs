@@ -4,7 +4,11 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import express from 'express'
-import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
+import {
+  chatBrowserFixture,
+  installEditorClock,
+  until,
+} from './lib/chat-browser-fixture.mjs'
 
 const output = path.resolve('.runtime/editor-sleep-ui')
 await fs.mkdir(output, { recursive: true })
@@ -52,27 +56,7 @@ try {
     messages.push(message)
     report.leanMethods.push(message.method)
   }
-  await page.clock.install()
-  await page.addInitScript(() => {
-    // Playwright's simulated clock returns performance measures without storing
-    // them. Monaco's typing metrics expect getEntriesByName to find each one.
-    const entries = new Map()
-    const measure = performance.measure.bind(performance)
-    const getEntries = performance.getEntriesByName.bind(performance)
-    const clearMeasures = performance.clearMeasures.bind(performance)
-    performance.measure = (name, ...args) => {
-      const entry = measure(name, ...args)
-      entries.set(name, [entry])
-      return entry
-    }
-    performance.getEntriesByName = (name, type) =>
-      entries.get(name) || getEntries(name, type)
-    performance.clearMeasures = (name) => {
-      if (name === undefined) entries.clear()
-      else entries.delete(name)
-      clearMeasures(name)
-    }
-  })
+  await installEditorClock(page)
   await fixture.ready()
   await until(
     () =>

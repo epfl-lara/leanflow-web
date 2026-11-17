@@ -786,6 +786,7 @@ textarea {
 }
 .file-toolbar {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
@@ -810,6 +811,8 @@ textarea {
 }
 .file-actions {
   display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   gap: 6px;
   flex-shrink: 0;
 }
@@ -819,7 +822,7 @@ textarea {
   min-width: 0;
   color: var(--muted);
   font-size: 11px;
-  flex: 1;
+  flex: 1 1 88px;
   overflow-x: auto;
   gap: 3px;
   scrollbar-width: thin;
@@ -1024,6 +1027,10 @@ textarea {
 }
 .build-caption > strong {
   font-weight: 550;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .build-caption > svg:last-child {
   margin-left: auto;

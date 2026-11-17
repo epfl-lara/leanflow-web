@@ -4,19 +4,75 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { captureTree } from './blobs.mjs'
 import { sourceFingerprint } from '../source-fingerprint.mjs'
-import { clusterError } from './state.mjs'
+import { clusterError, sha256 } from './state.mjs'
 import {
   captureDependencies,
   capturePresetEditorSource,
   protectedPresetRoot,
 } from './dependencies.mjs'
-import { publicPresetDefinition } from '../public-preset.mjs'
+import {
+  publicPresetDefinition,
+  publicPresetLakefile,
+} from '../public-preset.mjs'
+import { PROJECT_CONFIGURATION_FILES } from '../../shared/project-configuration.mjs'
 
 const TOOLCHAIN =
   /^leanprover\/lean4:v\d+\.\d+\.\d+(?:-(?:rc\d+|nightly-[0-9-]+))?$/
 // Arriving checks do not reschedule a failed capture of the same tree for this
 // long, so a full store or an unprotected tree cannot loop a large scan.
 const ASSET_RETRY_MS = 5 * 60_000
+
+function configurationHashes(manifest) {
+  return PROJECT_CONFIGURATION_FILES.map((name) => {
+    const entry = manifest.entries.find((item) => item.path === name)
+    return !entry ? null : entry.type === 'file' ? entry.hash : 'unsupported'
+  })
+}
+
+// Existing remote lean.file workers elaborate with lake env lean. Admit simple
+// headers importing only ready public modules. Any unrecognized syntax or local
+// import uses the dependency-aware lake lean command on the coordinator.
+function publicFileImports(source) {
+  const dotted = new Set()
+  let depth = 0
+  for (const line of source.split('\n')) {
+    let code = ''
+    for (let i = 0; i < line.length; i++) {
+      if (line.startsWith('/-', i)) {
+        depth++
+        i++
+        code += ' '
+      } else if (depth && line.startsWith('-/', i)) {
+        depth--
+        i++
+      } else if (!depth && line.startsWith('--', i)) break
+      else if (!depth) code += line[i]
+    }
+    const text = code.trim()
+    if (!text) continue
+    if (/^import[ \t]/.test(text)) {
+      const imports = text.split(/[ \t]+/).slice(1)
+      for (const name of imports) {
+        if (
+          !/^(?:Init|Lean|Std|Mathlib)(?:\.[A-Za-z_][A-Za-z0-9_']*)*$/.test(
+            name,
+          )
+        )
+          return null
+        if (name.includes('.')) dotted.add(name)
+      }
+      continue
+    }
+    if (
+      !/^(?:theorem|lemma|example|def|namespace|section|open|variable|universe)\b/.test(
+        text,
+      )
+    )
+      return null
+    break
+  }
+  return dotted
+}
 
 // Match source-fingerprint.mjs's Python JSON encoding and Unicode ordering.
 // Comparing this digest with the canonical source catches a mixed capture even
@@ -64,6 +120,8 @@ export class CheckInputs {
     this.blobs = blobs
     this.runtime = runtime
     this.assets = new Map()
+    this.fileSources = new WeakMap()
+    this.publicModuleIndexes = new WeakMap()
     this.readyAssets = new Set()
     this.assetFailures = new Map()
     // Immutable toolchain and dependency captures belong to the service. They
@@ -192,6 +250,18 @@ export class CheckInputs {
         version,
         signal,
       })
+      const preparedSource = await this.blobs.manifest(
+        editorSource.hash,
+        'source',
+      )
+      this.publicConfiguration = configurationHashes(preparedSource)
+      this.publicFileOptions =
+        preparedSource.entries.some(
+          (entry) =>
+            entry.path === 'lakefile.toml' &&
+            entry.hash === sha256(publicPresetLakefile(definition)),
+        ) &&
+        !preparedSource.entries.some((entry) => entry.path === 'lakefile.lean')
       this.editorEnvironment = {
         toolchain: { version, manifest: toolchain.hash },
         dependencies: dependencies.hash,
@@ -229,36 +299,40 @@ export class CheckInputs {
     const toolchainRoot = this.runtime.toolchains?.get(version)
     if (!toolchainRoot) return null
     const dependenciesRoot = await this.runtime.dependencyRoot(root)
-    // Personal or legacy mutable .lake trees are not shared as public assets.
+    const templateBound =
+      dependenciesRoot &&
+      path.dirname(dependenciesRoot) !==
+        path.join(this.runtime.runtimeDir, 'shared-dependencies')
+    // A public template is transferable only after the service warmed that
+    // exact protected binding. An ordinary check never starts that asset scan.
     if (
       dependenciesRoot &&
-      ((path.dirname(dependenciesRoot) !==
-        path.join(this.runtime.runtimeDir, 'shared-dependencies') &&
-        !(
-          editor &&
-          this.runtime.transferableDependencyRoot?.(root) === dependenciesRoot
-        )) ||
+      ((templateBound &&
+        ((!editor && !this.editorEnvironment) ||
+          this.runtime.transferableDependencyRoot?.(root) !==
+            dependenciesRoot)) ||
         this.runtime.dependencyPreparationReason(root))
     )
       return null
-    const toolchain = await this.#ready(toolchainRoot, 'toolchain', !editor)
+    const schedule = !editor && !templateBound
+    const toolchain = await this.#ready(toolchainRoot, 'toolchain', schedule)
     const dependencies =
       dependenciesRoot &&
       (await this.#ready(
         path.join(dependenciesRoot, '.lake/packages'),
         'dependencies',
-        !editor,
+        schedule,
       ))
     if (!toolchain || (dependenciesRoot && !dependencies)) return null
     if (
-      editor &&
+      (editor || templateBound) &&
       dependencies &&
       (this.editorEnvironment?.toolchain.version !== version ||
         this.editorEnvironment?.toolchain.manifest !== toolchain.hash ||
         this.editorEnvironment?.dependencies !== dependencies.hash)
     )
       return null
-    return { toolchain, dependencies: dependencies || null }
+    return { toolchain, dependencies: dependencies || null, templateBound }
   }
 
   async capture(root, { signal, fingerprint, editor = false } = {}) {
@@ -292,7 +366,19 @@ export class CheckInputs {
     if (!environment) return null
     signal?.throwIfAborted()
     const { toolchain, dependencies } = environment
-    return {
+    const prepared = this.editorEnvironment
+    const exactPublicConfiguration =
+      !!prepared &&
+      !!this.publicConfiguration &&
+      toolchain.hash === prepared.toolchain.manifest &&
+      version === prepared.toolchain.version &&
+      dependencies?.hash === prepared.dependencies &&
+      configurationHashes(source.manifest).every(
+        (value, index) => value === this.publicConfiguration[index],
+      )
+    if (!editor && environment.templateBound && !exactPublicConfiguration)
+      return null
+    const input = {
       sourceManifest: source.hash,
       dependencies: dependencies?.hash ?? null,
       toolchain: { version, manifest: toolchain.hash },
@@ -300,5 +386,86 @@ export class CheckInputs {
         ? { editorSource: this.editorEnvironment.editorSource }
         : {}),
     }
+    if (!editor && exactPublicConfiguration && this.publicFileOptions)
+      this.fileSources.set(input, source.manifest)
+    return input
+  }
+
+  async mayCheckFile(root) {
+    if (!this.editorEnvironment || !this.publicFileOptions) return false
+    const environment = await this.#environment(
+      root,
+      await this.#livePin(root),
+      true,
+    )
+    return (
+      environment?.dependencies?.hash === this.editorEnvironment.dependencies
+    )
+  }
+
+  // Only index compiled modules from the pinned standard libraries and Mathlib's
+  // package output. Other package layouts and source-only imports need Lake.
+  async #indexPublicModules(environment) {
+    const modules = new Set()
+    for (const [hash, kind, prefix] of [
+      [environment.toolchain.manifest, 'toolchain', 'lib/lean/'],
+      [
+        environment.dependencies,
+        'dependencies',
+        '.lake/packages/mathlib/.lake/build/lib/lean/',
+      ],
+    ]) {
+      const manifest = await this.blobs.manifest(hash, kind)
+      for (const entry of manifest.entries) {
+        if (
+          entry.type !== 'file' ||
+          !entry.path.startsWith(prefix) ||
+          !entry.path.endsWith('.olean')
+        )
+          continue
+        const name = entry.path.slice(prefix.length, -'.olean'.length)
+        if (/^(?:Init|Lean|Std|Mathlib)\//.test(name))
+          modules.add(name.replaceAll('/', '.'))
+      }
+    }
+    return modules
+  }
+
+  async canCheckFile(input, filename) {
+    const manifest = this.fileSources.get(input)
+    if (!manifest) return false
+    const entry = manifest.entries.find(
+      (item) => item.path === filename && item.type === 'file',
+    )
+    if (!entry || entry.size > 1024 * 1024) return false
+    // A local module or prebuilt artifact must never shadow a public import.
+    if (
+      manifest.entries.some(
+        (item) =>
+          item.type === 'symlink' ||
+          /^(?:Init|Lean|Std|Mathlib)(?:[/.]|$)/.test(item.path) ||
+          /\.(?:olean|ilean|so|dll|dylib)$/.test(item.path),
+      )
+    )
+      return false
+    const imports = publicFileImports(
+      (await this.blobs.read(entry.hash, 1024 * 1024)).toString('utf8'),
+    )
+    if (!imports) return false
+    if (!imports.size) return true
+    const environment = this.editorEnvironment
+    if (
+      environment?.dependencies !== input.dependencies ||
+      environment?.toolchain.manifest !== input.toolchain.manifest
+    )
+      return false
+    let index = this.publicModuleIndexes.get(environment)
+    if (!index) {
+      index = this.#indexPublicModules(environment)
+      this.publicModuleIndexes.set(environment, index)
+      index.catch(() => this.publicModuleIndexes.delete(environment))
+    }
+    const available = await index
+    return [...imports].every((name) => available.has(name))
   }
 }

@@ -19,6 +19,22 @@ Keep editors responsive during checks by reserving worker capacity in both direc
 
 Full checks keep their priority as slots become available. While open editors or agents prevent a full check from starting, bounded jobs can use the otherwise idle slots. New agents cannot use that exception. An assistant’s LaTeX compiler has a protected shared slot and inherits its parent’s priority, so a waiting check cannot block the compiler that lets the assistant finish. Cancelling queued work releases its place without stopping unrelated work. Capacity status reports effective class limits and active and queued slots. Before a larger rollout, run concurrent project checks on representative Lean projects with the intended hardware and provider limits; the deterministic worker-load regressions validate admission and cancellation, not a hardware sizing guarantee.
 
+For a competition in one shared project, size the assistant waiting list for
+the number of people likely to ask at once. For example,
+`STUDIO_MAX_AGENT_QUEUE=25` provides room for one waiting request from each of
+25 participants. Each participant's chat history stays private. Assistants
+work in separate copies. If two propose conflicting changes to the same saved
+file, one edit can be published and the conflicting candidate stays available
+for review. A shared RCP key also has its own parallel request limit.
+
+`STUDIO_MAX_AGENTS` is an upper bound. On a 45 GiB coordinator with 6 GiB
+agents, a group of active assistants shares one 6 GiB reservation for its
+LaTeX compiler. Three active assistants therefore leave 21 GiB for editors and
+other work. That fits three 6 GiB repository editors. With two assistants,
+four repository editors fit. At four editors and two assistants, an independent
+6 GiB local check waits for capacity. Remote checks use their own worker
+budgets when the project qualifies for remote execution.
+
 The [accepted distributed rollout](releases/2026-11-16-remote-editors.md) records
 15 concurrent managed Mathlib editors: nine on the VM and six on PC06, with a
 mixed compilation burst. The [local availability rollout](releases/2026-11-16-availability.md)

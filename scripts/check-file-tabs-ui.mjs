@@ -466,7 +466,7 @@ try {
       return {
         width: toolbar.width,
         tabs: tabs.width,
-        overlap: tabs.right > actions.left + 1,
+        overlap: tabs.right > actions.left + 1 && tabs.bottom > actions.top + 1,
         overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
       }
     })
