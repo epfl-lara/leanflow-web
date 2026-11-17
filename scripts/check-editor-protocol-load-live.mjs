@@ -229,8 +229,9 @@ try {
           ds.some(
             (d) =>
               d.severity === 1 &&
-              String(d.message).includes('invalid') &&
-              String(d.message).includes('Nat'),
+              String(d.message).includes('"invalid"') &&
+              /type mismatch/i.test(String(d.message)) &&
+              String(d.message).includes('String'),
           ),
         ),
       'genuine Lean error ' + s.row.user,
