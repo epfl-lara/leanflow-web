@@ -256,14 +256,22 @@ try {
     'Failed token session loading does not bind subsequent EPFL login to a stale account',
   )
 
-  expired = true
-  await page
-    .getByRole('button', { name: 'Refresh Git status', exact: true })
-    .click()
   const unlinkedRecovery = page.getByRole('dialog', {
     name: 'Sign in to continue',
     exact: true,
   })
+  // A background workspace read can discover expiry before a toolbar click.
+  // Observe that response directly while the participant leaves the page open.
+  const expiredRead = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname.startsWith(
+        `/api/projects/${projectId}/`,
+      ) &&
+      response.status() === 401,
+  )
+  expired = true
+  await expiredRead
   await unlinkedRecovery.waitFor()
   assert.equal(
     await unlinkedRecovery
