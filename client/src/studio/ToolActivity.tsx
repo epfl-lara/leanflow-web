@@ -6,7 +6,7 @@ import { CodeBlock } from './CodeBlock'
 const icons = {
   read: 'file',
   search: 'search',
-  check: 'check',
+  check: 'fileCheck',
   edit: 'edit',
   command: 'terminal',
   tool: 'settings',
@@ -19,6 +19,36 @@ function duration(milliseconds?: number) {
     : seconds < 60
       ? `${seconds}s`
       : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+}
+
+const resultIcons = {
+  success: 'check',
+  warning: 'warning',
+  failed: 'close',
+  neutral: 'minusCircle',
+} as const
+
+function stepResult(
+  step: ToolStep,
+  active: boolean,
+): {
+  state: keyof typeof resultIcons | 'running'
+  label: string
+} {
+  if (step.status === 'running') {
+    return active
+      ? { state: 'running', label: 'Running' }
+      : { state: 'neutral', label: 'No result recorded' }
+  }
+  if (step.status === 'failed')
+    return { state: 'failed', label: 'Attempt failed' }
+  if (step.status === 'declined') return { state: 'neutral', label: 'Declined' }
+  if (step.checkResult === 'issues')
+    return { state: 'warning', label: 'Check found issues' }
+  if (step.checkResult === 'passed')
+    return { state: 'success', label: 'Check passed' }
+  if (step.status === 'completed') return { state: 'success', label: 'Done' }
+  return { state: 'neutral', label: 'Finished' }
 }
 
 const ActivityStep = memo(function ActivityStep({
@@ -35,22 +65,8 @@ const ActivityStep = memo(function ActivityStep({
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const running = active && step.status === 'running'
-  const status = running
-    ? 'Running'
-    : step.status === 'running'
-      ? 'No result recorded'
-      : step.status === 'failed'
-        ? 'Attempt failed'
-        : step.status === 'declined'
-          ? 'Declined'
-          : step.checkResult === 'issues'
-            ? 'Check found issues'
-            : step.checkResult === 'passed'
-              ? 'Check passed'
-              : step.status === 'completed'
-                ? 'Done'
-                : 'Finished'
+  const { state, label } = stepResult(step, active)
+  const running = state === 'running'
   const inspect = () => {
     setError('')
     setLoading(true)
@@ -66,7 +82,7 @@ const ActivityStep = memo(function ActivityStep({
   }
   return (
     <details
-      className={`tool-step ${running ? 'is-running' : ''} ${step.status === 'failed' || step.checkResult === 'issues' ? 'has-error' : ''}`}
+      className={running ? 'tool-step is-running' : 'tool-step'}
       open={open}
       onToggle={(event) => {
         setOpen(event.currentTarget.open)
@@ -81,11 +97,7 @@ const ActivityStep = memo(function ActivityStep({
     >
       <summary>
         <span className="tool-step-icon">
-          {running ? (
-            <span className="spinner" />
-          ) : (
-            <Icon name={icons[step.kind]} size={15} />
-          )}
+          <Icon name={icons[step.kind]} size={15} />
         </span>
         <span className="tool-step-text">
           <strong>{step.label}</strong>
@@ -94,7 +106,14 @@ const ActivityStep = memo(function ActivityStep({
           )}
         </span>
         <span className="tool-step-meta">
-          <span>{status}</span>
+          <span className="tool-step-mark" data-state={state}>
+            {state === 'running' ? (
+              <span className="spinner" aria-hidden="true" />
+            ) : (
+              <Icon name={resultIcons[state]} size={13} />
+            )}
+            <span>{label}</span>
+          </span>
           {step.durationMs !== undefined && (
             <small>{duration(step.durationMs)}</small>
           )}

@@ -55,3 +55,46 @@
   border: 1px solid var(--border);
   border-radius: 6px;
 }
+
+.markdown-figure-caption {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 2px 10px;
+}
+.markdown-figure-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--accent);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: zoom-in;
+}
+.markdown-figure-expand:hover,
+.markdown-figure-expand:focus-visible {
+  background: var(--accent-soft);
+}
+.markdown-figure-expand:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.studio-dialog:has(> .image-file-viewer) {
+  width: min(920px, 92vw);
+  padding: clamp(14px, 2vw, 24px);
+}
+.studio-dialog:has(> .image-file-viewer) .dialog-header {
+  margin-bottom: 12px;
+  overflow-wrap: anywhere;
+}
+.studio-dialog > .image-file-viewer {
+  height: min(64dvh, 650px);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}

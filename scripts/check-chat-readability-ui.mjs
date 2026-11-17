@@ -138,13 +138,55 @@ try {
   )
   await step(1).getByText('Attempt failed', { exact: true }).waitFor()
   await step(5).getByText('Running', { exact: true }).waitFor()
+  const mark = (row, state) =>
+    row.locator(`summary .tool-step-mark[data-state="${state}"]`)
+  await mark(step(1), 'failed').waitFor()
+  const running = mark(step(5), 'running')
+  await running.waitFor()
+  const spinner = step(5).locator('summary .spinner')
+  await spinner.waitFor()
+  await until(
+    () =>
+      spinner.evaluate((node) =>
+        node.getAnimations().some((a) => a.playState === 'running'),
+      ),
+    'running tool animates',
+  )
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await until(
+    () =>
+      spinner.evaluate(
+        (node) => !node.getAnimations().some((a) => a.playState === 'running'),
+      ),
+    'reduced motion stops the running animation',
+  )
+  await running.waitFor()
+  await step(5).getByText('Running', { exact: true }).waitFor()
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
   assert.equal(await turn(active).locator('.turn-details[open]').count(), 0)
   assert.equal(await turn(active).locator('.turn-outcome').count(), 0)
   await turn(active)
     .getByRole('button', { name: 'Show 2 earlier', exact: true })
     .click()
   assert.equal(await turn(active).locator('.tool-step').count(), 6)
-  await step(5).locator('summary').click()
+  await mark(step(2), 'success').waitFor()
+  await step(2).getByText('Done', { exact: true }).waitFor()
+  await emit(active, 'tool-step', {
+    ...active.toolActivity[0],
+    kind: 'check',
+    status: 'completed',
+    checkResult: 'issues',
+  })
+  await step(0).getByText('Check found issues', { exact: true }).waitFor()
+  await mark(step(0), 'warning').waitFor()
+  const summary = step(5).locator('summary')
+  assert(
+    await summary.evaluate(
+      (node) => node.parentElement instanceof HTMLDetailsElement,
+    ),
+  )
+  await summary.focus()
+  await summary.press('Enter')
   await step(5)
     .getByText('Waiting for the tool result…', { exact: true })
     .waitFor()
@@ -157,6 +199,8 @@ try {
   }
   await emit(active, 'tool-step', completed)
   await step(5).getByText('Check passed', { exact: true }).waitFor()
+  await mark(step(5), 'success').waitFor()
+  assert.equal(await step(5).locator('.spinner').count(), 0)
   assert.notEqual(
     await step(5).getAttribute('open'),
     null,
@@ -266,6 +310,14 @@ try {
   })
   await emit(active, 'status', { status: 'cancelled' })
   await turn(active).getByText('No result recorded', { exact: true }).waitFor()
+  const interrupted = turn(active)
+    .locator('.tool-step')
+    .filter({ hasText: 'Last proof check' })
+  await mark(interrupted, 'neutral').waitFor()
+  assert.equal(await interrupted.locator('.spinner').count(), 0)
+  report.checks.push(
+    'Tool icons distinguish running, success, warning, failure and missing results. Reduced motion leaves a stationary running indicator, and keyboard disclosures survive streamed state changes.',
+  )
   assert.equal(await turn(active).locator('.turn-outcome.passed').count(), 0)
   await old.getByText('Final Lean check passed', { exact: true }).waitFor()
   report.checks.push(

@@ -20,6 +20,13 @@ const paths = {
   upload: 'M12 16V4m-5 5 5-5 5 5M4 16v5h16v-5',
   play: 'm8 5 12 7-12 7Z',
   stop: 'M6 6h12v12H6Z',
+  expand:
+    'M8 3H3v5m0-5 6 6m7-6h5v5m0-5-6 6M3 16v5h5m-5 0 6-6m12 1v5h-5m5 0-6-6',
+  warning:
+    'M10.4 3.8a1.8 1.8 0 0 1 3.2 0l8 14.5A1.8 1.8 0 0 1 20 21H4a1.8 1.8 0 0 1-1.6-2.7ZM12 8v5m0 4h.01',
+  minusCircle: 'M22 12a10 10 0 1 1-20 0 10 10 0 1 1 20 0M8 12h8',
+  fileCheck:
+    'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6M8 15l2 2 5-5',
   check: 'm5 12 4 4L19 6',
   pin: 'M12 17v5M5 17h14l-3-6V3H8v8ZM7 3h10',
   close: 'm6 6 12 12M6 18 18 6',

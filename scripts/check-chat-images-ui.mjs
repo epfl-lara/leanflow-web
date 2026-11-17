@@ -19,12 +19,12 @@ const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZlAAAAABJRU5ErkJggg==',
   'base64',
 )
-const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="420" height="200" viewBox="0 0 420 200"><rect width="420" height="200" rx="16" fill="#e9f0ff"/><path d="M30 150 L120 50 L220 130 L360 30" fill="none" stroke="#3159bb" stroke-width="5"/><text x="30" y="185" font-family="sans-serif" font-size="18" fill="#173269">Project figure</text><script>window.__projectImageScript=true</script><image href="https://chat-images.invalid/from-svg.png" width="1" height="1"/></svg>`
+const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1260" height="600" viewBox="0 0 420 200"><rect width="420" height="200" rx="16" fill="#e9f0ff"/><path d="M30 150 L120 50 L220 130 L360 30" fill="none" stroke="#3159bb" stroke-width="5"/><text x="30" y="185" font-family="sans-serif" font-size="18" fill="#173269">Project figure</text><script>window.__projectImageScript=true</script><image href="https://chat-images.invalid/from-svg.png" width="1" height="1"/></svg>`
 const markdown = '# Image guide\n\n![Document diagram](../plots/diagram.svg)\n'
 const imageReply = [
   'Here are the project images:',
   '![Project diagram](plots/diagram.svg)',
-  '![Tiny image](/workspace/plots/pixel.png)',
+  '![](/workspace/plots/pixel.png)',
   '[![Linked diagram](plots/diagram.svg)](plots/diagram.svg)',
   '![Missing diagram](plots/missing.png)',
   '![External diagram](https://chat-images.invalid/remote.png)',
@@ -129,7 +129,9 @@ try {
   await diagram.scrollIntoViewIfNeeded()
   await until(
     () =>
-      diagram.evaluate((image) => image.complete && image.naturalWidth === 420),
+      diagram.evaluate(
+        (image) => image.complete && image.naturalWidth === 1260,
+      ),
     'SVG rendered in chat',
   )
   await diagram.evaluate((node) => {
@@ -170,7 +172,7 @@ try {
   report.checks.push(
     'Streaming and parent UI updates retain decoded image nodes rather than restarting downloads.',
   )
-  const raster = reply.getByRole('img', { name: 'Tiny image', exact: true })
+  const raster = reply.getByRole('img', { name: 'pixel.png', exact: true })
   await raster.scrollIntoViewIfNeeded()
   await until(
     () => raster.evaluate((image) => image.complete && image.naturalWidth > 0),
@@ -181,7 +183,68 @@ try {
     1,
     'linked Markdown image retains one normal link',
   )
-  assert.equal(await reply.locator('a button').count(), 0)
+  assert.equal(await reply.locator('a button, button button').count(), 0)
+  const enlarge = reply.getByRole('button', {
+    name: 'Enlarge image plots/diagram.svg',
+    exact: true,
+  })
+  assert.equal(
+    await enlarge.count(),
+    1,
+    'Only the standalone diagram gets its own enlarge control',
+  )
+  const inlineWidth = (await diagram.boundingBox()).width
+  await enlarge.focus()
+  await enlarge.press('Enter')
+  const dialog = page.getByRole('dialog', {
+    name: 'Project diagram',
+    exact: true,
+  })
+  await dialog.waitFor()
+  const largeImage = dialog.getByRole('img', {
+    name: 'diagram.svg',
+    exact: true,
+  })
+  await until(
+    () =>
+      largeImage.evaluate((img) => img.complete && img.naturalWidth === 1260),
+    'expanded image loads from the project',
+  )
+  assert(
+    (await largeImage.boundingBox()).width > inlineWidth,
+    'The expanded figure is larger than the inline preview',
+  )
+  await dialog.getByRole('button', { name: 'Actual size', exact: true }).click()
+  assert.equal((await largeImage.boundingBox()).width, 1260)
+  await dialog.getByRole('button', { name: 'Fit image', exact: true }).click()
+  assert(
+    (await largeImage.boundingBox()).width < 1260,
+    'Fit restores the constrained preview',
+  )
+  await page.keyboard.press('Escape')
+  await dialog.waitFor({ state: 'hidden' })
+  await until(
+    () => enlarge.evaluate((node) => document.activeElement === node),
+    'Escape returns focus to Enlarge image',
+  )
+  assert.match(
+    await page.locator('.file-tab').getAttribute('aria-label'),
+    /Main\.lean/,
+  )
+  const rasterEnlarge = reply.getByRole('button', {
+    name: 'Enlarge image plots/pixel.png',
+    exact: true,
+  })
+  await rasterEnlarge.click()
+  await page.getByRole('dialog', { name: 'pixel.png', exact: true }).waitFor()
+  await page.keyboard.press('Escape')
+  await until(
+    () => rasterEnlarge.evaluate((node) => document.activeElement === node),
+    'unnamed image dialog restores focus',
+  )
+  report.checks.push(
+    'Enlarge opens a larger account-bound image, switches between fit and actual size, and returns focus to the chat without changing the active file. Images without alt text use the filename.',
+  )
   report.checks.push(
     'Project SVG and PNG images render inline from account-bound URLs; linked images keep valid keyboard controls.',
   )
@@ -257,7 +320,7 @@ try {
   await until(
     () =>
       documentImage.evaluate(
-        (image) => image.complete && image.naturalWidth === 420,
+        (image) => image.complete && image.naturalWidth === 1260,
       ),
     'document relative image rendered',
   )
@@ -306,6 +369,32 @@ try {
     path: path.join(output, 'chat-images-narrow.png'),
     fullPage: true,
   })
+  await enlarge.click()
+  await dialog.waitFor()
+  const compactBounds = await dialog.boundingBox()
+  assert(
+    compactBounds &&
+      compactBounds.x >= 0 &&
+      compactBounds.x + compactBounds.width <= 391,
+  )
+  await dialog.getByRole('button', { name: 'Actual size', exact: true }).click()
+  assert(
+    await dialog.locator('.image-file-canvas').evaluate((canvas) => {
+      canvas.scrollLeft = 100
+      return (
+        canvas.scrollLeft > 0 &&
+        document.documentElement.scrollWidth <= window.innerWidth + 1
+      )
+    }),
+    'A large figure pans inside its mobile viewer without expanding the page',
+  )
+  await dialog
+    .getByRole('button', { name: 'Close dialog', exact: true })
+    .click()
+  await until(
+    () => enlarge.evaluate((node) => document.activeElement === node),
+    'closing compact image returns to chat',
+  )
   report.checks.push(
     'Inline images remain bounded and readable on a narrow viewport.',
   )

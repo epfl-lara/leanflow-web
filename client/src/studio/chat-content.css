@@ -259,10 +259,6 @@
   padding-top: 3px;
   flex: 0 0 15px;
 }
-.tool-step-icon .spinner {
-  width: 13px;
-  height: 13px;
-}
 .tool-step-text {
   flex: 1;
   min-width: 0;
@@ -291,9 +287,8 @@
   line-height: 1.8;
   color: var(--muted);
   text-align: right;
-  max-width: 90px;
+  max-width: 108px;
 }
-.tool-step-meta > span,
 .tool-step-meta > small {
   display: block;
 }
@@ -304,11 +299,34 @@
 .tool-step.is-running {
   background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
 }
-.tool-step.is-running .tool-step-meta {
+.tool-step-mark {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 4px;
+  line-height: 1.5;
+}
+.tool-step-mark svg,
+.tool-step-mark .spinner {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 1px;
+}
+.tool-step-mark .spinner {
+  width: 11px;
+  height: 11px;
+  margin-top: 2px;
+}
+.tool-step-mark[data-state='running'] {
   color: var(--accent);
 }
-.tool-step.has-error .tool-step-meta,
-.tool-step.has-error .tool-step-icon {
+.tool-step-mark[data-state='success'] svg {
+  color: var(--success);
+}
+.tool-step-mark[data-state='warning'] {
+  color: light-dark(#855800, #eac276);
+}
+.tool-step-mark[data-state='failed'] {
   color: var(--danger);
 }
 .tool-step-body {
@@ -396,7 +414,15 @@
 .chat-workbench .chat-current-work .chat-edit-status {
   white-space: nowrap;
 }
+@media (prefers-reduced-motion: no-preference) {
+  .tool-step {
+    transition: background-color 160ms ease-out;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
+  .tool-step-mark .spinner {
+    animation: none;
+  }
   .tool-step > summary > svg {
     transition: none;
   }

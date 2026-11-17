@@ -80,6 +80,7 @@ export const ConversationTurn = memo(function ConversationTurn({
     },
     [onOpenTarget],
   )
+  const inspectRun = useCallback(() => onInspect(run.id), [onInspect, run.id])
   const changeCount = runChangeCount(run, !!run.liveEdits)
   const liveCount = runChangeCount(run, true)
   const [activityOpen, setActivityOpen] = useState(false)
@@ -123,7 +124,7 @@ export const ConversationTurn = memo(function ConversationTurn({
             key={segment.key}
             steps={segment.steps}
             active={active}
-            onInspect={() => onInspect(run.id)}
+            onInspect={inspectRun}
             onOpenTarget={onOpenTarget}
           />
         ) : segment.kind === 'assistant' ? (

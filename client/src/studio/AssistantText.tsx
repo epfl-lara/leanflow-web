@@ -123,6 +123,7 @@ const MarkdownText = memo(function MarkdownText({
           source && projectId ? markdownImagePath(source, currentPath) : null
         return path && projectId ? (
           <MarkdownProjectImage
+            expandable
             projectId={projectId}
             path={path}
             alt={props.alt}
