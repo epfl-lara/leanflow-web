@@ -77,6 +77,12 @@ export function LoginScreen({
                 onAvailabilityChange={setEpflAvailable}
                 onComplete={() => acceptSignIn()}
               />
+              {epflAvailable && (
+                <p className="lf-login__account-note">
+                  If you already use an access token, sign in with it below and
+                  link EPFL in Assistant settings to keep your projects.
+                </p>
+              )}
             </div>
             {epflAvailable && (
               <p className="lf-login__divider">
@@ -123,9 +129,11 @@ export function LoginScreen({
               your own Lemex API key.
             </p>
             <p>
-              Need access? Email{' '}
-              <a href="mailto:lazar.milikic@epfl.ch">lazar.milikic@epfl.ch</a>{' '}
-              to request an invitation.
+              {epflAvailable
+                ? 'For access help, email '
+                : 'Need access? Email '}
+              <a href="mailto:lazar.milikic@epfl.ch">lazar.milikic@epfl.ch</a>
+              {epflAvailable ? '.' : ' to request an invitation.'}
             </p>
           </div>
         </div>

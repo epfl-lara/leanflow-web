@@ -145,6 +145,28 @@ credential expiry, token claims and EPFL access assignments. Keep the owner's
 invitation token available while investigating. Do not weaken signature or
 tenant checks to make a failing login pass.
 
+### Recover from an accidental duplicate account
+
+An existing token user can accidentally create a separate account by using
+EPFL before linking. The original projects remain attached to the original
+account. Ask an administrator to confirm the original and duplicate account
+IDs before changing access.
+
+Keep a private backup of `auth/users.json`. Wait for active work to finish and
+stop the service before revoking the duplicate, so an account update cannot
+race with the command. From the source checkout, use the actual data directory
+and the **duplicate ID**, not the original account or a display name:
+
+```sh
+STUDIO_DATA_DIR=/path/to/instance-data node scripts/remove-user.mjs "duplicate-account-ID"
+```
+
+This revokes that account's access and retains its project files and history;
+it does not merge or transfer projects. Restart the service, then have the
+user sign in with the original token and link EPFL in Assistant settings.
+If the duplicate already contains useful work, plan its recovery before
+revoking access. The helper refuses to remove the owner account.
+
 ## Run isolated checks
 
 From the checkout, with Node 24 or newer:

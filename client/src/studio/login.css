@@ -88,6 +88,12 @@
 .lf-login .lf-login__epfl .error-message {
   margin-bottom: 0;
 }
+.lf-login .lf-login__account-note {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--lf-login-body);
+}
 .lf-login .button.lf-login__action {
   width: 100%;
   min-height: 44px;
