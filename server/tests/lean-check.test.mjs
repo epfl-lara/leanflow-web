@@ -308,6 +308,7 @@ test('selected files outside default targets still compile and changed source ca
 test('explicit file checks use the pinned dependency-aware compiler without starting a project check', async (t) => {
   const selected = await checkFixture(t, { scope: 'file', file: 'Main.lean' })
   assert.equal(selected.job.status, 'completed')
+  assert.equal(selected.job.result.hasWarnings, false)
   assert.equal(selected.job.checkScope, 'file')
   assert.equal(selected.job.checkMethod, 'lean-file')
   assert.deepEqual(
@@ -343,6 +344,33 @@ test('explicit file checks use the pinned dependency-aware compiler without star
   )
 })
 
+const sorryDiagnostic = JSON.stringify({
+  data: 'declaration uses `sorry`',
+  kind: 'hasSorry',
+  pos: { line: 1, column: 8 },
+  fileName: './Main.lean',
+  severity: 'warning',
+})
+
+test('a selected-file warning stays visible on a successful check and ordinary output cannot mark it as a warning', async (t) => {
+  for (const [output, hasWarnings] of [
+    [sorryDiagnostic, true],
+    [JSON.stringify({ severity: 'warning', data: 'unused variable' }), true],
+    [
+      '{"severity":"warning"\nwarning: build progress\n{"severity":"information","data":"warning"}',
+      false,
+    ],
+  ]) {
+    const { job } = await checkFixture(t, {
+      scope: 'file',
+      file: 'Main.lean',
+      result: { code: 0, stdout: 'progress\n' + output + '\n', stderr: '' },
+    })
+    assert.equal(job.status, 'completed')
+    assert.equal(job.result.hasWarnings, hasWarnings)
+  }
+})
+
 test('a frozen remote selected-file result retains its actual verdict and identifies the earlier saved snapshot', async (t) => {
   const root = await directory(t),
     events = new EventStore(root)
@@ -366,7 +394,7 @@ test('a frozen remote selected-file result retains its actual verdict and identi
         current = after
         const result = {
           code,
-          stdout: 'saved source',
+          stdout: code ? '' : sorryDiagnostic,
           stderr: code ? 'type mismatch' : '',
         }
         workerResults.add(result)
@@ -383,6 +411,7 @@ test('a frozen remote selected-file result retains its actual verdict and identi
     const final = events.get(job.id, 'participant')
     assert.equal(final.status, code === 0 ? 'completed' : 'failed')
     assert.equal(final.result.code, code)
+    assert.equal(final.result.hasWarnings, code === 0)
     assert.equal(final.result.checkedSnapshot, before)
     assert.equal(final.result.sourceChanged, true)
     assert.match(final.log, /earlier saved sources/)

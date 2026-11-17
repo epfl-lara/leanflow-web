@@ -222,6 +222,11 @@ try {
     .locator('.build-output')
     .getByText('Playground source compiled.', { exact: true })
     .waitFor()
+  await page
+    .locator('.build-output')
+    .getByText('Completed', { exact: true })
+    .waitFor()
+  assert.equal(await page.locator('.build-output output.success').count(), 0)
   assert.deepEqual(compileInput, { scope: 'file', path: 'Main.lean' })
   assert.equal(
     await page

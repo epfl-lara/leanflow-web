@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { proofTargetReference } from './proof-target.mjs'
+import { hasLeanWarnings } from './lean-check.mjs'
 import {
   setupFailureMessage,
   dependencyFailureMessage,
@@ -617,9 +618,10 @@ export class JobManager {
               (await this.workspaces.checkFingerprint(projectId, owner, {
                 signal: controller.signal,
               }))
-          if (checkedSnapshot || sourceChanged)
+          if (fileOnly || sourceChanged)
             result = {
               ...result,
+              ...(fileOnly && { hasWarnings: hasLeanWarnings(result) }),
               ...(checkedSnapshot && { checkedSnapshot }),
               ...(sourceChanged && { sourceChanged: true }),
               ...(sourceChanged && !checkedSnapshot && { code: 1 }),

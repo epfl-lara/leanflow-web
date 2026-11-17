@@ -20,6 +20,7 @@
   --accent: #335cce;
   --accent-soft: #eef3fc;
   --success: #20865c;
+  --warning: #905a08;
   --danger: #ba3645;
   --danger-soft: #fff1f2;
   --shadow: 0 16px 70px #17223c26;
@@ -42,6 +43,7 @@
   --accent: #8bafff;
   --accent-soft: #202d43;
   --success: #72d1a3;
+  --warning: #e9b85e;
   --danger: #f59aa1;
   --danger-soft: #3e242d;
   --shadow: 0 16px 70px #0007;
@@ -267,6 +269,11 @@ textarea {
   color: var(--success);
   background: color-mix(in srgb, var(--success) 8%, var(--bg));
   border-color: color-mix(in srgb, var(--success) 20%, var(--border));
+}
+.tag.warning {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg));
+  border-color: color-mix(in srgb, var(--warning) 25%, var(--border));
 }
 .tag.danger {
   color: var(--danger);
@@ -1031,6 +1038,12 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.build-caption .tag:is(.success, .warning, .danger) {
+  text-transform: none;
+}
+.build-caption .tag svg {
+  flex-shrink: 0;
 }
 .build-caption > svg:last-child {
   margin-left: auto;

@@ -148,11 +148,8 @@
   --proof-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m2.5 8 3.3 3.4 7.6-8' fill='none' stroke='black' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 .proof-mark-warning {
-  color: #905a08;
+  color: var(--warning);
   --proof-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.6 15 14H1Z' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='M8 6v3m0 2v.4' stroke='black' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E");
-}
-:root[data-theme='dark'] .proof-mark-warning {
-  color: #e9b85e;
 }
 .proof-mark-error {
   color: var(--danger);

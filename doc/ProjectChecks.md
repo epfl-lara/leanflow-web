@@ -33,6 +33,11 @@ feedback on that source and **Check Project** when you need independent kernel
 verification of the default targets. Each participant can submit a separate
 file check while waiting for an interactive editor slot.
 
+**Compiled with warnings** means Lean accepted the file and reported a
+warning. Open the check output to read it. A result marked **earlier version**
+applies to the saved sources Lean checked. Run **Check File** again for the
+current version.
+
 On the coordinator, available worker capacity sets how many file checks can take private source copies, up to six. Each copy can hold up to 128 MiB of source or the lower configured storage allowance. The compiler reuses the project’s prepared dependencies. If the project contains too much source, excluded private files or links that cannot be copied faithfully, Lean checks the saved project in place. Run an in-place check again if someone edits the project before it finishes.
 
 Checks run offline, with source and toolchains read only and the project's

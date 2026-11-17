@@ -11,6 +11,21 @@ export const PROJECT_CHECK_COMMAND = Object.freeze([
   '/opt/leanflow-project-check/run.py',
 ])
 
+// Lean --json emits one diagnostic per line alongside ordinary command output.
+export function hasLeanWarnings({ stdout, stderr }) {
+  for (const output of [stdout, stderr]) {
+    for (const [line] of (output ?? '').matchAll(/^[\t ]*\{[^\r\n]*/gm)) {
+      if (!line.includes('"warning"')) continue
+      try {
+        if (JSON.parse(line)?.severity === 'warning') return true
+      } catch {
+        // Plain text and truncated final lines are not diagnostics.
+      }
+    }
+  }
+  return false
+}
+
 // Cache capabilities, never proof verdicts. A changed installation or worker
 // image must be probed again, including release candidates with backports.
 export class LeanCheckSupport {

@@ -153,7 +153,9 @@ interface Job {
   log?: string
   result?: {
     checkedSnapshot?: string
+    hasWarnings?: boolean
     sourceChanged?: boolean
+    truncated?: boolean
     [key: string]: unknown
   }
   error?: string
@@ -163,6 +165,30 @@ const terminalJob = (job: Job) =>
   ['completed', 'failed', 'cancelled', 'interrupted', 'error'].includes(
     job.status,
   )
+
+function checkOutcome(job: Job) {
+  if (job.status === 'failed' || job.status === 'error')
+    return { label: 'Failed', tone: 'danger', icon: 'close' } as const
+  if (job.status !== 'completed')
+    return { label: job.status, tone: '', icon: null } as const
+  if (job.checkScope === 'file' && job.result?.hasWarnings === true)
+    return {
+      label: 'Compiled with warnings',
+      tone: 'warning',
+      icon: 'warning',
+    } as const
+  if (
+    job.checkScope === 'file' &&
+    job.result?.hasWarnings === false &&
+    !job.result.truncated
+  )
+    return { label: 'Passed', tone: 'success', icon: 'check' } as const
+  return {
+    label: 'Completed',
+    tone: job.checkScope === 'file' ? '' : 'success',
+    icon: null,
+  } as const
+}
 
 const INVITATION_STORAGE_KEY = 'lemex-project-invitation'
 
@@ -529,6 +555,7 @@ export function Studio() {
     !!file?.path.endsWith('.lean') &&
     !file.unavailable
   const activeCheck = job && !terminalJob(job) ? job : null
+  const outcome = job && checkOutcome(job)
   const earlierFileResult =
     job?.checkScope === 'file' &&
     (job.status === 'completed' || job.status === 'failed') &&
@@ -4063,7 +4090,7 @@ export function Studio() {
                 />
               ) : null}
             </div>
-            {job && (
+            {job && outcome && (
               <section className={`build-output ${jobOpen ? 'expanded' : ''}`}>
                 <button
                   className="build-caption"
@@ -4080,14 +4107,11 @@ export function Studio() {
                         ? 'File check'
                         : 'Project check'}
                   </strong>
-                  <output
-                    aria-live="polite"
-                    className={`tag ${job.status === 'completed' ? 'success' : job.status === 'failed' ? 'danger' : ''}`}
-                  >
+                  <output aria-live="polite" className={`tag ${outcome.tone}`}>
                     {!terminalJob(job) && <span className="spinner" />}
-                    {earlierFileResult
-                      ? `${job.status === 'completed' ? 'Passed' : 'Failed'} · earlier version`
-                      : job.status}
+                    {outcome.icon && <Icon name={outcome.icon} size={13} />}
+                    {outcome.label}
+                    {earlierFileResult && ' · earlier version'}
                   </output>
                   <Icon
                     name="chevron"
@@ -4097,6 +4121,11 @@ export function Studio() {
                 </button>
                 {jobOpen && (
                   <>
+                    {outcome.tone === 'warning' && (
+                      <p className="field-help">
+                        Review Lean’s warnings in the output below.
+                      </p>
+                    )}
                     {earlierFileResult && (
                       <p className="field-help">
                         Project files changed while Lean checked this saved

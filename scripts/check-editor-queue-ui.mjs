@@ -243,7 +243,12 @@ try {
     status: 'completed',
     checkMethod: 'lean-file',
     log: 'Second.lean compiled.',
-    result: { code: 0, checkedSnapshot: 'a'.repeat(64), sourceChanged: true },
+    result: {
+      code: 0,
+      checkedSnapshot: 'a'.repeat(64),
+      hasWarnings: false,
+      sourceChanged: true,
+    },
   }
   await outputPanel
     .getByText('Second.lean compiled.', { exact: true })
@@ -251,6 +256,7 @@ try {
   await outputPanel
     .getByText('Passed · earlier version', { exact: true })
     .waitFor()
+  assert(await outputPanel.locator('output.success svg').isVisible())
   await outputPanel.getByText(/again to check current sources/).waitFor()
   assert.equal(checkRequests.length, 1)
   assert.equal(connections, 1)
@@ -376,6 +382,48 @@ try {
   await outputPanel
     .getByText('Failed · earlier version', { exact: true })
     .waitFor()
+  assert(await outputPanel.locator('output.danger svg').isVisible())
+  for (const sourceChanged of [false, true]) {
+    await page.getByRole('button', { name: 'Check File', exact: true }).click()
+    await outputPanel.getByText('queued', { exact: true }).waitFor()
+    checkJob = {
+      ...checkJob,
+      status: 'completed',
+      checkMethod: 'lean-file',
+      log: 'Main.lean:1:8: warning: declaration uses sorry',
+      result: {
+        code: 0,
+        hasWarnings: true,
+        checkedSnapshot: 'c'.repeat(64),
+        sourceChanged,
+        truncated: sourceChanged,
+      },
+    }
+    const label = sourceChanged
+      ? 'Compiled with warnings · earlier version'
+      : 'Compiled with warnings'
+    await outputPanel.getByText(label, { exact: true }).waitFor()
+    assert(await outputPanel.locator('output.warning svg').isVisible())
+    await outputPanel.getByText(/Review Lean’s warnings/).waitFor()
+    await outputPanel.getByText(/declaration uses sorry/).waitFor()
+    assert.equal(
+      await outputPanel.getByText(/again to check current sources/).count(),
+      Number(sourceChanged),
+    )
+  }
+  await page.getByRole('button', { name: 'Check File', exact: true }).click()
+  await outputPanel.getByText('queued', { exact: true }).waitFor()
+  checkJob = {
+    ...checkJob,
+    status: 'completed',
+    result: { code: 0, hasWarnings: false, truncated: true },
+  }
+  await outputPanel.getByText('Completed', { exact: true }).waitFor()
+  assert.equal(await outputPanel.locator('output svg').count(), 0)
+  assert.equal(await outputPanel.locator('output.success').count(), 0)
+  report.checks.push(
+    'Clean, warning and failed file checks have distinct visible symbols and labels. Current and earlier warning results both retain Lean’s diagnostic.',
+  )
   await page
     .getByRole('button', { name: 'Restart Lean', exact: true })
     .first()
