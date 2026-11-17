@@ -129,7 +129,12 @@ and projects; order is preserved within each account and project. A pre-start
 capacity race keeps its original queue place and deadline during a short
 backoff. Its waiting place remains reserved until startup succeeds, so a full
 queue cannot evict a tab already waiting. Only one resource reservation is being
-started at a time; already running editors execute in parallel. Queue positions
+started at a time; already running editors execute in parallel. Failed starts
+retain only their own slot and waiting place while cleanup is unconfirmed;
+healthy workers can continue starting other tabs. An unavailable worker's held
+grants are counted separately from its lost capacity, avoiding a second capacity
+penalty. Account and project limits remain held until cleanup is confirmed.
+Queue positions
 therefore show arrival order, not a promised
 start time. A dropped worker reduces available capacity without evicting other
 running sessions. Resource changes are checked every 500 ms while tabs wait.

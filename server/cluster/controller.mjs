@@ -618,6 +618,22 @@ export class ClusterController {
     )
   }
 
+  editorAdmissionCapacity(environment) {
+    // Held processes on an unavailable worker are already counted by global
+    // admission. Add those liabilities back so the worker's lost capacity is
+    // not subtracted twice; placement still forbids using the unavailable node.
+    const unavailable = [...this.#grants.values()].filter((grant) => {
+      if (grant.operation !== 'lean.session') return false
+      const node = this.#nodes.get(grant.nodeId)
+      return (
+        !node ||
+        !this.#ready(node) ||
+        (environment && !this.#warmEditor(node, environment))
+      )
+    }).length
+    return this.editorCapacity(environment) + unavailable
+  }
+
   // Uploads a pinned environment to one worker and, when asked, has the worker
   // certify itself with that toolchain. Capabilities come only from the
   // worker's own report.

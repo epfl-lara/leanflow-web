@@ -470,6 +470,46 @@ test('closing a dedicated editor channel kills only its owner and confirms clean
   )
 })
 
+test('an unavailable editor grant does not subtract healthy worker capacity twice', async (t) => {
+  const f = await cluster(t, {
+    nodes: [editorNode(), editorNode({ id: 'node-b' })],
+  })
+  await f.ready()
+  for (const node of ['node-a', 'node-b'])
+    await f.controller.prepareNode(node, f.input, { certify: true })
+  const editor = await f.controller.openEditor(
+    f.input,
+    options({ jobId: 'lost-editor' }),
+  )
+  editor.stdout.resume()
+  editor.stderr.resume()
+  f.transport.hook = (call) =>
+    call.node === 'node-a'
+      ? refuseCancel(call)
+      : call.request(call.method, call.params, call.options)
+  editor.kill()
+  await until(() => f.controller.status().held === 1)
+  assert.equal(f.controller.editorCapacity(), 2)
+  assert.equal(
+    f.controller.editorAdmissionCapacity(),
+    3,
+    'Two healthy places plus one already held process',
+  )
+  assert.equal(f.controller.canOpenEditor(), true)
+  const healthy = await f.controller.openEditor(
+    f.input,
+    options({ jobId: 'healthy-editor', actor: 'bob' }),
+  )
+  healthy.stdout.resume()
+  healthy.stderr.resume()
+  assert.equal(f.workers.get('node-b').runtime.editorChildren.length, 1)
+  f.transport.hook = null
+  await editor.workerReleased
+  await f.ready()
+  assert.equal(f.controller.editorAdmissionCapacity(), 4)
+  healthy.kill()
+})
+
 test('unsupported repository snapshots never start a remote editor', async (t) => {
   const f = await cluster(t, {
     nodes: [editorNode()],

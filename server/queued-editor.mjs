@@ -51,6 +51,9 @@ export function queuedEditor({
         release.started()
         return child
       } catch (error) {
+        // Failed starts keep their own lease until cleanup is confirmed, but
+        // an offline worker must not block startup on every healthy machine.
+        release.startingDone()
         child?.kill()
         if (actual) {
           try {

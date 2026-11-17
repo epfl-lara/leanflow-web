@@ -37,6 +37,7 @@ export class EditorAdmission {
   #draining = false
   #again = false
   #starting = null
+  #reservedWaiting = new Set()
   #sequence = 0
 
   constructor({
@@ -142,6 +143,7 @@ export class EditorAdmission {
     const { actor, projectId, signal } = entry
     this.#active++
     if (entry.reserveStart) this.#starting = entry
+    if (entry.reserveStart && entry.waiting) this.#reservedWaiting.add(entry)
     this.#users.set(actor, (this.#users.get(actor) || 0) + 1)
     this.#projects.set(projectId, (this.#projects.get(projectId) || 0) + 1)
     let released = false
@@ -150,6 +152,7 @@ export class EditorAdmission {
       if (released) return false
       released = true
       if (this.#starting === entry) this.#starting = null
+      this.#reservedWaiting.delete(entry)
       this.#active--
       decrement(this.#users, actor)
       decrement(this.#projects, projectId)
@@ -161,11 +164,16 @@ export class EditorAdmission {
     }
     // Do not probe the same unreserved worker for another tab until this
     // startup has actually acquired its runtime/controller resources.
+    release.startingDone = () => {
+      if (released) return
+      if (this.#starting === entry) this.#starting = null
+      this.#drain()
+    }
     release.started = () => {
       if (released || confirmed) return
       confirmed = true
-      if (this.#starting === entry) this.#starting = null
-      this.#drain()
+      this.#reservedWaiting.delete(entry)
+      release.startingDone()
     }
     release.retry = () => {
       if (released || confirmed)
@@ -200,10 +208,10 @@ export class EditorAdmission {
   // New requests join the waiting list only after they could not start, so a
   // refused tab never receives a queue position.
   #bound() {
-    const reserved = this.#starting?.waiting ? this.#starting : null
-    let total = reserved ? 1 : 0
+    let total = this.#reservedWaiting.size
     const users = new Map()
-    if (reserved) users.set(reserved.actor, 1)
+    for (const entry of this.#reservedWaiting)
+      users.set(entry.actor, (users.get(entry.actor) || 0) + 1)
     for (const entry of [...this.#queue]) {
       const mine = users.get(entry.actor) || 0
       if (!entry.waiting) {
@@ -333,7 +341,7 @@ export class EditorAdmission {
   assertCanQueue(actor) {
     if (this.#closed) throw closing()
     const waiting = this.#waiting()
-    if (this.#starting?.waiting) waiting.push(this.#starting)
+    waiting.push(...this.#reservedWaiting)
     const mine = waiting.filter((entry) => entry.actor === actor).length
     if (waiting.length < this.maxQueued && mine < this.maxQueuedPerUser) return
     if (

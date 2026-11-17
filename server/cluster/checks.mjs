@@ -62,6 +62,14 @@ export class ClusterChecks {
     )
   }
 
+  editorAdmissionCapacity() {
+    return this.mode === 'serve' && this.editorsReady()
+      ? (this.controller.editorAdmissionCapacity?.(
+          this.editorWarmup?.environment,
+        ) ?? this.editorCapacity())
+      : 0
+  }
+
   editorsReady() {
     return !this.editorWarmup || this.editorWarmup.state === 'ready'
   }

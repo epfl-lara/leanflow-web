@@ -142,6 +142,36 @@ test('admission follows final cleanup rather than an obsolete failed cleanup att
   assert.equal(f.admission.info().active, 0)
 })
 
+test('unconfirmed startup cleanup holds only its own lease and permits healthy editors to start', async (t) => {
+  const f = fixture(t, { capacity: () => 4 })
+  let confirm
+  const workerReleased = new Promise((resolve) => {
+    confirm = resolve
+  })
+  const failed = f.open('offline', {
+    start: () => {
+      throw Object.assign(new Error('Worker cleanup pending'), {
+        status: 503,
+        workerCleanup: true,
+        workerReleased,
+      })
+    },
+  })
+  const rejected = assert.rejects(failed.ready, /cleanup pending/)
+  await flush()
+  const healthy = f.open('healthy')
+  await healthy.ready
+  assert.equal(f.children.length, 1)
+  assert.equal(
+    f.admission.info().active,
+    2,
+    'The uncertain worker keeps its own slot',
+  )
+  confirm()
+  await rejected
+  assert.equal(f.admission.info().active, 1)
+})
+
 test('a cancelled waiting tab never starts after capacity returns', async (t) => {
   const f = fixture(t)
   await f.open('first').ready

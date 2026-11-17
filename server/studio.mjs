@@ -451,7 +451,11 @@ export async function createStudio({
     socketProjects = new Map(),
     socketActors = new Map()
   const editorAdmission = new EditorAdmission({
-    capacity: () => capacity.editors + (clusterChecks?.editorCapacity() || 0),
+    capacity: () =>
+      capacity.editors +
+      (clusterChecks?.editorAdmissionCapacity?.() ??
+        clusterChecks?.editorCapacity() ??
+        0),
     maxPerUser: capacity.editorsPerUser ?? capacity.editors,
     maxPerProject: capacity.editorsPerProject,
     maxQueued: capacity.editorQueue ?? 128,
@@ -1813,6 +1817,11 @@ export async function createStudio({
       const localEditor = (fallback) => {
         if (fallback?.unsupported) remoteAllowed = false
         const current = currentProject()
+        if (activity.isStopping(actor, project.id))
+          throw Object.assign(
+            new Error('This project is stopping. Wait a moment.'),
+            { status: 503 },
+          )
         return runtime.spawn(current.root, ['lake', 'serve', '--'], {
           workload: 'interactive',
           // Keep repository editors at their existing worker size. The smaller
