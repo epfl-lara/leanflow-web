@@ -47,6 +47,7 @@ export interface Account {
   name: string
   role: 'owner' | 'admin' | 'user'
   profileComplete?: boolean
+  entraLinked?: boolean
 }
 
 export interface ProviderStatus {

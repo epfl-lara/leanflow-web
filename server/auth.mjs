@@ -38,6 +38,47 @@ function accountName(input) {
   return name
 }
 
+function entraIdentity(input) {
+  const guid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  if (
+    !input ||
+    typeof input !== 'object' ||
+    Array.isArray(input) ||
+    typeof input.tenantId !== 'string' ||
+    !guid.test(input.tenantId) ||
+    typeof input.objectId !== 'string' ||
+    !guid.test(input.objectId)
+  )
+    throw Object.assign(
+      new Error(
+        'EPFL sign-in returned an invalid account. Try signing in again.',
+      ),
+      { status: 400 },
+    )
+  return {
+    tenantId: input.tenantId.toLowerCase(),
+    objectId: input.objectId.toLowerCase(),
+    name: accountName(input.name),
+  }
+}
+
+function matchesEntra(user, identity) {
+  return (
+    user.entra?.tenantId === identity.tenantId &&
+    user.entra?.objectId === identity.objectId
+  )
+}
+
+function availableAccountName(name, users) {
+  const existing = new Set(users.map((user) => user.name.toLowerCase()))
+  let candidate = name
+  for (let suffix = 2; existing.has(candidate.toLowerCase()); suffix++) {
+    const ending = ` ${suffix}`
+    candidate = name.slice(0, 80 - ending.length).trimEnd() + ending
+  }
+  return candidate
+}
+
 export class Auth {
   constructor(dataDir) {
     this.dir = path.join(dataDir, 'auth')
@@ -88,6 +129,7 @@ export class Auth {
           : user.role === 'admin'
             ? 'admin'
             : 'user',
+      ...(user.entra ? { entraLinked: true } : {}),
     }
   }
   requireAdmin(user) {
@@ -129,6 +171,68 @@ export class Auth {
       }
       this.users.push(user)
       return { user: this.public(user), token }
+    })
+  }
+  async signInEntra(identity, { allowSignup = false, expectedUserId } = {}) {
+    const verified = entraIdentity(identity)
+    return this.mutate(() => {
+      const user = this.users.find((current) => matchesEntra(current, verified))
+      if (expectedUserId !== undefined && user?.id !== expectedUserId)
+        throw Object.assign(
+          new Error(
+            'This EPFL sign-in does not match the account you have open. Sign in with its linked EPFL account or access token.',
+          ),
+          { status: 409 },
+        )
+      if (user) return user
+      if (allowSignup !== true)
+        throw Object.assign(
+          new Error(
+            'This EPFL account is not linked to LeanFlow. Sign in with your access token to link it, or ask the administrator for access.',
+          ),
+          { status: 403 },
+        )
+      const created = {
+        id: randomBytes(12).toString('hex'),
+        name: availableAccountName(verified.name, this.users),
+        role: 'user',
+        entra: { tenantId: verified.tenantId, objectId: verified.objectId },
+      }
+      this.users.push(created)
+      return created
+    })
+  }
+  async linkEntra(actor, identity) {
+    const verified = entraIdentity(identity)
+    return this.mutate(() => {
+      const current = this.users.find((user) => user.id === actor?.id)
+      if (!current)
+        throw Object.assign(new Error('Sign in again before linking EPFL.'), {
+          status: 401,
+        })
+      if (
+        this.users.some(
+          (user) => user.id !== current.id && matchesEntra(user, verified),
+        )
+      )
+        throw Object.assign(
+          new Error(
+            'This EPFL account is already linked to another LeanFlow account. Ask the administrator for help.',
+          ),
+          { status: 409 },
+        )
+      if (current.entra && !matchesEntra(current, verified))
+        throw Object.assign(
+          new Error(
+            'Your LeanFlow account is already linked to a different EPFL account. Sign in with that account or ask the administrator for help.',
+          ),
+          { status: 409 },
+        )
+      current.entra = {
+        tenantId: verified.tenantId,
+        objectId: verified.objectId,
+      }
+      return current
     })
   }
   async updateProfile(actor, input) {

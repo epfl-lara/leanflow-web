@@ -18,7 +18,12 @@ async function fixture(t, options) {
     if (!isPublicAuthRequest(request)) return response.sendStatus(401)
     next()
   })
-  for (const action of ['login', 'logout'])
+  for (const action of [
+    'login',
+    'logout',
+    'auth/entra/start',
+    'auth/entra/link',
+  ])
     app.post(`/api/${action}`, (request, response) => {
       parsed.push(request.body)
       response.json({ ok: true })
@@ -69,6 +74,7 @@ test('account JSON accepts the longest key, provider URL and recovery identity w
   assert.equal((await f.post('/api/login', JSON.stringify(body))).status, 200)
   assert.deepEqual(f.parsed, [body])
   assert.equal((await f.post('/api/logout', '{}')).status, 200)
+  assert.equal((await f.post('/API/Auth/Entra/Start/', '{}')).status, 200)
   // Express routes are case insensitive and accept a trailing slash.
   assert.equal((await f.post('/API/LOGIN/', '{}')).status, 200)
   assert.equal((await f.post('/api/projects', '{}')).status, 401)
@@ -81,9 +87,15 @@ test('oversized and compressed public bodies stop before credential handling; er
     [oversized, {}],
     [gzipSync(oversized), { 'Content-Encoding': 'gzip' }],
   ]) {
-    const response = await f.post('/api/login', body, headers)
-    assert.equal(response.status, 413)
-    assert.match((await response.json()).error, /too large/)
+    for (const endpoint of [
+      '/api/login',
+      '/api/auth/entra/start',
+      '/api/auth/entra/link',
+    ]) {
+      const response = await f.post(endpoint, body, headers)
+      assert.equal(response.status, 413)
+      assert.match((await response.json()).error, /too large/)
+    }
   }
   const secret = 'unregistered-fixture-login-secret'
   const malformed = await f.post('/api/login', `{"token":"${secret}"`)

@@ -6,6 +6,7 @@ import express from 'express'
 import compression from 'compression'
 import { WebSocketServer } from 'ws'
 import { Auth, sameOrigin } from './auth.mjs'
+import { installEntraAuthRoutes, loadEntraConfig } from './entra-auth.mjs'
 import { authRequestJson, isPublicAuthRequest } from './auth-request-limits.mjs'
 import {
   expectedSessionUser,
@@ -198,6 +199,7 @@ export async function createStudio({
   books = new LeanBooks(),
   modelDiscoverer,
   providerLimits,
+  entraConfig = loadEntraConfig(),
 } = {}) {
   dataDir = path.resolve(dataDir)
   const workspaceDataDir = dataDir
@@ -593,6 +595,7 @@ export async function createStudio({
   })
   // Public account requests have their own small, bounded parser.
   app.use(authRequestJson())
+  const entraAuth = installEntraAuthRoutes(app, { auth, config: entraConfig })
   // Protected requests authenticate before allocating a source/upload body.
   app.use('/api', (req, res, next) => {
     const publicAccountRequest = isPublicAuthRequest(req)
@@ -1876,6 +1879,7 @@ export async function createStudio({
   const close = () => {
     if (closePromise) return closePromise
     closePromise = (async () => {
+      entraAuth.close()
       chats.stopNaming()
       const stopped = new Promise((resolve) => server.close(resolve))
       server.closeAllConnections()

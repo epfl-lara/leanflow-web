@@ -5,6 +5,7 @@ import {
   type Account,
   type ModelAccess as ModelAccessStatus,
   type ProviderStatus,
+  type Session,
 } from './api'
 import { ProviderKeyForm } from './ProviderKeyForm'
 import { AdminAccounts } from './AdminAccounts'
@@ -13,6 +14,7 @@ import { Dialog } from './Dialog'
 import { Icon } from './Icons'
 import { ProfileForm } from './ProfileForm'
 import { TerminalRecoveries } from './TerminalRecoveries'
+import { EntraButton } from './EntraButton'
 
 interface Settings {
   extraInstructions: string
@@ -48,8 +50,11 @@ export function SettingsModal({
   const [providerBusy, setProviderBusy] = useState(false)
   const [accountBusy, setAccountBusy] = useState(false)
   const [profileBusy, setProfileBusy] = useState(false)
+  const [entraBusy, setEntraBusy] = useState(false)
+  const [entraLinked, setEntraLinked] = useState(user.entraLinked === true)
   const [recoveriesOpen, setRecoveriesOpen] = useState(false)
-  const pending = busy || providerBusy || accountBusy || profileBusy
+  const pending =
+    busy || providerBusy || accountBusy || profileBusy || entraBusy
   useEffect(() => {
     let cancelled = false
     void api<ProviderStatus>('/api/provider')
@@ -106,8 +111,26 @@ export function SettingsModal({
         user={user}
         onSaved={(updated) => onProfileSaved?.(updated)}
         onBusyChange={setProfileBusy}
-        disabled={busy || providerBusy || accountBusy}
+        disabled={busy || providerBusy || accountBusy || entraBusy}
       />
+      {entraLinked ? (
+        <p className="field-help">Your EPFL account is linked for sign-in.</p>
+      ) : (
+        <EntraButton
+          mode="link"
+          expectedUserId={user.id}
+          label="Link EPFL account"
+          disabled={pending}
+          onBusyChange={setEntraBusy}
+          onComplete={async () => {
+            const session = await api<Session>('/api/session')
+            if (session.user.id !== user.id)
+              throw new Error('Return to this workspace account and try again.')
+            setEntraLinked(session.user.entraLinked === true)
+            onProfileSaved?.(session.user)
+          }}
+        />
+      )}
       <section aria-label="Private terminal files">
         <h3 className="account-settings-heading">Private terminal files</h3>
         <p className="field-help">
@@ -129,7 +152,7 @@ export function SettingsModal({
         <ProviderKeyForm
           initial={provider}
           onBusyChange={setProviderBusy}
-          disabled={busy || accountBusy || profileBusy}
+          disabled={busy || accountBusy || profileBusy || entraBusy}
           onSaved={(value) => {
             setProvider(value)
             onProviderSaved()
@@ -282,7 +305,7 @@ export function SettingsModal({
         <AdminAccounts
           user={user}
           onBusyChange={setAccountBusy}
-          disabled={busy || providerBusy || profileBusy}
+          disabled={busy || providerBusy || profileBusy || entraBusy}
         />
       )}
     </Dialog>
