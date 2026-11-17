@@ -1571,6 +1571,24 @@ test('held editors use fewer status polls while cancellation wakes cleanup immed
   })
 })
 
+test('shutdown keeps the controller lease until the owner has drained capture helpers', async (t) => {
+  const f = await cluster(t)
+  await f.ready()
+  const drained = Promise.withResolvers()
+  const stopped = f.controller.shutdown({ beforeRelease: drained.promise })
+  await delay(20)
+  const other = f.make()
+  try {
+    await assert.rejects(other.init(), { code: 'controller_locked' })
+  } finally {
+    drained.resolve()
+    await stopped
+  }
+  const next = f.make()
+  await next.init()
+  await until(() => next.status().ready === 1)
+})
+
 test('storage exhaustion before start releases its grant and permits safe local fallback', async (t) => {
   const f = await cluster(t)
   await f.ready()

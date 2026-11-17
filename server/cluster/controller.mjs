@@ -856,12 +856,12 @@ export class ClusterController {
   // Stops accepting work, resolves queued runs with null, and cancels active
   // attempts. `unresolved` counts attempts whose stop was not confirmed; they
   // stay durable for the next controller to reconcile.
-  shutdown() {
-    this.#shutdown ??= this.#close()
+  shutdown({ beforeRelease } = {}) {
+    this.#shutdown ??= this.#close(beforeRelease)
     return this.#shutdown
   }
 
-  async #close() {
+  async #close(beforeRelease) {
     this.#accepting = false
     this.#stopping = true
     for (const queue of [...this.#queues.values()])
@@ -887,6 +887,9 @@ export class ClusterController {
     const unresolved = [...this.#grants.values()].filter(
       (grant) => grant.held,
     ).length
+    // The owner may still be stopping source-capture helpers. Their storage
+    // writes must end before another controller can acquire this lease.
+    await beforeRelease
     this.#state?.close()
     this.#lock?.close()
     return { cancelled: jobs.length, unresolved }

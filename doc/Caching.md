@@ -57,7 +57,8 @@ assets are not ready uses the existing local execution path while preparation
 continues. Clearly unsupported checks return locally before creating a source
 snapshot. Failed preparation has a five-minute retry cooldown. Shutdown cancels
 and drains the shared preparation work, including waiting for Python helpers to
-actually close after cancellation.
+actually close after cancellation. The controller keeps its storage lease until
+those helpers have stopped, so a replacement cannot race their final writes.
 
 Upload history evicts its oldest entry instead of clearing the whole history.
 Running editor attempts use a two-second status interval rather than the

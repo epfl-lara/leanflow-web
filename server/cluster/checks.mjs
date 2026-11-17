@@ -359,10 +359,7 @@ export class ClusterChecks {
       abort.abort(
         clusterError('Shadow check stopped during shutdown.', 'cancelled', 499),
       )
-    const shutdown =
-      this.controller.shutdown?.() || Promise.resolve({ unresolved: 0 })
-    const [report] = await Promise.all([
-      shutdown,
+    const drained = Promise.all([
       this.settleShadows(),
       Promise.allSettled([...this.inflight.values()]),
       Promise.allSettled(editorStarts),
@@ -370,6 +367,10 @@ export class ClusterChecks {
       // Stop and drain service-owned asset captures before their store closes.
       this.inputs.close?.(),
     ])
+    const shutdown =
+      this.controller.shutdown?.({ beforeRelease: drained }) ||
+      Promise.resolve({ unresolved: 0 })
+    const [report] = await Promise.all([shutdown, drained])
     this.inputs.blobs?.close()
     return report
   }
