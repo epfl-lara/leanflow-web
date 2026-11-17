@@ -135,7 +135,7 @@ function diagnostics(s, version, predicate) {
   )
 }
 try {
-  for (const [index, account] of state.accounts.entries()) {
+  async function openSession(account, index) {
     const s = {
       account,
       messages: [],
@@ -252,6 +252,15 @@ try {
             probing = false
           })
       }, 2000)
+  }
+  for (let index = 0; index < state.accounts.length; index += 3) {
+    const opened = await Promise.allSettled(
+      state.accounts
+        .slice(index, index + 3)
+        .map((account, offset) => openSession(account, index + offset)),
+    )
+    const failed = opened.find((result) => result.status === 'rejected')
+    if (failed) throw failed.reason
   }
   assert.equal(
     sessions.filter((s) => s.socket.readyState === WebSocket.OPEN).length,
