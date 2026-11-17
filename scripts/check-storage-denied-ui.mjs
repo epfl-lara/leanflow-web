@@ -56,6 +56,8 @@ try {
         role: 'user',
         profileComplete: false,
       }
+      if (endpoint === '/api/auth/entra' && request.method() === 'GET')
+        return respond({ enabled: false })
       if (endpoint === '/api/login' && request.method() === 'POST') {
         assert.equal(request.postDataJSON().token, 'fixture-token')
         signedIn = true
@@ -111,6 +113,12 @@ try {
       await page.reload()
       await page.getByLabel('Access token', { exact: true }).waitFor()
       assert.equal(new URL(page.url()).hash, `#share=${invitation}&marker=keep`)
+      assert.equal(
+        await page
+          .getByRole('button', { name: 'Sign in with EPFL', exact: true })
+          .count(),
+        0,
+      )
       await page
         .getByLabel('Access token', { exact: true })
         .fill('fixture-token')
@@ -137,6 +145,7 @@ try {
       result.checks.push({
         mode,
         loginUsable: true,
+        epflSignInDisabled: true,
         invitationSurvivesReload: true,
         invitationClearedAfter: mode === 'quota' ? 'dismissal' : 'joining',
         unrelatedFragmentPreserved: true,
