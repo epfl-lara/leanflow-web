@@ -16,7 +16,7 @@ If your imported repository has no Lean setup, choose a Lean version and librari
 
 ## Get started
 
-**EPFL early access:** [Open LeanFlow](https://leanflow.epfl.ch/), available only from the **EPFL network or VPN**. Contact [lazar.milikic@epfl.ch](mailto:lazar.milikic@epfl.ch) for an early-access key.
+**EPFL early access:** [Open LeanFlow](https://leanflow.epfl.ch/) from the **EPFL network or VPN** and sign in with EPFL. Existing token users should sign in with their token first, then choose **Assistant settings → Link EPFL account** once to keep their projects. For access help, contact [lazar.milikic@epfl.ch](mailto:lazar.milikic@epfl.ch).
 
 Self-host LeanFlow Web for yourself or trusted collaborators on Linux with Node.js 24+, Python 3.11+, Git, and Docker. Setup uses a precompiled Lemex release; no Rust build is needed.
 
