@@ -38,7 +38,7 @@ let authenticated = false
 let expired = false
 let expireSave = false
 let rejectIdentity = false
-let failNextSession = false
+let failSession = false
 let omitLinkToken = true
 let finalizations = 0
 let saves = 0
@@ -98,6 +98,7 @@ await page.route('**/api/**', async (route) => {
   if (endpoint === '/api/auth/entra') return respond({ enabled })
   if (endpoint === '/api/auth/entra/start') {
     assert.equal(request.method(), 'POST')
+    failSession = false
     const options = request.postDataJSON()
     if (authenticated || expired) {
       assert.equal(options.expectedUserId, user.id)
@@ -121,12 +122,12 @@ await page.route('**/api/**', async (route) => {
   }
   if (endpoint === '/api/login') {
     assert.equal(request.postDataJSON().token, 'fixture-token')
-    failNextSession = true
+    failSession = true
     return respond({ user: { ...user, id: 'stale-account' } })
   }
   if (endpoint === '/api/session') {
-    if (failNextSession) {
-      failNextSession = false
+    // Keep the outage through all safe GET retries until a new sign-in starts.
+    if (failSession) {
       assert.equal(request.headers()['x-leanflow-user'], 'stale-account')
       return respond({ error: 'Fixture session unavailable.' }, 503)
     }

@@ -7,21 +7,31 @@ export function EntraButton({
   expectedUserId,
   label = 'Sign in with EPFL',
   disabled = false,
+  className = 'button secondary',
   onComplete,
   onBusyChange,
+  onAvailabilityChange,
 }: {
   mode?: 'login' | 'link'
   expectedUserId?: string
   label?: string
   disabled?: boolean
+  /** Presentation only: classes for the sign-in button. */
+  className?: string
   onComplete: () => Promise<void>
   onBusyChange?: (busy: boolean) => void
+  /** Lets a surrounding layout show or hide content tied to EPFL sign-in. */
+  onAvailabilityChange?: (enabled: boolean) => void
 }) {
   const [enabled, setEnabled] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const mounted = useRef(false)
   const pending = useRef<AbortController | null>(null)
+  const availabilityListener = useRef(onAvailabilityChange)
+  useEffect(() => {
+    availabilityListener.current = onAvailabilityChange
+  }, [onAvailabilityChange])
   useEffect(() => {
     mounted.current = true
     const controller = new AbortController()
@@ -29,8 +39,11 @@ export function EntraButton({
       signal: controller.signal,
     })
       .then((status) => {
-        if (mounted.current && !controller.signal.aborted)
-          setEnabled(status.enabled === true)
+        if (mounted.current && !controller.signal.aborted) {
+          const available = status.enabled === true
+          setEnabled(available)
+          availabilityListener.current?.(available)
+        }
       })
       .catch(() => {
         // Token sign-in remains available if EPFL sign-in is unavailable.
@@ -90,7 +103,7 @@ export function EntraButton({
     <div>
       <button
         type="button"
-        className="button secondary"
+        className={className}
         disabled={disabled || busy}
         onClick={() => void start()}
       >

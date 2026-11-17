@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type FormEvent,
   type CSSProperties,
 } from 'react'
 import {
@@ -13,7 +12,6 @@ import {
   ApiError,
   bindSessionUser,
   errorText,
-  markSessionRestored,
   post,
   pretty,
   SESSION_EXPIRED_EVENT,
@@ -110,7 +108,7 @@ import { GitModal } from './GitModal'
 import { GitConnectionsDialog } from './GitConnectionsDialog'
 import { ResizeHandle } from './ResizeHandle'
 import { SessionRecovery } from './SessionRecovery'
-import { EntraButton } from './EntraButton'
+import { LoginScreen } from './LoginScreen'
 import { useSessionActivity } from './useSessionActivity'
 import type {
   EditorProofState,
@@ -159,101 +157,6 @@ const terminalJob = (job: Job) =>
   ['completed', 'failed', 'cancelled', 'interrupted', 'error'].includes(
     job.status,
   )
-
-function Login({ onSession }: { onSession: (session: Session) => void }) {
-  const [token, setToken] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  async function acceptSignIn(expectedUserId?: string) {
-    bindSessionUser(expectedUserId ?? null)
-    const session = await api<Session>('/api/session')
-    bindSessionUser(session.user.id)
-    setRunEventTransport(session.eventTransport)
-    markSessionRestored()
-    onSession(session)
-  }
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    if (busy) return
-    setBusy(true)
-    setError('')
-    try {
-      const signedIn = await post<{ user: Account }>('/api/login', {
-        token: token.trim(),
-      })
-      await acceptSignIn(signedIn.user.id)
-    } catch (error) {
-      bindSessionUser(null)
-      setError(errorText(error))
-      setBusy(false)
-    }
-  }
-  return (
-    <main className="login-screen">
-      <div className="login-card">
-        <Brand />
-        <h1>
-          Your Lean workspace,
-          <br />
-          with a proof partner.
-        </h1>
-        <p>Sign in to open projects, inspect goals, and work with Lemex.</p>
-        <EntraButton
-          disabled={busy}
-          onBusyChange={setBusy}
-          onComplete={() => acceptSignIn()}
-        />
-        <form onSubmit={submit}>
-          <label className="field-label" htmlFor="access-token">
-            Access token
-          </label>
-          <input
-            id="access-token"
-            type="password"
-            value={token}
-            onChange={(event) => setToken(event.target.value)}
-            placeholder="Enter your collaborator token"
-            required
-            autoFocus
-            autoComplete="current-password"
-            disabled={busy}
-          />
-          {error && (
-            <p role="alert" className="error-message">
-              {error}
-            </p>
-          )}
-          <button className="button primary" disabled={busy || !token.trim()}>
-            {busy ? (
-              <span className="spinner" />
-            ) : (
-              <Icon name="arrow" size={16} />
-            )}
-            {busy ? 'Signing in…' : 'Open workspace'}
-          </button>
-        </form>
-        <p className="login-help">
-          Use your personal token from an administrator. On your first visit,
-          confirm your name and connect your own Lemex API key.
-        </p>
-        <p className="login-help">
-          Need access? Email{' '}
-          <a href="mailto:lazar.milikic@epfl.ch">lazar.milikic@epfl.ch</a> to
-          request an invitation token.
-        </p>
-      </div>
-      <div className="login-art" aria-hidden="true">
-        <div className="proof-orbit">
-          <span>∀</span>
-          <span>→</span>
-          <span>∎</span>
-          <span>λ</span>
-        </div>
-        <p>Write. Explore. Verify.</p>
-      </div>
-    </main>
-  )
-}
 
 const INVITATION_STORAGE_KEY = 'lemex-project-invitation'
 
@@ -2780,7 +2683,7 @@ export function Studio() {
 
   if (authRequired && !session)
     return (
-      <Login
+      <LoginScreen
         onSession={(value) => {
           setSession(value)
           setAuthRequired(false)

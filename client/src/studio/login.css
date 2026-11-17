@@ -1,0 +1,320 @@
+/*
+ * Initial sign-in screen. Every rule is scoped under .lf-login because this
+ * file loads before studio.css; the extra class keeps these rules ahead of the
+ * shared button, brand, and field styles without changing them elsewhere.
+ */
+.lf-login {
+  --lf-login-gutter: clamp(20px, 5vw, 56px);
+  --lf-login-body: color-mix(in srgb, var(--text) 78%, var(--bg));
+  --lf-token-keyword: #7b3fa8;
+  --lf-token-tactic: var(--accent);
+  --lf-token-name: #95550a;
+  --lf-token-type: #1c7565;
+  min-height: 100dvh;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  background: var(--bg);
+  color: var(--text);
+}
+:root[data-theme='dark'] .lf-login {
+  --lf-token-keyword: #d3a8ff;
+  --lf-token-name: #f0c27e;
+  --lf-token-type: #7fd3c0;
+}
+
+/* Sign-in column */
+.lf-login .lf-login__panel {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 40px;
+  width: 100%;
+  max-width: calc(440px + 2 * var(--lf-login-gutter));
+  justify-self: center;
+  min-width: 0;
+  padding: 28px var(--lf-login-gutter) 40px;
+}
+.lf-login .brand-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+}
+.lf-login .brand strong {
+  font-size: 19px;
+}
+.lf-login .brand-links {
+  font-size: 12px;
+  color: color-mix(in srgb, var(--text) 72%, var(--bg));
+}
+.lf-login .brand-credit {
+  padding-block: 4px;
+}
+.lf-login .lf-login__content {
+  align-self: center;
+  min-width: 0;
+}
+.lf-login .lf-login__title {
+  font-size: clamp(28px, 3.2vw, 36px);
+  font-weight: 650;
+  line-height: 1.18;
+  letter-spacing: -0.025em;
+  margin-bottom: 14px;
+  text-wrap: balance;
+}
+.lf-login .lf-login__lede {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--lf-login-body);
+  margin-bottom: 0;
+  max-width: 38ch;
+}
+
+/* Sign-in card */
+.lf-login .lf-login__auth {
+  margin-top: 32px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 6%, transparent);
+}
+.lf-login .lf-login__auth-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+.lf-login .lf-login__epfl:empty {
+  display: none;
+}
+.lf-login .lf-login__epfl .error-message {
+  margin-bottom: 0;
+}
+.lf-login .button.lf-login__action {
+  width: 100%;
+  min-height: 44px;
+  font-size: 14px;
+}
+.lf-login .lf-login__divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0 16px;
+  font-size: 12px;
+  color: var(--lf-login-body);
+}
+.lf-login .lf-login__divider::before,
+.lf-login .lf-login__divider::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--border);
+}
+.lf-login .lf-login__form .field-label {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.lf-login .lf-login__form input {
+  min-height: 44px;
+  font-size: 14px;
+}
+.lf-login .lf-login__form .button.lf-login__action {
+  margin-top: 14px;
+}
+
+.lf-login .lf-login__help {
+  margin-top: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--lf-login-body);
+}
+.lf-login .lf-login__help p {
+  margin: 0 0 8px;
+}
+.lf-login .lf-login__help a {
+  overflow-wrap: anywhere;
+}
+
+/* Proof sample */
+.lf-login .lf-login__showcase {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 36px var(--lf-login-gutter) 44px;
+  border-top: 1px solid var(--border);
+  background-color: var(--canvas);
+  background-image: radial-gradient(
+    color-mix(in srgb, var(--accent) 16%, transparent) 1px,
+    transparent 1px
+  );
+  background-size: 22px 22px;
+}
+.lf-login .lf-preview {
+  width: 100%;
+  max-width: 580px;
+  margin: 0;
+  min-width: 0;
+}
+.lf-login .lf-preview__window {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+}
+.lf-login .lf-preview__bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 36px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.lf-login .lf-preview__dots {
+  display: inline-flex;
+  gap: 6px;
+}
+.lf-login .lf-preview__dots span {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 45%, var(--surface));
+}
+.lf-login .lf-preview__file {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--lf-login-body);
+}
+.lf-login .lf-preview__code {
+  margin: 0;
+  padding: 14px 0;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.lf-login .lf-preview__code code {
+  display: block;
+}
+.lf-login .lf-preview__line {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  padding-right: 16px;
+}
+.lf-login .lf-preview__line.is-current {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.lf-login .lf-preview__number {
+  padding-right: 14px;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+.lf-login .lf-preview__text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lf-login .lf-token-keyword {
+  color: var(--lf-token-keyword);
+  font-weight: 600;
+}
+.lf-login .lf-token-tactic {
+  color: var(--lf-token-tactic);
+}
+.lf-login .lf-token-name {
+  color: var(--lf-token-name);
+}
+.lf-login .lf-token-type {
+  color: var(--lf-token-type);
+}
+.lf-login .lf-preview__goals {
+  padding: 14px 16px 16px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 60%, var(--bg));
+}
+.lf-login .lf-preview__goals-title {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.lf-login .lf-preview__goals-title span {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--lf-login-body);
+}
+.lf-login .lf-preview__goal {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.lf-login .lf-preview__case {
+  font-weight: 600;
+  color: var(--lf-login-body);
+}
+.lf-login .lf-preview__turnstile {
+  color: var(--accent);
+  font-weight: 600;
+}
+.lf-login .lf-preview__caption {
+  margin-top: 14px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--lf-login-body);
+}
+.lf-login .lf-preview__caption code {
+  font-size: 0.95em;
+}
+
+/* Side-by-side composition once both columns have room. */
+@media (min-width: 960px) {
+  .lf-login {
+    grid-template-columns: minmax(420px, 5fr) minmax(0, 6fr);
+  }
+  .lf-login .lf-login__panel {
+    padding-block: 32px 56px;
+  }
+  .lf-login .lf-login__showcase {
+    border-top: 0;
+    border-left: 1px solid var(--border);
+    padding-block: 56px;
+  }
+}
+
+@media (max-width: 420px) {
+  .lf-login .lf-login__panel {
+    gap: 32px;
+    padding-top: 22px;
+  }
+  .lf-login .lf-login__auth {
+    padding: 20px 18px;
+  }
+  .lf-login .lf-preview__code {
+    font-size: 12px;
+  }
+  .lf-login .lf-preview__line {
+    grid-template-columns: 34px minmax(0, 1fr);
+    padding-right: 12px;
+  }
+  .lf-login .lf-preview__number {
+    padding-right: 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lf-login .button {
+    transition: none;
+  }
+  .lf-login .spinner {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .lf-login .lf-preview__line.is-current {
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+  }
+}
