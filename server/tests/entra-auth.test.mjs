@@ -123,6 +123,7 @@ async function fixture(t, options = {}) {
       return json({ keys: [jwk] })
     }
     assert(url.pathname.endsWith('/token'))
+    await options.beforeToken?.()
     if (options.failToken)
       return json(
         {
@@ -220,6 +221,10 @@ async function fixture(t, options = {}) {
     })
     server = createServer(app)
   }
+  if (options.onRequest)
+    server.on('request', (req, res) =>
+      options.onRequest(req.url.split('?')[0], res),
+    )
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   t.after(async () => {
     releaseDiscovery?.()
@@ -259,6 +264,7 @@ async function fixture(t, options = {}) {
       algorithm,
       state,
       cookie = started.cookie,
+      signal,
       extra = '',
     } = {},
   ) => {
@@ -274,6 +280,7 @@ async function fixture(t, options = {}) {
       `/api/auth/entra/callback?code=${code}&state=${state ?? started.url.searchParams.get('state')}${extra}`,
       {
         headers: cookie ? { Cookie: cookie } : {},
+        signal,
       },
     )
   }
@@ -300,6 +307,7 @@ async function fixture(t, options = {}) {
     dataDir,
     releaseDiscovery,
     discoveryReached,
+    closeRoutes: () => routes.close(),
     advance: (ms) => {
       timestamp += ms
     },
@@ -803,10 +811,173 @@ test('pending transaction and per-IP attempt bounds reject excess starts', async
   assert.equal((await limited.start()).response.status, 200)
 })
 
-test('provider concurrency is bounded while discovery is pending', async (t) => {
+test('25 participants can open EPFL sign-in together while provider discovery is cold', async (t) => {
+  let arrivals = 0
+  const arrived = Promise.withResolvers()
+  const f = await fixture(t, {
+    studio: true,
+    blockDiscovery: true,
+    onRequest: (url) => {
+      if (url.endsWith('/start') && ++arrivals === 25) arrived.resolve()
+    },
+  })
+  const opens = Promise.all(Array.from({ length: 25 }, () => f.start()))
+  await Promise.all([arrived.promise, f.discoveryReached])
+  f.releaseDiscovery()
+  const started = await opens
+  assert.equal(
+    started.filter((item) => item.response.status === 200).length,
+    25,
+  )
+  assert.equal(
+    f.calls.fetch.filter((url) => url.includes('openid-configuration')).length,
+    1,
+  )
+})
+
+test('25 simultaneous bound EPFL returns finish with at most eight active exchanges', async (t) => {
+  let arrivals = 0,
+    exchanging = 0,
+    peak = 0
+  const arrived = Promise.withResolvers(),
+    eight = Promise.withResolvers(),
+    hold = Promise.withResolvers()
+  const f = await fixture(t, {
+    studio: true,
+    onRequest: (url) => {
+      if (url.endsWith('/callback') && ++arrivals === 25) arrived.resolve()
+    },
+    beforeToken: async () => {
+      peak = Math.max(peak, ++exchanging)
+      if (exchanging === 8) eight.resolve()
+      await hold.promise
+      exchanging--
+    },
+  })
+  const started = []
+  for (let i = 0; i < 25; i++) started.push(await f.start())
+  const returning = Promise.all(
+    started.map((item, index) =>
+      f.callback(item, {
+        claims: {
+          oid: '33333333-3333-3333-3333-' + String(index).padStart(12, '0'),
+        },
+      }),
+    ),
+  )
+  await Promise.all([arrived.promise, eight.promise])
+  hold.resolve()
+  const responses = await returning
+  const cookies = responses
+    .flatMap((response) => response.headers.getSetCookie())
+    .filter((value) => value.startsWith('lemex_web='))
+  assert.equal(cookies.length, 25)
+  const sessions = await Promise.all(
+    cookies.map(async (value) => {
+      const response = await f.request('/api/session', {
+        headers: { Cookie: value.split(';')[0] },
+      })
+      assert.equal(response.status, 200)
+      return (await response.json()).user
+    }),
+  )
+  assert.equal(new Set(sessions.map((user) => user.id)).size, 25)
+  assert(sessions.every((user) => user.role === 'user' && user.entraLinked))
+  assert.equal(peak, 8)
+})
+
+test('full and timed-out exchange queues preserve each bound return URL for one retry', async (t) => {
+  const active = Promise.withResolvers(),
+    queued = Promise.withResolvers(),
+    release = Promise.withResolvers()
+  let arrivals = 0
+  const f = await fixture(t, {
+    limits: { maxConcurrent: 1, maxQueuedExchanges: 1, exchangeWaitMs: 100 },
+    beforeToken: async () => {
+      active.resolve()
+      await release.promise
+    },
+    onRequest: (path) => {
+      if (path.endsWith('/callback') && ++arrivals === 2) queued.resolve()
+    },
+  })
+  const starts = await Promise.all([f.start(), f.start(), f.start()])
+  const first = f.callback(starts[0])
+  await active.promise
+  const second = f.callback(starts[1])
+  await queued.promise
+  const third = await f.callback(starts[2])
+  const timedOut = await second
+  release.resolve()
+  assert.match(await (await first).text(), /"ok":true/)
+  for (const [response, started] of [
+    [third, starts[2]],
+    [timedOut, starts[1]],
+  ]) {
+    assert.equal(response.status, 429)
+    assert.equal(response.headers.get('retry-after'), '5')
+    assert.equal(response.headers.get('set-cookie'), null)
+    const url = new URL(response.url)
+    const retry = () =>
+      f.request(url.pathname + url.search, {
+        headers: { Cookie: started.cookie },
+      })
+    assert.match(await (await retry()).text(), /"ok":true/)
+    assert.match(await (await retry()).text(), /"ok":false/)
+  }
+  assert.equal(f.calls.signIn.length, 3)
+})
+
+test('disconnect and shutdown clear waiting EPFL callbacks without exchanging their codes', async (t) => {
+  const active = Promise.withResolvers(),
+    queued = Promise.withResolvers(),
+    disconnected = Promise.withResolvers(),
+    next = Promise.withResolvers(),
+    release = Promise.withResolvers()
+  let arrivals = 0
+  const f = await fixture(t, {
+    limits: { maxConcurrent: 1, maxQueuedExchanges: 1 },
+    beforeToken: async () => {
+      active.resolve()
+      await release.promise
+    },
+    onRequest: (path, response) => {
+      if (!path.endsWith('/callback')) return
+      arrivals++
+      if (arrivals === 2) {
+        response.once('close', disconnected.resolve)
+        queued.resolve()
+      }
+      if (arrivals === 3) next.resolve()
+    },
+  })
+  const starts = await Promise.all([f.start(), f.start(), f.start()])
+  const first = f.callback(starts[0])
+  await active.promise
+  const abort = new AbortController()
+  const cancelled = assert.rejects(
+    f.callback(starts[1], { signal: abort.signal }),
+    { name: 'AbortError' },
+  )
+  await queued.promise
+  abort.abort()
+  await Promise.all([cancelled, disconnected.promise])
+  const last = f.callback(starts[2])
+  await next.promise
+  f.closeRoutes()
+  const response = await last
+  release.resolve()
+  assert.match(await (await first).text(), /"ok":false/)
+  assert.equal(response.status, 200)
+  assert.match(await response.text(), /expired/)
+  assert.equal(f.calls.fetch.filter((url) => url.endsWith('/token')).length, 1)
+  assert.equal(f.calls.signIn.length, 0)
+})
+
+test('cold sign-in starts are bounded while discovery is pending', async (t) => {
   const { start, releaseDiscovery, discoveryReached } = await fixture(t, {
     blockDiscovery: true,
-    limits: { maxConcurrent: 1 },
+    limits: { maxConcurrentStarts: 1 },
   })
   const pending = start()
   await discoveryReached

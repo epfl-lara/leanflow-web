@@ -242,9 +242,7 @@ test('activity cannot renew a revoked account or extend another account session'
     200,
   )
   const newCollaborator = await sessionCookie(await f.login(invited.token))
-  await f.auth.mutate(() => {
-    f.auth.users = f.auth.users.filter((user) => user.id !== invited.user.id)
-  })
+  await f.auth.removeUser(invited.user.id)
   await statusWithoutRenewal(
     await f.activity(newCollaborator, { userId: invited.user.id }),
     401,

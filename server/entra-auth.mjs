@@ -227,7 +227,10 @@ export function installEntraAuthRoutes(
     now = Date.now,
     transactionTtlMs = 10 * 60_000,
     maxTransactions = 256,
+    maxConcurrentStarts = 32,
     maxConcurrent = 8,
+    maxQueuedExchanges = 32,
+    exchangeWaitMs = 45_000,
     // A reverse proxy can give many EPFL users the same socket address.
     maxStartsPerWindow = 120,
     rateWindowMs = 5 * 60_000,
@@ -236,7 +239,9 @@ export function installEntraAuthRoutes(
   const pending = new Map()
   const pendingLinks = new Map()
   const attempts = new Map()
-  let active = 0
+  let starting = 0
+  let exchanging = 0
+  const waiting = new Set()
   let discovery
   let closed = false
   const report = (stage, error) => {
@@ -300,6 +305,47 @@ export function installEntraAuthRoutes(
       .status(429)
       .json({ error: 'EPFL sign-in is busy. Wait a moment and try again.' })
   }
+  const acquireExchange = (response, remainingMs) => {
+    if (exchanging < maxConcurrent) {
+      exchanging++
+      return true
+    }
+    if (waiting.size >= maxQueuedExchanges || response.destroyed) return false
+    return new Promise((resolve) => {
+      const finish = (granted) => {
+        if (!waiting.delete(finish)) return
+        clearTimeout(timer)
+        response.off('close', cancel)
+        resolve(granted)
+      }
+      const cancel = () => finish(false)
+      const timer = setTimeout(cancel, Math.min(exchangeWaitMs, remainingMs))
+      timer.unref()
+      waiting.add(finish)
+      response.once('close', cancel)
+    })
+  }
+  const releaseExchange = () => {
+    const next = waiting.values().next().value
+    if (next) next(true)
+    else exchanging--
+  }
+  // The bound authorization code stays usable until exchange actually begins.
+  // Refreshing this same callback URL can retry after a full or timed-out queue.
+  const retryExchange = (response) => {
+    response.set({
+      'Retry-After': '5',
+      'Referrer-Policy': 'no-referrer',
+      'Content-Security-Policy':
+        "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+    })
+    return response
+      .status(429)
+      .type('html')
+      .send(
+        '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>EPFL sign-in</title><p>EPFL sign-in is busy. Wait a few seconds, then <a href="">retry sign-in in this window</a>.</p></html>',
+      )
+  }
   app.get('/api/auth/entra', (_request, response) => {
     response.setHeader('Cache-Control', 'no-store')
     response.json({ enabled: !!config && !closed })
@@ -327,10 +373,11 @@ export function installEntraAuthRoutes(
     if (
       ++attempt.count > maxStartsPerWindow ||
       pending.size + pendingLinks.size >= maxTransactions ||
-      active >= maxConcurrent
+      starting >= maxConcurrentStarts
     )
       return busy(response)
-    active++
+    // Cold starts share one discovery request; token exchange has its own cap.
+    starting++
     try {
       const client = await provider()
       if (closed)
@@ -353,6 +400,7 @@ export function installEntraAuthRoutes(
         prompt: mode === 'link' ? 'login' : 'select_account',
       })
       // Discovery and PKCE calculation yield; recheck before reserving a slot.
+      if (response.destroyed) return
       if (closed || pending.size + pendingLinks.size >= maxTransactions)
         return busy(response)
       pending.set(state, {
@@ -376,7 +424,7 @@ export function installEntraAuthRoutes(
           'EPFL sign-in is unavailable. Try again, or use your access token.',
       })
     } finally {
-      active--
+      starting--
     }
   })
   app.post('/api/auth/entra/link', async (request, response) => {
@@ -442,19 +490,26 @@ export function installEntraAuthRoutes(
       !timingSafeEqual(binding, transaction.binding)
     )
       return complete(response, config, false, expiredError)
-    pending.delete(state)
-    if (active >= maxConcurrent) {
-      response.append('Set-Cookie', cookie('', 0))
-      return complete(
-        response,
-        config,
-        false,
-        'EPFL sign-in is busy. Close this window and try again.',
-      )
+    if (transaction.returning) return retryExchange(response)
+    transaction.returning = true
+    const granted = await acquireExchange(response, transaction.expires - now())
+    transaction.returning = false
+    if (!granted) {
+      if (response.destroyed) return
+      if (closed || transaction.expires <= now())
+        return complete(response, config, false, expiredError)
+      return retryExchange(response)
     }
-    active++
     let identity
     try {
+      if (response.destroyed) return
+      if (
+        closed ||
+        pending.get(state) !== transaction ||
+        transaction.expires <= now()
+      )
+        return complete(response, config, false, expiredError)
+      pending.delete(state)
       const tokens = await oidc.authorizationCodeGrant(
         await provider(),
         callback,
@@ -485,8 +540,9 @@ export function installEntraAuthRoutes(
       response.append('Set-Cookie', cookie('', 0))
       return complete(response, config, false, providerError)
     } finally {
-      active--
+      releaseExchange()
     }
+    if (response.destroyed) return
     try {
       if (transaction.mode === 'link') {
         if (pending.size + pendingLinks.size >= maxTransactions)
@@ -526,6 +582,7 @@ export function installEntraAuthRoutes(
   return {
     close() {
       closed = true
+      for (const finish of waiting) finish(false)
       pending.clear()
       pendingLinks.clear()
       attempts.clear()

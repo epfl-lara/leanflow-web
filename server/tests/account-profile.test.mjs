@@ -209,9 +209,7 @@ test('concurrent profile updates preserve unique names and revoked accounts cann
     [200, 409],
   )
   await Promise.all(responses.map((response) => response.text()))
-  await f.auth.mutate(() => {
-    f.auth.users = f.auth.users.filter((user) => user.id !== invited.user.id)
-  })
+  await f.auth.removeUser(invited.user.id)
   await assert.rejects(
     f.auth.updateProfile(invited.user, { name: 'Revoked' }),
     { status: 401 },

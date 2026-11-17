@@ -1827,9 +1827,7 @@ for (const transport of ['lean', 'terminal']) {
       // Revocation may close the socket while the account mutation is still
       // persisting. Subscribe first so a prompt close cannot escape the test.
       const closed = once(ws, 'close')
-      await f.auth.mutate(() => {
-        f.auth.users = f.auth.users.filter((user) => user.id !== f.editor.id)
-      })
+      await f.auth.removeUser(f.editor.id)
       // Both server-initiated private output and client input must stop using the
       // credential captured at the original WebSocket handshake.
       if (transport === 'lean') {
@@ -1888,9 +1886,7 @@ test(
     const reader = response.body.getReader()
     const first = await reader.read()
     assert.equal(first.done, false)
-    await f.auth.mutate(() => {
-      f.auth.users = f.auth.users.filter((user) => user.id !== f.editor.id)
-    })
+    await f.auth.removeUser(f.editor.id)
     f.events.event(job.id, 'message', { text: 'PRIVATE_AFTER_ACCOUNT_REMOVAL' })
     let output = ''
     while (true) {
@@ -2376,9 +2372,7 @@ test('a file deletion refuses another member setup without aborting it', async (
 test('last-admin protection ignores accounts that no longer exist', async (t) => {
   const f = await fixture(t)
   assert.equal((await f.member(f.editor, 'admin')).status, 200)
-  await f.auth.mutate(() => {
-    f.auth.users = f.auth.users.filter((user) => user.id !== f.editor.id)
-  })
+  await f.auth.removeUser(f.editor.id)
   const response = await f.request(`${f.base}/sharing/members/${f.owner.id}`, {
     method: 'PUT',
     body: { role: 'viewer' },

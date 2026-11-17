@@ -323,11 +323,7 @@ test('real sockets reject viewer writes, unknown roots, malformed operations and
 test('revoking an account token invalidates an already-open collaborative socket before its next write', async (t) => {
   const f = await fixture(t)
   const alice = await f.connect(f.users.alice)
-  await f.studio.auth.mutate(() => {
-    f.studio.auth.users = f.studio.auth.users.filter(
-      (user) => user.id !== f.users.alice.id,
-    )
-  })
+  await f.studio.auth.removeUser(f.users.alice.id)
   assert.equal(
     (await f.request(`/api/projects/${f.project.id}`, { actor: f.users.alice }))
       .status,
@@ -517,10 +513,8 @@ test('credential rotation while a source write waits in the workspace queue prev
     'queued source update',
   )
   await delay(30)
-  await f.studio.auth.mutate(() => {
-    const user = f.studio.auth.users.find(
-      (entry) => entry.id === f.users.alice.id,
-    )
+  await f.studio.auth.mutate((users) => {
+    const user = users.find((entry) => entry.id === f.users.alice.id)
     user.tokenHash = '0'.repeat(64)
   })
   release()
@@ -851,11 +845,7 @@ test('an account deleted while joining waits cannot acquire persistent project m
     body: { token: link.token },
   })
   await delay(30)
-  await f.studio.auth.mutate(() => {
-    f.studio.auth.users = f.studio.auth.users.filter(
-      (user) => user.id !== f.users.outsider.id,
-    )
-  })
+  await f.studio.auth.removeUser(f.users.outsider.id)
   release()
   const response = await joined
   assert([401, 404].includes(response.status))
@@ -880,9 +870,10 @@ test('rotating an admin credential while a membership change waits prevents the 
     { method: 'PUT', body: { role: 'admin' } },
   )
   await delay(30)
-  await f.studio.auth.mutate(() => {
-    f.studio.auth.users.find((user) => user.id === f.users.admin.id).tokenHash =
-      '0'.repeat(64)
+  await f.studio.auth.mutate((users) => {
+    users.find((user) => user.id === f.users.admin.id).tokenHash = '0'.repeat(
+      64,
+    )
   })
   release()
   const response = await changing

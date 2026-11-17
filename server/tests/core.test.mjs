@@ -12,12 +12,7 @@ import { PassThrough } from 'node:stream'
 import { WebSocket } from 'ws'
 import { Auth, sameOrigin } from '../auth.mjs'
 import { AgentRpc, LspFrames, frame, validateClientUris } from '../rpc.mjs'
-import {
-  proofRisks,
-  declarationNames,
-  maskLean,
-  verifyCandidate,
-} from '../verification.mjs'
+import { proofRisks, maskLean, verifyCandidate } from '../verification.mjs'
 import { EventStore, JobManager } from '../events.mjs'
 import { Settings } from '../settings.mjs'
 import { createStudio } from '../studio.mjs'
@@ -646,12 +641,6 @@ test('comments and strings mentioning sorry, axioms, and trust settings do not c
     [],
   )
   assert.equal(maskLean(after).includes('debug.skipKernelTC'), false)
-  assert.deepEqual(
-    declarationNames(
-      'namespace A\nsection\ntheorem α : True := by trivial\nend\nend A\n',
-    ),
-    ['A.α'],
-  )
 })
 
 test('repair preserves definitions and notation while allowing legitimate proof body changes', () => {
@@ -759,9 +748,7 @@ test('candidate evaluation reaches the pinned build and independent readonly pro
   )
   assert.equal(result.complete, true)
   assert.deepEqual(calls[1].args, ['lake', 'build'])
-  assert.deepEqual(JSON.parse(calls[2].args.at(-1)), [
-    { path: 'Proofs/Selected.lean', names: ['shifted', 'selected'] },
-  ])
+  assert.deepEqual(JSON.parse(calls[2].options.input), ['Proofs/Selected.lean'])
   assert.deepEqual(calls[2].args.slice(0, 3), ['python3', '-I', '-c'])
   assert.ok(calls.every((call) => call.options.network === 'none'))
   for (const key of ['readOnlyWorkspace', 'readOnlyHome', 'freshHome'])

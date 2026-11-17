@@ -7,6 +7,7 @@ import {
 import { promises as fs } from 'node:fs'
 import { closeSync, fstatSync, openSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
+import { withAccountWriteLock } from './account-write-lock.mjs'
 
 const SESSION_IDLE_TIMEOUT_MS = 48 * 3600_000
 
@@ -113,10 +114,17 @@ export class Auth {
       })
     }
   }
-  async refreshUsers() {
-    this.users = JSON.parse(
+  async #loadUsers() {
+    return JSON.parse(
       await fs.readFile(path.join(this.dir, 'users.json'), 'utf8'),
     )
+  }
+  async refreshUsers() {
+    if (!this.#readCurrentUsers())
+      throw Object.assign(
+        new Error('Account details are temporarily unavailable. Try again.'),
+        { status: 503 },
+      )
   }
   public(user) {
     return {
@@ -139,8 +147,8 @@ export class Auth {
       })
   }
   async createUser(actor, input) {
-    return this.mutate(async () => {
-      const current = this.users.find((user) => user.id === actor.id)
+    return this.mutate((users) => {
+      const current = users.find((user) => user.id === actor.id)
       if (!current)
         throw Object.assign(new Error('Sign in again.'), { status: 401 })
       this.requireAdmin(current)
@@ -153,11 +161,7 @@ export class Auth {
           new Error('Only the owner can appoint administrators.'),
           { status: 403 },
         )
-      if (
-        this.users.some(
-          (user) => user.name.toLowerCase() === name.toLowerCase(),
-        )
-      )
+      if (users.some((user) => user.name.toLowerCase() === name.toLowerCase()))
         throw Object.assign(
           new Error('An account with that name already exists.'),
           { status: 409 },
@@ -169,14 +173,14 @@ export class Auth {
         role,
         tokenHash: hash(token),
       }
-      this.users.push(user)
+      users.push(user)
       return { user: this.public(user), token }
     })
   }
   async signInEntra(identity, { allowSignup = false, expectedUserId } = {}) {
     const verified = entraIdentity(identity)
-    return this.#withCurrentUsers(async () => {
-      const user = this.users.find((current) => matchesEntra(current, verified))
+    const find = (users) => {
+      const user = users.find((current) => matchesEntra(current, verified))
       if (expectedUserId !== undefined && user?.id !== expectedUserId)
         throw Object.assign(
           new Error(
@@ -192,27 +196,37 @@ export class Auth {
           ),
           { status: 403 },
         )
-      const created = {
-        id: randomBytes(12).toString('hex'),
-        name: availableAccountName(verified.name, this.users),
-        role: 'user',
-        entra: { tenantId: verified.tenantId, objectId: verified.objectId },
-      }
-      this.users.push(created)
-      await this.#saveUsers()
-      return created
+      return null
+    }
+    return this.#enqueue(async () => {
+      const existing = find(await this.#loadUsers())
+      if (existing) return existing
+      return withAccountWriteLock(this.dir, async () => {
+        const users = await this.#loadUsers()
+        const current = find(users)
+        if (current) return current
+        const created = {
+          id: randomBytes(12).toString('hex'),
+          name: availableAccountName(verified.name, users),
+          role: 'user',
+          entra: { tenantId: verified.tenantId, objectId: verified.objectId },
+        }
+        users.push(created)
+        await this.#saveUsers(users)
+        return created
+      })
     })
   }
   async linkEntra(actor, identity) {
     const verified = entraIdentity(identity)
-    return this.mutate(() => {
-      const current = this.users.find((user) => user.id === actor?.id)
+    return this.mutate((users) => {
+      const current = users.find((user) => user.id === actor?.id)
       if (!current)
         throw Object.assign(new Error('Sign in again before linking EPFL.'), {
           status: 401,
         })
       if (
-        this.users.some(
+        users.some(
           (user) => user.id !== current.id && matchesEntra(user, verified),
         )
       )
@@ -247,12 +261,12 @@ export class Auth {
         status: 400,
       })
     const name = accountName(input.name)
-    return this.mutate(() => {
-      const current = this.users.find((user) => user.id === actor.id)
+    return this.mutate((users) => {
+      const current = users.find((user) => user.id === actor.id)
       if (!current)
         throw Object.assign(new Error('Sign in again.'), { status: 401 })
       if (
-        this.users.some(
+        users.some(
           (user) =>
             user.id !== current.id &&
             user.name.toLowerCase() === name.toLowerCase(),
@@ -269,33 +283,46 @@ export class Auth {
       return { user: this.public(current) }
     })
   }
-  async mutate(change) {
-    return this.#withCurrentUsers(async () => {
-      const result = await change()
-      await this.#saveUsers()
-      return result
+  async removeUser(query) {
+    return this.mutate((users) => {
+      const user =
+        users.find((entry) => entry.id === query) ||
+        users.find((entry) => entry.name.toLowerCase() === query.toLowerCase())
+      if (!user) throw new Error('Collaborator not found.')
+      if (user.id === 'owner')
+        throw new Error('The owner account cannot be removed with this helper.')
+      users.splice(users.indexOf(user), 1)
+      return this.public(user)
     })
   }
-  #withCurrentUsers(action) {
+  async mutate(change) {
+    return this.#enqueue(() =>
+      withAccountWriteLock(this.dir, async () => {
+        const users = await this.#loadUsers()
+        const result = await change(users)
+        await this.#saveUsers(users)
+        return result
+      }),
+    )
+  }
+  #enqueue(action) {
     const task = (this.writeQueue || Promise.resolve())
       .catch(() => {})
-      .then(async () => {
-        await this.refreshUsers()
-        return action()
-      })
+      .then(action)
     this.writeQueue = task
     return task
   }
-  async #saveUsers() {
+  async #saveUsers(users) {
     const filename = path.join(this.dir, 'users.json'),
       temporary = filename + '.' + randomBytes(12).toString('hex') + '.tmp'
     try {
-      await fs.writeFile(
-        temporary,
-        JSON.stringify(this.users, null, 2) + '\n',
-        { mode: 0o600, flag: 'wx' },
-      )
+      await fs.writeFile(temporary, JSON.stringify(users, null, 2) + '\n', {
+        mode: 0o600,
+        flag: 'wx',
+      })
       await fs.rename(temporary, filename)
+      this.users = users
+      this.usersStamp = undefined
     } finally {
       await fs.rm(temporary, { force: true })
     }
@@ -330,10 +357,10 @@ export class Auth {
   identify(req) {
     if (!this.#readCurrentUsers()) return null
     const bearer = requestBearerToken(req)
-    if (bearer)
-      return (
-        this.users.find((user) => equal(user.tokenHash, hash(bearer))) || null
-      )
+    if (bearer) {
+      const digest = hash(bearer)
+      return this.users.find((user) => equal(user.tokenHash, digest)) || null
+    }
     const cookie = /(?:^|;\s*)lemex_web=([^;]+)/.exec(
       req.headers.cookie || '',
     )?.[1]
@@ -366,10 +393,13 @@ export class Auth {
   }
   async login(token, ip) {
     await this.refreshUsers()
-    const user =
+    const digest =
       typeof token === 'string' && token.length < 200
-        ? this.users.find((it) => equal(it.tokenHash, hash(token.trim())))
+        ? hash(token.trim())
         : null
+    const user = digest
+      ? this.users.find((it) => equal(it.tokenHash, digest))
+      : null
     // A shared SSH/reverse-proxy address must not let invalid attempts lock out
     // collaborators who already have the correct high-entropy access token.
     if (user) {

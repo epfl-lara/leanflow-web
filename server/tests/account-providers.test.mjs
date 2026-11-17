@@ -337,8 +337,8 @@ test('tokens identify roles; only owner appoints admins; users cannot list or cr
   ])
     assert(!listing.includes(secret))
   // Re-read persisted roles on every request, including an already issued cookie.
-  await f.auth.mutate(() => {
-    f.auth.users.find((u) => u.id === admin.user.id).role = 'user'
+  await f.auth.mutate((users) => {
+    users.find((u) => u.id === admin.user.id).role = 'user'
   })
   assert.equal((await f.request('/api/admin/users', admin.token)).status, 403)
 })
