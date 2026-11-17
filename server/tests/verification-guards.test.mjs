@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { maskLean, proofRisks, verifyCandidate } from '../verification.mjs'
 import fs from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { proofLayouts } from './fixtures/proof-layouts.mjs'
@@ -155,8 +156,8 @@ test('new helper declarations reach the independent build and kernel audit', asy
   t.after(() => fs.rm(root, { recursive: true, force: true }))
   const calls = []
   const runtime = {
-    async run(_root, args) {
-      calls.push(args)
+    async run(_root, args, options) {
+      calls.push({ args, options })
       if (args[1] === 'env')
         return {
           code: 0,
@@ -194,18 +195,53 @@ test('new helper declarations reach the independent build and kernel audit', asy
     true,
     'Ordinary compiler warnings do not block acceptance',
   )
-  assert.deepEqual(calls[1], ['lake', 'build'])
-  assert.deepEqual(JSON.parse(calls[2].at(-1)), [
-    {
-      path: 'Main.lean',
-      names: [
-        'Proofs.targetValue',
-        'Proofs.helper',
-        'Proofs.target',
-        'Proofs.another',
-      ],
+  assert.deepEqual(calls[1].args, ['lake', 'build'])
+  assert.deepEqual(JSON.parse(calls[2].options.input), ['Main.lean'])
+})
+
+test('large project file lists reach the proof auditor intact across a real process boundary', async (t) => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'leanflow-audit-manifest-'),
+  )
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  const paths = Array.from(
+    { length: 900 },
+    (_, index) => `Competition/${'Theorem'.repeat(22)}${index}.lean`,
+  )
+  assert(Buffer.byteLength(JSON.stringify(paths)) > 128 * 1024)
+  const changes = paths.map((path) => ({
+    path,
+    before: null,
+    after: 'theorem solved : True := by trivial\n',
+  }))
+  const runtime = {
+    async run(_root, args, options) {
+      if (args[1] === 'env')
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            LEAN_SYSROOT: '/opt/lean-toolchains/pinned',
+            LEAN_PATH: '/workspace/.lake/build/lib/lean',
+            LEAN_SRC_PATH: '/workspace',
+          }),
+        }
+      if (args.includes('build')) return { code: 0, stdout: '' }
+      // Substitute a fixture audit result but preserve all data arguments
+      // and worker stdin, so the operating system enforces argument limits.
+      const fixture =
+        'import json,sys; files=json.load(sys.stdin); print(json.dumps(dict(files=files, compiled=True, complete=True, kernelChecked=True, errors=[], warnings=[], axioms=[])))'
+      const child = spawnSync(
+        args[0],
+        [...args.slice(1, 3), fixture, ...args.slice(4)],
+        { input: options.input, encoding: 'utf8' },
+      )
+      if (child.error) throw child.error
+      return { code: child.status, stdout: child.stdout, stderr: child.stderr }
     },
-  ])
+  }
+  const result = await verifyCandidate(runtime, root, changes, 'formalize')
+  assert.equal(result.complete, true)
+  assert.deepEqual(result.files, paths)
 })
 
 test('numeric shifts and evaluation commands reach Lean verification in every mode', () => {

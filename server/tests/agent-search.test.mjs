@@ -1360,10 +1360,7 @@ test('configuration and Lean changes are built together and still receive indepe
       )
       assert.equal(result.verification.kernelChecked, true)
       const audit = calls.find((call) => call.args[0] === 'python3')
-      assert.deepEqual(
-        JSON.parse(audit.args.at(-1)).map((entry) => entry.path),
-        ['Main.lean'],
-      )
+      assert.deepEqual(JSON.parse(audit.options.input), ['Main.lean'])
       await manager.apply('alice', result.id)
       assert.equal(
         (await workspaces.readFile(project.id, 'alice', 'Main.lean')).content,

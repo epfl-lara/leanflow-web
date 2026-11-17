@@ -56,23 +56,6 @@ export function maskLean(source, preserveStrings = false) {
   return output
 }
 
-export function declarationNames(source) {
-  const masked = maskLean(source),
-    scopes = [],
-    result = []
-  for (const line of masked.split('\n')) {
-    const scope = /^\s*(namespace|section)\b\s*([^\s]*)/.exec(line)
-    if (scope) scopes.push(scope[1] === 'namespace' ? scope[2] : '')
-    if (/^\s*end\b/.test(line)) scopes.pop()
-    const match =
-      /^\s*(?:@\[[^\]\n]*\][ \t]*)*(?:(?:private|protected|noncomputable|unsafe|partial)\s+){0,8}(?:theorem|lemma|def|opaque|abbrev)\s+([\p{L}_][\p{L}\p{N}_'.]*)/u.exec(
-        line,
-      )
-    if (match) result.push([...scopes.filter(Boolean), match[1]].join('.'))
-  }
-  return result
-}
-
 export function proofRisks(
   changes,
   mode,
@@ -378,7 +361,7 @@ function theoremHeaderEntries(source) {
 
 const auditScript = String.raw`
 import json, os, pathlib, subprocess, sys, tempfile
-entries=json.loads(sys.argv[1])
+paths=json.load(sys.stdin)
 result={'compiled':True,'complete':True,'kernelChecked':True,'files':[],'errors':[],'warnings':[],'axioms':[]}
 workspace=pathlib.Path('/workspace')
 sysroot=pathlib.Path(os.environ['LEAN_SYSROOT'])
@@ -440,8 +423,8 @@ with tempfile.TemporaryDirectory(prefix='lean-web-audit-') as temp:
         if kernel.returncode:
             result['kernelChecked']=False; result['errors'].append('Kernel replay failed: '+kernel.stdout[-5000:]+kernel.stderr[-5000:]); return False
         visiting.remove(module); compiled.add(module); imports.append(module); return True
-    for entry in entries:
-        file=workspace/entry['path']
+    for relative in paths:
+        file=workspace/relative
         module=next(('.'.join(file.relative_to(prefix).with_suffix('').parts) for prefix in source_roots if file.is_relative_to(prefix)),None)
         if not module or not compile_module(module,file): result['compiled']=False; result['complete']=False
     if result['compiled'] and imports:
@@ -495,17 +478,14 @@ export async function verifyCandidate(
       reason:
         'Final verification stopped before Lean could check these changes.',
     }
-  const entries = changes
+  const paths = changes
     .filter(
       (change) =>
         change.after !== null &&
         change.path.endsWith('.lean') &&
         !PROJECT_CONFIGURATION_FILES.includes(change.path.split('/').at(-1)),
     )
-    .map((change) => ({
-      path: change.path,
-      names: declarationNames(change.after),
-    }))
+    .map((change) => change.path)
   const configurationChanged = changes.some((change) =>
     PROJECT_CONFIGURATION_FILES.includes(change.path.split('/').at(-1)),
   )
@@ -515,7 +495,7 @@ export async function verifyCandidate(
       !PROJECT_CONFIGURATION_FILES.includes(change.path.split('/').at(-1)),
   )
   if (
-    !entries.length &&
+    !paths.length &&
     !configurationChanged &&
     !leanChanged &&
     (mode === 'search' || (options.allowRequestedEdits && changes.length))
@@ -527,7 +507,7 @@ export async function verifyCandidate(
       reason:
         'Project file changes are ready to review. No Lean source changes to check.',
     }
-  if (!entries.length && !configurationChanged && mode === 'formalize')
+  if (!paths.length && !configurationChanged && mode === 'formalize')
     return {
       compiled: false,
       complete: false,
@@ -536,7 +516,7 @@ export async function verifyCandidate(
       reason:
         'No Lean formalization was written. There is no Lean output to verify.',
     }
-  if (!entries.length && !configurationChanged && !leanChanged)
+  if (!paths.length && !configurationChanged && !leanChanged)
     return {
       compiled: true,
       complete: true,
@@ -614,7 +594,7 @@ export async function verifyCandidate(
       reason:
         'The candidate build changed project files, so final verification stopped.',
     }
-  if (!entries.length)
+  if (!paths.length)
     return {
       compiled: true,
       complete: true,
@@ -624,20 +604,19 @@ export async function verifyCandidate(
         ? 'Project configuration builds successfully. No Lean source changes to check.'
         : 'The project builds after the requested file changes. No remaining Lean source edits to check.',
     }
-  const audit = await runtime.run(
-    root,
-    ['python3', '-I', '-c', auditScript, JSON.stringify(entries)],
-    {
-      ...options,
-      env: auditEnv,
-      readOnlyWorkspace: true,
-      freshHome: true,
-      readOnlyHome: true,
-      network: 'none',
-      timeoutMs: 180_000,
-      onOutput,
-    },
-  )
+  const audit = await runtime.run(root, ['python3', '-I', '-c', auditScript], {
+    ...options,
+    // The compiler enumerates declarations from rebuilt modules. A project
+    // file list can exceed the OS limit for one command argument.
+    input: JSON.stringify(paths),
+    env: auditEnv,
+    readOnlyWorkspace: true,
+    freshHome: true,
+    readOnlyHome: true,
+    network: 'none',
+    timeoutMs: 180_000,
+    onOutput,
+  })
   const last = audit.stdout.trim().split('\n').at(-1)
   try {
     if (audit.code !== 0) throw new Error('Audit subprocess failed.')
