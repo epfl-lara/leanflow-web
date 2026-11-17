@@ -831,14 +831,14 @@ export class ClusterController {
       await this.#send(bulk, archive, undefined, signal)
       const reply = await bulk.request(
         'images.load',
-        { archive, imageDigest: this.#imageDigest },
+        { archive, imageDigest: this.#nodeImageDigest(node) },
         { signal, timeoutMs: 25 * 60_000 },
       )
       this.#observe(node, this.#workerStatus(node, reply))
       node.prepared.clear()
       return {
         nodeId,
-        imageDigest: this.#imageDigest,
+        imageDigest: this.#nodeImageDigest(node),
         loaded: node.status.ready,
         capabilities: node.status.capabilities,
       }
@@ -1151,7 +1151,7 @@ export class ClusterController {
       {
         operation: request.operation,
         bundleDigest: this.#bundleDigest,
-        imageDigest: this.#imageDigest,
+        imageDigest: this.#nodeImageDigest(node),
         inputDigest: request.inputDigest,
         resources,
       },
@@ -1237,7 +1237,7 @@ export class ClusterController {
       nodeId: node.config.id,
       nodeEpoch: node.status.nodeEpoch,
       bundleDigest: this.#bundleDigest,
-      imageDigest: this.#imageDigest,
+      imageDigest: this.#nodeImageDigest(node),
       sourceManifest: request.sourceManifest,
       ...(request.editorSource ? { editorSource: request.editorSource } : {}),
       dependencies: request.dependencies,
@@ -2024,6 +2024,13 @@ export class ClusterController {
 
   // Connections
 
+  // Docker's classic and containerd stores identify the same exported image
+  // differently. Enrollment may pin a reviewed worker's exact local digest.
+  // This stays mandatory in handshakes, placement, grants and result fences.
+  #nodeImageDigest(node) {
+    return node.config.imageDigest ?? this.#imageDigest
+  }
+
   async #transport(node, channel) {
     const rpc = await this.#transportFactory({ ...node.config }, channel)
     if (
@@ -2045,7 +2052,7 @@ export class ClusterController {
         lineage: this.#identity.lineage,
         epoch: this.#identity.epoch,
         bundleDigest: this.#bundleDigest,
-        imageDigest: this.#imageDigest,
+        imageDigest: this.#nodeImageDigest(node),
       },
       { timeoutMs: TIMEOUTS.hello },
     )
@@ -2058,7 +2065,7 @@ export class ClusterController {
       value.version !== PROTOCOL_VERSION ||
       value.nodeId !== node.config.id ||
       value.bundleDigest !== this.#bundleDigest ||
-      value.imageDigest !== this.#imageDigest
+      value.imageDigest !== this.#nodeImageDigest(node)
     )
       throw clusterError(
         'The worker release or identity does not match this controller.',

@@ -81,6 +81,33 @@ reviewed home-directory upgrades. Preserve that explicitly retained route when
 removing a generated temporary bootstrap key. PC06's approved maintenance route
 is recorded in the [editor rollout](releases/2026-11-16-remote-editors.md).
 
+### Keep image pins exact across Docker image stores
+
+Docker's classic store identifies an image by its configuration digest. The
+containerd store identifies its image target by a manifest or index digest.
+Importing the same reviewed archive can therefore produce different local IDs.
+See the [Docker image inspection implementation](https://github.com/moby/moby/blob/master/daemon/containerd/image_inspect.go).
+
+Preserve the administrator's engine setup. Verify the export archive checksum,
+its image configuration digest, and the imported image's actual ID. Set that
+exact ID as `image` in the worker configuration. If it differs from the
+controller's default execution profile, set `imageDigest` on **that worker's
+controller entry** to the same exact ID. Omit the override for other workers.
+Tags and partial digests are rejected. This enrollment setting is not an
+automatic assertion that two different images are equivalent.
+
+The controller enforces each worker's pin in both SSH handshakes, placement,
+image loading, durable resource grants and result acceptance. The reviewed
+worker bundle and protocol pins still apply to every worker. Re-certify the
+actual host/image combination and qualify its public editor environment before
+enabling it. An incompatible older coordinator leaves that worker unavailable.
+
+When copying an account home, regenerate the protocol bridge from the handoff
+instead of copying a bridge with a numeric UID. The generated bridge discovers
+the account's actual UID and home for its user-service bus. Give the new host a
+unique node ID and protocol key; preserve administrator and approved maintenance
+keys, and verify that the old host's protocol key is rejected.
+
 If the administrator prefers, they can perform the home-directory installation
 themselves and omit the bootstrap key. No public worker port is needed; only
 SSH from the coordinator. Keep all private keys on the coordinator.

@@ -419,6 +419,12 @@ export function controllerConfig(value) {
       throw clusterError('Invalid worker SSH port.')
     if (node.role !== undefined && !['primary', 'reserve'].includes(node.role))
       throw clusterError('Invalid worker role.')
+    if (
+      node.imageDigest !== undefined &&
+      (typeof node.imageDigest !== 'string' ||
+        !/^sha256:[a-f0-9]{64}$/.test(node.imageDigest))
+    )
+      throw clusterError('Worker image identity must be an exact digest.')
     return {
       ...node,
       role: node.role || 'primary',

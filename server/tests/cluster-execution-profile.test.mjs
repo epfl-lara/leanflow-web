@@ -16,6 +16,67 @@ const old = {
 }
 const current = 'sha256:' + 'c'.repeat(64)
 
+test('eight editors preserve a native grant inside the shared 48 GiB and 16 CPU boundary', () => {
+  const parsed = nodeConfig({
+    version: 1,
+    nodeId: 'native-headroom',
+    controllerLineage: 'lineage',
+    dataDir: '/private/worker',
+    image: current,
+    workerMemory: '6g',
+    workerCpus: 2,
+    memoryBudget: '42g',
+    maxCpus: 14,
+    maxConcurrent: 11,
+    parentMemoryMax: '48g',
+    parentMaxCpus: 16,
+    editors: {
+      maxConcurrent: 8,
+      memory: '3g',
+      cpus: 1,
+      cpuReservation: 1,
+      reservedBatchMemory: '18g',
+      reservedBatchCpus: 6,
+    },
+  })
+  assert.equal(
+    parsed.maxEditors * parsed.editorMemoryBytes +
+      parsed.editorBatchMemoryBytes,
+    parsed.budgetBytes,
+  )
+  assert.equal(
+    parsed.maxEditors * parsed.editorCpuReservation + parsed.editorBatchCpus,
+    parsed.maxCpus,
+  )
+  assert.equal(parsed.maxConcurrent, parsed.maxEditors + 3)
+})
+
+test('worker image overrides require an exact local digest and survive normalization', () => {
+  const node = {
+    id: 'worker-a',
+    host: 'worker.test',
+    user: 'leanflow',
+    identityFile: '/private/key',
+    knownHostsFile: '/private/known_hosts',
+    imageDigest: current,
+  }
+  const parsed = controllerConfig({ ...config, nodes: [node] })
+  assert.equal(parsed.nodes[0].imageDigest, current)
+  assert.deepEqual(controllerConfig(parsed), parsed)
+  for (const imageDigest of [
+    null,
+    '',
+    'worker:latest',
+    'sha256:' + 'z'.repeat(64),
+    123,
+    {},
+  ])
+    assert.throws(
+      () => controllerConfig({ ...config, nodes: [{ ...node, imageDigest }] }),
+      /exact digest/,
+    )
+})
+
 test('shared worker editor CPU caps fit the agreed pool and normalized policies survive reload', () => {
   const value = {
     version: 1,

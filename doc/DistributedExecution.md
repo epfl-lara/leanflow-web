@@ -115,6 +115,13 @@ profile retains the old release's behavior and limits; it does not apply those
 fixes remotely. The maintenance CLI's `--image` must match this profile. Local
 work continues to use the coordinator's own configured image. Without this field,
 the original matching-image-and-bundle requirement remains in force.
+
+An enrolled worker can additionally pin its exact local image ID through
+`nodes[].imageDigest`. This supports reviewed exports imported into different
+Docker image stores without changing a shared host's engine. The worker's
+`image` must match that override, and its protocol and bundle still match the
+execution profile. Follow the [image identity checks](WorkerExpansion.md#keep-image-pins-exact-across-docker-image-stores)
+before enabling such a worker; an image tag is never a substitute for a pin.
 Protocol 2 requires the larger dependency bounds on both peers. Protocol 1 pins
 are rejected; upgrade with distributed admission off rather than retaining an
 older worker profile during this transition.

@@ -834,7 +834,7 @@ const certification = (worker, capabilities) => ({
   nodeId: worker.config.nodeId,
   nodeEpoch: worker.nodeEpoch,
   bundleDigest: worker.bundleDigest,
-  imageDigest: IMAGE,
+  imageDigest: worker.config.image,
   engineKind: 'docker',
   checkedAt: new Date().toISOString(),
   capabilities,
@@ -846,13 +846,17 @@ async function startWorker(root, spec) {
   const { id, role, bundle = BUNDLE, memoryBudget = '4g' } = spec
   const capabilities = spec.capabilities ?? ALL
   const runtime = new FakeRuntime()
+  if (spec.imageDigest) {
+    const info = runtime.info.bind(runtime)
+    runtime.info = () => ({ ...info(), imageId: spec.imageDigest })
+  }
   const worker = new WorkerNode({
     config: {
       version: 1,
       nodeId: id,
       controllerLineage: LINEAGE,
       dataDir: path.join(root, id),
-      image: IMAGE,
+      image: spec.imageDigest ?? IMAGE,
       role,
       workerMemory: '1g',
       memoryBudget,
@@ -962,9 +966,10 @@ async function cluster(t, settings = {}) {
     ...(nodes.some((node) => node.editors)
       ? { editors: { placement: 'prefer' } }
       : {}),
-    nodes: nodes.map(({ id, role }) => ({
+    nodes: nodes.map(({ id, role, imageDigest }) => ({
       id,
       role,
+      ...(imageDigest ? { imageDigest } : {}),
       host: 'worker.test',
       user: 'leanflow',
       identityFile: '/etc/leanflow/id_ed25519',
@@ -1771,6 +1776,117 @@ test('a worker with another release or image is never used', async (t) => {
     () => image.controller.status().workers[0].error === 'release_mismatch',
   )
   assert.equal(await image.controller.run(image.input, options()), null)
+})
+
+test('a worker-specific image pin is enforced in handshakes, editor grants and check result fences', async (t) => {
+  const imageDigest = `sha256:${'d'.repeat(64)}`
+  const f = await cluster(t, { nodes: [editorNode({ imageDigest })] })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input, { certify: true })
+  assert.equal(f.controller.editorCapacity(), 2)
+  const result = await f.controller.run(f.input, options())
+  assert.equal(result.code, 0)
+  const editor = await f.controller.openEditor(
+    f.input,
+    options({ jobId: 'pinned-editor' }),
+  )
+  assert(editor)
+  editor.stdout.resume()
+  editor.stderr.resume()
+  const starts = f.transport.requests.filter(
+    (r) => r.method === 'attempt.start',
+  )
+  assert.equal(starts.length, 2)
+  assert(starts.every((r) => r.params.imageDigest === imageDigest))
+  assert(
+    f.transport.requests
+      .filter((r) => r.method === 'hello')
+      .every((r) => r.params.imageDigest === imageDigest),
+  )
+  editor.kill()
+  await until(() => f.controller.status().active === 0)
+  f.transport.hook = async ({ method, params, options, request }) => {
+    const reply = await request(method, params, options)
+    return method === 'attempt.get' && reply.attempt.state === 'completed'
+      ? { ...reply, attempt: { ...reply.attempt, imageDigest: IMAGE } }
+      : reply
+  }
+  await assert.rejects(
+    f.controller.run(f.input, options({ jobId: 'wrong-result-pin' })),
+    { code: 'invalid_result' },
+  )
+  const archive = await f.blobs.put(Buffer.from('mock image archive'))
+  f.transport.hook = async ({ method, params, options, request }) => {
+    if (method === 'images.load') {
+      assert.equal(params.imageDigest, imageDigest)
+      return f.workers.get('node-a').worker.status()
+    }
+    return request(method, params, options)
+  }
+  assert.equal(
+    (await f.controller.loadImage('node-a', archive.hash)).imageDigest,
+    imageDigest,
+  )
+  f.transport.hook = async ({ method, params, options, request }) => {
+    const reply = await request(method, params, options)
+    return method === 'hello' ? { ...reply, imageDigest: IMAGE } : reply
+  }
+  f.transport.opened.forEach(({ rpc }) => rpc.close(new Error('reset')))
+  await until(
+    () => f.controller.status().workers[0].error === 'release_mismatch',
+  )
+  assert.equal(
+    await f.controller.run(f.input, options({ jobId: 'wrong-pin' })),
+    null,
+  )
+})
+
+test('mixed image stores keep each image pin bound to its enrolled worker', async (t) => {
+  const alternate = `sha256:${'d'.repeat(64)}`
+  const f = await cluster(t, {
+    nodes: [{ id: 'node-a' }, { id: 'node-b', imageDigest: alternate }],
+  })
+  await f.ready()
+  const gates = [...f.workers.values()].map(({ runtime }) => hold(runtime))
+  const jobs = [0, 1].map((index) =>
+    f.controller.run(
+      f.input,
+      options({
+        operation: 'check.kernel',
+        actor: 'user-' + index,
+        jobId: 'mixed-' + index,
+      }),
+    ),
+  )
+  await until(() =>
+    [...f.workers.values()].every(({ runtime }) => runtime.runs.length === 1),
+  )
+  for (const row of f.transport.requests.filter((r) =>
+    ['hello', 'attempt.start'].includes(r.method),
+  ))
+    assert.equal(
+      row.params.imageDigest,
+      row.node === 'node-a' ? IMAGE : alternate,
+    )
+  gates.forEach((gate) => gate[0]())
+  assert((await Promise.all(jobs)).every((result) => result.code === 0))
+  f.transport.hook = async ({ node, method, params, options, request }) => {
+    const reply = await request(method, params, options)
+    return method === 'hello'
+      ? { ...reply, imageDigest: node === 'node-a' ? alternate : IMAGE }
+      : reply
+  }
+  f.transport.opened.forEach(({ rpc }) => rpc.close(new Error('swap pins')))
+  await until(() =>
+    f.controller
+      .status()
+      .workers.every((worker) => worker.error === 'release_mismatch'),
+  )
+  assert.equal(f.controller.status().ready, 0)
+  assert.equal(
+    await f.controller.run(f.input, options({ jobId: 'swapped' })),
+    null,
+  )
 })
 
 test('losing bulk while independent uploads have active and queued transfers permits a fresh four-way upload', async (t) => {
