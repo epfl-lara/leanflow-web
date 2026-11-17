@@ -65,6 +65,14 @@ const fixture = await chatBrowserFixture({
 })
 const { page, report } = fixture
 const sourceReads = []
+const alphaLifecycle = []
+fixture.state.onLeanMessage = (message, url) => {
+  if (
+    new URL(url).pathname === '/websocket/alpha' &&
+    ['initialize', 'shutdown', 'exit'].includes(message.method)
+  )
+    alphaLifecycle.push(message.method)
+}
 report.consoleErrors = []
 page.on('console', (message) => {
   if (message.type() === 'error') report.consoleErrors.push(message.text())
@@ -135,6 +143,11 @@ try {
     async () =>
       (await page.locator('.statusbar').innerText()).includes('Lean connected'),
     'beta Lean initialized',
+  )
+  assert.deepEqual(
+    alphaLifecycle,
+    ['initialize', 'shutdown', 'exit'],
+    'The initialized Alpha editor shuts down its original Lean session before switching to Beta.',
   )
   const identifier = page
     .locator('.view-line')

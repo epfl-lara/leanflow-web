@@ -334,7 +334,7 @@ test('the actual language client startup preserves its rejection when channel cl
   )
 })
 
-test('workspace cancellation closes its pending socket before initialization and preserves another workspace', () => {
+test('workspace cancellation releases pending starts and gives initialized sockets time to shut down', () => {
   const source = fs.readFileSync(
     new URL(
       '../../../node_modules/monaco-editor-wrapper/dist/languageClientWrapper.js',
@@ -343,14 +343,16 @@ test('workspace cancellation closes its pending socket before initialization and
     'utf8',
   )
   const patched = patchLeanClientWrapper(source)
-  const begin = patched.indexOf('const webSocket = new WebSocket(url);')
+  const begin = patched.indexOf('const pendingSignal =')
   const end = patched.indexOf('webSocket.onopen =', begin)
   const create = new Function(
     'lcConfig',
     'url',
     'WebSocket',
+    'resolve',
     'reject',
-    patched.slice(begin, end) + '\nreturn webSocket;',
+    patched.slice(begin, end) +
+      '\nreturn { socket: webSocket, finish: resolve };',
   )
   class Socket extends EventTarget {
     closed = false
@@ -361,33 +363,34 @@ test('workspace cancellation closes its pending socket before initialization and
     }
   }
   const failures = []
-  const first = new AbortController(),
-    other = new AbortController()
-  const socket = create(
-    { leanflowSignal: first.signal },
-    'fixture',
-    Socket,
-    (error) => failures.push(error),
-  )
-  const preserved = create(
-    { leanflowSignal: other.signal },
-    'other',
-    Socket,
-    (error) => failures.push(error),
-  )
+  const first = new AbortController()
+  const disposed = new AbortController()
+  const open = (pending, closing) =>
+    create(
+      {
+        leanflowPendingSignal: pending.signal,
+        leanflowDisposeSignal: closing.signal,
+      },
+      'fixture',
+      Socket,
+      () => {},
+      (error) => failures.push(error),
+    )
+  const pending = open(first, disposed)
+  const running = open(first, disposed)
+  const other = open(new AbortController(), new AbortController())
+  running.finish()
   first.abort()
-  assert.equal(socket.closed, true)
-  assert.equal(preserved.closed, false)
+  assert.equal(pending.socket.closed, true)
+  assert.equal(running.socket.closed, false)
+  assert.equal(other.socket.closed, false)
   assert.equal(failures.length, 1)
   assert.match(failures[0].message, /connection cancelled/)
-  const late = create(
-    { leanflowSignal: first.signal },
-    'late',
-    Socket,
-    (error) => failures.push(error),
-  )
-  assert.equal(late.closed, true)
+  assert.equal(open(first, disposed), undefined)
   assert.equal(failures.length, 2)
+  disposed.abort()
+  assert.equal(running.socket.closed, true)
+  assert.equal(other.socket.closed, false)
 })
 
 test('the actual wrapper receives queue notices before initialization and preserves the upstream strategy', () => {

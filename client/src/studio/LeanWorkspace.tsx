@@ -65,10 +65,17 @@ import {
 } from './proofTarget'
 
 class BrowserLeanMonaco extends LeanMonaco {
-  private readonly connectionAbort = new AbortController()
+  private readonly pendingConnections = new AbortController()
+  private readonly disposedConnections = new AbortController()
 
-  cancelConnections() {
-    this.connectionAbort.abort()
+  cancelPendingConnections() {
+    this.pendingConnections.abort()
+  }
+
+  override dispose() {
+    this.cancelPendingConnections()
+    this.disposedConnections.abort()
+    super.dispose()
   }
 
   closeHiddenDocuments: () => Promise<void> = async () => {}
@@ -99,7 +106,8 @@ class BrowserLeanMonaco extends LeanMonaco {
     options: Parameters<LeanMonaco['start']>[0],
   ): WebSocketConfigOptionsUrl & {
     leanflowQueue: (params: unknown) => void
-    leanflowSignal: AbortSignal
+    leanflowPendingSignal: AbortSignal
+    leanflowDisposeSignal: AbortSignal
   } {
     const settings = super.getWebSocketOptions(options)
     const onConnectionIssue = this.onConnectionIssue
@@ -117,7 +125,8 @@ class BrowserLeanMonaco extends LeanMonaco {
     const prepareRenameSources = this.prepareRenameSources
     return {
       ...settings,
-      leanflowSignal: this.connectionAbort.signal,
+      leanflowPendingSignal: this.pendingConnections.signal,
+      leanflowDisposeSignal: this.disposedConnections.signal,
       leanflowQueue(params: unknown) {
         const notice = editorQueueNotice(params)
         if (notice) onEditorQueue(notice)
@@ -667,7 +676,7 @@ export function LeanWorkspace({
     }).catch(() => undefined)
     return () => {
       cancelled = true
-      own?.lean.cancelConnections()
+      own?.lean.cancelPendingConnections()
       own?.idleCleanup?.()
       void serialize(async () => {
         own?.subscription?.dispose()

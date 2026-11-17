@@ -4,16 +4,30 @@ import { fileURLToPath } from 'node:url'
 
 const creation = 'this.languageClient = new MonacoLanguageClient(mlcConfig);'
 const socketCreation = 'const webSocket = new WebSocket(url);'
-const cancellableSocket = `${socketCreation}
-                const leanflowSignal = lcConfig.leanflowSignal;
-                if (leanflowSignal) {
-                    const cancel = () => {
-                        webSocket.close(1000, 'Lean editor closed.');
+const cancellableSocket = `const pendingSignal = lcConfig.leanflowPendingSignal;
+                const disposeSignal = lcConfig.leanflowDisposeSignal;
+                if (pendingSignal?.aborted || disposeSignal?.aborted) {
+                    reject(new Error('Lean editor connection cancelled.'));
+                    return;
+                }
+                ${socketCreation}
+                if (pendingSignal && disposeSignal) {
+                    const close = () => webSocket.close(1000, 'Lean editor closed.');
+                    const cancelPending = () => {
+                        close();
                         reject(new Error('Lean editor connection cancelled.'));
                     };
-                    leanflowSignal.addEventListener('abort', cancel, { once: true });
-                    webSocket.addEventListener('close', () => leanflowSignal.removeEventListener('abort', cancel), { once: true });
-                    if (leanflowSignal.aborted) cancel();
+                    pendingSignal.addEventListener('abort', cancelPending, { once: true });
+                    disposeSignal.addEventListener('abort', close, { once: true });
+                    webSocket.addEventListener('close', () => {
+                        pendingSignal.removeEventListener('abort', cancelPending);
+                        disposeSignal.removeEventListener('abort', close);
+                    }, { once: true });
+                    const started = resolve;
+                    resolve = () => {
+                        pendingSignal.removeEventListener('abort', cancelPending);
+                        started();
+                    };
                 }`
 const guardedCreation = `const leanflowQueueNotice = this.languageClientConfig?.options?.leanflowQueue;
         if (typeof leanflowQueueNotice === 'function') {
@@ -61,7 +75,8 @@ const replacement = `this.messageTransports?.reader.onClose(async () => {
 // upstream onCall hook runs after initialize; install only this notification's
 // handler through the existing connection strategy before the client starts.
 // The wrapper otherwise retains a pending socket outside the provider's client
-// list. Bind only this instance's socket to its owning workspace cancellation.
+// list. Cancel pending starts promptly. Once initialized, leave the socket open
+// for didClose, shutdown and exit until its owner finishes bounded disposal.
 export function patchLeanClientWrapper(source) {
   if (
     source.split(expected).length !== 2 ||
