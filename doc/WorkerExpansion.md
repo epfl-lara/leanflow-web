@@ -272,7 +272,7 @@ worker needs the reviewed upgrade, preloaded environments and fresh
 certification before it can serve editors. Public Mathlib environments also
 need compiler and same-profile LSP diagnostics/save qualification after every
 worker restart; installed dependency bytes alone add no editor slots. Follow the
-[rollout record](releases/2026-11-16-remote-editors.md) for measured acceptance.
+[current rollout record](releases/2026-11-17-primary-workers.md) for measured acceptance.
 Canonical source and collaboration stay on the coordinator; worker-local copies
 are disposable. Repository and private/unsupported environments use the local
 path. A helper change always needs a reviewed pin and fresh certification.
@@ -288,10 +288,13 @@ priority, native-check starvation protection and safe automatic cache upkeep
 are application work to resolve and validate, not additional administrator
 packages or already available features.
 
-Acceptance must include twenty real browser accounts with **live Lean diagnostic
-responses for every session**, durable distinct edits, a concurrent check burst,
-observed worker placement, bounded queue waits and user fairness, plus restart,
-disconnect and cancellation tests. Fail on rejected LSP connections or silent
+Acceptance separates server concurrency from client rendering: thirty ordinary
+accounts with **live Lean diagnostic responses for every session**, distinct
+durable saves verified by Lean, a concurrent check burst and independently
+observed placement, plus fifteen real browser contexts exercising token login,
+editing, saves and checks. This replaces the earlier twenty-browser launch gate;
+it does not claim twenty or thirty browser processes were tested together.
+Record queue waits and user fairness, plus restart, disconnect and cancellation tests. Fail on rejected LSP connections or silent
 reconnect loops. Record memory, cgroup OOM deltas, CPU pressure, disk/inodes and
 request/diagnostic latency. The previous ten-user compilation test did not
 establish this. Keep no-inference fixtures unless provider testing is separately

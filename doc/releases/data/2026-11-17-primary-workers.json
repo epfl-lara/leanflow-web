@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-17",
+  "coordinatorCommit": "35e77d94b099d8e85405f47b40774228245660e5",
+  "acceptanceToolsCommit": "8f94cbde77d974fcba1d084e7cf8de63341ff14e",
+  "workerBundleDigest": "cc7080df981d0ddb00c30c0d8b511b53e4c245c4b82a96b76843b2753a70ddb2",
+  "configuredManagedEditorSlots": 32,
+  "workerPools": {
+    "vm": {
+      "editorSlots": 9,
+      "poolGiB": 45,
+      "nativeReserveGiB": 18
+    },
+    "larapc05": {
+      "editorSlots": 9,
+      "poolGiB": 45,
+      "poolCpus": 15,
+      "nativeReserveGiB": 18,
+      "nativeReserveCpus": 6
+    },
+    "larapc06": {
+      "editorSlots": 9,
+      "poolGiB": 45,
+      "poolCpus": 15,
+      "nativeReserveGiB": 18,
+      "nativeReserveCpus": 6
+    },
+    "larapc2": {
+      "editorSlots": 5,
+      "poolGiB": 21,
+      "poolCpus": 7,
+      "ordinaryReserveGiB": 6,
+      "ordinaryReserveCpus": 2
+    }
+  },
+  "protocol": {
+    "passed": true,
+    "ordinaryAccounts": 30,
+    "simultaneousEditors": 30,
+    "placement": {
+      "vm": 7,
+      "larapc05": 9,
+      "larapc06": 9,
+      "larapc2": 5
+    },
+    "placementObservations": 56,
+    "validSavedFilesReadByLean": 30,
+    "nativeChecks": 15,
+    "mathlibChecks": 15,
+    "checksWithEditorsHeld": 30,
+    "mixedBurstMs": 72200.0,
+    "webSocketClosesBeforeCleanup": 0,
+    "apiProbes": {
+      "count": 147,
+      "p50Ms": 3.2573020000127144,
+      "p95Ms": 4.874567999999272,
+      "maxMs": 15.9721150000114
+    },
+    "initialTypeErrorLatency": {
+      "minMs": 13247.35,
+      "p50Ms": 21960.3,
+      "p95Ms": 28029.55,
+      "maxMs": 28882.69
+    },
+    "correctionSaveAndReadback": {
+      "minMs": 792.46,
+      "p50Ms": 866.81,
+      "p95Ms": 2014.76,
+      "maxMs": 2018.12
+    },
+    "retried429Saves": 13,
+    "generatorMemoryLimitBytes": 1073741824,
+    "generatorPeakMemoryBytes": 87552000,
+    "generatorCpuCap": 1,
+    "generatorOomKilled": false,
+    "durationSeconds": 315.67
+  },
+  "browser": {
+    "passed": true,
+    "realBrowserContexts": 15,
+    "simultaneousEditors": 15,
+    "mixedChecks": 15,
+    "mixedBurstMs": 36941,
+    "webSocketClosesBeforeCleanup": 0,
+    "unhandledErrors": 0,
+    "inferenceRequests": 0,
+    "apiProbes": {
+      "count": 108,
+      "p50Ms": 8.885388000009698,
+      "p95Ms": 189.93168799999694,
+      "maxMs": 22793.215805999993
+    },
+    "generatorMemoryLimitBytes": 8589934592,
+    "generatorPeakMemoryBytes": 7715217408,
+    "generatorCpuCap": 2,
+    "generatorOomKilled": false,
+    "durationSeconds": 195.52,
+    "latencyNote": "Browser timings include fifteen renderers and full-buffer input in a two-CPU generator. The 22.79-second API probe outlier is retained and has not been attributed to server or client."
+  },
+  "nativeApplicationPlacement": {
+    "passed": true,
+    "completedChecks": 4,
+    "hosts": ["larapc05", "larapc06", "larapc2"]
+  },
+  "freshPostLoadSession": {
+    "passed": true,
+    "nativeCheck": true,
+    "remoteEditor": true,
+    "accountRevoked": true,
+    "projectsPurged": 2
+  },
+  "hosts": {
+    "larapc05": {
+      "oomDeltas": {
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "activeAttempts": 0,
+      "nodeContainers": 0,
+      "warmupDirectories": 0,
+      "warmupBindings": 0,
+      "freeDiskBytes": 751191220224,
+      "freeInodes": 53842518
+    },
+    "larapc06": {
+      "oomDeltas": {
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "activeAttempts": 0,
+      "nodeContainers": 0,
+      "warmupDirectories": 0,
+      "warmupBindings": 0,
+      "freeDiskBytes": 763351818240,
+      "freeInodes": 53232333
+    },
+    "larapc2": {
+      "oomDeltas": {
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "activeAttempts": 0,
+      "nodeContainers": 0,
+      "warmupDirectories": 0,
+      "warmupBindings": 0,
+      "freeDiskBytes": 1107328487424,
+      "freeInodes": 107713237
+    }
+  },
+  "fixtureCleanup": {
+    "passed": true,
+    "projectsPurged": 60,
+    "accountsRevoked": 30,
+    "otherAccountRecordsPreserved": true,
+    "plaintextFixtureRemoved": true
+  },
+  "ci": {
+    "node24": "passed",
+    "node26": "passed",
+    "workspaceBrowser": "Git publish test observed status before preview cleanup; test now waits for the reviewed region to detach; isolated Git browser test passed"
+  },
+  "claims": {
+    "thirtyConcurrentProtocolEditorsValidated": true,
+    "fifteenBrowserContextsValidated": true,
+    "thirtyBrowserContextsValidated": false,
+    "thirtyAiAgentsValidated": false,
+    "generalProjectStorageOnPcs": false
+  }
+}

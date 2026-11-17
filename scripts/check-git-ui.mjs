@@ -592,6 +592,7 @@ try {
     async () => (await dialog().innerText()).includes('Published '),
     'confirmed push success',
   )
+  await reviewed.waitFor({ state: 'detached' })
   assert.equal(await reviewed.count(), 0)
   await noStoredCredential()
   report.checks.push(
@@ -620,6 +621,7 @@ try {
   assert(
     !(await dialog().getByRole('alert').innerText()).includes('push failed'),
   )
+  await reviewed.waitFor({ state: 'detached' })
   assert.equal(await reviewed.count(), 0)
   await noStoredCredential()
   pushWarning = ''

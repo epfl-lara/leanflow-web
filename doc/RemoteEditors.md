@@ -15,7 +15,10 @@ available coordinator.
 Remote placement is **off by default** for new installations. Enable a worker's
 editor slots after its reviewed upgrade and acceptance. Current installation,
 enabled machines and measured capacity are tracked in the
-[rollout record](releases/2026-11-16-remote-editors.md).
+[current four-machine rollout](releases/2026-11-17-primary-workers.md). The
+installation exposes 32 managed editor slots: nine on the VM, nine each on
+PC05/06 and five on PC2. The preceding
+[PC06 rollout](releases/2026-11-16-remote-editors.md) records the initial integration.
 
 ## Eligible editors
 
