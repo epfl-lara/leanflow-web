@@ -1,9 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { createHash, createHmac, generateKeyPairSync, sign } from 'node:crypto'
+import { createServer } from 'node:http'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import express from 'express'
 import { installEntraAuthRoutes, loadEntraConfig } from '../entra-auth.mjs'
 import { sameOrigin } from '../auth.mjs'
+import { createStudio } from '../studio.mjs'
 
 const tenantId = '11111111-1111-1111-1111-111111111111'
 const clientId = '22222222-2222-2222-2222-222222222222'
@@ -28,13 +33,19 @@ const json = (body, status = 200) =>
     status,
     headers: { 'content-type': 'application/json' },
   })
-const jwt = (claims, privateKey = keys.privateKey) => {
+const jwt = (claims, privateKey = keys.privateKey, algorithm = 'RS256') => {
   const header = Buffer.from(
-    JSON.stringify({ alg: 'RS256', kid: 'fixture', typ: 'JWT' }),
+    JSON.stringify({ alg: algorithm, kid: 'fixture', typ: 'JWT' }),
   ).toString('base64url')
   const payload = Buffer.from(JSON.stringify(claims)).toString('base64url')
   const signed = `${header}.${payload}`
-  return `${signed}.${sign('RSA-SHA256', Buffer.from(signed), privateKey).toString('base64url')}`
+  const signature =
+    algorithm === 'HS256'
+      ? createHmac('sha256', env.STUDIO_ENTRA_CLIENT_SECRET)
+          .update(signed)
+          .digest()
+      : sign('RSA-SHA256', Buffer.from(signed), privateKey)
+  return `${signed}.${signature.toString('base64url')}`
 }
 
 async function fixture(t, options = {}) {
@@ -42,7 +53,7 @@ async function fixture(t, options = {}) {
   const config = options.disabled
     ? null
     : { ...loadEntraConfig(env), allowSignup: true }
-  const calls = { fetch: [], signIn: [], link: [] }
+  const calls = { fetch: [], signIn: [], link: [], failures: [] }
   const codes = new Map()
   const auth = {
     identify(request) {
@@ -88,6 +99,7 @@ async function fixture(t, options = {}) {
     calls.fetch.push(url.href)
     assert.equal(url.origin, 'https://login.microsoftonline.com')
     if (url.pathname.endsWith('/.well-known/openid-configuration')) {
+      assert.equal(url.searchParams.get('appid'), clientId)
       markDiscoveryReached()
       await discoveryGate
       if (options.failDiscovery)
@@ -95,10 +107,10 @@ async function fixture(t, options = {}) {
           `Private discovery error: ${env.STUDIO_ENTRA_CLIENT_SECRET}`,
         )
       return json({
-        issuer: config.issuer,
+        issuer: options.wrongMetadataIssuer || config.issuer,
         authorization_endpoint: `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize`,
         token_endpoint: `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
-        jwks_uri: `https://login.microsoftonline.com/${tenantId}/discovery/v2.0/keys`,
+        jwks_uri: `https://login.microsoftonline.com/${tenantId}/discovery/v2.0/keys?appid=${clientId}`,
         response_types_supported: ['code'],
         subject_types_supported: ['public'],
         id_token_signing_alg_values_supported: ['RS256'],
@@ -106,13 +118,17 @@ async function fixture(t, options = {}) {
         code_challenge_methods_supported: ['S256'],
       })
     }
-    if (url.pathname.endsWith('/keys')) return json({ keys: [jwk] })
+    if (url.pathname.endsWith('/keys')) {
+      assert.equal(url.searchParams.get('appid'), clientId)
+      return json({ keys: [jwk] })
+    }
     assert(url.pathname.endsWith('/token'))
     if (options.failToken)
       return json(
         {
           error: 'invalid_client',
           error_description: env.STUDIO_ENTRA_CLIENT_SECRET,
+          error_codes: [7000215, env.STUDIO_ENTRA_CLIENT_SECRET],
         },
         400,
       )
@@ -151,33 +167,69 @@ async function fixture(t, options = {}) {
           ...entry.claims,
         },
         entry.wrongSignature ? wrongKeys.privateKey : keys.privateKey,
+        entry.algorithm,
       ),
     })
   }
-  const app = express()
-  app.use((request, response, next) => {
-    if (request.method === 'POST' && !sameOrigin(request, env.STUDIO_ORIGIN))
-      return response.status(403).json({ error: 'Wrong origin' })
-    next()
-  })
-  app.use(express.json({ limit: '16kb' }))
-  const routes = installEntraAuthRoutes(app, {
-    auth,
-    config,
-    providerFetch,
-    now: () => timestamp,
-    ...options.limits,
-  })
-  app.use((error, _request, response, _next) => {
-    response.status(error.status || 500).json({ error: error.message })
-  })
-  const server = app.listen(0, '127.0.0.1')
-  await new Promise((resolve) => server.once('listening', resolve))
+  let server, routes, studio, dataDir
+  if (options.studio) {
+    const previousOrigin = process.env.STUDIO_ORIGIN
+    process.env.STUDIO_ORIGIN = env.STUDIO_ORIGIN
+    t.after(() => {
+      if (previousOrigin === undefined) delete process.env.STUDIO_ORIGIN
+      else process.env.STUDIO_ORIGIN = previousOrigin
+    })
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-entra-studio-'))
+    studio = await createStudio({
+      dataDir,
+      entraConfig: config,
+      entraProviderFetch: providerFetch,
+      runtime: {
+        async init() {},
+        async shutdown() {},
+        info: () => ({ ready: true }),
+        templates: () => [],
+      },
+      config: {
+        defaultModel: 'fixture',
+        models: [],
+        provider: {},
+        redact: String,
+        lemex: {},
+      },
+    })
+    server = studio.server
+  } else {
+    const app = express()
+    app.use((request, response, next) => {
+      if (request.method === 'POST' && !sameOrigin(request, env.STUDIO_ORIGIN))
+        return response.status(403).json({ error: 'Wrong origin' })
+      next()
+    })
+    app.use(express.json({ limit: '16kb' }))
+    routes = installEntraAuthRoutes(app, {
+      auth,
+      config,
+      providerFetch,
+      reportFailure: (diagnostic) => calls.failures.push(diagnostic),
+      now: () => timestamp,
+      ...options.limits,
+    })
+    app.use((error, _request, response, _next) => {
+      response.status(error.status || 500).json({ error: error.message })
+    })
+    server = createServer(app)
+  }
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   t.after(async () => {
     releaseDiscovery?.()
-    routes.close()
-    server.closeAllConnections()
-    await new Promise((resolve) => server.close(resolve))
+    if (studio) await studio.close()
+    else {
+      routes.close()
+      server.closeAllConnections()
+      await new Promise((resolve) => server.close(resolve))
+    }
+    if (dataDir) await fs.rm(dataDir, { recursive: true, force: true })
   })
   const request = (endpoint, init) =>
     fetch(`http://127.0.0.1:${server.address().port}${endpoint}`, init)
@@ -201,7 +253,14 @@ async function fixture(t, options = {}) {
   }
   const callback = async (
     started,
-    { claims, wrongSignature, state, cookie = started.cookie, extra = '' } = {},
+    {
+      claims,
+      wrongSignature,
+      algorithm,
+      state,
+      cookie = started.cookie,
+      extra = '',
+    } = {},
   ) => {
     const code = `fixture-code-${codes.size}-${calls.fetch.length}`
     codes.set(code, {
@@ -209,6 +268,7 @@ async function fixture(t, options = {}) {
       challenge: started.url.searchParams.get('code_challenge'),
       claims,
       wrongSignature,
+      algorithm,
     })
     return request(
       `/api/auth/entra/callback?code=${code}&state=${state ?? started.url.searchParams.get('state')}${extra}`,
@@ -236,6 +296,8 @@ async function fixture(t, options = {}) {
     finalize,
     calls,
     config,
+    studio,
+    dataDir,
     releaseDiscovery,
     discoveryReached,
     advance: (ms) => {
@@ -336,7 +398,10 @@ test('a signed EPFL response exchanges a PKCE code and establishes only the exis
       settings: { allowSignup: true, expectedUserId: undefined },
     },
   ])
-  assert.equal(calls.fetch.filter((url) => url.endsWith('/keys')).length, 1)
+  assert.equal(
+    calls.fetch.filter((url) => new URL(url).pathname.endsWith('/keys')).length,
+    1,
+  )
 })
 
 test('state, browser binding, expiration, and replay checks reject before token exchange', async (t) => {
@@ -425,6 +490,9 @@ test('provider failures return actionable errors without exposing provider detai
   assert(
     !JSON.stringify(started.result).includes(env.STUDIO_ENTRA_CLIENT_SECRET),
   )
+  assert.deepEqual(unavailable.calls.failures, [
+    { stage: 'start', errorClass: 'ClientError' },
+  ])
 
   const denied = await fixture(t, { failToken: true })
   const response = await denied.callback(await denied.start())
@@ -433,6 +501,20 @@ test('provider failures return actionable errors without exposing provider detai
   assert(!body.includes(env.STUDIO_ENTRA_CLIENT_SECRET))
   assert(!body.includes('invalid_client'))
   assert.equal(denied.calls.signIn.length, 0)
+  assert.deepEqual(denied.calls.failures, [
+    {
+      stage: 'exchange',
+      errorClass: 'ResponseBodyError',
+      code: 'OAUTH_RESPONSE_BODY_ERROR',
+      oauthCode: 'invalid_client',
+      aadstsCode: 7000215,
+    },
+  ])
+  assert(
+    !JSON.stringify(denied.calls.failures).includes(
+      env.STUDIO_ENTRA_CLIENT_SECRET,
+    ),
+  )
   assert(
     !response.headers
       .getSetCookie()
@@ -440,8 +522,76 @@ test('provider failures return actionable errors without exposing provider detai
   )
 })
 
-test('invalid signature, issuer, audience, expiration, nonce, tenant, or object ID cannot create a session', async (t) => {
+test('account failure diagnostics omit unexpected class names, codes and private error fields', async (t) => {
+  const secret = env.STUDIO_ENTRA_CLIENT_SECRET
+  const failure = Object.assign(new Error(secret), {
+    name: secret,
+    code: secret,
+    error: secret,
+    error_description: secret,
+    cause: {
+      error_codes: [secret, -3, 1.5],
+      callback: `https://private.example/${secret}`,
+    },
+  })
+  const { start, callback, calls } = await fixture(t, { signInError: failure })
+  const response = await callback(await start())
+  assert.match(await response.text(), /"ok":false/)
+  assert.deepEqual(calls.failures, [{ stage: 'account', errorClass: 'Error' }])
+  assert(!JSON.stringify(calls.failures).includes(secret))
+})
+
+test('an access_denied callback produces a safe diagnostic without exchanging a token', async (t) => {
+  const { request, start, calls } = await fixture(t)
+  const started = await start()
+  const query = new URLSearchParams({
+    state: started.url.searchParams.get('state'),
+    error: 'access_denied',
+    error_description: env.STUDIO_ENTRA_CLIENT_SECRET,
+  })
+  const response = await request(`/api/auth/entra/callback?${query}`, {
+    headers: { Cookie: started.cookie },
+  })
+  const body = await response.text()
+  assert.match(body, /"ok":false/)
+  assert(!body.includes(env.STUDIO_ENTRA_CLIENT_SECRET))
+  assert.equal(calls.fetch.length, 1)
+  assert.deepEqual(calls.signIn, [])
+  assert.deepEqual(calls.failures, [
+    {
+      stage: 'exchange',
+      errorClass: 'AuthorizationResponseError',
+      code: 'OAUTH_AUTHORIZATION_RESPONSE_ERROR',
+      oauthCode: 'access_denied',
+    },
+  ])
+  assert(
+    !JSON.stringify(calls.failures).includes(env.STUDIO_ENTRA_CLIENT_SECRET),
+  )
+})
+
+test('app-specific discovery retains exact issuer validation', async (t) => {
+  const { start, calls } = await fixture(t, {
+    wrongMetadataIssuer: 'https://attacker.example/v2.0',
+  })
+  const result = await start()
+  assert.equal(result.response.status, 503)
+  assert.equal(new URL(calls.fetch[0]).searchParams.get('appid'), clientId)
+  assert.equal(calls.fetch.length, 1)
+  assert.deepEqual(calls.signIn, [])
+  assert(!JSON.stringify(result.result).includes('attacker.example'))
+  assert.deepEqual(calls.failures, [
+    {
+      stage: 'start',
+      errorClass: 'ClientError',
+      code: 'OAUTH_JSON_ATTRIBUTE_COMPARISON_FAILED',
+    },
+  ])
+})
+
+test('invalid signature, HS256 downgrade, issuer, audience, expiration, nonce, tenant, or object ID cannot create a session', async (t) => {
   const invalid = [
+    { algorithm: 'HS256' },
     { wrongSignature: true },
     { claims: { iss: 'https://attacker.example' } },
     { claims: { aud: '44444444-4444-4444-4444-444444444444' } },
@@ -492,6 +642,7 @@ test('linking requires same-origin finalization by the bound current account and
       'X-Leanflow-User': 'existing',
     },
   )
+  assert.equal(started.url.searchParams.get('prompt'), 'login')
   const response = await callback(started)
   const body = await response.text()
   assert.match(body, /"ok":true/)
@@ -662,4 +813,118 @@ test('provider concurrency is bounded while discovery is pending', async (t) => 
   assert.equal((await start()).response.status, 429)
   releaseDiscovery()
   assert.equal((await pending).response.status, 200)
+})
+
+test('enabled EPFL sign-in provisions a regular account through the real studio middleware and session', async (t) => {
+  const { start, callback, request, studio } = await fixture(t, {
+    studio: true,
+  })
+  const response = await callback(await start())
+  assert.match(await response.text(), /"ok":true/)
+  const sessionCookie = response.headers
+    .getSetCookie()
+    .find((value) => value.startsWith('lemex_web='))
+    ?.split(';')[0]
+  assert(sessionCookie)
+  const sessionResponse = await request('/api/session', {
+    headers: { Cookie: sessionCookie },
+  })
+  assert.equal(sessionResponse.status, 200)
+  const session = await sessionResponse.json()
+  assert.equal(session.user.name, 'EPFL Tester')
+  assert.equal(session.user.role, 'user')
+  assert.equal(session.user.entraLinked, true)
+  assert.equal(session.lemex.configured, false)
+  const stored = studio.auth.users.find((user) => user.id === session.user.id)
+  assert.deepEqual(stored.entra, { tenantId, objectId })
+  assert.equal(stored.tokenHash, undefined)
+  const headers = {
+    Cookie: sessionCookie,
+    'X-Leanflow-User': session.user.id,
+    'Content-Type': 'application/json',
+    Origin: env.STUDIO_ORIGIN,
+  }
+  const renewed = await request('/api/session/activity', {
+    method: 'POST',
+    headers,
+    body: '{}',
+  })
+  assert.equal(renewed.status, 200)
+  assert.equal((await request('/api/projects', { headers })).status, 200)
+  assert.equal(
+    (
+      await request('/api/projects', {
+        headers: { ...headers, 'X-Leanflow-User': 'another-account' },
+      })
+    ).status,
+    401,
+  )
+})
+
+test('real studio linking requires the current bound user and preserves the existing account and cookie', async (t) => {
+  const { start, callback, finalize, request, studio } = await fixture(t, {
+    studio: true,
+  })
+  const { user: existing, token } = await studio.auth.createUser(
+    studio.auth.users[0],
+    {
+      name: 'Existing collaborator',
+      role: 'user',
+    },
+  )
+  const login = await request('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: env.STUDIO_ORIGIN },
+    body: JSON.stringify({ token }),
+  })
+  assert.equal(login.status, 200)
+  const sessionCookie = login.headers.get('set-cookie').split(';')[0]
+  const headers = { Cookie: sessionCookie, 'X-Leanflow-User': existing.id }
+  const mismatched = await start(
+    { mode: 'link' },
+    {
+      ...headers,
+      'X-Leanflow-User': 'another-account',
+    },
+  )
+  assert.equal(mismatched.response.status, 401)
+  const started = await start(
+    { mode: 'link', expectedUserId: existing.id },
+    headers,
+  )
+  assert.equal(started.response.status, 200)
+  assert.equal(started.url.searchParams.get('prompt'), 'login')
+  const response = await callback(started)
+  const proof = /"linkToken":"([A-Za-z0-9_-]{43})"/.exec(
+    await response.text(),
+  )?.[1]
+  assert(proof)
+  const bindingCookie = response.headers.getSetCookie()[0].split(';')[0]
+  assert.equal(
+    studio.auth.users.find((user) => user.id === existing.id).entra,
+    undefined,
+  )
+  const denied = await finalize(proof, bindingCookie, {
+    Cookie: `${sessionCookie}; ${bindingCookie}`,
+    'X-Leanflow-User': 'another-account',
+  })
+  assert.equal(denied.status, 401)
+  const linked = await finalize(proof, bindingCookie, {
+    Cookie: `${sessionCookie}; ${bindingCookie}`,
+    'X-Leanflow-User': existing.id,
+  })
+  assert.equal(linked.status, 200)
+  assert(
+    !linked.headers
+      .getSetCookie()
+      .some((value) => value.startsWith('lemex_web=')),
+  )
+  const sessionResponse = await request('/api/session', { headers })
+  assert.equal(sessionResponse.status, 200)
+  const { user } = await sessionResponse.json()
+  assert.equal(user.id, existing.id)
+  assert.equal(user.name, existing.name)
+  assert.equal(user.role, existing.role)
+  assert.equal(user.entraLinked, true)
+  assert.equal((await studio.auth.login(token, 'fixture-ip')).id, existing.id)
 })

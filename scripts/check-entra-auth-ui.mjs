@@ -40,6 +40,7 @@ let expireSave = false
 let rejectIdentity = false
 let failSession = false
 let omitLinkToken = true
+let holdProvider = false
 let finalizations = 0
 let saves = 0
 const starts = []
@@ -61,6 +62,11 @@ await context.route('**/api/**', (route) =>
   }),
 )
 await context.route('https://login.microsoftonline.com/**', (route) => {
+  if (holdProvider)
+    return route.fulfill({
+      contentType: 'text/html',
+      body: '<!doctype html><title>EPFL fixture</title><p>Waiting for fixture sign-in.</p>',
+    })
   const attempt = new URL(route.request().url()).searchParams.get('attempt')
   return route.fulfill({
     contentType: 'text/html',
@@ -121,7 +127,15 @@ await page.route('**/api/**', async (route) => {
     return respond({ ok: true })
   }
   if (endpoint === '/api/login') {
-    assert.equal(request.postDataJSON().token, 'fixture-token')
+    const body = request.postDataJSON()
+    assert.equal(body.token, 'fixture-token')
+    if (body.expectedUserId !== undefined) {
+      assert.equal(body.expectedUserId, user.id)
+      authenticated = true
+      expired = false
+      failSession = false
+      return respond({ user: state.session.user })
+    }
     failSession = true
     return respond({ user: { ...user, id: 'stale-account' } })
   }
@@ -162,16 +176,14 @@ await page.route('**/api/**', async (route) => {
 })
 
 try {
-  await page.goto(base)
-  await page.getByLabel('Access token', { exact: true }).waitFor()
-  // Wait for the disabled metadata response before checking the absent button.
-  await until(
-    () =>
-      page
-        .getByRole('button', { name: 'Open workspace', exact: true })
-        .isVisible(),
-    'token login',
+  const disabledMetadata = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === '/api/auth/entra' &&
+      response.request().method() === 'GET',
   )
+  await page.goto(base)
+  assert.deepEqual(await (await disabledMetadata).json(), { enabled: false })
+  await page.getByLabel('Access token', { exact: true }).waitFor()
   assert.equal(
     await page
       .getByRole('button', { name: 'Sign in with EPFL', exact: true })
@@ -185,6 +197,43 @@ try {
 
   enabled = true
   await page.reload()
+  const epflSignIn = page.getByRole('button', {
+    name: 'Sign in with EPFL',
+    exact: true,
+  })
+  await epflSignIn.waitFor()
+  holdProvider = true
+  const popupOpened = context.waitForEvent('page')
+  await epflSignIn.focus()
+  await page.keyboard.press('Enter')
+  const heldPopup = await popupOpened
+  await heldPopup
+    .getByText('Waiting for fixture sign-in.', { exact: true })
+    .waitFor()
+  assert(await page.getByLabel('Access token', { exact: true }).isDisabled())
+  const popupClosed = heldPopup.waitForEvent('close')
+  await page
+    .getByRole('button', { name: 'Cancel EPFL sign-in', exact: true })
+    .click()
+  await popupClosed
+  await until(
+    async () =>
+      (await epflSignIn.isEnabled()) &&
+      (await page.getByLabel('Access token', { exact: true }).isEnabled()),
+    'cancelled EPFL sign-in releases token controls',
+  )
+  await until(
+    () => epflSignIn.evaluate((button) => document.activeElement === button),
+    'cancelled EPFL sign-in restores keyboard focus',
+  )
+  assert.equal(authenticated, false)
+  assert.equal(finalizations, 0)
+  assert.equal(starts.length, 1)
+  holdProvider = false
+  report.checks.push(
+    'Keyboard-started EPFL sign-in can be cancelled, closing its popup and restoring token controls and focus without authentication or linking',
+  )
+
   await page.getByLabel('Access token', { exact: true }).fill('fixture-token')
   await page
     .getByRole('button', { name: 'Open workspace', exact: true })
@@ -201,10 +250,37 @@ try {
   await page
     .locator('.editor-loading')
     .waitFor({ state: 'hidden', timeout: 60000 })
-  assert.equal(starts[0].mode, 'login')
+  assert.equal(starts[1].mode, 'login')
   report.checks.push('EPFL popup login opens the existing workspace')
   report.checks.push(
     'Failed token session loading does not bind subsequent EPFL login to a stale account',
+  )
+
+  expired = true
+  await page
+    .getByRole('button', { name: 'Refresh Git status', exact: true })
+    .click()
+  const unlinkedRecovery = page.getByRole('dialog', {
+    name: 'Sign in to continue',
+    exact: true,
+  })
+  await unlinkedRecovery.waitFor()
+  assert.equal(
+    await unlinkedRecovery
+      .getByRole('button', { name: 'Sign in with EPFL', exact: true })
+      .count(),
+    0,
+  )
+  await unlinkedRecovery
+    .getByLabel('Access token', { exact: true })
+    .fill('fixture-token')
+  await unlinkedRecovery
+    .getByRole('button', { name: 'Continue in workspace', exact: true })
+    .click()
+  await unlinkedRecovery.waitFor({ state: 'hidden' })
+  assert.equal(starts.length, 2)
+  report.checks.push(
+    'An unlinked workspace account recovers with its token and is not offered EPFL recovery',
   )
 
   await page
@@ -238,7 +314,7 @@ try {
     () => closeSettings.isEnabled(),
     'linking releases the settings dialog',
   )
-  assert.equal(starts[1].mode, 'link')
+  assert.equal(starts[2].mode, 'link')
   assert.equal(finalizations, 1)
   assert.equal(state.session.user.id, user.id)
   assert.equal(state.session.user.role, 'user')
@@ -290,7 +366,7 @@ try {
       () => window.__entraEditor === document.querySelector('.monaco-editor'),
     ),
   )
-  assert.equal(starts.length, 5)
+  assert.equal(starts.length, 6)
   fixture.assertClean()
   report.checks.push(
     'Same-account EPFL renewal preserves the editor and unsent draft without replaying writes',

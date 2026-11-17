@@ -65,12 +65,14 @@ export function SessionRecovery({ user }: { user: Session['user'] }) {
         Your session expired. Your unsaved edits and chat draft are still here.
         Sign in as {user.name} to continue.
       </p>
-      <EntraButton
-        expectedUserId={user.id}
-        disabled={busy}
-        onBusyChange={setBusy}
-        onComplete={restoreSession}
-      />
+      {user.entraLinked === true && (
+        <EntraButton
+          expectedUserId={user.id}
+          disabled={busy}
+          onBusyChange={setBusy}
+          onComplete={restoreSession}
+        />
+      )}
       <form onSubmit={submit}>
         <label className="field-label" htmlFor="recovery-access-token">
           Access token

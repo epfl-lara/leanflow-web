@@ -155,10 +155,10 @@ try {
   const accessToken = connections.getByLabel('Access token', { exact: true })
   await authorName.fill('My draft author')
   await accessToken.fill(fakeToken)
-  failLookup = false
   await connections
     .getByRole('button', { name: 'Retry loading connections', exact: true })
     .click()
+  failLookup = false
   await until(
     async () => (await authorEmail.inputValue()) === 'server@example.invalid',
     'connection retry loads untouched identity fields',
@@ -193,10 +193,12 @@ try {
     )
     .waitFor()
   assert.equal(await accessToken.inputValue(), '')
-  failLookup = false
+  // Keep the outage active through the click: the post-save change event may
+  // still be retrying reads and must not remove the retry action mid-click.
   await connections
     .getByRole('button', { name: 'Retry loading connections', exact: true })
     .click()
+  failLookup = false
   await connections
     .getByRole('button', { name: 'Disconnect github.com', exact: true })
     .waitFor()

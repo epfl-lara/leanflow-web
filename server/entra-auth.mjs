@@ -14,6 +14,67 @@ const providerError =
 const expiredError =
   'This EPFL sign-in expired. Close this window and try again.'
 const hash = (value) => createHash('sha256').update(value).digest()
+const FAILURE_CLASSES = new Set([
+  'Error',
+  'TypeError',
+  'ClientError',
+  'AuthorizationResponseError',
+  'ResponseBodyError',
+  'WWWAuthenticateChallengeError',
+  'OperationProcessingError',
+  'UnsupportedOperationError',
+])
+const OAUTH_FAILURES = new Set([
+  'invalid_request',
+  'unauthorized_client',
+  'access_denied',
+  'unsupported_response_type',
+  'invalid_scope',
+  'server_error',
+  'temporarily_unavailable',
+  'invalid_client',
+  'invalid_grant',
+  'invalid_token',
+  'interaction_required',
+  'login_required',
+  'consent_required',
+  'account_selection_required',
+])
+const CLIENT_FAILURES = new Set([
+  'OAUTH_RESPONSE_BODY_ERROR',
+  'OAUTH_AUTHORIZATION_RESPONSE_ERROR',
+  'OAUTH_UNSUPPORTED_OPERATION',
+  'OAUTH_PARSE_ERROR',
+  'OAUTH_INVALID_RESPONSE',
+  'OAUTH_INVALID_REQUEST',
+  'OAUTH_RESPONSE_IS_NOT_JSON',
+  'OAUTH_RESPONSE_IS_NOT_CONFORM',
+  'OAUTH_HTTP_REQUEST_FORBIDDEN',
+  'OAUTH_REQUEST_PROTOCOL_FORBIDDEN',
+  'OAUTH_JWT_TIMESTAMP_CHECK_FAILED',
+  'OAUTH_JWT_CLAIM_COMPARISON_FAILED',
+  'OAUTH_JSON_ATTRIBUTE_COMPARISON_FAILED',
+  'OAUTH_KEY_SELECTION_FAILED',
+  'OAUTH_MISSING_SERVER_METADATA',
+  'OAUTH_INVALID_SERVER_METADATA',
+])
+
+function failureDiagnostic(stage, error) {
+  const cause = error?.cause
+  const aadstsCode = Array.isArray(cause?.error_codes)
+    ? cause.error_codes.find(
+        (code) =>
+          Number.isSafeInteger(code) && code > 0 && code < 10_000_000_000,
+      )
+    : undefined
+  return {
+    stage,
+    errorClass: FAILURE_CLASSES.has(error?.name) ? error.name : 'Error',
+    ...(CLIENT_FAILURES.has(error?.code) && { code: error.code }),
+    ...(OAUTH_FAILURES.has(error?.error) && { oauthCode: error.error }),
+    ...(aadstsCode !== undefined && { aadstsCode }),
+  }
+}
 
 function displayName(claims) {
   const fullName = [claims.given_name, claims.family_name]
@@ -161,6 +222,8 @@ export function installEntraAuthRoutes(
     auth,
     config,
     providerFetch,
+    reportFailure = (diagnostic) =>
+      console.warn('EPFL sign-in failed.', diagnostic),
     now = Date.now,
     transactionTtlMs = 10 * 60_000,
     maxTransactions = 256,
@@ -176,6 +239,14 @@ export function installEntraAuthRoutes(
   let active = 0
   let discovery
   let closed = false
+  const report = (stage, error) => {
+    // Never pass raw errors, messages, provider descriptions, or token data to logs.
+    try {
+      reportFailure(failureDiagnostic(stage, error))
+    } catch {
+      // Diagnostics must not change authentication outcomes.
+    }
+  }
   const prune = () => {
     const timestamp = now()
     for (const [state, transaction] of pending)
@@ -199,9 +270,24 @@ export function installEntraAuthRoutes(
           {
             timeout: 10,
             execute: [oidc.enableNonRepudiationChecks],
-            ...(providerFetch && { [oidc.customFetch]: providerFetch }),
+            [oidc.customFetch]: (input, options) => {
+              const url = new URL(input)
+              if (
+                url.href === `${config.issuer}/.well-known/openid-configuration`
+              )
+                url.searchParams.set('appid', config.clientId)
+              return (providerFetch || globalThis.fetch)(url, options)
+            },
           },
         )
+        .then((client) => {
+          // Entra discovery permits template issuers; this app is single-tenant.
+          if (client.serverMetadata().issuer !== config.issuer)
+            throw new oidc.ClientError('Unexpected EPFL discovery issuer.', {
+              code: 'OAUTH_JSON_ATTRIBUTE_COMPARISON_FAILED',
+            })
+          return client
+        })
         .catch((error) => {
           discovery = undefined
           throw error
@@ -264,7 +350,7 @@ export function installEntraAuthRoutes(
         nonce,
         code_challenge: await oidc.calculatePKCECodeChallenge(verifier),
         code_challenge_method: 'S256',
-        prompt: 'select_account',
+        prompt: mode === 'link' ? 'login' : 'select_account',
       })
       // Discovery and PKCE calculation yield; recheck before reserving a slot.
       if (closed || pending.size + pendingLinks.size >= maxTransactions)
@@ -283,7 +369,8 @@ export function installEntraAuthRoutes(
         cookie(browserBinding, Math.ceil(transactionTtlMs / 1000)),
       )
       response.json({ url: url.href })
-    } catch {
+    } catch (error) {
+      report('start', error)
       response.status(503).json({
         error:
           'EPFL sign-in is unavailable. Try again, or use your access token.',
@@ -327,7 +414,12 @@ export function installEntraAuthRoutes(
     requireSessionUser(actor, transaction.actorId)
     pendingLinks.delete(body.token)
     response.append('Set-Cookie', cookie('', 0))
-    await auth.linkEntra(actor, transaction.identity)
+    try {
+      await auth.linkEntra(actor, transaction.identity)
+    } catch (error) {
+      report('account', error)
+      throw error
+    }
     response.json({ ok: true })
   })
   app.get(CALLBACK, async (request, response) => {
@@ -388,7 +480,8 @@ export function installEntraAuthRoutes(
         objectId: claims.oid.toLowerCase(),
         name: displayName(claims),
       }
-    } catch {
+    } catch (error) {
+      report('exchange', error)
       response.append('Set-Cookie', cookie('', 0))
       return complete(response, config, false, providerError)
     } finally {
@@ -422,6 +515,7 @@ export function installEntraAuthRoutes(
       }
       complete(response, config, true)
     } catch (error) {
+      report('account', error)
       response.append('Set-Cookie', cookie('', 0))
       const message = [400, 401, 403, 409].includes(error.status)
         ? error.message

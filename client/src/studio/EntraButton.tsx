@@ -25,9 +25,13 @@ export function EntraButton({
 }) {
   const [enabled, setEnabled] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [popupBusy, setPopupBusy] = useState(false)
   const [error, setError] = useState('')
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const restoreFocus = useRef(false)
   const mounted = useRef(false)
   const pending = useRef<AbortController | null>(null)
+  const popupController = useRef<AbortController | null>(null)
   const availabilityListener = useRef(onAvailabilityChange)
   useEffect(() => {
     availabilityListener.current = onAvailabilityChange
@@ -55,11 +59,39 @@ export function EntraButton({
     }
   }, [])
 
+  useEffect(() => {
+    if (enabled && !busy && !disabled && restoreFocus.current) {
+      restoreFocus.current = false
+      buttonRef.current?.focus()
+    }
+  }, [enabled, busy, disabled])
+
+  function release(controller: AbortController) {
+    if (pending.current !== controller) return
+    pending.current = null
+    popupController.current = null
+    if (mounted.current) {
+      setBusy(false)
+      setPopupBusy(false)
+    }
+    onBusyChange?.(false)
+  }
+
+  function cancel() {
+    const controller = popupController.current
+    if (!controller) return
+    restoreFocus.current = true
+    controller.abort()
+    release(controller)
+  }
+
   async function start() {
     if (disabled || pending.current) return
     const controller = new AbortController()
     pending.current = controller
+    popupController.current = controller
     setBusy(true)
+    setPopupBusy(true)
     setError('')
     onBusyChange?.(true)
     try {
@@ -75,6 +107,10 @@ export function EntraButton({
           }),
         { signal: controller.signal },
       )
+      if (popupController.current === controller) {
+        popupController.current = null
+        if (mounted.current) setPopupBusy(false)
+      }
       if (controller.signal.aborted) return
       if (mode === 'link') {
         if (!result.linkToken || !/^[A-Za-z0-9_-]{43}$/.test(result.linkToken))
@@ -92,9 +128,7 @@ export function EntraButton({
       if (mounted.current && !controller.signal.aborted)
         setError(errorText(error))
     } finally {
-      pending.current = null
-      if (mounted.current) setBusy(false)
-      onBusyChange?.(false)
+      release(controller)
     }
   }
 
@@ -102,6 +136,7 @@ export function EntraButton({
   return (
     <div>
       <button
+        ref={buttonRef}
         type="button"
         className={className}
         disabled={disabled || busy}
@@ -110,6 +145,11 @@ export function EntraButton({
         {busy && <span className="spinner" />}
         {busy ? 'Waiting for EPFL…' : label}
       </button>
+      {popupBusy && (
+        <button type="button" className="button subtle small" onClick={cancel}>
+          Cancel EPFL sign-in
+        </button>
+      )}
       {error && (
         <p className="error-message" role="alert">
           {error}

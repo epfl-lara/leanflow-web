@@ -172,6 +172,112 @@ test('EPFL session recovery cannot create or switch accounts', async (t) => {
   )
 })
 
+test('existing EPFL sign-in and recovery do not rewrite the account store', async (t) => {
+  const { auth } = await fixture(t)
+  const created = await auth.signInEntra(identity, { allowSignup: true })
+  const filename = path.join(auth.dir, 'users.json')
+  const timestamp = new Date('2026-01-01T00:00:00Z')
+  await fs.utimes(filename, timestamp, timestamp)
+  const before = await fs.stat(filename, { bigint: true })
+  const contents = await fs.readFile(filename, 'utf8')
+  for (const options of [
+    {},
+    { allowSignup: true },
+    { expectedUserId: created.id },
+    { allowSignup: true, expectedUserId: created.id },
+  ])
+    assert.equal((await auth.signInEntra(identity, options)).id, created.id)
+  const after = await fs.stat(filename, { bigint: true })
+  assert.equal(await fs.readFile(filename, 'utf8'), contents)
+  for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'])
+    assert.equal(after[field], before[field], field)
+})
+
+test('existing EPFL sign-in succeeds when account-store writes are unavailable', async (t) => {
+  const { auth } = await fixture(t)
+  const created = await auth.signInEntra(identity, { allowSignup: true })
+  const writeFile = fs.writeFile.bind(fs)
+  t.mock.method(fs, 'writeFile', async (filename, ...options) => {
+    if (
+      typeof filename === 'string' &&
+      filename.startsWith(auth.dir + path.sep)
+    )
+      throw Object.assign(new Error('Fixture account store is read-only.'), {
+        code: 'EROFS',
+      })
+    return writeFile(filename, ...options)
+  })
+  assert.equal((await auth.signInEntra(identity)).id, created.id)
+  assert.equal(
+    (await auth.signInEntra(identity, { expectedUserId: created.id })).id,
+    created.id,
+  )
+  await assert.rejects(
+    auth.signInEntra(anotherIdentity, { allowSignup: true }),
+    { code: 'EROFS' },
+  )
+  // A failed signup must neither poison the queue nor leave an account behind.
+  assert.equal((await auth.signInEntra(identity)).id, created.id)
+  await assert.rejects(auth.signInEntra(anotherIdentity), { status: 403 })
+})
+
+test('an account removed during EPFL sign-in cannot be restored by that sign-in', async (t) => {
+  const { auth } = await fixture(t)
+  const created = await auth.signInEntra(identity, { allowSignup: true })
+  const filename = path.join(auth.dir, 'users.json')
+  const readFile = fs.readFile.bind(fs)
+  let removeAfterRead = true
+  let revokedContents
+  t.mock.method(fs, 'readFile', async (file, ...options) => {
+    const contents = await readFile(file, ...options)
+    if (file === filename && removeAfterRead) {
+      removeAfterRead = false
+      revokedContents =
+        JSON.stringify(
+          JSON.parse(contents).filter((user) => user.id !== created.id),
+          null,
+          2,
+        ) + '\n'
+      // Simulate an administrator removing the account after the read snapshot.
+      await fs.writeFile(filename, revokedContents)
+    }
+    return contents
+  })
+  await auth.signInEntra(identity)
+  assert.equal(await readFile(filename, 'utf8'), revokedContents)
+  assert.equal(auth.isActive(created.id), false)
+  await assert.rejects(auth.signInEntra(identity), { status: 403 })
+  await assert.rejects(
+    auth.signInEntra(identity, { expectedUserId: created.id }),
+    { status: 409 },
+  )
+  assert.equal(await readFile(filename, 'utf8'), revokedContents)
+})
+
+test('EPFL sign-in waits for a pending explicit link before looking up its account', async (t) => {
+  const { auth, owner } = await fixture(t)
+  const [linked, signedIn] = await Promise.all([
+    auth.linkEntra(owner, identity),
+    auth.signInEntra(identity, { expectedUserId: owner.id }),
+  ])
+  assert.equal(linked.id, owner.id)
+  assert.equal(signedIn.id, owner.id)
+  assert.equal(signedIn.role, 'owner')
+})
+
+test('EPFL sign-in sees a pending signup without provisioning a second account', async (t) => {
+  const { auth, directory } = await fixture(t)
+  const [created, signedIn] = await Promise.all([
+    auth.signInEntra(identity, { allowSignup: true }),
+    auth.signInEntra(identity),
+  ])
+  assert.equal(signedIn.id, created.id)
+  const reopened = new Auth(directory)
+  await reopened.init()
+  assert.equal(reopened.users.length, 2)
+  assert.equal((await reopened.signInEntra(identity)).id, created.id)
+})
+
 test('concurrent EPFL signup creates one persistent account per identity', async (t) => {
   const { auth, directory } = await fixture(t)
   const users = await Promise.all(

@@ -175,7 +175,7 @@ export class Auth {
   }
   async signInEntra(identity, { allowSignup = false, expectedUserId } = {}) {
     const verified = entraIdentity(identity)
-    return this.mutate(() => {
+    return this.#withCurrentUsers(async () => {
       const user = this.users.find((current) => matchesEntra(current, verified))
       if (expectedUserId !== undefined && user?.id !== expectedUserId)
         throw Object.assign(
@@ -199,6 +199,7 @@ export class Auth {
         entra: { tenantId: verified.tenantId, objectId: verified.objectId },
       }
       this.users.push(created)
+      await this.#saveUsers()
       return created
     })
   }
@@ -269,27 +270,35 @@ export class Auth {
     })
   }
   async mutate(change) {
+    return this.#withCurrentUsers(async () => {
+      const result = await change()
+      await this.#saveUsers()
+      return result
+    })
+  }
+  #withCurrentUsers(action) {
     const task = (this.writeQueue || Promise.resolve())
       .catch(() => {})
       .then(async () => {
         await this.refreshUsers()
-        const result = await change()
-        const filename = path.join(this.dir, 'users.json'),
-          temporary = filename + '.' + randomBytes(12).toString('hex') + '.tmp'
-        try {
-          await fs.writeFile(
-            temporary,
-            JSON.stringify(this.users, null, 2) + '\n',
-            { mode: 0o600, flag: 'wx' },
-          )
-          await fs.rename(temporary, filename)
-        } finally {
-          await fs.rm(temporary, { force: true })
-        }
-        return result
+        return action()
       })
     this.writeQueue = task
     return task
+  }
+  async #saveUsers() {
+    const filename = path.join(this.dir, 'users.json'),
+      temporary = filename + '.' + randomBytes(12).toString('hex') + '.tmp'
+    try {
+      await fs.writeFile(
+        temporary,
+        JSON.stringify(this.users, null, 2) + '\n',
+        { mode: 0o600, flag: 'wx' },
+      )
+      await fs.rename(temporary, filename)
+    } finally {
+      await fs.rm(temporary, { force: true })
+    }
   }
   #readCurrentUsers() {
     try {

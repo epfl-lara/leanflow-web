@@ -64,6 +64,11 @@ returned token; public discovery alone cannot confirm app assignments,
 consent, credentials, or user claims. See Microsoft's
 [ID-token claims reference](https://learn.microsoft.com/en-us/entra/identity-platform/id-token-claims-reference).
 
+LeanFlow requests application-specific metadata with `appid=<client-ID>` so
+that Entra can return the correct signing keys for EPFL's mapped claims.
+Issuer, tenant, audience, nonce and signature checks still apply. See
+[Microsoft's signing-key guidance](https://learn.microsoft.com/en-us/entra/identity-platform/jwt-claims-customization#validate-token-signing-key).
+
 ## Configure a linked-account pilot
 
 For a later test deployment, add these settings to its private environment
@@ -78,7 +83,8 @@ STUDIO_ENTRA_CLIENT_SECRET=<private-secret-value>
 STUDIO_ENTRA_ALLOW_SIGNUP=false
 ```
 
-Use a separate app registration and origin for a staging server. Enabling
+Use a separate app registration and hostname for a staging server; cookies are
+shared across ports on the same hostname. Enabling
 sign-in requires all settings to be valid; an incomplete configuration stops
 startup with an actionable error. Disabled sign-in makes no identity-provider
 requests and hides the EPFL controls.
@@ -98,6 +104,11 @@ browser blocks one. Renewal checks the workspace account before restoring
 access and keeps unsaved editor text and chat drafts in the original tab.
 Transactions expire after a short interval and are lost on server restart;
 start sign-in again if interrupted.
+
+Use **Cancel EPFL sign-in** to close an unfinished popup and return to the
+workspace. Linking asks Microsoft to authenticate the account again.
+Signing out of LeanFlow clears this browser's LeanFlow session; it does not
+sign you out of Microsoft or EPFL.
 
 ## Review before broader access
 
@@ -122,6 +133,17 @@ Deployment remains a separate step. Wait for active proof runs, checks, and
 project setup to finish before any service restart. To disable SSO later, set
 `STUDIO_ENTRA_ENABLED=false` and apply it during an idle restart. This stops new
 EPFL sign-ins; it does not revoke already-issued LeanFlow session cookies.
+Accounts created through EPFL sign-in need Entra for new sign-ins. Invitation
+tokens remain a fallback for accounts that already have one.
+
+### Diagnose a failed sign-in
+
+Private server logs identify the failed stage and sanitized provider error
+codes. They omit authorization codes, tokens, user claims and secret values.
+Use the stage and any `AADSTS` code to check the registered redirect URI,
+credential expiry, token claims and EPFL access assignments. Keep the owner's
+invitation token available while investigating. Do not weaken signature or
+tenant checks to make a failing login pass.
 
 ## Run isolated checks
 
@@ -148,6 +170,7 @@ already-installed Playwright Chromium browser:
 
 ```sh
 STUDIO_TEST_URL=http://127.0.0.1:3109 node scripts/check-entra-auth-ui.mjs
+STUDIO_TEST_URL=http://127.0.0.1:3109 node scripts/check-login-ui.mjs
 STUDIO_TEST_URL=http://127.0.0.1:3109 node scripts/check-auth-recovery-ui.mjs
 STUDIO_TEST_URL=http://127.0.0.1:3109 node scripts/check-profile-ui.mjs
 ```
