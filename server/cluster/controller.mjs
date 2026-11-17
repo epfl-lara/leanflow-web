@@ -48,6 +48,7 @@ const MAX_EVENT_PAGES = 16
 const MAX_TIMEOUT_MS = 6 * 60 * 60 * 1000
 const WATCHDOG_GRACE_MS = 15 * 60 * 1000
 const MAX_PREPARED = 1024
+const MAX_VALIDATED_ASSETS = 64
 const TIMEOUTS = {
   hello: 15_000,
   status: 10_000,
@@ -62,6 +63,7 @@ const TIMEOUTS = {
 const DEFAULT_TIMING = {
   pollMs: 5000,
   eventPollMs: 500,
+  editorPollMs: 2000,
   renewMs: 5000,
   minBackoffMs: 1000,
   maxBackoffMs: 60_000,
@@ -363,7 +365,7 @@ function lockController(filename) {
 }
 
 // Schedules pure checks on enrolled workers. A run resolves to the remote
-// result, resolves to null before assignment when no certified worker can take
+// result, resolves to null before execution when no certified worker can take
 // it, or rejects once the worker's attempt is known to be stopped. When that
 // cannot be confirmed it rejects with workerCleanup and keeps the capacity
 // reserved until the worker is reconciled.
@@ -396,6 +398,7 @@ export class ClusterController {
   #resultNodes = new WeakMap()
   #uploads = new WeakMap()
   #uploadSlots = new WeakMap()
+  #validatedAssets = new Set()
 
   constructor({
     config,
@@ -450,6 +453,7 @@ export class ClusterController {
           retryTimer: null,
           backoffMs: this.#timing.minBackoffMs,
           busyUntil: 0,
+          storageFullUntil: 0,
           quarantined: false,
           fenced: false,
           error: null,
@@ -781,6 +785,7 @@ export class ClusterController {
       }
     }
     await this.#blobs.reset()
+    this.#validatedAssets.clear()
     const local = this.#state.compactHistory(this.#identity.epoch)
     return { local, worker }
   }
@@ -955,6 +960,16 @@ export class ClusterController {
     return manifest
   }
 
+  async #validateAsset(hash, kind) {
+    const key = `${kind}:${hash}`
+    if (!this.#validatedAssets.has(key)) await this.#localManifest(hash, kind)
+    // Retain only the immutable validation result, not another large entry array.
+    this.#validatedAssets.delete(key)
+    if (this.#validatedAssets.size >= MAX_VALIDATED_ASSETS)
+      this.#validatedAssets.delete(this.#validatedAssets.values().next().value)
+    this.#validatedAssets.add(key)
+  }
+
   // Checks the frozen environment before it is queued, so a worker never
   // receives inputs that disagree with their pinned toolchain.
   async #environment(request) {
@@ -976,9 +991,9 @@ export class ClusterController {
       )
     )
       throw invalidRequest('Choose a Lean file in this project.')
-    await this.#localManifest(request.toolchain.manifest, 'toolchain')
+    await this.#validateAsset(request.toolchain.manifest, 'toolchain')
     if (request.dependencies)
-      await this.#localManifest(request.dependencies, 'dependencies')
+      await this.#validateAsset(request.dependencies, 'dependencies')
     return source.totalBytes
   }
 
@@ -1072,6 +1087,7 @@ export class ClusterController {
       node.control &&
       node.status?.ready &&
       node.status.capabilities.length > 0 &&
+      Date.now() >= node.storageFullUntil &&
       !node.quarantined &&
       !node.maintenance
     )
@@ -1334,6 +1350,14 @@ export class ClusterController {
         reason: 'prepare-failed',
       })
       if (job.stop) throw job.stop.error
+      if (error?.code === 'storage_full') {
+        // No attempt was started: keep a full worker out of placement briefly
+        // and let the caller use the existing local path safely.
+        node.storageFullUntil =
+          Date.now() + Math.max(30_000, this.#timing.pollMs)
+        node.error = 'storage_full'
+        return null
+      }
       throw error?.code === 'snapshot_invalid'
         ? error
         : failure('worker_upload_failed')
@@ -1503,7 +1527,14 @@ export class ClusterController {
         job.node.quarantined = true
         throw failure('worker_cleanup')
       }
-      await this.#sleep(job, this.#timing.eventPollMs)
+      await this.#sleep(
+        job,
+        job.entry.request.operation === 'lean.session' &&
+          job.editorReady &&
+          attempt.state === 'running'
+          ? this.#timing.editorPollMs
+          : this.#timing.eventPollMs,
+      )
     }
   }
 
@@ -1779,26 +1810,59 @@ export class ClusterController {
       await this.#upload(node, bulk, sourceManifest, 'source', signal)
       return
     }
-    await this.#upload(node, bulk, toolchain.manifest, 'toolchain', signal)
-    if (dependencies)
+    const installed = node.status?.ready && node.nodeEpoch === nodeEpoch
+    const toolchainReady =
+      installed &&
+      node.status.assets?.toolchains[toolchain.version] === toolchain.manifest
+    const dependenciesReady =
+      installed && node.status.assets?.dependencies.includes(dependencies)
+    if (!toolchainReady)
+      await this.#upload(node, bulk, toolchain.manifest, 'toolchain', signal)
+    if (dependencies && !dependenciesReady)
       await this.#upload(node, bulk, dependencies, 'dependencies', signal)
     if (sourceManifest)
       await this.#upload(node, bulk, sourceManifest, 'source', signal)
     if (environment.editorSource)
       await this.#upload(node, bulk, environment.editorSource, 'source', signal)
     const key = `${nodeEpoch}:assets:${toolchain.version}:${toolchain.manifest}:${dependencies ?? ''}:${environment.editorSource ?? ''}`
-    if (!node.prepared.has(key)) {
-      const reply = await bulk.request(
-        'assets.prepare',
-        {
-          toolchain,
-          ...(dependencies ? { dependencies } : {}),
-          ...(environment.editorSource
-            ? { editorSource: environment.editorSource }
-            : {}),
-        },
-        { signal, timeoutMs: TIMEOUTS.prepare },
-      )
+    if (!this.#prepared(node, key)) {
+      const prepare = () =>
+        bulk.request(
+          'assets.prepare',
+          {
+            toolchain,
+            ...(dependencies ? { dependencies } : {}),
+            ...(environment.editorSource
+              ? { editorSource: environment.editorSource }
+              : {}),
+          },
+          { signal, timeoutMs: TIMEOUTS.prepare },
+        )
+      let reply
+      try {
+        reply = await prepare()
+      } catch (error) {
+        // A stale installed-tree advertisement may need its immutable objects
+        // restored. Retry preparation once, before attempt.start can run code.
+        if (
+          !(toolchainReady || dependenciesReady) ||
+          signal?.aborted ||
+          node.status?.nodeEpoch !== nodeEpoch ||
+          !['assets_missing', 'asset_missing', 'cluster_error'].includes(
+            error?.code,
+          )
+        )
+          throw error
+        for (const [hash, kind] of [
+          [toolchainReady && toolchain.manifest, 'toolchain'],
+          [dependenciesReady && dependencies, 'dependencies'],
+        ])
+          if (hash) {
+            node.prepared.delete(`${nodeEpoch}:${hash}`)
+            await this.#upload(node, bulk, hash, kind, signal)
+          }
+        reply = await prepare()
+      }
       if (!isRecord(reply) || reply.ready !== true) throw invalidReply()
       this.#remember(node, nodeEpoch, key)
     }
@@ -1808,8 +1872,17 @@ export class ClusterController {
 
   #remember(node, nodeEpoch, key) {
     if (node.nodeEpoch !== nodeEpoch) return
-    if (node.prepared.size >= MAX_PREPARED) node.prepared.clear()
+    node.prepared.delete(key)
+    if (node.prepared.size >= MAX_PREPARED)
+      node.prepared.delete(node.prepared.values().next().value)
     node.prepared.add(key)
+  }
+
+  #prepared(node, key) {
+    if (!node.prepared.has(key)) return false
+    node.prepared.delete(key)
+    node.prepared.add(key)
+    return true
   }
 
   // Uploads one manifest and every object it names, then confirms that the
@@ -1818,7 +1891,7 @@ export class ClusterController {
   async #upload(node, bulk, hash, kind, signal) {
     const nodeEpoch = node.status?.nodeEpoch
     const key = `${nodeEpoch}:${hash}`
-    if (node.prepared.has(key)) return
+    if (this.#prepared(node, key)) return
     const manifest = await this.#localManifest(hash, kind)
     const sizes = new Map()
     for (const entry of manifest.entries)
@@ -2187,8 +2260,11 @@ export class ClusterController {
   }
 
   #observe(node, status) {
+    if (node.error === 'storage_full' && Date.now() >= node.storageFullUntil)
+      node.error = null
     if (node.nodeEpoch !== status.nodeEpoch) {
       node.prepared.clear()
+      node.storageFullUntil = 0
       node.nodeEpoch = status.nodeEpoch
     }
     node.status = status

@@ -27,6 +27,7 @@ const ALL = ['check.build', 'check.kernel', 'lean.file']
 const FAST = {
   pollMs: 40,
   eventPollMs: 10,
+  editorPollMs: 10,
   renewMs: 40,
   minBackoffMs: 10,
   maxBackoffMs: 80,
@@ -985,7 +986,7 @@ async function cluster(t, settings = {}) {
       bundleDigest: BUNDLE,
       imageDigest: IMAGE,
       transportFactory,
-      timing: FAST,
+      timing: { ...FAST, ...settings.timing },
     })
     controllers.push(controller)
     return controller
@@ -1447,6 +1448,7 @@ test('evicted coordinator asset payloads transfer again after worker cache loss 
   assert.equal((await worker.blobs.read(hash)).toString(), '#!/bin/sh\n')
   await controller.shutdown()
   await worker.blobs.reset()
+  await fsp.rm(worker.runtime.toolchains.get(VERSION), { recursive: true })
   const restarted = make()
   await restarted.init()
   await until(() => restarted.status().ready === 1)
@@ -1465,6 +1467,137 @@ test('evicted coordinator asset payloads transfer again after worker cache loss 
         entry.params.final,
     ).length,
     2,
+  )
+})
+
+test('a fresh controller reuses installed worker assets without scanning their object hashes', async (t) => {
+  const f = await cluster(t)
+  await f.ready()
+  const dependency = await f.blobs.put('compiled dependency fixture')
+  const dependencies = (
+    await f.blobs.seal(
+      [{ path: 'public.olean', type: 'file', ...dependency, mode: 0o600 }],
+      'dependencies',
+    )
+  ).hash
+  const input = { ...f.input, dependencies }
+  await f.controller.prepareNode('node-a', input)
+  await f.controller.shutdown()
+  const controller = f.make()
+  await controller.init()
+  await until(() => controller.status().ready === 1)
+  f.transport.requests.length = 0
+  assert.equal((await controller.run(input, options())).code, 0)
+  const assets = new Set([
+    input.toolchain.manifest,
+    dependencies,
+    dependency.hash,
+    sha256('#!/bin/sh\n'),
+  ])
+  assert(
+    !f.transport.requests.some(
+      (call) =>
+        call.method === 'objects.has' &&
+        call.params.hashes.some((hash) => assets.has(hash)),
+    ),
+  )
+  assert(
+    f.transport.requests.some((call) => call.method === 'objects.has'),
+    'Fresh project source still gets checked and transferred',
+  )
+  assert.equal(
+    f.transport.requests.filter((call) => call.method === 'assets.prepare')
+      .length,
+    1,
+  )
+})
+
+test('immutable asset validation survives blob-LRU eviction without retaining another manifest array', async (t) => {
+  const f = await cluster(t)
+  await f.ready()
+  const dependencies = (await f.blobs.seal([], 'dependencies')).hash
+  const input = { ...f.input, dependencies }
+  const counts = new Map()
+  const manifest = f.blobs.manifest.bind(f.blobs)
+  f.blobs.manifest = (hash, ...args) => {
+    counts.set(hash, (counts.get(hash) || 0) + 1)
+    return manifest(hash, ...args)
+  }
+  assert.equal((await f.controller.run(input, options())).code, 0)
+  const before = new Map(counts)
+  f.blobs.manifestCache.clear()
+  f.blobs.manifestCacheBytes = 0
+  assert.equal(
+    (await f.controller.run(input, options({ jobId: 'again' }))).code,
+    0,
+  )
+  assert.equal(
+    counts.get(input.toolchain.manifest),
+    before.get(input.toolchain.manifest),
+  )
+  assert.equal(counts.get(dependencies), before.get(dependencies))
+  assert(
+    counts.get(input.sourceManifest) > before.get(input.sourceManifest),
+    'Project snapshot validation is never bypassed',
+  )
+})
+
+test('held editors use fewer status polls while cancellation wakes cleanup immediately', async (t) => {
+  const f = await cluster(t, {
+    nodes: [editorNode()],
+    timing: { editorPollMs: 10000 },
+  })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input)
+  f.transport.requests.length = 0
+  const editor = await f.controller.openEditor(
+    f.input,
+    options({ jobId: 'quiet-editor' }),
+  )
+  assert(editor)
+  editor.stdout.resume()
+  editor.stderr.resume()
+  await delay(200)
+  const polls = f.transport.requests.filter(
+    (call) => call.method === 'attempt.get',
+  )
+  assert(polls.length <= 3, `Unexpected editor polling: ${polls.length}`)
+  editor.kill()
+  await until(() => f.controller.status().active === 0, 1000)
+  assert.deepEqual(counts(f.controller.status()), {
+    active: 0,
+    held: 0,
+    queued: 0,
+  })
+})
+
+test('storage exhaustion before start releases its grant and permits safe local fallback', async (t) => {
+  const f = await cluster(t)
+  await f.ready()
+  f.transport.hook = ({ method, params, options, request }) => {
+    if (method === 'objects.put')
+      throw new RpcError('Storage full', { code: 'storage_full', status: 507 })
+    return request(method, params, options)
+  }
+  assert.equal(await f.controller.run(f.input, options()), null)
+  assert.equal(f.workers.get('node-a').runtime.runs.length, 0)
+  assert(!f.transport.requests.some((call) => call.method === 'attempt.start'))
+  assert.deepEqual(counts(f.controller.status()), {
+    active: 0,
+    held: 0,
+    queued: 0,
+  })
+  const calls = f.transport.requests.filter((call) =>
+    call.method.startsWith('objects.'),
+  ).length
+  assert.equal(
+    await f.controller.run(f.input, options({ jobId: 'backoff' })),
+    null,
+  )
+  assert.equal(
+    f.transport.requests.filter((call) => call.method.startsWith('objects.'))
+      .length,
+    calls,
   )
 })
 

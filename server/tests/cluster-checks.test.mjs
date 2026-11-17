@@ -248,3 +248,38 @@ test('remote dependency errors quarantine only their frozen input and never run 
     0,
   )
 })
+
+test('a pending editor warm-up never holds a request capture slot', async () => {
+  const gate = Promise.withResolvers()
+  const f = fixture('serve')
+  f.executor.maxCaptures = 1
+  f.controller.status = () => ({ editors: { placement: 'prefer' } })
+  f.inputs.prepareEditorAssets = () => gate.promise
+  f.executor.startEditorWarmup()
+  // Immutable captures wait in the inputs' service-owned lane, so this check's
+  // source snapshot uses the only slot while warm-up is still pending.
+  assert.equal(await f.executor.execute(f.context, f.local), result)
+  assert.deepEqual(f.counts(), { captures: 1, localCalls: 0 })
+  assert.equal(f.executor.editorWarmup.state, 'warming')
+  const closing = f.executor.close()
+  gate.resolve(null)
+  await closing
+})
+
+test('closing stops and drains shared asset captures before their store closes', async () => {
+  const f = fixture('serve')
+  const order = []
+  const drained = Promise.withResolvers()
+  f.inputs.close = async () => {
+    order.push('assets-stopping')
+    await drained.promise
+    order.push('assets-drained')
+  }
+  f.inputs.blobs = { close: () => order.push('store-closed') }
+  const closing = f.executor.close()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(order, ['assets-stopping'])
+  drained.resolve()
+  await closing
+  assert.deepEqual(order, ['assets-stopping', 'assets-drained', 'store-closed'])
+})

@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-17",
+  "baselineCoordinatorCommit": "35e77d94b099d8e85405f47b40774228245660e5",
+  "sourceBaseCommit": "6d7c33364590755750288c35e84358d57f1d95f1",
+  "componentMemoryLimitGiB": 3,
+  "componentCpuCap": 2,
+  "coordinatorOnly": true,
+  "workerBundleDigest": "cc7080df981d0ddb00c30c0d8b511b53e4c245c4b82a96b76843b2753a70ddb2",
+  "manifest": {
+    "before": {
+      "kind": "dependencies",
+      "hash": "b6874cdcbadfb2529dce414270d230da4ec5de717f6c0c4979123ca3fae16693",
+      "concurrentCallers": 8,
+      "manifestBytes": 38520773,
+      "manifestEntries": 163143,
+      "compiledFiles": {
+        ".olean": 9043,
+        ".ilean": 9043,
+        ".olean.private": 9042,
+        ".olean.server": 9042,
+        ".trace": 9090
+      },
+      "coldReads": 8,
+      "coldMs": 8586.803809000001,
+      "sameVerifiedObject": false,
+      "warmReads": 30,
+      "warmThirtyMs": 0.05944100000124308,
+      "additionalWarmReads": 0,
+      "encodedCacheBytes": 38520773,
+      "cacheEntries": 1,
+      "rssBytes": 770240512,
+      "maxEventLoopDelayMs": 5943.328767
+    },
+    "after": {
+      "kind": "dependencies",
+      "hash": "b6874cdcbadfb2529dce414270d230da4ec5de717f6c0c4979123ca3fae16693",
+      "concurrentCallers": 8,
+      "manifestBytes": 38520773,
+      "manifestEntries": 163143,
+      "compiledFiles": {
+        ".olean": 9043,
+        ".ilean": 9043,
+        ".olean.private": 9042,
+        ".olean.server": 9042,
+        ".trace": 9090
+      },
+      "coldReads": 1,
+      "coldMs": 1177.243396,
+      "sameVerifiedObject": true,
+      "warmReads": 30,
+      "warmThirtyMs": 0.05576300000006995,
+      "additionalWarmReads": 0,
+      "encodedCacheBytes": 38520773,
+      "cacheEntries": 1,
+      "rssBytes": 179548160,
+      "maxEventLoopDelayMs": 1059.061759
+    }
+  },
+  "protectedCapture": {
+    "before": {
+      "variant": "before",
+      "elapsedMs": 34202.805374,
+      "hash": "240c685376645a8e8f133cae718b807dd23b42e4c13740331e8884ef9cf61a1e",
+      "files": 146241,
+      "totalBytes": 7539449807,
+      "captureStats": null,
+      "rssBytes": 481816576,
+      "physicalStoreBytes": 33843225
+    },
+    "after": {
+      "variant": "after",
+      "elapsedMs": 9489.351203999999,
+      "hash": "240c685376645a8e8f133cae718b807dd23b42e4c13740331e8884ef9cf61a1e",
+      "files": 146241,
+      "totalBytes": 7539449807,
+      "captureStats": {
+        "hashedFiles": 21,
+        "hashedBytes": 191484,
+        "reusedFiles": 146220,
+        "reusedBytes": 7539258323
+      },
+      "rssBytes": 480079872,
+      "physicalStoreBytes": 33843225
+    }
+  },
+  "measurementLimits": "Isolated component runs, not browser response-time promises. Capture uses protected existing asset metadata; project source is never cached by file identity.",
+  "validation": {
+    "fullSuitePassed": 2266,
+    "optionalSkipped": 2,
+    "fullSuiteFailed": 0,
+    "ranOnVm": true,
+    "sourceCaptureAlwaysFresh": true,
+    "noProofVerdictCaching": true
+  }
+}

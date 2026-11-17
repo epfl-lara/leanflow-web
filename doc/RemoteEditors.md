@@ -20,6 +20,9 @@ installation exposes 32 managed editor slots: nine on the VM, nine each on
 PC05/06 and five on PC2. The preceding
 [PC06 rollout](releases/2026-11-16-remote-editors.md) records the initial integration.
 
+See [cache reuse](Caching.md) for shared Lean artifacts, incremental editor
+sessions, coordinator improvements and measured limits.
+
 ## Eligible editors
 
 The initial remote class is a managed single-file workspace with `Main.lean`,

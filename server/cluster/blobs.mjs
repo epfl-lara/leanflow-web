@@ -2,13 +2,11 @@ import fs from 'node:fs/promises'
 import { constants } from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import { captureProcess } from './capture-process.mjs'
 import { clusterError, digest, identifier, sha256 } from './state.mjs'
 import { ObjectBudget, pythonBudget } from './budget.mjs'
 import { AssetSources, pythonAssetSources } from './asset-sources.mjs'
 
-const execute = promisify(execFile)
 const MAX_CHUNK = 256 * 1024
 export const MAX_MANIFEST = 64 * 1024 * 1024
 export const MAX_ENTRIES = 250000
@@ -216,6 +214,7 @@ export class BlobStore {
     this.maxBytes = maxBytes
     this.maxFiles = maxFiles
     this.manifestCache = new Map()
+    this.manifestLoads = new Map()
     this.manifestCacheBytes = 0
     this.assetSources = assetDataDir
       ? new AssetSources(this.directory, assetDataDir, maxFiles, (relative) => {
@@ -271,7 +270,13 @@ export class BlobStore {
   }
 
   async reset() {
-    if (this.writes.size || this.captures || this.readers || this.trimming)
+    if (
+      this.writes.size ||
+      this.captures ||
+      this.readers ||
+      this.trimming ||
+      this.manifestLoads.size
+    )
       throw clusterError(
         'Drain object writes before clearing the cache.',
         'worker_busy',
@@ -627,6 +632,24 @@ export class BlobStore {
 
   async manifest(hash, expectedKind) {
     digest(hash)
+    const cached = this.#cachedManifest(hash, expectedKind)
+    if (cached) return cached
+    // Cold arrivals share the complete read/hash/parse/validation, not just the
+    // finished value. Keep read limits independent for different requested kinds.
+    const key = `${hash}:${expectedKind || ''}`
+    let task = this.manifestLoads.get(key)
+    if (!task) {
+      task = this.#loadManifest(hash, expectedKind)
+      this.manifestLoads.set(key, task)
+    }
+    try {
+      return await task
+    } finally {
+      if (this.manifestLoads.get(key) === task) this.manifestLoads.delete(key)
+    }
+  }
+
+  #cachedManifest(hash, expectedKind) {
     const cached = this.manifestCache.get(hash)
     if (cached) {
       if (expectedKind && cached.value.kind !== expectedKind)
@@ -635,6 +658,10 @@ export class BlobStore {
       this.manifestCache.set(hash, cached)
       return cached.value
     }
+    return null
+  }
+
+  async #loadManifest(hash, expectedKind) {
     let value
     let bytes
     try {
@@ -653,6 +680,10 @@ export class BlobStore {
       throw clusterError('Invalid snapshot manifest.')
     }
     const valid = validateManifest(value)
+    // An untyped and a typed reader can finish together. Account for the
+    // canonical value once and return the same immutable object to both.
+    const cached = this.#cachedManifest(hash, expectedKind)
+    if (cached) return cached
     for (const entry of valid.entries) Object.freeze(entry)
     Object.freeze(valid.entries)
     Object.freeze(valid)
@@ -997,6 +1028,7 @@ signal.signal(signal.SIGTERM,interrupted)
 secret={'.git','.lemex','.codex','.ssh','.aws','.azure','.config','.netrc','.npmrc','.pypirc','credentials','credentials.json','auth.json'}
 entries=[]
 total=0
+capture_stats=dict(hashedFiles=0,hashedBytes=0,reusedFiles=0,reusedBytes=0)
 flags=os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK
 def private(name):
  n=name.lower()
@@ -1028,20 +1060,27 @@ def walk(fd,prefix=''):
     if not stat.S_ISREG(actual.st_mode) or actual.st_size>2*1024**3:raise ValueError('Invalid snapshot input')
     if (before.st_dev,before.st_ino)!=(actual.st_dev,actual.st_ino):raise ValueError('Snapshot input changed')
     if require_refs and not source_referenceable(actual):raise ValueError('Editor dependency files must use protected managed references; payload copying is disabled')
-    h=hashlib.sha256();size=0
-    while True:
-     chunk=os.read(source,1024*1024)
-     if not chunk:break
-     size+=len(chunk)
-     if size>2*1024**3:raise ValueError('Snapshot input exceeds limit')
-     h.update(chunk)
+    content_hash=cached_source_hash(relative,actual)
+    if content_hash is None:
+     h=hashlib.sha256();size=0
+     while True:
+      chunk=os.read(source,1024*1024)
+      if not chunk:break
+      size+=len(chunk)
+      if size>2*1024**3:raise ValueError('Snapshot input exceeds limit')
+      h.update(chunk)
+     content_hash=h.hexdigest()
+     capture_stats['hashedFiles']+=1;capture_stats['hashedBytes']+=size
+    else:
+     size=actual.st_size
+     capture_stats['reusedFiles']+=1;capture_stats['reusedBytes']+=size
     after=os.fstat(source)
     if (actual.st_size,actual.st_mtime_ns,actual.st_ctime_ns)!=(after.st_size,after.st_mtime_ns,after.st_ctime_ns):raise ValueError('Snapshot input changed')
     total+=size
     if total>512*1024**3:raise ValueError('Snapshot exceeds limit')
-    target=os.path.join(objects,h.hexdigest())
-    referenced=reference_source(relative,actual,h.hexdigest(),size)
-    if not referenced:reserve_blob(h.hexdigest(),size)
+    target=os.path.join(objects,content_hash)
+    referenced=reference_source(relative,actual,content_hash,size)
+    if not referenced:reserve_blob(content_hash,size)
     if not referenced and not os.path.exists(target):
      out,temporary=tempfile.mkstemp(prefix='.capture-',dir=objects)
      os.lseek(source,0,os.SEEK_SET);copied=hashlib.sha256()
@@ -1056,9 +1095,9 @@ def walk(fd,prefix=''):
        if count<=0:raise OSError('Snapshot write made no progress')
        view=view[count:]
      final=os.fstat(source)
-     if copied.hexdigest()!=h.hexdigest() or (actual.st_size,actual.st_mtime_ns,actual.st_ctime_ns)!=(final.st_size,final.st_mtime_ns,final.st_ctime_ns):raise ValueError('Snapshot input changed')
+     if copied.hexdigest()!=content_hash or (actual.st_size,actual.st_mtime_ns,actual.st_ctime_ns)!=(final.st_size,final.st_mtime_ns,final.st_ctime_ns):raise ValueError('Snapshot input changed')
      os.fsync(out);os.fchmod(out,0o400);os.replace(temporary,target)
-    entries.append(dict(path=relative,type='file',hash=h.hexdigest(),size=size,mode=0o700 if actual.st_mode&0o111 else 0o600,mtimeNs=str(actual.st_mtime_ns)))
+    entries.append(dict(path=relative,type='file',hash=content_hash,size=size,mode=0o700 if actual.st_mode&0o111 else 0o600,mtimeNs=str(actual.st_mtime_ns)))
    finally:
     os.close(source)
     if out is not None:os.close(out)
@@ -1068,7 +1107,7 @@ fd=os.open(root,flags|os.O_DIRECTORY)
 try:walk(fd)
 finally:os.close(fd)
 publish_sources()
-print(json.dumps(dict(version=1,kind=kind,entries=entries),separators=(',',':'),ensure_ascii=True))
+print(json.dumps(dict(version=1,kind=kind,entries=entries,captureStats=capture_stats),separators=(',',':'),ensure_ascii=True))
 `
 
 export async function captureTree(
@@ -1087,7 +1126,7 @@ export async function captureTree(
   store.captures++
   try {
     const sources = await store.assetSources?.captureRoot(root, kind)
-    const { stdout } = await execute(
+    const { stdout } = await captureProcess(
       'python3',
       [
         '-I',
@@ -1108,14 +1147,16 @@ export async function captureTree(
       ],
       {
         signal,
-        maxBuffer: manifestLimits(kind).bytes,
+        // Bounded counters sit outside the sealed manifest's unchanged limit.
+        maxBuffer: manifestLimits(kind).bytes + 1024,
         timeout: 30 * 60 * 1000,
       },
     )
-    const manifest = validateManifest(JSON.parse(stdout))
+    const { captureStats, ...value } = JSON.parse(stdout)
+    const manifest = validateManifest(value)
     await syncDirectory(store.objects)
     const sealed = await store.seal(manifest.entries, kind)
-    return { ...sealed, manifest }
+    return { ...sealed, manifest, captureStats }
   } finally {
     store.captures--
   }

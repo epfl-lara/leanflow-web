@@ -1,8 +1,7 @@
 import fs from 'node:fs/promises'
 import { constants } from 'node:fs'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import { captureProcess } from './capture-process.mjs'
 import { dependencyPackageDirectory } from '../project-libraries.mjs'
 import { captureTree, MAX_ENTRIES, MAX_MANIFEST } from './blobs.mjs'
 import { clusterError } from './state.mjs'
@@ -13,8 +12,6 @@ import {
   presetTemplatePaths,
   verifiedPublicPreset,
 } from '../public-preset.mjs'
-
-const execute = promisify(execFile)
 
 export async function capturePresetDependencies(
   store,
@@ -289,7 +286,7 @@ export async function captureDependencies(
   entries.set('.lake/packages', { path: '.lake/packages', type: 'directory' })
   let generated = []
   if (records.length) {
-    const { stdout } = await execute(
+    const { stdout } = await captureProcess(
       'python3',
       [
         '-I',

@@ -50,7 +50,8 @@ export class AssetSources {
         hash TEXT PRIMARY KEY, root TEXT NOT NULL, kind TEXT NOT NULL,
         filename TEXT NOT NULL, size INTEGER NOT NULL, device TEXT NOT NULL,
         inode TEXT NOT NULL, modified TEXT NOT NULL, changed TEXT NOT NULL
-      );`)
+      );
+      CREATE INDEX IF NOT EXISTS asset_sources_root_kind ON asset_sources(root,kind);`)
     return this
   }
 
@@ -211,8 +212,25 @@ export class AssetSources {
 
 export const pythonAssetSources = String.raw`
 source_rows=tempfile.TemporaryFile(mode='w+t',encoding='utf8',dir=os.path.dirname(sources_filename)) if sources_filename else None
+source_hashes=None
 def source_referenceable(actual):
  return source_rows is not None and actual.st_nlink==1 and actual.st_uid==os.getuid() and not actual.st_mode&0o022
+def cached_source_hash(relative,actual):
+ global source_hashes
+ if not source_referenceable(actual):return None
+ if source_hashes is None:
+  import urllib.parse
+  connection=sqlite3.connect('file:'+urllib.parse.quote(sources_filename)+'?mode=ro',uri=True,timeout=30)
+  try:
+   source_hashes={row[0]:row[1:] for row in connection.execute('SELECT filename,hash,size,device,inode,modified,changed FROM asset_sources WHERE root=? AND kind=? LIMIT ?',(root,kind,max_sources+1))}
+   if len(source_hashes)>max_sources:raise OSError('Managed asset index budget reached')
+  finally:connection.close()
+ row=source_hashes.get(os.path.join(root,relative))
+ if row is None:return None
+ # Match the protected backing-file identity used by AssetSources.open().
+ identity=(actual.st_size,str(actual.st_dev),str(actual.st_ino),str(actual.st_mtime_ns),str(actual.st_ctime_ns))
+ if row[1:]!=identity or len(row[0])!=64 or any(c not in '0123456789abcdef' for c in row[0]):return None
+ return row[0]
 def reference_source(relative,actual,hash,size):
  if not source_referenceable(actual):return False
  row=[hash,root,kind,os.path.join(root,relative),size,str(actual.st_dev),str(actual.st_ino),str(actual.st_mtime_ns),str(actual.st_ctime_ns)]

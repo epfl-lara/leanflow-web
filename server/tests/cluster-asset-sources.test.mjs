@@ -149,6 +149,80 @@ test('managed toolchain captures keep exact bytes available without duplicating 
   assert.equal(store.maxBytes, options.maxBytes)
 })
 
+test('unchanged managed captures reuse recorded hashes across a service restart', async (t) => {
+  const { store, toolchain } = await fixture(t)
+  const bytes = Buffer.alloc(600000, 71)
+  await writeProtected(path.join(toolchain, 'bin/lean'), bytes)
+  const first = await captureTree(store, toolchain, { kind: 'toolchain' })
+  assert.deepEqual(first.captureStats, {
+    hashedFiles: 1,
+    hashedBytes: bytes.length,
+    reusedFiles: 0,
+    reusedBytes: 0,
+  })
+  store.close()
+  await store.init()
+  const second = await captureTree(store, toolchain, { kind: 'toolchain' })
+  assert.equal(second.hash, first.hash)
+  assert.deepEqual(second.captureStats, {
+    hashedFiles: 0,
+    hashedBytes: 0,
+    reusedFiles: 1,
+    reusedBytes: bytes.length,
+  })
+  assert.deepEqual(await store.read(sha256(bytes)), bytes)
+})
+
+test('managed hash reuse detects same-size writes with restored mtime and atomic replacements', async (t) => {
+  const { store, toolchain } = await fixture(t)
+  const filename = path.join(toolchain, 'bin/lean')
+  const fixed = 1700000000
+  await writeProtected(filename, 'original')
+  await fs.utimes(filename, fixed, fixed)
+  const first = await captureTree(store, toolchain, { kind: 'toolchain' })
+  await writeProtected(filename, 'modified')
+  await fs.utimes(filename, fixed, fixed)
+  const changed = await captureTree(store, toolchain, { kind: 'toolchain' })
+  assert.notEqual(changed.hash, first.hash)
+  assert.equal(changed.captureStats.hashedFiles, 1)
+  assert.equal(changed.captureStats.reusedFiles, 0)
+  const temporary = path.join(toolchain, 'bin/replacement')
+  await writeProtected(temporary, 'modified')
+  await fs.utimes(temporary, fixed, fixed)
+  await fs.rename(temporary, filename)
+  const replaced = await captureTree(store, toolchain, { kind: 'toolchain' })
+  assert.equal(replaced.hash, changed.hash)
+  assert.equal(replaced.captureStats.hashedFiles, 1)
+  assert.equal(replaced.captureStats.reusedFiles, 0)
+})
+
+test('hash reuse never applies to mutable project captures or unprotected managed files', async (t) => {
+  const { store, toolchain, data } = await fixture(t)
+  const filename = path.join(toolchain, 'bin/lean')
+  await writeProtected(filename, 'managed')
+  await captureTree(store, toolchain, { kind: 'toolchain' })
+  await fs.chmod(filename, 0o664)
+  const unprotected = await captureTree(store, toolchain, { kind: 'toolchain' })
+  assert.equal(unprotected.captureStats.hashedFiles, 1)
+  assert.equal(unprotected.captureStats.reusedFiles, 0)
+  const project = path.join(data, 'projects/fresh-source')
+  await fs.mkdir(project, { recursive: true })
+  await writeProtected(
+    path.join(project, 'Main.lean'),
+    'example : True := by trivial\n',
+  )
+  const first = await captureTree(store, project)
+  const second = await captureTree(store, project)
+  assert.equal(second.hash, first.hash)
+  assert.equal(second.captureStats.hashedFiles, 1)
+  assert.equal(second.captureStats.reusedFiles, 0)
+  await writeProtected(
+    path.join(project, 'Main.lean'),
+    'example : False := by trivial\n',
+  )
+  assert.notEqual((await captureTree(store, project)).hash, first.hash)
+})
+
 test('pinned public preset dependencies use protected backings without a second VM payload copy', async (t) => {
   const { store, data } = await fixture(t, { maxBytes: 4096 })
   const preset = JSON.parse(

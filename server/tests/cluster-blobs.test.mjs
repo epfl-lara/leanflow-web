@@ -248,6 +248,99 @@ test('manifests reject traversal, secret paths, escaped links and file/link ance
   assert.equal(validateManifest(manifest([file])).totalBytes, 6)
 })
 
+test('concurrent manifest callers share one verified load and one cache entry', async (t) => {
+  const { store } = await fixture(t)
+  const snapshot = await store.seal([], 'dependencies')
+  const read = store.read.bind(store)
+  let reads = 0,
+    release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  store.read = async (...args) => {
+    reads++
+    await gate
+    return read(...args)
+  }
+  const pending = Array.from({ length: 30 }, () =>
+    store.manifest(snapshot.hash, 'dependencies'),
+  )
+  release()
+  const values = await Promise.all(pending)
+  assert.equal(reads, 1)
+  assert(values.every((value) => value === values[0]))
+  assert.equal(store.manifestCacheBytes, snapshot.size)
+  assert.equal(await store.manifest(snapshot.hash, 'dependencies'), values[0])
+  assert.equal(reads, 1)
+})
+
+test('failed shared manifest reads can retry and kind checks remain independent', async (t) => {
+  const { store } = await fixture(t)
+  const snapshot = await store.seal([], 'dependencies')
+  const read = store.read.bind(store)
+  let reads = 0,
+    release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  store.read = async () => {
+    reads++
+    await gate
+    throw new Error('Transient read failure')
+  }
+  const pending = Array.from({ length: 30 }, () =>
+    store.manifest(snapshot.hash, 'dependencies'),
+  )
+  release()
+  const failed = await Promise.allSettled(pending)
+  assert(failed.every((value) => value.status === 'rejected'))
+  assert.equal(reads, 1)
+  assert.equal(store.manifestCache.size, 0)
+  assert.equal(store.manifestCacheBytes, 0)
+  store.read = read
+  const [wrong, valid, generic] = await Promise.allSettled([
+    store.manifest(snapshot.hash, 'source'),
+    store.manifest(snapshot.hash, 'dependencies'),
+    store.manifest(snapshot.hash),
+  ])
+  assert.equal(wrong.status, 'rejected')
+  assert.equal(valid.status, 'fulfilled')
+  assert.equal(generic.status, 'fulfilled')
+  assert.equal(valid.value, generic.value)
+  assert.equal(store.manifestCacheBytes, snapshot.size)
+  await assert.rejects(store.manifest(snapshot.hash, 'source'))
+})
+
+test('cache reset refuses an unfinished manifest load after its file read closes', async (t) => {
+  const { store } = await fixture(t)
+  const snapshot = await store.seal([], 'dependencies')
+  const read = store.read.bind(store)
+  let release, reached
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const ready = new Promise((resolve) => {
+    reached = resolve
+  })
+  store.read = async (...args) => {
+    const bytes = await read(...args)
+    reached()
+    await gate
+    return bytes
+  }
+  const pending = store.manifest(snapshot.hash, 'dependencies')
+  await ready
+  try {
+    await assert.rejects(store.reset(), { code: 'worker_busy' })
+  } finally {
+    release()
+    await pending
+  }
+  await store.reset()
+  assert.equal(store.manifestCache.size, 0)
+  assert.equal(store.manifestCacheBytes, 0)
+})
+
 test('a Mathlib-sized manifest crosses the former entry and byte bounds without removing the new bounds', async (t) => {
   const { store } = await fixture(t)
   const empty = await store.put('')

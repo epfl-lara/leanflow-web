@@ -66,9 +66,12 @@ export class ClusterChecks {
     const abort = new AbortController()
     const warmup = { abort, state: 'warming', task: null, environment: null }
     this.editorWarmup = warmup
-    warmup.task = this.#capture(abort.signal, () =>
+    // Immutable captures run in the inputs' own service-owned lane. Warm-up
+    // waits there, never in a request slot that editor and check sources need.
+    const prepared = Promise.resolve().then(() =>
       this.inputs.prepareEditorAssets({ signal: abort.signal }),
-    ).then(
+    )
+    warmup.task = prepared.then(
       (result) => {
         warmup.state = result ? 'ready' : 'unavailable'
         warmup.environment = result
@@ -364,6 +367,8 @@ export class ClusterChecks {
       Promise.allSettled([...this.inflight.values()]),
       Promise.allSettled(editorStarts),
       this.editorWarmup?.task,
+      // Stop and drain service-owned asset captures before their store closes.
+      this.inputs.close?.(),
     ])
     this.inputs.blobs?.close()
     return report

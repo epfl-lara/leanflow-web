@@ -33,7 +33,9 @@ normal scheduling rather than waiting as a reserve node.
 
 ## Release and image identity
 
-The deployed coordinator is `35e77d94b099d8e85405f47b40774228245660e5`.
+The four-machine cutover used coordinator `35e77d94b099d8e85405f47b40774228245660e5`.
+The subsequent [cache audit and improvements](../Caching.md) preserve this
+allocation and worker bundle.
 Its 185 production helper files match the server-tested source. The existing
 client assets and native Lemex binaries are unchanged from the newer EPFL
 sign-in release, `ee9d2feaf593f71518dc5f4f8c7bc4f0d806adb8`. Provider settings,
