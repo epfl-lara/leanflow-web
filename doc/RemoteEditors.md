@@ -23,6 +23,8 @@ PC05/06 and five on PC2. The preceding
 See [cache reuse](Caching.md) for shared Lean artifacts, incremental editor
 sessions, coordinator improvements and measured limits.
 
+See the [25-participant competition rehearsal](releases/2026-11-17-competition-readiness.md) for same-time opening, saving and proof-check timings.
+
 ## Eligible editors
 
 The initial remote class is a managed single-file workspace with `Main.lean`,

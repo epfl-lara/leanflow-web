@@ -1,0 +1,63 @@
+{
+  "passed": true,
+  "release": "df68441",
+  "users": 25,
+  "arrivalBatch": 25,
+  "held": 25,
+  "capacity": 32,
+  "webSocketCloses": 0,
+  "errors": 0,
+  "inference": 0,
+  "saved": 25,
+  "readBackByLean": 25,
+  "successfulChecks": 25,
+  "native": 13,
+  "mathlib": 12,
+  "rateLimitRetries": 0,
+  "usersRetried": 0,
+  "initialDiagnostics": {
+    "min_s": 17.736,
+    "median_s": 29.969,
+    "p95_s": 37.576,
+    "max_s": 38.574
+  },
+  "savedAndVerified": {
+    "min_s": 0.672,
+    "median_s": 0.736,
+    "p95_s": 0.759,
+    "max_s": 0.76
+  },
+  "initialClearDiagnostics": {
+    "min_s": 0.367,
+    "median_s": 0.434,
+    "p95_s": 0.455,
+    "max_s": 0.457
+  },
+  "nativeCheck": {
+    "min_s": 51.528,
+    "median_s": 53.956,
+    "p95_s": 77.257,
+    "max_s": 77.257
+  },
+  "mathlibCheck": {
+    "min_s": 32.293,
+    "median_s": 38.384,
+    "p95_s": 50.164,
+    "max_s": 50.164
+  },
+  "projectListProbes": {
+    "count": 50,
+    "p50Ms": 2.94871399999829,
+    "p95Ms": 5.085802999994485,
+    "maxMs": 124.14635499999713
+  },
+  "mixedBurst_s": 78.43,
+  "cleanup": {
+    "revokedAccounts": 25,
+    "purgedProjects": 50,
+    "remainingProjectDirectories": 0,
+    "credentialManifestRemoved": true
+  },
+  "oomKillIncreases": 0,
+  "oomMonitoredHosts": 4
+}
