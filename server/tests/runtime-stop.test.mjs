@@ -104,10 +104,27 @@ test('a cleanup failure retains the worker for a safe project-stop retry', async
   controller.abort()
   await assert.rejects(task, { status: 503, workerCleanup: true })
   assert.equal(f.runtime.children.size, 1)
+  const child = [...f.runtime.children][0]
+  let released = false
+  void child.workerReleased.then(() => {
+    released = true
+  })
+  await Promise.resolve()
+  assert.equal(
+    released,
+    false,
+    'Failed cleanup must retain editor admission too',
+  )
   await fs.rm(f.failed)
   await fs.writeFile(f.released, 'retry cleanup')
   await f.runtime.stopProject(f.root)
   assert.equal(f.runtime.children.size, 0)
+  await child.workerReleased
+  assert.equal(
+    released,
+    true,
+    'A successful retry notifies the original admission lease',
+  )
 })
 
 test('cancelling a queued worker removes it without interrupting the active worker', async (t) => {

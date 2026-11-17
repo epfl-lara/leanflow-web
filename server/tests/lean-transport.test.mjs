@@ -4,7 +4,7 @@ import { Writable } from 'node:stream'
 import { leanTransport } from '../lean-transport.mjs'
 import { frame } from '../rpc.mjs'
 
-function fixture(t, maxBufferedBytes = 512) {
+function fixture(t, maxBufferedBytes = 512, options = {}) {
   const sent = [],
     closed = [],
     written = []
@@ -37,7 +37,7 @@ function fixture(t, maxBufferedBytes = 512) {
     sent,
     closed,
     written,
-    transport: leanTransport(ws, child, { maxBufferedBytes }),
+    transport: leanTransport(ws, child, { maxBufferedBytes, ...options }),
   }
 }
 
@@ -123,4 +123,42 @@ test('drained websocket traffic can continue and disposed transports stop forwar
   assert.equal(f.transport.sendToLean(message), false)
   assert.equal(f.sent.length, 2)
   assert.equal(f.closed.length, 0)
+})
+
+test('waiting connections have a strict smaller input bound, restored after admission', (t) => {
+  let waiting = true
+  const f = fixture(t, 1024, {
+    isWaiting: () => waiting,
+    waitingBufferedBytes: 256,
+  })
+  const message = { method: 'initialize', params: { text: 'α'.repeat(32) } }
+  assert.equal(f.transport.sendToLean(message), true)
+  assert.equal(f.transport.sendToLean(message), false)
+  assert(f.child.stdin.writableLength <= 256)
+  assert.equal(f.child.kills, 1)
+  const admitted = fixture(t, 1024, {
+    isWaiting: () => waiting,
+    waitingBufferedBytes: 256,
+  })
+  waiting = false
+  for (let i = 0; i < 4; i++)
+    assert.equal(admitted.transport.sendToLean(message), true)
+  assert(admitted.child.stdin.writableLength > 256)
+  assert.equal(admitted.child.kills, 0)
+})
+
+test('one oversized waiting frame is refused without retaining its source', (t) => {
+  const f = fixture(t, 1024, {
+    isWaiting: () => true,
+    waitingBufferedBytes: 256,
+  })
+  assert.equal(
+    f.transport.sendToLean({
+      method: 'fixture',
+      params: { text: 'α'.repeat(256) },
+    }),
+    false,
+  )
+  assert.equal(f.child.stdin.writableLength, 0)
+  assert.equal(f.child.kills, 1)
 })

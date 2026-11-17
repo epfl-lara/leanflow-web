@@ -36,6 +36,10 @@ import { DefinitionPreviewFiles } from './definitionPreviewFiles'
 import { WorkspaceEditor } from './workspaceEditor'
 import { installLeanClientLifecycle } from './leanClientLifecycle'
 import { watchEditorIdle } from './editorIdle'
+import {
+  editorQueueNotice,
+  type EditorQueueNotice,
+} from '../../../shared/editor-queue.mjs'
 import { installCollaborativeEditorUndo } from './collaborativeEditorUndo'
 import { CollaboratorCursors } from './collaboratorCursors'
 import { LeanCommentImagePreviews } from './leanCommentImagePreviews'
@@ -61,6 +65,12 @@ import {
 } from './proofTarget'
 
 class BrowserLeanMonaco extends LeanMonaco {
+  private readonly connectionAbort = new AbortController()
+
+  cancelConnections() {
+    this.connectionAbort.abort()
+  }
+
   closeHiddenDocuments: () => Promise<void> = async () => {}
   showVisibleDocument: () => Promise<void> = async () => {}
   refreshVisibleDocument: () => Promise<void> = async () => {}
@@ -80,17 +90,22 @@ class BrowserLeanMonaco extends LeanMonaco {
       sources: RenameSource[],
       token: CancellationToken,
     ) => Promise<void>,
+    private readonly onEditorQueue: (notice: EditorQueueNotice) => void,
   ) {
     super()
   }
 
   protected override getWebSocketOptions(
     options: Parameters<LeanMonaco['start']>[0],
-  ): WebSocketConfigOptionsUrl {
+  ): WebSocketConfigOptionsUrl & {
+    leanflowQueue: (params: unknown) => void
+    leanflowSignal: AbortSignal
+  } {
     const settings = super.getWebSocketOptions(options)
     const onConnectionIssue = this.onConnectionIssue
     const onProcessingNotice = this.onProcessingNotice
     const onRenameIssue = this.onRenameIssue
+    const onEditorQueue = this.onEditorQueue
     const setDocumentController = (
       controller: ReturnType<typeof installLeanRenameMiddleware>,
     ) => {
@@ -102,6 +117,11 @@ class BrowserLeanMonaco extends LeanMonaco {
     const prepareRenameSources = this.prepareRenameSources
     return {
       ...settings,
+      leanflowSignal: this.connectionAbort.signal,
+      leanflowQueue(params: unknown) {
+        const notice = editorQueueNotice(params)
+        if (notice) onEditorQueue(notice)
+      },
       startOptions: {
         ...settings.startOptions,
         onCall(client) {
@@ -349,6 +369,8 @@ export function LeanWorkspace({
   const [connectionIssue, setConnectionIssue] = useState('')
   const [restarting, setRestarting] = useState(false)
   const [sleeping, setSleeping] = useState(false)
+  const [editorQueue, setEditorQueue] = useState<EditorQueueNotice | null>(null)
+  const editorQueueRef = useRef<EditorQueueNotice | null>(null)
   const [restartIssue, setRestartIssue] = useState('')
   const [importsStale, setImportsStalePath] = useState<string | null>(null)
   const importsStaleRef = useRef<string | null>(null)
@@ -387,6 +409,8 @@ export function LeanWorkspace({
     setImportsStale(null)
     setRestarting(false)
     setSleeping(false)
+    setEditorQueue(null)
+    editorQueueRef.current = null
     setRenameIssue('')
     setLoading(true)
     onStateRef.current('Connecting to Lean')
@@ -430,6 +454,15 @@ export function LeanWorkspace({
             throw new Error('Rename cancelled.')
           for (const source of sources) own.virtualFiles.add(source.uri)
           await own.renameModels.prepare(sources, token)
+        },
+        (notice) => {
+          if (cancelled) return
+          const queued = notice.state === 'active' ? null : notice
+          editorQueueRef.current = queued
+          setEditorQueue(queued)
+          if (notice.state === 'waiting')
+            onStateRef.current(`Waiting for Lean: position ${notice.position}`)
+          else onStateRef.current('Connecting to Lean')
         },
       )
       own = {
@@ -499,6 +532,8 @@ export function LeanWorkspace({
               new FileUri('/workspace'),
               (error) => {
                 if (!cancelled) {
+                  setEditorQueue(null)
+                  editorQueueRef.current = null
                   setRequestIssue(
                     'Lean could not connect. Check your connection or close unused project tabs, then wait a moment and use Restart Lean. You can keep editing.',
                   )
@@ -557,6 +592,7 @@ export function LeanWorkspace({
                       )
                   })
               },
+              () => editorQueueRef.current?.state !== 'waiting',
             )
             own.connectionSubscriptions.push(
               provider.clientAdded((client: ConnectionClient) => {
@@ -631,6 +667,7 @@ export function LeanWorkspace({
     }).catch(() => undefined)
     return () => {
       cancelled = true
+      own?.lean.cancelConnections()
       own?.idleCleanup?.()
       void serialize(async () => {
         own?.subscription?.dispose()
@@ -1557,6 +1594,18 @@ export function LeanWorkspace({
       style={{ '--goals-size': `${goalsSize}%` } as CSSProperties}
     >
       <div className="source-pane proof-source-pane">
+        {editorQueue && (
+          <output
+            className="lean-connection-notice"
+            role="status"
+            aria-live="polite"
+            data-editor-queue={editorQueue.state}
+          >
+            {editorQueue.state === 'waiting'
+              ? `Waiting for a Lean editor slot — position ${editorQueue.position} of ${editorQueue.total}. You will connect automatically. You can keep editing and saving; closing this project leaves the queue.`
+              : 'A Lean slot is available. Starting Lean…'}
+          </output>
+        )}
         {sleeping && (
           <output className="lean-connection-notice">
             Lean editor sleeping to free memory. Click or type to reconnect.
@@ -1590,7 +1639,7 @@ export function LeanWorkspace({
             <button
               className="button small secondary"
               onClick={() => void restartLean()}
-              disabled={restarting}
+              disabled={restarting || !!editorQueue}
             >
               {restarting ? 'Restarting…' : 'Restart Lean'}
             </button>
@@ -1661,7 +1710,13 @@ export function LeanWorkspace({
           <button
             className="button small subtle"
             onClick={() => void restartLean()}
-            disabled={loading || restarting || !!connectionIssue || !!failure}
+            disabled={
+              loading ||
+              restarting ||
+              !!connectionIssue ||
+              !!failure ||
+              !!editorQueue
+            }
             title="Restart this editor's Lean connection. Your unsaved edits stay in the editor."
           >
             {restarting ? 'Restarting…' : 'Restart Lean'}

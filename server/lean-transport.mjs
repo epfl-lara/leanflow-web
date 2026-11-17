@@ -5,9 +5,19 @@ import { frame } from './rpc.mjs'
 export function leanTransport(
   ws,
   child,
-  { maxBufferedBytes = 16 * 1024 * 1024 } = {},
+  {
+    maxBufferedBytes = 16 * 1024 * 1024,
+    isWaiting = () => false,
+    waitingBufferedBytes = 256 * 1024,
+  } = {},
 ) {
-  if (!Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes <= 0)
+  if (
+    !Number.isSafeInteger(maxBufferedBytes) ||
+    maxBufferedBytes <= 0 ||
+    !Number.isSafeInteger(waitingBufferedBytes) ||
+    waitingBufferedBytes <= 0 ||
+    typeof isWaiting !== 'function'
+  )
     throw new Error('Lean transport buffer limit must be a positive integer.')
   let closed = false
   const stop = () => {
@@ -27,8 +37,16 @@ export function leanTransport(
     },
     sendToLean(message) {
       if (closed || ws.readyState !== 1 || child.stdin.destroyed) return false
-      if (child.stdin.writableLength > maxBufferedBytes) return stop()
+      const limit = isWaiting()
+        ? Math.min(maxBufferedBytes, waitingBufferedBytes)
+        : maxBufferedBytes
+      if (child.stdin.writableLength > limit) return stop()
       const text = frame(message)
+      if (
+        isWaiting() &&
+        child.stdin.writableLength + Buffer.byteLength(text) > limit
+      )
+        return stop()
       child.stdin.write(text)
       return true
     },

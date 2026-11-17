@@ -101,10 +101,66 @@ behind editors. The coordinator must retain its own native-check reserve. To
 guarantee a native check on every PC instead, reduce that PC's editor allocation
 until its full native grant fits alongside all admitted editors.
 
-Per-user and per-project editor limits apply across local and remote sockets.
+Per-user and per-project editor limits apply across local and remote processes.
 `STUDIO_MAX_EDITORS` supplies the local admission ceiling; certified, enabled
 remote editor slots add to it. Unavailable, disabled and unenrolled nodes add
 nothing. These ceilings describe admission, not a measured concurrency promise.
+
+## Waiting for an editor
+
+Open the project normally. If its editor cannot start yet, LeanFlow shows its
+position in a waiting list and connects automatically when capacity is available.
+The tab can still edit and save canonical source while waiting. Diagnostics,
+goals and completion become available after Lean starts. Closing the project or
+tab cancels its wait. Waiting tabs do not allocate Lean workers, containers or
+remote project snapshots.
+
+Active editors keep their workers. A slot becomes reusable after worker cleanup
+is confirmed, rather than as soon as the browser disconnects. Admission checks
+the current account, project, worker resources and remote placement again before
+starting. An unsupported remote project waits for local capacity; repository
+editors still use their existing larger allocation.
+
+The default waiting room holds 128 connections, at most three per account, for
+up to one hour. These limits are separate from active per-account and
+per-project limits. The next eligible request starts in arrival order. A request
+blocked by its account, project or placement does not block unrelated accounts
+and projects; order is preserved within each account and project. A pre-start
+capacity race keeps its original queue place and deadline during a short
+backoff. Its waiting place remains reserved until startup succeeds, so a full
+queue cannot evict a tab already waiting. Only one resource reservation is being
+started at a time; already running editors execute in parallel. Queue positions
+therefore show arrival order, not a promised
+start time. A dropped worker reduces available capacity without evicting other
+running sessions. Resource changes are checked every 500 ms while tabs wait.
+
+Configure `STUDIO_MAX_EDITOR_QUEUE`, `STUDIO_MAX_EDITOR_QUEUE_PER_USER` and
+`STUDIO_EDITOR_QUEUE_WAIT_MS` as shown in [.env.example](../.env.example).
+Only a full waiting room, its account limit, or an expired wait rejects overflow;
+closing unused tabs makes room. Waiting state is in memory: a service restart
+closes those sockets, and reopening the project joins the new waiting list.
+The authenticated `/api/session` capacity snapshot includes
+`editorAdmission.active`, `editorAdmission.queued` and
+`editorAdmission.maxQueued`, without exposing account or project identities.
+
+The browser receives `$/leanflow/editorQueue` notifications before its pending
+LSP `initialize` completes. A version-checked transform of the existing editor
+wrapper intercepts only that notification and preserves its normal message
+strategy. Its workspace cancellation signal also closes a pending socket before
+initialization, so changing projects promptly leaves the waiting list. Pending
+input is limited to 256 KiB per waiting connection; active
+traffic retains its existing transport bound. Waiting does not trigger the
+30-minute editor sleep timer. Active, unattended editors still sleep normally
+to return capacity.
+
+Run these checks for queue ordering, cleanup and the actual Monaco waiting
+display. The browser check also saves before admission and promotes on one socket.
+
+```sh
+node --test server/tests/editor-admission.test.mjs server/tests/queued-editor.test.mjs
+npm run build
+node scripts/ci/check-browser.mjs editor-queue
+```
 
 ## Upgrade and enable
 

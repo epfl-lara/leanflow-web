@@ -136,6 +136,23 @@ function fixture(t, patch = {}) {
   }
 }
 
+test('cancelling initial synchronization retains the remote cleanup confirmation', async (t) => {
+  const f = fixture(t)
+  const syncing = Promise.withResolvers(),
+    released = Promise.withResolvers()
+  f.remote.workerReleased = released.promise
+  f.remote.sync = () => syncing.promise
+  await until(() => f.data.remoteStarts === 1)
+  const rejected = assert.rejects(
+    f.result.ready,
+    (error) => error.workerReleased === released.promise,
+  )
+  f.result.kill()
+  syncing.resolve()
+  await rejected
+  released.resolve()
+})
+
 test('initialize waits for capture and the newest canonical save without changing browser text', async (t) => {
   const captured = Promise.withResolvers()
   const f = fixture(t, { captureEditor: () => captured.promise })

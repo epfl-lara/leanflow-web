@@ -23,6 +23,9 @@ test('invalid capacity settings fail before startup rather than disabling admiss
     'STUDIO_MAX_EDITORS',
     'STUDIO_MAX_EDITORS_PER_PROJECT',
     'STUDIO_MAX_EDITORS_PER_USER',
+    'STUDIO_MAX_EDITOR_QUEUE',
+    'STUDIO_MAX_EDITOR_QUEUE_PER_USER',
+    'STUDIO_EDITOR_QUEUE_WAIT_MS',
     'STUDIO_MAX_TERMINALS',
     'STUDIO_MAX_TERMINALS_PER_PROJECT',
     'STUDIO_MAX_AGENTS',
@@ -168,6 +171,8 @@ async function fixture(
         { headers },
       )
       sockets.push(ws)
+      ws.messages = []
+      ws.on('message', (bytes) => ws.messages.push(JSON.parse(bytes)))
       ws.once('error', reject)
       ws.once('open', () => resolve(ws))
       ws.once('unexpected-response', (_request, response) => {
@@ -179,25 +184,67 @@ async function fixture(
   return { studio, capacity, children, projects, headers, base, connect }
 }
 
-test('six editors can connect, project and global limits reject overflow and recover on disconnect', async (t) => {
-  const f = await fixture(t)
+async function waitFor(check) {
+  for (let i = 0; i < 200; i++) {
+    if (check()) return
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  assert.fail('Editor admission did not reach the expected state.')
+}
+
+test('six editors stay active while project and global overflow queue and promote without reconnecting', async (t) => {
+  const f = await fixture(t, { STUDIO_MAX_EDITOR_QUEUE: '2' })
   const first = await f.connect(f.projects[0])
   const second = await f.connect(f.projects[0])
   assert(first instanceof WebSocket)
   assert(second instanceof WebSocket)
-  assert.equal(await f.connect(f.projects[0]), 429)
   for (let i = 1; i < 5; i++)
     assert((await f.connect(f.projects[i])) instanceof WebSocket)
   assert.equal(f.children.size, 6)
-  assert.equal(await f.connect(f.projects[5]), 429)
+  const projectWaiting = await f.connect(f.projects[0])
+  await waitFor(() =>
+    projectWaiting.messages.some(
+      (message) => message.params?.state === 'waiting',
+    ),
+  )
+  assert.equal(f.children.size, 6)
+  const globalWaiting = await f.connect(f.projects[5])
+  await waitFor(() =>
+    globalWaiting.messages.some((message) => message.params?.position === 2),
+  )
+  assert.equal(await f.connect(f.projects[6]), 429)
   await new Promise((resolve) => {
     first.once('close', resolve)
     first.close()
   })
-  await new Promise((resolve) => setImmediate(resolve))
-  assert((await f.connect(f.projects[5])) instanceof WebSocket)
+  await waitFor(() =>
+    projectWaiting.messages.some(
+      (message) => message.params?.state === 'active',
+    ),
+  )
+  assert.equal(f.children.size, 6)
+  assert(
+    !globalWaiting.messages.some(
+      (message) => message.params?.state === 'active',
+    ),
+  )
+  await new Promise((resolve) => {
+    second.once('close', resolve)
+    second.close()
+  })
+  await waitFor(() =>
+    globalWaiting.messages.some(
+      (message) => message.params?.state === 'active',
+    ),
+  )
+  assert.equal(f.children.size, 6)
+  assert.equal(projectWaiting.readyState, WebSocket.OPEN)
+  assert.equal(globalWaiting.readyState, WebSocket.OPEN)
   const response = await fetch(f.base + '/api/session', { headers: f.headers })
-  assert.deepEqual((await response.json()).capacity, f.capacity)
+  assert.deepEqual((await response.json()).capacity, {
+    ...f.capacity,
+    editorAdmission: { active: 6, queued: 0, maxQueued: 2 },
+  })
 })
 
 test('configured assistant queue rejects overflow and releases a place when a queued task is cancelled', async (t) => {

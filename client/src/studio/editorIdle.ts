@@ -8,6 +8,7 @@ export function editorIdle(
   sleep: () => void,
   wake: () => void,
   idleMs = EDITOR_IDLE_MS,
+  canSleep = () => true,
 ) {
   let lastActivity = Date.now()
   let sleeping = false
@@ -16,7 +17,10 @@ export function editorIdle(
   function check() {
     const remaining = lastActivity + idleMs - Date.now()
     if (remaining > 0) timer = setTimeout(check, remaining)
-    else {
+    else if (!canSleep()) {
+      lastActivity = Date.now()
+      timer = setTimeout(check, idleMs)
+    } else {
       sleeping = true
       sleep()
     }
@@ -43,8 +47,9 @@ export function watchEditorIdle(
   infoview: HTMLElement,
   sleep: () => void,
   wake: () => void,
+  canSleep = () => true,
 ) {
-  const idle = editorIdle(sleep, wake)
+  const idle = editorIdle(sleep, wake, EDITOR_IDLE_MS, canSleep)
   const stopActivity = listenForUserActivity(target, () => idle.activity())
   // Infoview controls live in a same-origin iframe; their interaction events
   // do not bubble into the parent document.

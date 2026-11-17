@@ -604,6 +604,20 @@ export class ClusterController {
       )
   }
 
+  canOpenEditor(environment) {
+    return (
+      this.#accepting &&
+      this.#config.mode === 'serve' &&
+      this.#config.editors.placement === 'prefer' &&
+      !!this.#place({
+        ...environment,
+        operation: 'lean.session',
+        file: 'Main.lean',
+        sourceBytes: 0,
+      })
+    )
+  }
+
   // Uploads a pinned environment to one worker and, when asked, has the worker
   // certify itself with that toolchain. Capabilities come only from the
   // worker's own report.
@@ -1278,6 +1292,9 @@ export class ClusterController {
       held: false,
       reconciling: false,
     }
+    const released = Promise.withResolvers()
+    grant.workerReleased = released.promise
+    grant.confirmStopped = released.resolve
     this.#grants.set(payload.id, grant)
     const job = {
       id: payload.id,
@@ -1311,7 +1328,15 @@ export class ClusterController {
         },
         (error) => {
           this.#active.delete(job.id)
-          entry.reject(error)
+          entry.reject(
+            job.payload.operation === 'lean.session'
+              ? Object.assign(
+                  new Error(error.message, { cause: error }),
+                  error,
+                  { workerReleased: grant.workerReleased },
+                )
+              : error,
+          )
         },
       )
       .finally(() => {
@@ -1411,6 +1436,7 @@ export class ClusterController {
             }
           },
         })
+        job.editor.workerReleased = job.grant.workerReleased
         job.editorRpc.handle('editor.ready', (value) => {
           if (value?.id !== job.id || job.stop || job.lost || job.editorReady)
             throw invalidReply()
@@ -1751,6 +1777,7 @@ export class ClusterController {
 
   #release(job, state, patch) {
     this.#state.transition(job.id, state, patch)
+    this.#grants.get(job.id)?.confirmStopped?.()
     this.#grants.delete(job.id)
   }
 
@@ -1765,6 +1792,7 @@ export class ClusterController {
       state = this.#state.transition(id, 'reconciling').state
     if (state === 'reconciling')
       this.#state.transition(id, 'interrupted', { reason: 'reconciled' })
+    this.#grants.get(id)?.confirmStopped?.()
     this.#grants.delete(id)
   }
 

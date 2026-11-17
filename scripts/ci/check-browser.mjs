@@ -65,6 +65,7 @@ const workspaceSuites = [
   'session-project-drafts',
   'terminal-opening',
   'editor-startup',
+  'editor-queue',
   'editor-sleep',
   'lean-comment-images',
   'file-lifecycle',

@@ -60,6 +60,17 @@ export function loadCapacity(env = process.env) {
     ),
     batchWorkers: nonnegativeInteger(env, 'STUDIO_RESERVED_BATCH_WORKERS', 3),
     editors: positiveNumber(env, 'STUDIO_MAX_EDITORS', 4),
+    editorQueue: positiveNumber(env, 'STUDIO_MAX_EDITOR_QUEUE', 128),
+    editorQueuePerUser: positiveNumber(
+      env,
+      'STUDIO_MAX_EDITOR_QUEUE_PER_USER',
+      3,
+    ),
+    editorQueueWaitMs: positiveNumber(
+      env,
+      'STUDIO_EDITOR_QUEUE_WAIT_MS',
+      60 * 60_000,
+    ),
     editorsPerProject: positiveNumber(env, 'STUDIO_MAX_EDITORS_PER_PROJECT', 2),
     editorsPerUser: positiveNumber(
       env,

@@ -21,6 +21,7 @@ import {
 import { EventStore, JobManager } from '../events.mjs'
 import { Settings } from '../settings.mjs'
 import { createStudio } from '../studio.mjs'
+import { loadCapacity } from '../capacity.mjs'
 
 const hash = (value) => createHash('sha256').update(value).digest('hex')
 const TOOLCHAIN = 'leanprover/lean4:v4.34.1'
@@ -138,7 +139,7 @@ async function fixture(t, capacity) {
     dataDir,
     runtime,
     config,
-    capacity,
+    capacity: capacity ? { ...loadCapacity({}), ...capacity } : undefined,
     modelDiscoverer: fixtureModelDiscovery,
     providerLimits: { get: async () => 1, current: () => 1 },
   })

@@ -907,6 +907,15 @@ export class Runtime {
     return root ? path.join(root, 'src', 'lean') : null
   }
 
+  canSpawnEditor({ editor = true } = {}) {
+    if (this.stopping) return false
+    this.#assertReady()
+    return (
+      !this.queue.some((job) => job.options.workload === 'interactive') &&
+      this.#hasCapacity({ workload: 'interactive', editor })
+    )
+  }
+
   info() {
     return {
       ready: this.ready,
@@ -2113,6 +2122,8 @@ export class Runtime {
       child.stderr.on('data', (chunk) => onOutput(chunk.toString(), 'stderr'))
     }
     const closed = new Promise((resolve) => child.once('close', resolve))
+    const released = Promise.withResolvers()
+    child.workerReleased = released.promise
     let cleanup
     child.cleanupWorker = () => {
       cleanup ||= (async () => {
@@ -2128,6 +2139,7 @@ export class Runtime {
         if (freshHome && !retainHome) await removeDisposableTree(home)
         await storageReservation?.release()
         this.children.delete(child)
+        released.resolve()
         this.#drain()
       })().catch((error) => {
         cleanup = undefined

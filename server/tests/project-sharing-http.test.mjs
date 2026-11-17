@@ -663,7 +663,7 @@ test('viewer writes and owner controls are rejected while editor saves retain st
   )
 })
 
-test('Lean editor admission limits one account across projects and releases its slot on close', async (t) => {
+test('Lean editor admission queues one account across projects and promotes its existing socket on close', async (t) => {
   const f = await fixture(t, {
     capacity: loadCapacity({
       STUDIO_MAX_EDITORS: '4',
@@ -688,16 +688,17 @@ test('Lean editor admission limits one account across projects and releases its 
   await once(first, 'open')
   const other = connect(f.editor, f.project)
   await once(other, 'open')
-  const rejected = connect(f.owner, second)
-  const status = await new Promise((resolve, reject) => {
-    rejected.on('error', reject)
-    rejected.once('unexpected-response', (_request, response) => {
-      response.resume()
-      rejected.terminate()
-      resolve(response.statusCode)
-    })
-  })
-  assert.equal(status, 429)
+  const waiting = connect(f.owner, second)
+  const notices = []
+  waiting.on('message', (bytes) => notices.push(JSON.parse(bytes)))
+  await once(waiting, 'open')
+  for (
+    let i = 0;
+    !notices.some((message) => message.params?.state === 'waiting') && i < 100;
+    i++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert(notices.some((message) => message.params?.state === 'waiting'))
   assert.equal(f.spawned.length, 2)
   assert(
     f.spawned.every(
@@ -713,11 +714,74 @@ test('Lean editor admission limits one account across projects and releases its 
   for (let i = 0; !f.spawned[0].child.killed && i < 100; i++)
     await new Promise((resolve) => setTimeout(resolve, 5))
   assert.equal(f.spawned[0].child.killed, true)
-  const reopened = connect(f.owner, second)
-  await once(reopened, 'open')
+  for (
+    let i = 0;
+    !notices.some((message) => message.params?.state === 'active') && i < 100;
+    i++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert(notices.some((message) => message.params?.state === 'active'))
   assert.equal(f.spawned.length, 3)
+  assert.equal(waiting.readyState, WebSocket.OPEN)
   assert.equal(other.readyState, WebSocket.OPEN)
 })
+
+for (const reason of ['disconnect', 'access removal']) {
+  test(`a waiting editor leaves on ${reason} and never starts after a slot frees`, async (t) => {
+    const f = await fixture(t, {
+      capacity: loadCapacity({ STUDIO_MAX_EDITORS: '1' }),
+    })
+    const connect = (actor) => {
+      const ws = new WebSocket(
+        f.origin.replace('http:', 'ws:') + `/websocket/${f.project.id}`,
+        { headers: { Authorization: `Bearer ${actor.token}` } },
+      )
+      t.after(() => ws.terminate())
+      return ws
+    }
+    const first = connect(f.owner)
+    await once(first, 'open')
+    const waiting = connect(f.editor)
+    const notices = []
+    waiting.on('message', (bytes) => notices.push(JSON.parse(bytes)))
+    await once(waiting, 'open')
+    for (
+      let i = 0;
+      !notices.some((message) => message.params?.state === 'waiting') &&
+      i < 100;
+      i++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    assert(notices.some((message) => message.params?.state === 'waiting'))
+    assert.equal(f.spawned.length, 1)
+    const closed = once(waiting, 'close')
+    if (reason === 'disconnect') waiting.close()
+    else
+      assert.equal(
+        (
+          await f.request(`${f.base}/sharing/members/${f.editor.id}`, {
+            method: 'DELETE',
+            body: {},
+          })
+        ).status,
+        200,
+      )
+    await closed
+    const firstClosed = once(first, 'close')
+    first.close()
+    await firstClosed
+    for (let i = 0; !f.spawned[0].child.killed && i < 100; i++)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    assert.equal(f.spawned[0].child.killed, true)
+    const session = await (await f.request('/api/session')).json()
+    assert.deepEqual(session.capacity.editorAdmission, {
+      active: 0,
+      queued: 0,
+      maxQueued: 128,
+    })
+    assert.equal(f.spawned.length, 1)
+  })
+}
 
 test('editor terminals use the initiating account’s private Git credentials and identity', async (t) => {
   const f = await fixture(t)

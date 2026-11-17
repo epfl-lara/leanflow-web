@@ -73,6 +73,7 @@ test('real editor sockets share local and remote admission, mirror canonical sav
     },
     controller: {
       canRun: (operation) => operation === 'lean.session',
+      canOpenEditor: () => remote.filter((child) => !child.killed).length < 2,
       editorCapacity: () => 2,
       openEditor: async () => {
         if (remote.filter((child) => !child.killed).length >= 2) return null
@@ -99,6 +100,8 @@ test('real editor sockets share local and remote admission, mirror canonical sav
     locals.push(child)
     return child
   }
+  f.runtime.canSpawnEditor = () =>
+    locals.filter((child) => !child.killed).length < 1
   const projects = [await f.create()]
   const owner = (
     await fs.readFile(path.join(f.dataDir, 'auth/owner.token'), 'utf8')
@@ -155,7 +158,27 @@ test('real editor sockets share local and remote admission, mirror canonical sav
         resolve(response.statusCode)
       })
     })
-  assert.equal(await rejected(tokens[3], projects[3]), 429)
+  const waiting = connect(tokens[3], projects[3])
+  const waitingMessages = []
+  waiting.on('message', (bytes) => waitingMessages.push(JSON.parse(bytes)))
+  await once(waiting, 'open')
+  waiting.send(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'initialize',
+      params: { rootUri: 'file:///workspace' },
+    }),
+  )
+  for (
+    let i = 0;
+    !waitingMessages.some((message) => message.params?.state === 'waiting') &&
+    i < 100;
+    i++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert(waitingMessages.some((message) => message.params?.position === 1))
+  assert.equal(children.length, 3, 'Waiting consumes no worker')
   assert.equal(await rejected(tokens[1], projects[0]), 404)
   const before = await f.workspaces.readFile(
     projects[0].id,
@@ -194,7 +217,21 @@ test('real editor sockets share local and remote admission, mirror canonical sav
   assert.equal(remote[0].killed, true)
   assert.equal(sockets[1].readyState, WebSocket.OPEN)
   assert.equal(sockets[2].readyState, WebSocket.OPEN)
+  for (
+    let i = 0;
+    !waitingMessages.some((message) => message.id === 4) && i < 100;
+    i++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert(
+    waitingMessages.some((message) => message.id === 4),
+    'The queued initialize completes on the same socket',
+  )
+  assert.equal(children.length, 4)
+  assert.equal(waiting.readyState, WebSocket.OPEN)
   checks.controller.openEditor = async () => null
+  checks.controller.canOpenEditor = () => false
+  f.runtime.canSpawnEditor = () => false
   f.runtime.spawn = () => {
     throw Object.assign(
       new Error(
@@ -204,11 +241,44 @@ test('real editor sockets share local and remote admission, mirror canonical sav
     )
   }
   const busy = connect(owner, projects[0])
-  const busyClosed = once(busy, 'close')
+  const busyMessages = []
+  busy.on('message', (bytes) => busyMessages.push(JSON.parse(bytes)))
   await once(busy, 'open')
-  const [code, reason] = await busyClosed
-  assert.equal(code, 1013)
-  assert.match(reason.toString(), /Interactive worker capacity is full/)
+  const waitingClosed = once(waiting, 'close')
+  waiting.close()
+  await waitingClosed
+  for (
+    let i = 0;
+    !busyMessages.some((message) => message.params?.state === 'waiting') &&
+    i < 100;
+    i++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert(busyMessages.some((message) => message.params?.state === 'waiting'))
+  assert.equal(busy.readyState, WebSocket.OPEN)
+  assert.equal(children.length, 4)
+  f.runtime.spawn = () => {
+    const child = makeChild()
+    locals.push(child)
+    return child
+  }
+  f.runtime.canSpawnEditor = () => true
+  busy.send(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'initialize',
+      params: { rootUri: 'file:///workspace' },
+    }),
+  )
+  for (
+    let i = 0;
+    !busyMessages.some((message) => message.id === 5) && i < 200;
+    i++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  assert(busyMessages.some((message) => message.id === 5))
+  assert.equal(busy.readyState, WebSocket.OPEN)
   assert.equal(f.providerCalls(), 0)
 })
 

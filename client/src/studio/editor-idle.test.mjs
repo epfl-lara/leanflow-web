@@ -24,6 +24,24 @@ function load(name) {
 const { editorIdle, EDITOR_IDLE_MS } = load('editorIdle')
 const { listenForUserActivity } = load('userActivity')
 
+test('waiting for admission does not put a worker-free editor to sleep', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 })
+  let waiting = true,
+    sleeps = 0
+  const idle = editorIdle(
+    () => sleeps++,
+    () => {},
+    100,
+    () => !waiting,
+  )
+  t.mock.timers.tick(300)
+  assert.equal(sleeps, 0)
+  waiting = false
+  t.mock.timers.tick(100)
+  assert.equal(sleeps, 1)
+  idle.dispose()
+})
+
 test('an unattended editor sleeps once at the deadline and wakes only on activity', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 })
   let sleeps = 0,

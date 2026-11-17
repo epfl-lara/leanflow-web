@@ -334,6 +334,124 @@ test('the actual language client startup preserves its rejection when channel cl
   )
 })
 
+test('workspace cancellation closes its pending socket before initialization and preserves another workspace', () => {
+  const source = fs.readFileSync(
+    new URL(
+      '../../../node_modules/monaco-editor-wrapper/dist/languageClientWrapper.js',
+      import.meta.url,
+    ),
+    'utf8',
+  )
+  const patched = patchLeanClientWrapper(source)
+  const begin = patched.indexOf('const webSocket = new WebSocket(url);')
+  const end = patched.indexOf('webSocket.onopen =', begin)
+  const create = new Function(
+    'lcConfig',
+    'url',
+    'WebSocket',
+    'reject',
+    patched.slice(begin, end) + '\nreturn webSocket;',
+  )
+  class Socket extends EventTarget {
+    closed = false
+    close(code) {
+      assert.equal(code, 1000)
+      this.closed = true
+      this.dispatchEvent(new Event('close'))
+    }
+  }
+  const failures = []
+  const first = new AbortController(),
+    other = new AbortController()
+  const socket = create(
+    { leanflowSignal: first.signal },
+    'fixture',
+    Socket,
+    (error) => failures.push(error),
+  )
+  const preserved = create(
+    { leanflowSignal: other.signal },
+    'other',
+    Socket,
+    (error) => failures.push(error),
+  )
+  first.abort()
+  assert.equal(socket.closed, true)
+  assert.equal(preserved.closed, false)
+  assert.equal(failures.length, 1)
+  assert.match(failures[0].message, /connection cancelled/)
+  const late = create(
+    { leanflowSignal: first.signal },
+    'late',
+    Socket,
+    (error) => failures.push(error),
+  )
+  assert.equal(late.closed, true)
+  assert.equal(failures.length, 2)
+})
+
+test('the actual wrapper receives queue notices before initialization and preserves the upstream strategy', () => {
+  const source = fs.readFileSync(
+    new URL(
+      '../../../node_modules/monaco-editor-wrapper/dist/languageClientWrapper.js',
+      import.meta.url,
+    ),
+    'utf8',
+  )
+  const patched = patchLeanClientWrapper(source)
+  const begin = patched.indexOf('const leanflowQueueNotice =')
+  const end = patched.indexOf(
+    'this.languageClient = new MonacoLanguageClient(mlcConfig);',
+    begin,
+  )
+  const install = new Function('mlcConfig', patched.slice(begin, end))
+  const notices = [],
+    previous = [],
+    normal = []
+  const config = {
+    clientOptions: {
+      connectionOptions: {
+        cancellationStrategy: 'preserved',
+        messageStrategy: {
+          handleMessage(message, next) {
+            previous.push(message)
+            next(message)
+          },
+        },
+      },
+    },
+  }
+  install.call(
+    {
+      languageClientConfig: {
+        options: { leanflowQueue: (notice) => notices.push(notice) },
+      },
+    },
+    config,
+  )
+  const waiting = {
+    method: '$/leanflow/editorQueue',
+    params: { state: 'waiting', position: 1, total: 2 },
+  }
+  const response = { id: 1, result: { capabilities: {} } }
+  config.clientOptions.connectionOptions.messageStrategy.handleMessage(
+    waiting,
+    (message) => normal.push(message),
+  )
+  assert.deepEqual(notices, [waiting.params])
+  assert.deepEqual(previous, [])
+  config.clientOptions.connectionOptions.messageStrategy.handleMessage(
+    response,
+    (message) => normal.push(message),
+  )
+  assert.deepEqual(previous, [response])
+  assert.deepEqual(normal, [response])
+  assert.equal(
+    config.clientOptions.connectionOptions.cancellationStrategy,
+    'preserved',
+  )
+})
+
 test('the actual patched wrapper handles channel closure before and after initialization and preserves unrelated errors', async () => {
   const source = fs.readFileSync(
     new URL(

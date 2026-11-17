@@ -3,7 +3,35 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const creation = 'this.languageClient = new MonacoLanguageClient(mlcConfig);'
-const guardedCreation = `${creation}
+const socketCreation = 'const webSocket = new WebSocket(url);'
+const cancellableSocket = `${socketCreation}
+                const leanflowSignal = lcConfig.leanflowSignal;
+                if (leanflowSignal) {
+                    const cancel = () => {
+                        webSocket.close(1000, 'Lean editor closed.');
+                        reject(new Error('Lean editor connection cancelled.'));
+                    };
+                    leanflowSignal.addEventListener('abort', cancel, { once: true });
+                    webSocket.addEventListener('close', () => leanflowSignal.removeEventListener('abort', cancel), { once: true });
+                    if (leanflowSignal.aborted) cancel();
+                }`
+const guardedCreation = `const leanflowQueueNotice = this.languageClientConfig?.options?.leanflowQueue;
+        if (typeof leanflowQueueNotice === 'function') {
+            const previousStrategy = mlcConfig.clientOptions.connectionOptions?.messageStrategy;
+            mlcConfig.clientOptions.connectionOptions = {
+                ...mlcConfig.clientOptions.connectionOptions,
+                messageStrategy: {
+                    handleMessage(message, next) {
+                        if (message.method === '$/leanflow/editorQueue') {
+                            leanflowQueueNotice(message.params);
+                            return;
+                        }
+                        return previousStrategy ? previousStrategy.handleMessage(message, next) : next(message);
+                    }
+                }
+            };
+        }
+        ${creation}
         const guardedClient = this.languageClient;
         const stopClient = guardedClient.stop.bind(guardedClient);
         let transportClosed = false;
@@ -29,15 +57,22 @@ const replacement = `this.messageTransports?.reader.onClose(async () => {
 // rejects unhandled during revocation/initialization. Remove this transform
 // when the upstream listener stops doing that. Never modify installed modules:
 // production checkouts can share their dependency directory.
+// Queue notifications must be observed while initialize is still waiting. The
+// upstream onCall hook runs after initialize; install only this notification's
+// handler through the existing connection strategy before the client starts.
+// The wrapper otherwise retains a pending socket outside the provider's client
+// list. Bind only this instance's socket to its owning workspace cancellation.
 export function patchLeanClientWrapper(source) {
   if (
     source.split(expected).length !== 2 ||
-    source.split(creation).length !== 2
+    source.split(creation).length !== 2 ||
+    source.split(socketCreation).length !== 2
   )
     throw new Error(
       'Lean editor compatibility changed. Review the pinned monaco-editor-wrapper reader-close listener before updating dependencies.',
     )
   return source
+    .replace(socketCreation, cancellableSocket)
     .replace(creation, guardedCreation)
     .replace(expected, replacement)
 }

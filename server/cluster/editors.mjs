@@ -118,14 +118,20 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
       current()
       const input = await checks.captureEditor(project.root, combined)
       combined.throwIfAborted()
+      const warm = checks.editorWarmup?.environment
       if (
         !input ||
+        (warm &&
+          (input.toolchain?.version !== warm.toolchain.version ||
+            input.toolchain?.manifest !== warm.toolchain.manifest ||
+            input.dependencies !== warm.dependencies ||
+            input.editorSource !== warm.editorSource)) ||
         !editorSource(
           await checks.inputs.blobs.manifest(input.sourceManifest, 'source'),
         )
       ) {
         unsubscribe()
-        return local()
+        return local({ unsupported: true })
       }
       child = await checks.controller.openEditor(input, {
         actor,
@@ -148,17 +154,26 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
     } catch (error) {
       unsubscribe()
       child?.kill()
-      signal.throwIfAborted()
+      const released = child?.workerReleased ?? error.workerReleased
       // A possibly running remote process keeps its grant until cleanup is
       // confirmed; launching a second copy could exceed the shared boundary.
       if (
+        signal.aborted ||
         checks.closing ||
         child ||
         error.workerCleanup ||
         error.code === 'worker_cleanup' ||
         stopped
-      )
-        throw error
+      ) {
+        const reason = signal.aborted ? signal.reason : error
+        throw released
+          ? Object.assign(
+              new Error(reason.message, { cause: reason }),
+              reason,
+              { workerReleased: released },
+            )
+          : reason
+      }
       return local()
     } finally {
       clearTimeout(timer)

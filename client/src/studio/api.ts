@@ -81,6 +81,10 @@ export interface Session {
     editors: number
     editorsPerProject: number
     editorsPerUser: number
+    editorQueue: number
+    editorQueuePerUser: number
+    editorQueueWaitMs: number
+    editorAdmission: { active: number; queued: number; maxQueued: number }
     terminals: number
     terminalsPerProject: number
     agents: number

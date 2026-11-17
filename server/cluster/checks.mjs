@@ -52,6 +52,16 @@ export class ClusterChecks {
       : 0
   }
 
+  canOpenEditor(project) {
+    return (
+      !this.closing &&
+      this.mode === 'serve' &&
+      this.editorsReady() &&
+      project.kind === 'single-file' &&
+      this.controller.canOpenEditor?.(this.editorWarmup?.environment) === true
+    )
+  }
+
   editorsReady() {
     return !this.editorWarmup || this.editorWarmup.state === 'ready'
   }

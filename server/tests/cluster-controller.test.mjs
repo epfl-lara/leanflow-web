@@ -450,12 +450,19 @@ test('closing a dedicated editor channel kills only its owner and confirms clean
   const { worker, runtime } = f.workers.get('node-a')
   const cleanup = Promise.withResolvers()
   runtime.editorCleanup = () => cleanup.promise
+  let released = false
+  void first.workerReleased.then(() => {
+    released = true
+  })
   first.rpc.close()
   await until(() => runtime.editorChildren[0].killed)
   assert.equal(runtime.editorChildren[1].killed, undefined)
   assert.equal(f.controller.status().active, 2)
   assert.equal(worker.running.size, 2)
+  assert.equal(released, false)
   cleanup.resolve()
+  await first.workerReleased
+  assert.equal(released, true)
   await until(() => f.controller.status().active === 1)
   second.kill()
   await until(

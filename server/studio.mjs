@@ -35,6 +35,9 @@ import { createChatTitleGenerator } from './chat-titles.mjs'
 import { searchDeclarations } from './search.mjs'
 import { LspFrames, validateClientUris } from './rpc.mjs'
 import { leanTransport } from './lean-transport.mjs'
+import { EditorAdmission } from './editor-admission.mjs'
+import { queuedEditor } from './queued-editor.mjs'
+import { EDITOR_QUEUE_METHOD } from '../shared/editor-queue.mjs'
 import { LeanRequests } from './lean-requests.mjs'
 import { LeanProgress } from './lean-progress.mjs'
 import { LeanEditPolicy } from './lean-edit-policy.mjs'
@@ -445,9 +448,16 @@ export async function createStudio({
   const app = express(),
     server = http.createServer(app),
     sockets = new Set(),
-    languageServers = new Map(),
     socketProjects = new Map(),
     socketActors = new Map()
+  const editorAdmission = new EditorAdmission({
+    capacity: () => capacity.editors + (clusterChecks?.editorCapacity() || 0),
+    maxPerUser: capacity.editorsPerUser ?? capacity.editors,
+    maxPerProject: capacity.editorsPerProject,
+    maxQueued: capacity.editorQueue ?? 128,
+    maxQueuedPerUser: capacity.editorQueuePerUser ?? 3,
+    maxWaitMs: capacity.editorQueueWaitMs ?? 60 * 60_000,
+  })
   const closeProjectEditors = (projectId) => {
     for (const ws of sockets)
       if (socketProjects.get(ws) === projectId)
@@ -720,6 +730,7 @@ export async function createStudio({
       capacity: {
         ...capacity,
         editors: capacity.editors + (clusterChecks?.editorCapacity() || 0),
+        editorAdmission: editorAdmission.info(),
       },
       runtime: runtime.info(),
       storage: await storage.status(),
@@ -1736,14 +1747,11 @@ export async function createStudio({
         openingId,
       })
     }
-    if (
-      sockets.size >=
-        capacity.editors + (clusterChecks?.editorCapacity() || 0) ||
-      [...socketActors.values()].filter((actor) => actor === user.id).length >=
-        (capacity.editorsPerUser ?? capacity.editors) ||
-      (languageServers.get(project.id) || 0) >= capacity.editorsPerProject
-    )
+    try {
+      editorAdmission.assertCanQueue(user.id)
+    } catch {
       return reject('429 Too Many Requests')
+    }
     wss.handleUpgrade(req, socket, head, (ws) =>
       wss.emit('connection', ws, req, project, user.id),
     )
@@ -1752,28 +1760,105 @@ export async function createStudio({
     sockets.add(ws)
     socketProjects.set(ws, project.id)
     socketActors.set(ws, actor)
-    languageServers.set(project.id, (languageServers.get(project.id) || 0) + 1)
+    let queueNotice = null,
+      remoteAllowed = true,
+      announcedWaiting = false,
+      noticePending = false
+    const sendQueueNotice = () => {
+      if (
+        !queueNotice ||
+        (queueNotice.state !== 'waiting' && !announcedWaiting)
+      )
+        return
+      if (ws.readyState === 1 && isAuthenticated(request, actor)) {
+        if (queueNotice.state === 'waiting') announcedWaiting = true
+        transport?.sendToClient({
+          jsonrpc: '2.0',
+          method: EDITOR_QUEUE_METHOD,
+          params: queueNotice,
+        })
+      }
+    }
+    const notifyQueue = (notice) => {
+      queueNotice = notice
+      // Waiting time must not consume the newly admitted editor's idle window.
+      if (notice.state === 'starting') lastActivity = Date.now()
+      if (notice.state !== 'waiting') return sendQueueNotice()
+      if (noticePending) return
+      noticePending = true
+      queueMicrotask(() => {
+        noticePending = false
+        if (queueNotice?.state === 'waiting') sendQueueNotice()
+      })
+    }
     let child,
       alive = true,
       lastActivity = Date.now()
     let requests, progress, editPolicy, widgetPolicy, transport
     try {
-      const localEditor = () =>
-        runtime.spawn(project.root, ['lake', 'serve', '--'], {
+      const currentProject = () => {
+        if (!isAuthenticated(request, actor))
+          throw Object.assign(
+            new Error('Account access changed. Sign in again.'),
+            { status: 403 },
+          )
+        const current = workspaces.get(project.id, actor)
+        if (current.status !== 'ready' || current.root !== project.root)
+          throw Object.assign(
+            new Error('This project is not ready for a Lean connection.'),
+            { status: 409 },
+          )
+        return current
+      }
+      const localEditor = (fallback) => {
+        if (fallback?.unsupported) remoteAllowed = false
+        const current = currentProject()
+        return runtime.spawn(current.root, ['lake', 'serve', '--'], {
           workload: 'interactive',
           // Keep repository editors at their existing worker size. The smaller
           // allocation was measured for managed single-file Mathlib workspaces.
-          editor: project.kind === 'single-file',
+          editor: current.kind === 'single-file',
           network: 'none',
           readOnlyWorkspace: true,
           writeLakeCache: true,
           freshHome: true,
           cleanHome: true,
         })
-      child = clusterChecks
-        ? clusterChecks.openEditor({ project, actor, workspaces }, localEditor)
-        : localEditor()
-      transport = leanTransport(ws, child)
+      }
+      child = queuedEditor({
+        admission: editorAdmission,
+        actor,
+        projectId: project.id,
+        onStatus: notifyQueue,
+        canStart: () => {
+          const current = currentProject()
+          if (activity.isStopping(actor, project.id)) return false
+          return (
+            (remoteAllowed && clusterChecks?.canOpenEditor?.(current)) ||
+            (runtime.canSpawnEditor?.({
+              editor: current.kind === 'single-file',
+            }) ??
+              true)
+          )
+        },
+        start: () => {
+          const current = currentProject()
+          if (activity.isStopping(actor, project.id))
+            throw Object.assign(
+              new Error('This project is stopping. Wait a moment.'),
+              { status: 503 },
+            )
+          return clusterChecks
+            ? clusterChecks.openEditor(
+                { project: current, actor, workspaces },
+                localEditor,
+              )
+            : localEditor()
+        },
+      })
+      transport = leanTransport(ws, child, {
+        isWaiting: () => queueNotice?.state === 'waiting',
+      })
       const sendToClient = (message) => {
         if (!isAuthenticated(request, actor)) {
           ws.close(1008, 'Account access changed. Sign in again.')
@@ -1837,6 +1922,13 @@ export async function createStudio({
           }
           workspaces.get(project.id, actor)
           const message = validateClientUris(JSON.parse(data.toString()))
+          // Re-send after initialize so the client's early notification handler
+          // observes waiting even if it attached after the socket opened.
+          if (
+            message.method === 'initialize' &&
+            queueNotice?.state === 'waiting'
+          )
+            sendQueueNotice()
           requests.track(message)
           progress.client(message)
           if (widgetPolicy.client(message) && editPolicy.client(message))
@@ -1858,7 +1950,11 @@ export async function createStudio({
         child?.kill()
         return
       }
-      if (!alive || Date.now() - lastActivity > 30 * 60_000)
+      if (
+        !alive ||
+        (queueNotice?.state !== 'waiting' &&
+          Date.now() - lastActivity > 30 * 60_000)
+      )
         return ws.terminate()
       alive = false
       ws.ping()
@@ -1873,10 +1969,6 @@ export async function createStudio({
       sockets.delete(ws)
       socketProjects.delete(ws)
       socketActors.delete(ws)
-      languageServers.set(
-        project.id,
-        Math.max(0, (languageServers.get(project.id) || 1) - 1),
-      )
     })
     ws.on('error', () => child?.kill())
   })
@@ -1884,6 +1976,7 @@ export async function createStudio({
   const close = () => {
     if (closePromise) return closePromise
     closePromise = (async () => {
+      editorAdmission.close()
       entraAuth.close()
       chats.stopNaming()
       const stopped = new Promise((resolve) => server.close(resolve))
