@@ -108,6 +108,9 @@ nothing. These ceilings describe admission, not a measured concurrency promise.
 
 ## Waiting for an editor
 
+The [17 November rollout report](releases/2026-11-17-editor-queue.md) records
+the live limits, acceptance tests and known limitations.
+
 Open the project normally. If its editor cannot start yet, LeanFlow shows its
 position in a waiting list and connects automatically when capacity is available.
 The tab can still edit and save canonical source while waiting. Diagnostics,

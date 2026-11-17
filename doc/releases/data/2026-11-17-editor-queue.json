@@ -1,0 +1,135 @@
+{
+  "date": "2026-11-17",
+  "sourceCommit": "27fffa307d6f2c726121a20ec72ece7d95ec78d1",
+  "previousSourceCommit": "36eb4418d6591793f04383c3b5b0c0bc4433c95e",
+  "deployed": true,
+  "publicSite": {
+    "publicHttpsStatus": 200,
+    "indexMatchesDeployedRelease": true,
+    "sha256": "803fa0bc2a9d8944d0e1330267b10148a22fbddf3a22d1930ec4887fe19b1b04"
+  },
+  "capacity": {
+    "editors": 32,
+    "editorsPerUser": 3,
+    "editorsPerProject": 3,
+    "editorQueue": 128,
+    "editorQueuePerUser": 3,
+    "editorQueueWaitMs": 3600000,
+    "editorAdmission": {
+      "active": 0,
+      "queued": 0,
+      "maxQueued": 128
+    }
+  },
+  "workers": {
+    "larapc06": {
+      "epoch": "0369d638-de0d-44cf-aa00-a39f28c8805f",
+      "ready": true,
+      "certified": true,
+      "editorSlots": 9
+    },
+    "larapc05": {
+      "epoch": "f27dd8db-64c6-4df9-a0ed-d9431516a987",
+      "ready": true,
+      "certified": true,
+      "editorSlots": 9
+    },
+    "larapc2": {
+      "epoch": "de2f0ddc-2259-45ab-9b2f-f6e5b9511a36",
+      "ready": true,
+      "certified": true,
+      "editorSlots": 5
+    }
+  },
+  "workerBundleDigest": "cc7080df981d0ddb00c30c0d8b511b53e4c245c4b82a96b76843b2753a70ddb2",
+  "workerBundleAndClusterConfigPreserved": true,
+  "applicationTests": {
+    "total": 2303,
+    "passed": 2301,
+    "skipped": 2,
+    "failed": 0,
+    "host": "coordinator VM",
+    "node": "24.22.0"
+  },
+  "checks": [
+    {
+      "check": "format",
+      "exit": 0,
+      "seconds": 0.12
+    },
+    {
+      "check": "tests",
+      "exit": 0,
+      "seconds": 135.69
+    },
+    {
+      "check": "typecheck",
+      "exit": 0,
+      "seconds": 6.79
+    },
+    {
+      "check": "lint",
+      "exit": 0,
+      "seconds": 1.12
+    },
+    {
+      "check": "build",
+      "exit": 0,
+      "seconds": 31.19
+    }
+  ],
+  "browserSuites": ["editor-queue", "editor-startup", "editor-sleep", "workspace-switch"],
+  "browserSuitesPassed": true,
+  "browserAssetsIdenticalBetweenFeatureAndFinalRelease": true,
+  "admissionModelTest": {
+    "capacity": 32,
+    "requests": 36,
+    "usesRealLean": false
+  },
+  "liveAcceptance": {
+    "usesRealLean": true,
+    "inferenceRequests": 0,
+    "nativeLocalAndRemoteCheck": true,
+    "nativeWorker": "larapc06",
+    "queue": {
+      "passed": true,
+      "activeEditors": 3,
+      "waitingEditors": 1,
+      "workersUsed": ["larapc05", "larapc06", "larapc2"],
+      "waitingWithoutAttempt": true,
+      "canonicalSaveWhileQueued": true,
+      "sameSocketPromotion": true,
+      "invalidDiagnostics": true,
+      "correctedDiagnostics": true,
+      "savedSourceReadByLean": true,
+      "otherEditorsPreserved": true,
+      "waitedBeforeReleaseMs": 1017,
+      "promotionObservedAfterReleaseMs": 26466,
+      "worker": "larapc06",
+      "cancellationWithoutAttempt": true
+    }
+  },
+  "review": {
+    "tool": "Claude Code",
+    "model": "Claude Opus 5.5",
+    "effort": "max",
+    "finalConfirmedBlockers": 0,
+    "scope": "Read-only diff and source review; tests run separately on the VM."
+  },
+  "ci": {
+    "applicationChecks": "pass before dependency audit",
+    "workflowResult": "failure",
+    "reason": "Existing picomatch advisory GHSA-fc5q-39xc-vjpf in unchanged Vite/tinyglobby dependencies",
+    "run": "https://github.com/epfl-lara/leanflow-web/actions/runs/44148994058",
+    "securityWorkflow": "success",
+    "securityRun": "https://github.com/epfl-lara/leanflow-web/actions/runs/44148993846"
+  },
+  "cleanup": {
+    "fixtureProjectsPurged": 6,
+    "fixtureAccountRevoked": true,
+    "maintenanceCarriersStopped": true,
+    "unusedCandidateAndStagingRemoved": true,
+    "freeAfterBytes": 87180660736,
+    "recoveredBytes": 1405194240
+  }
+}
