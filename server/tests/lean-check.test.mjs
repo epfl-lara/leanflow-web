@@ -177,6 +177,7 @@ async function checkFixture(
   {
     supported = true,
     result = { code: 0, stdout: 'checked', stderr: '' },
+    selectedResult = { code: 1, stdout: '', stderr: 'selected file error' },
     changed = false,
     changedDuringProbe = false,
     scope,
@@ -215,8 +216,7 @@ async function checkFixture(
       async run(root, args, options) {
         calls.push({ args, options })
         if (changed) await fs.writeFile(path.join(root, 'Main.lean'), 'changed')
-        if (file && args.includes(file))
-          return { code: 1, stdout: '', stderr: 'selected file error' }
+        if (file && args.includes(file)) return selectedResult
         return result
       },
     },
@@ -380,6 +380,27 @@ const sorryDiagnostic = JSON.stringify({
   pos: { line: 1, column: 8 },
   fileName: './Main.lean',
   severity: 'warning',
+})
+
+test('an output-limited project build preserves truncation and the following file diagnostic', async (t) => {
+  const { job } = await checkFixture(t, {
+    file: 'Main.lean',
+    result: {
+      code: 0,
+      stdout: 'cut off mid-line',
+      stderr: '',
+      truncated: true,
+    },
+    selectedResult: {
+      code: 0,
+      stdout: sorryDiagnostic,
+      stderr: '',
+      truncated: false,
+    },
+  })
+  assert.equal(job.status, 'completed')
+  assert.equal(job.result.truncated, true)
+  assert.equal(job.result.hasWarnings, true)
 })
 
 test('a selected-file warning stays visible on a successful check and ordinary output cannot mark it as a warning', async (t) => {

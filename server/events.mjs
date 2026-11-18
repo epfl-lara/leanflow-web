@@ -582,8 +582,13 @@ export class JobManager {
               controller.signal.throwIfAborted()
               result = {
                 ...checked,
-                stdout: result.stdout + checked.stdout,
-                stderr: result.stderr + checked.stderr,
+                stdout: [result.stdout, checked.stdout]
+                  .filter(Boolean)
+                  .join('\n'),
+                stderr: [result.stderr, checked.stderr]
+                  .filter(Boolean)
+                  .join('\n'),
+                truncated: Boolean(result.truncated || checked.truncated),
               }
             }
             return result
