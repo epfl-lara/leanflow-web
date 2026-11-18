@@ -1,0 +1,130 @@
+{
+  "deployedCommit": "bbfcadc20f52782bf80ee34041d72cf19ea85735",
+  "date": "2026-11-18",
+  "fixture": "25 ordinary accounts, public Mathlib geometry, independent Lean 4 repository with a local module, shared playground",
+  "sharedTwoWindowRehearsal": {
+    "participants": 25,
+    "heldPlaygroundEditors": 25,
+    "leanWindowsHeld": 50,
+    "heldDuringEdits": 25,
+    "collaborativeWrites": 50,
+    "allEditsConvergedMs": 1319,
+    "maxActive": 4,
+    "maxWaiting": 22,
+    "waitingWhenChecksFinished": 22,
+    "allIndependentChecksMs": 44501,
+    "crossRepositoryImportCheck": true,
+    "verifiedFiles": 50,
+    "unexpectedCloses": 0,
+    "elapsedMs": 166884,
+    "providerRequests": 0
+  },
+  "geometryFileChecks": {
+    "count": 50,
+    "elapsedPerFile": {
+      "medianMs": 12597,
+      "p95Ms": 21867,
+      "maxMs": 24001
+    },
+    "remoteJobs": 50,
+    "localJobs": 0,
+    "placement": [
+      ["larapc05", "lean.file", "completed", 21],
+      ["larapc06", "lean.file", "completed", 20],
+      ["larapc2", "lean.file", "completed", 9]
+    ]
+  },
+  "managedPlaygroundPlacement": [
+    ["larapc05", "lean.session", "cancelled", 9],
+    ["larapc06", "lean.session", "cancelled", 9],
+    ["larapc2", "lean.session", "cancelled", 5]
+  ],
+  "managedSessionEndStates": "The worker records a closed live session as cancelled when the browser exits normally.",
+  "localImportBurst": {
+    "participants": 25,
+    "fileChecks": 50,
+    "rounds": [
+      {
+        "totalMs": 5326,
+        "p50Ms": 3832,
+        "p95Ms": 5282,
+        "maxMs": 5323,
+        "sourceChanged": 6
+      },
+      {
+        "totalMs": 5375,
+        "p50Ms": 3613,
+        "p95Ms": 5217,
+        "maxMs": 5374,
+        "sourceChanged": 6
+      }
+    ],
+    "perFile": {
+      "medianMs": 3613,
+      "p95Ms": 5282,
+      "maxMs": 5374
+    },
+    "placement": {
+      "coordinator": 50
+    },
+    "unrelatedBrokenFile": "failed"
+  },
+  "fullProjectProofChecks": {
+    "anonymousWarningShownOnBothBuilds": true,
+    "independentKernelRejectedNamedSorry": true,
+    "verifiedCompleteTheorem": true,
+    "fixtureRestored": true
+  },
+  "historicalFileCheck": {
+    "deployedCommit": "46c9ce377867833c5253ccb0ba7364aee1b0bdcd",
+    "passed": true,
+    "bothEditedFilesRestored": true
+  },
+  "incompleteProof": [
+    {
+      "workspace": "Packing",
+      "warningDetected": true,
+      "correctedClean": true
+    },
+    {
+      "workspace": "Modules",
+      "warningDetected": true,
+      "correctedClean": true
+    }
+  ],
+  "hostOomKillsDuringRehearsal": {
+    "coordinator": 0,
+    "larapc05": 0,
+    "larapc06": 0,
+    "larapc2": 0
+  },
+  "firstDeploymentRehearsal": {
+    "participants": 25,
+    "verifiedFiles": 50,
+    "allIndependentChecksMs": 44904,
+    "unexpectedCloses": 0,
+    "elapsedMs": 169719
+  },
+  "previousReleaseSharedProject": {
+    "participants": 25,
+    "maxActive": 3,
+    "maxWaiting": 22,
+    "collaborativeWrites": 50,
+    "allEditsConvergedMs": 1407,
+    "verifiedFiles": 50,
+    "unexpectedCloses": 0,
+    "elapsedMs": 174929
+  },
+  "providerSimulation": {
+    "participants": 25,
+    "activeAtBurst": 3,
+    "queuedAtBurst": 22,
+    "completed": 25,
+    "liveInferenceRequests": 0
+  },
+  "cleanup": {
+    "temporaryProjectsPurged": 3,
+    "disposableAccountsRevoked": 25,
+    "workerEpochsPreserved": true
+  }
+}
