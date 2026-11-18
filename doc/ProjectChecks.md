@@ -16,6 +16,12 @@ declared in project modules, before expensive kernel replay. It inspects the
 actual export rather than relying on cached axiom metadata. Imported definitions,
 inductives and constructor types retain their full dependency graph.
 
+**Verified with warnings** means kernel replay passed for the exported
+declarations and Lean reported a warning. For example, an anonymous
+`example : True := by sorry` produces a compiler warning. It creates no
+exported declaration, so kernel replay can still pass. Open the check output
+to read the warning and locate the example.
+
 Unused declarations from imported libraries are outside this project check.
 For example, a project using `import Mathlib` checks its own declarations and
 every Mathlib declaration they depend on; it does not recheck all of Mathlib's
@@ -33,10 +39,10 @@ feedback on that source and **Check Project** when you need independent kernel
 verification of the default targets. Each participant can submit a separate
 file check while waiting for an interactive editor slot.
 
-**Compiled with warnings** means Lean accepted the file and reported a
-warning. Open the check output to read it. A result marked **earlier version**
-applies to the saved sources Lean checked. Run **Check File** again for the
-current version.
+**Compiled with warnings** means the selected file or build-only project check
+finished with a compiler warning. Open the check output to read it. A file
+result marked **earlier version** applies to the saved sources Lean checked.
+Run **Check File** again for the current version.
 
 On the coordinator, available worker capacity sets how many file checks can take private source copies, up to six. Each copy can hold up to 128 MiB of source or the lower configured storage allowance. The compiler reuses the project’s prepared dependencies. If the project contains too much source, excluded private files or links that cannot be copied faithfully, Lean checks the saved project in place. Run an in-place check again if someone edits the project before it finishes.
 

@@ -180,6 +180,7 @@ async function checkFixture(
     changed = false,
     changedDuringProbe = false,
     scope,
+    remote = false,
     kind = 'project',
     file,
   } = {},
@@ -219,6 +220,12 @@ async function checkFixture(
         return result
       },
     },
+    checkExecutor: remote
+      ? {
+          execute: async () => result,
+          isRemoteResult: (value) => value === result,
+        }
+      : undefined,
   })
   t.after(async () => {
     await manager.shutdown()
@@ -262,6 +269,29 @@ test('kernel rejections and sandbox failures do not fall back to build-only succ
       [PROJECT_CHECK_COMMAND],
     )
     assert.match(checked.job.error, /independent Lean/)
+  }
+})
+
+test('full project checks preserve kernel verdicts and surface fresh or replayed Lake compiler warnings', async (t) => {
+  const diagnosis = 'warning: Unfinished.lean:1:0: declaration uses `sorry`\n'
+  const built = '⚠ [2/4] Built Unfinished (191ms)\n' + diagnosis
+  const replayed = '⚠ [2/4] Replayed Unfinished\n' + diagnosis
+  for (const remote of [false, true]) {
+    for (const [code, stdout, stderr, hasWarnings] of [
+      [0, 'Verified', built, true],
+      [0, replayed, '', true],
+      [0, 'Nested/File.lean:10:2: warning: unused variable', '', true],
+      [1, '', built + 'Kernel rejected an axiom', true],
+      [0, 'Verified\nwarning: build progress\n', '', false],
+    ]) {
+      const { job } = await checkFixture(t, {
+        remote,
+        result: { code, stdout, stderr },
+      })
+      assert.equal(job.checkMethod, 'lake-check')
+      assert.equal(job.status, code === 0 ? 'completed' : 'failed')
+      assert.equal(job.result.hasWarnings, hasWarnings)
+    }
   }
 })
 

@@ -618,14 +618,13 @@ export class JobManager {
               (await this.workspaces.checkFingerprint(projectId, owner, {
                 signal: controller.signal,
               }))
-          if (fileOnly || sourceChanged)
-            result = {
-              ...result,
-              ...(fileOnly && { hasWarnings: hasLeanWarnings(result) }),
-              ...(checkedSnapshot && { checkedSnapshot }),
-              ...(sourceChanged && { sourceChanged: true }),
-              ...(sourceChanged && !checkedSnapshot && { code: 1 }),
-            }
+          result = {
+            ...result,
+            hasWarnings: hasLeanWarnings(result),
+            ...(checkedSnapshot && { checkedSnapshot }),
+            ...(sourceChanged && { sourceChanged: true }),
+            ...(sourceChanged && !checkedSnapshot && { code: 1 }),
+          }
           if (checkedSnapshot && sourceChanged)
             this.events.append(
               job.id,

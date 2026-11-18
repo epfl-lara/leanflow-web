@@ -171,9 +171,12 @@ function checkOutcome(job: Job) {
     return { label: 'Failed', tone: 'danger', icon: 'close' } as const
   if (job.status !== 'completed')
     return { label: job.status, tone: '', icon: null } as const
-  if (job.checkScope === 'file' && job.result?.hasWarnings === true)
+  if (job.result?.hasWarnings === true)
     return {
-      label: 'Compiled with warnings',
+      label:
+        job.checkMethod === 'lake-check' && job.checkScope !== 'file'
+          ? 'Verified with warnings'
+          : 'Compiled with warnings',
       tone: 'warning',
       icon: 'warning',
     } as const

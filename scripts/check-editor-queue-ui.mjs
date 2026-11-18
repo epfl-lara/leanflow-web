@@ -349,10 +349,16 @@ try {
   checkJob = {
     ...checkJob,
     status: 'completed',
+    checkMethod: 'lake-check',
+    result: { code: 0, hasWarnings: false },
     log: 'Project targets checked.',
   }
   await outputPanel
     .getByText('Project targets checked.', { exact: true })
+    .waitFor()
+  await outputPanel
+    .locator('output.success')
+    .filter({ hasText: 'Completed' })
     .waitFor()
   await page.getByRole('button', { name: 'Check File', exact: true }).click()
   await outputPanel
@@ -421,6 +427,40 @@ try {
   await outputPanel.getByText('Completed', { exact: true }).waitFor()
   assert.equal(await outputPanel.locator('output svg').count(), 0)
   assert.equal(await outputPanel.locator('output.success').count(), 0)
+  for (const [checkMethod, label] of [
+    ['lake-check', 'Verified with warnings'],
+    ['lake-build', 'Compiled with warnings'],
+  ]) {
+    await page
+      .getByRole('button', { name: 'Check Project', exact: true })
+      .click()
+    await outputPanel.getByText('queued', { exact: true }).waitFor()
+    checkJob = {
+      ...checkJob,
+      status: 'completed',
+      checkMethod,
+      result: { code: 0, hasWarnings: true },
+      log: 'Main.lean:3:0: warning: declaration uses sorry',
+    }
+    await outputPanel.getByText(label, { exact: true }).waitFor()
+    assert(await outputPanel.locator('output.warning svg').isVisible())
+    await outputPanel.getByText(/declaration uses sorry/).waitFor()
+  }
+  await page.getByRole('button', { name: 'Check Project', exact: true }).click()
+  await outputPanel.getByText('queued', { exact: true }).waitFor()
+  checkJob = {
+    ...checkJob,
+    status: 'failed',
+    checkMethod: 'lake-check',
+    result: { code: 1, hasWarnings: true },
+    error: 'Project verification failed.',
+  }
+  await outputPanel.getByText('Failed', { exact: true }).waitFor()
+  assert(await outputPanel.locator('output.danger svg').isVisible())
+  assert.equal(await outputPanel.locator('output.warning').count(), 0)
+  report.checks.push(
+    'Project checks distinguish kernel verification with warnings from compiler-only warnings, preserve a clean success, and keep a failing kernel check visibly failed.',
+  )
   report.checks.push(
     'Clean, warning and failed file checks have distinct visible symbols and labels. Current and earlier warning results both retain Lean’s diagnostic.',
   )
