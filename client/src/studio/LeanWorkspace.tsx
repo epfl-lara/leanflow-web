@@ -297,7 +297,7 @@ export function LeanWorkspace({
   joining = false,
 }: {
   projectId: string
-  queuedFileCheck?: { submit: () => void; saving: boolean; inProgress: boolean }
+  queuedFileCheck?: { submit: () => void; inProgress: boolean }
   files: readonly FileEntry[]
   file: OpenFile | null
   buffers: ReadonlyMap<string, OpenFile>
@@ -1805,7 +1805,6 @@ export function LeanWorkspace({
                   <button
                     type="button"
                     className="button small secondary"
-                    disabled={queuedFileCheck.saving}
                     onClick={queuedFileCheck.submit}
                   >
                     Check this file

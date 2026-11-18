@@ -17,6 +17,7 @@ const server = await new Promise((resolve) => {
 })
 const projectId = 'file-creation-project'
 const projectName = 'Creation fixture'
+const finishAutosave = Promise.withResolvers()
 let fixture
 try {
   fixture = await chatBrowserFixture({
@@ -46,6 +47,8 @@ try {
   const sources = state.files[projectId]
   const folders = new Set(['Main'])
   const writes = []
+  const autosaveMarker = '-- Draft saved before creating the next file'
+  let autosavePending = false
   const hash = (content) => createHash('sha256').update(content).digest('hex')
   let failNextFolder = false
   let releaseFolder = null
@@ -112,6 +115,11 @@ try {
       filename in sources ? hash(sources[filename]) : null,
     )
     writes.push({ kind: 'file', path: filename, ...body })
+    if (filename === 'Main.lean' && body.content.includes(autosaveMarker)) {
+      autosavePending = true
+      await finishAutosave.promise
+      autosavePending = false
+    }
     sources[filename] = body.content
     await route.fulfill({
       json: {
@@ -293,9 +301,38 @@ try {
     'Nested locations work; duplicate names and server conflicts preserve the dialog and allow retry.',
   )
 
+  await until(
+    () => sources['Main.lean'].includes('Unsaved fixture edit'),
+    'first draft saved',
+  )
+  await page.locator('.monaco-editor textarea').first().focus()
+  await page.keyboard.press(
+    process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
+  )
+  await page.keyboard.insertText(autosaveMarker + '\n')
+  await until(() => autosavePending, 'background save of the existing draft')
+  for (const name of ['New file', 'New folder']) {
+    assert(
+      await page.getByRole('button', { name, exact: true }).isEnabled(),
+      `${name} must remain available during a background save`,
+    )
+  }
+  await open('folder')
+  await dialog('folder')
+    .getByRole('button', { name: 'Cancel', exact: true })
+    .click()
   await page.getByLabel('Filter files', { exact: true }).fill('Proofs/Nested')
   assert(await folderButton('Proofs/Nested').isVisible())
   await create('file', 'Extra.lean', 'Proofs/Nested')
+  assert(
+    await dialog('file')
+      .getByRole('button', { name: 'Create file', exact: true })
+      .isDisabled(),
+  )
+  assert(autosavePending)
+  assert(!sources['Main.lean'].includes(autosaveMarker))
+  assert(!writes.some((entry) => entry.path === 'Proofs/Nested/Extra.lean'))
+  finishAutosave.resolve()
   await dialog('file').waitFor({ state: 'hidden' })
   await until(
     async () =>
@@ -310,10 +347,11 @@ try {
     '',
   )
   assert(sources['Main.lean'].includes('-- Unsaved fixture edit'))
+  assert(sources['Main.lean'].includes(autosaveMarker))
   assert.equal(sources['Proofs/Nested/Extra.lean'], '')
   assert.deepEqual(
     writes.filter((entry) => entry.kind === 'file').map((entry) => entry.path),
-    ['Main.lean', 'Proofs/Nested/Extra.lean'],
+    ['Main.lean', 'Main.lean', 'Proofs/Nested/Extra.lean'],
   )
   await create('file', 'notes.md')
   await dialog('file').waitFor({ state: 'hidden' })
@@ -324,7 +362,7 @@ try {
     .getByRole('button', { name: 'Cancel', exact: true })
     .click()
   report.checks.push(
-    'New files save existing edits with the expected hash, open at the selected location, support root files, and reject folder collisions.',
+    'New file and New folder stay usable during autosave. Creating a file waits for the pending draft to save before writing or opening the selected path; duplicate paths are rejected.',
   )
 
   await page.reload()
@@ -504,6 +542,7 @@ try {
   }
   throw error
 } finally {
+  finishAutosave.resolve()
   await fixture?.browser.close()
   await new Promise((resolve) => server.close(resolve))
 }

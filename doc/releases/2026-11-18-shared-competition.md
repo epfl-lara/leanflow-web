@@ -2,7 +2,7 @@
 
 Open a shared project in one browser tab. Double-click a file in **Files** to keep it open, then double-click another. Both files share the same continuous Lean session. Another browser tab or window with its own project editor can request another session. Each participant can edit, save and see collaborators' changes while waiting. Use **Check this file** in the waiting notice to compile the saved file and its imports. The result names the file. A second check on the current version is available if collaborators edited the project while Lean was working. **Check Project** verifies the project's default targets.
 
-The coordinator and web client run commit `bbfcadc`. The service restarted in an idle window. All three worker PCs retained their running processes and warmed Lean environments. The [main branch CI history](https://github.com/epfl-lara/leanflow-web/actions/workflows/ci.yml?query=branch%3Amain) records the Node and browser checks.
+The coordinator runs commit `bbfcadc`. The rehearsal used its matching web client. The service restarted in an idle window. All three worker PCs retained their running processes and warmed Lean environments. The [main branch CI history](https://github.com/epfl-lara/leanflow-web/actions/workflows/ci.yml?query=branch%3Amain) records the Node and browser checks.
 
 ## Hosting profile
 
@@ -45,6 +45,10 @@ A collaborator edited the unrelated target during each round. Twelve results ide
 Two real selected-file checks, one in each repository, displayed a warning for `sorry` and cleared it when the proof was completed. In the full verification test, an anonymous example with `sorry` produced a compiler warning in both the initial and cached builds. Kernel replay of the exported declarations passed. Replacing the example with a named theorem using `sorry` failed independent verification. Completing the named theorem passed with no warning.
 
 All four machines reported zero new out-of-memory kills during the rehearsals. The three test projects were purged and the 25 test accounts revoked. [Anonymized results](data/2026-11-18-shared-competition.json).
+
+### Opening a file or starting a check during autosave
+
+In an isolated browser, starting an autosave between pointer-down and pointer-up could swallow a click on **New file**. The client now keeps the file and folder dialogs available during a save. Creating a new file still waits for the previous draft to finish saving. The same save barrier protects file and project checks submitted from the toolbar or the editor queue.
 
 ## Reproduce the rehearsal
 

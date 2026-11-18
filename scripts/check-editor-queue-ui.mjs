@@ -152,6 +152,48 @@ try {
   await page.goto(process.env.STUDIO_TEST_URL || 'http://127.0.0.1:4173')
   const source = page.locator('.monaco-editor textarea').first()
   await source.waitFor({ timeout: 60000 })
+  async function checkDuringAutosave(button, filename, marker) {
+    const count = checkRequests.length
+    const release = Promise.withResolvers()
+    let saving = false
+    state.onSave = async ({ save }) => {
+      saving = true
+      await release.promise
+      return save()
+    }
+    try {
+      await source.focus()
+      await page.keyboard.press(editorShortcuts.documentEnd)
+      await page.keyboard.insertText(`-- ${marker}\n`)
+      await until(() => saving, `autosave started for ${filename}`)
+      assert(!state.files[projectId][filename].includes(marker))
+      assert(
+        await button.isEnabled(),
+        'A pending save must allow a check request',
+      )
+      await button.click()
+      const starting = page.getByRole('button', {
+        name: 'Starting check…',
+        exact: true,
+      })
+      await starting.waitFor()
+      assert(await starting.isDisabled(), 'A second check cannot start')
+      assert.equal(
+        checkRequests.length,
+        count,
+        'The check waits for the saved source',
+      )
+    } finally {
+      state.onSave = null
+      release.resolve()
+    }
+    await until(
+      () => checkRequests.length > count,
+      'check submitted after save',
+    )
+    assert.equal(checkRequests.length, count + 1)
+    assert(checkRequests[count].source.includes(marker))
+  }
   const waiting = page.locator('[data-editor-queue="waiting"]')
   await waiting.waitFor()
   assert.match(await waiting.innerText(), /position 3 of 4/)
@@ -214,12 +256,12 @@ try {
     0,
     'Waiting and editing do not submit background checks',
   )
-  await source.focus()
-  await page.keyboard.press(editorShortcuts.documentEnd)
-  await page.keyboard.insertText('-- CHECK_THIS_REVISION\n')
-  await waiting
-    .getByRole('button', { name: 'Check this file', exact: true })
-    .click()
+  await checkDuringAutosave(
+    waiting.getByRole('button', { name: 'Check this file', exact: true }),
+    'Second.lean',
+    'CHECK_THIS_REVISION',
+  )
+  assert.match(await waiting.innerText(), /position 3 of 4/)
   const outputPanel = page.locator('.build-output')
   await outputPanel
     .getByText('File check · Second.lean', { exact: true })
@@ -332,17 +374,14 @@ try {
   await checked('queueFirst').waitFor()
   assert(openedWithEdits('Main.lean'))
   assert.equal(connections, 1)
-  await source.focus()
-  await page.keyboard.press(editorShortcuts.documentEnd)
-  await page.keyboard.insertText('-- SAVED_AFTER_PROMOTION\n')
-  await until(
-    () => state.files[projectId]['Main.lean'].includes('SAVED_AFTER_PROMOTION'),
-    'saving after promotion',
+  await checkDuringAutosave(
+    page.getByRole('button', { name: 'Check Project', exact: true }),
+    'Main.lean',
+    'SAVED_AFTER_PROMOTION',
   )
   report.checks.push(
     'Two edited file tabs share one queue position and one Lean connection. On promotion each file opens with its own saved text and current checked theorem.',
   )
-  await page.getByRole('button', { name: 'Check Project', exact: true }).click()
   await outputPanel.getByText('queued', { exact: true }).waitFor()
   await outputPanel.getByText('Project check', { exact: true }).waitFor()
   assert.deepEqual(checkRequests[1].body, { path: 'Main.lean' })
@@ -360,7 +399,14 @@ try {
     .locator('output.success')
     .filter({ hasText: 'Completed' })
     .waitFor()
-  await page.getByRole('button', { name: 'Check File', exact: true }).click()
+  await checkDuringAutosave(
+    page.getByRole('button', { name: 'Check File', exact: true }),
+    'Main.lean',
+    'FILE_CHECK_DURING_SAVE',
+  )
+  report.checks.push(
+    'The queued file action and both toolbar checks accept a request during autosave, wait for the saved draft, and submit it exactly once.',
+  )
   await outputPanel
     .getByText('File check · Main.lean', { exact: true })
     .waitFor()

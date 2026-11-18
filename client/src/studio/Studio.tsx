@@ -2907,10 +2907,7 @@ export function Studio() {
                       className="icon-button"
                       onClick={() => setNewEntryKind('file')}
                       disabled={
-                        !projectCanEdit ||
-                        !workspaceEditable ||
-                        opening ||
-                        saving
+                        !projectCanEdit || !workspaceEditable || opening
                       }
                       title="New file"
                       aria-label="New file"
@@ -2928,7 +2925,6 @@ export function Studio() {
                           !projectCanEdit ||
                           !workspaceEditable ||
                           opening ||
-                          saving ||
                           !foldersAvailable
                         }
                         title={
@@ -3912,7 +3908,7 @@ export function Studio() {
                 <CheckControls
                   onCheck={(scope) => void check(scope)}
                   onStop={() => void stopCheck()}
-                  disabled={!checkAvailable || saving}
+                  disabled={!checkAvailable}
                   singleFile={singleFileMode}
                   starting={startingCheck}
                   activeJob={activeCheck}
@@ -3936,7 +3932,6 @@ export function Studio() {
                     checkAvailable
                       ? {
                           submit: () => void check('file'),
-                          saving,
                           inProgress: startingCheck || !!activeCheck,
                         }
                       : undefined
