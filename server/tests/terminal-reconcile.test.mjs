@@ -130,6 +130,34 @@ test('an authoritative folder move carries dirty files, private-only files and t
   assert.equal(f.state.deletedPaths.has('Old'), true)
 })
 
+test('new empty shared folders reach the open terminal and keep their inode when a collaborator moves them', async (t) => {
+  const f = await fixture(t)
+  await fs.mkdir(path.join(f.sharedRoot, 'Proofs', 'Empty'), {
+    recursive: true,
+  })
+  f.event(['Proofs/Empty'])
+  await f.pull()
+  const before = await fs.stat(path.join(f.manifest.root, 'Proofs/Empty'))
+  await fs.rename(
+    path.join(f.sharedRoot, 'Proofs'),
+    path.join(f.sharedRoot, 'Moved'),
+  )
+  f.event(['Proofs', 'Moved'], [{ from: 'Proofs', to: 'Moved' }], ['Proofs'])
+  await f.pull()
+  assert.equal(
+    (await fs.stat(path.join(f.manifest.root, 'Moved/Empty'))).ino,
+    before.ino,
+  )
+  await fs.mkdir(path.join(f.manifest.root, 'Moved/Private'))
+  await fs.rm(path.join(f.sharedRoot, 'Moved'), { recursive: true })
+  f.event(['Moved'], [], ['Moved'])
+  await f.pull()
+  await assert.rejects(f.read('Moved/Empty'), { code: 'ENOENT' })
+  assert(
+    (await fs.stat(path.join(f.manifest.root, 'Moved/Private'))).isDirectory(),
+  )
+})
+
 test('clean project updates rebase a previously published terminal edit without reverting it on the next push', async (t) => {
   const f = await fixture(t)
   const previous = [

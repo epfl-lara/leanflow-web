@@ -16,7 +16,12 @@ import type { WorkspaceBuffers, WorkspaceScope } from './workspaceBuffers'
 import { ApiError, sessionBoundUrl, type OpenFile } from './api'
 import { LocalDocumentHistory } from './localDocumentHistory'
 import { mergeMovedDocumentText } from './movedDocumentText'
-import { pathMoves, remapMovedPath, type PathMove } from './projectPaths'
+import {
+  parentFolders,
+  pathMoves,
+  remapMovedPath,
+  type PathMove,
+} from './projectPaths'
 import {
   projectPeers,
   type ProjectPeer,
@@ -109,7 +114,10 @@ export function useProjectCollaboration({
   scope: WorkspaceScope
   enabled: boolean
   canEdit: boolean
-  onFilesChanged?: () => void | Promise<void>
+  onFilesChanged?: (
+    affected: (path: string) => boolean,
+    recheck: (path: string) => void,
+  ) => void | Promise<void>
   onFilesMoved?: (move: PathMove) => void
   onAccessChanged?: () => void | Promise<void>
 }) {
@@ -221,6 +229,9 @@ export function useProjectCollaboration({
       discardVersion = store.getSnapshot().discardVersion
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined
     let listingTimer: ReturnType<typeof setTimeout> | undefined
+    let listingDeadline = 0
+    let refreshingFiles = false
+    let changedPaths: Set<string> | null = new Set()
     let sendTimer: ReturnType<typeof setTimeout> | undefined
     let presenceTimer: ReturnType<typeof setTimeout> | undefined
     let lastPresence = ''
@@ -276,20 +287,54 @@ export function useProjectCollaboration({
       if (current()) clearIssue()
       notify()
     }
-    const filesChanged = () => {
-      clearTimeout(listingTimer)
-      listingTimer = setTimeout(() => {
-        if (current())
-          void Promise.resolve(callbacks.current.onFilesChanged?.()).catch(
-            () => {},
-          )
-      }, 350)
+    const scheduleFileRefresh = () => {
+      if (!current() || changedPaths?.size === 0 || refreshingFiles) return
+      // Coalesce a typing burst. An uninterrupted stream of edits must still
+      // refresh the file tree and ordinary-save editors periodically.
+      if (listingTimer === undefined) listingDeadline = Date.now() + 2000
+      else clearTimeout(listingTimer)
+      listingTimer = setTimeout(
+        async () => {
+          listingTimer = undefined
+          if (!current()) return
+          const paths = changedPaths
+          changedPaths = new Set()
+          refreshingFiles = true
+          try {
+            await callbacks.current.onFilesChanged?.(
+              (path) =>
+                !paths ||
+                paths.has(path) ||
+                parentFolders(path).some((parent) => paths.has(parent)),
+              (path) => filesChanged([path]),
+            )
+          } catch {
+            // A subsequent change or reconnect will refresh the listing again.
+          } finally {
+            refreshingFiles = false
+            scheduleFileRefresh()
+          }
+        },
+        Math.max(0, Math.min(350, listingDeadline - Date.now())),
+      )
+    }
+    const filesChanged = (paths?: unknown) => {
+      if (!Array.isArray(paths) || !paths.length) changedPaths = null
+      else if (changedPaths)
+        for (const path of paths) {
+          if (typeof path === 'string') changedPaths.add(path)
+          if (changedPaths.size > 128) {
+            changedPaths = null
+            break
+          }
+        }
+      scheduleFileRefresh()
     }
     const send = (message: object) => {
       if (!ready || socket?.readyState !== WebSocket.OPEN) return false
       if (socket.bufferedAmount > 12 * 1024 * 1024) {
         fail('Live editing is catching up. Your edits are kept in this tab.')
-        socket.close(1013, 'Live editing is catching up.')
+        socket.close()
         return false
       }
       socket.send(JSON.stringify(message))
@@ -873,7 +918,7 @@ export function useProjectCollaboration({
         }
         publishLocal()
         schedulePresence()
-        if (store.getSnapshot().buffers.size) filesChanged()
+        filesChanged()
         notify()
         return
       }
@@ -892,7 +937,7 @@ export function useProjectCollaboration({
               (path): path is string => typeof path === 'string',
             ),
           )
-        filesChanged()
+        filesChanged('paths' in message ? message.paths : undefined)
         return
       }
       if (message.type === 'access' || message.type === 'project') {
@@ -954,7 +999,7 @@ export function useProjectCollaboration({
           fail(record.sourceLimitFailure, record, 413)
           // Later deltas on this connection can depend on the rejected text.
           // Reconnect before replaying a corrected source with all causal IDs.
-          socket?.close(1013, 'Reduce the file before live saving resumes.')
+          socket?.close()
           return
         }
         if (
@@ -984,7 +1029,7 @@ export function useProjectCollaboration({
           record,
           status,
         )
-        if (transient) socket?.close(1013, 'Live editing is busy.')
+        if (transient) socket?.close()
         if (status === 403 || (status === 404 && !path))
           void Promise.resolve(callbacks.current.onAccessChanged?.()).catch(
             () => {},
@@ -1247,24 +1292,27 @@ export function useProjectCollaboration({
         setPresence({ scope, peers: [] })
         setConnected(false)
         notify()
+        const reconnect = () => {
+          if (current())
+            reconnectTimer = setTimeout(
+              connect,
+              Math.min(15_000, 500 * 2 ** Math.min(retry++, 5)),
+            )
+        }
         if (event.code === 1008) {
           fail(
             'Project access changed. Your unsaved edits are kept in this tab.',
           )
-          void Promise.resolve(callbacks.current.onAccessChanged?.())
-            .then(() => {
-              if (current()) reconnectTimer = setTimeout(connect, 500)
-            })
-            .catch(() => {})
+          void Promise.resolve(callbacks.current.onAccessChanged?.()).then(
+            reconnect,
+            reconnect,
+          )
           return
         }
         setIssue(
           'Live connection interrupted. Your edits are kept in this tab; reconnecting…',
         )
-        reconnectTimer = setTimeout(
-          connect,
-          Math.min(15_000, 500 * 2 ** Math.min(retry++, 5)),
-        )
+        reconnect()
       })
       socket.addEventListener('error', () => socket?.close())
     }

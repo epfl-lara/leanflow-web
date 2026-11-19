@@ -193,6 +193,7 @@ function fixture(t, initial = 'base source\n', options = {}) {
       scope: store.getSnapshot().scope,
       enabled,
       canEdit,
+      onFilesChanged: options.onFilesChanged,
       onAccessChanged: options.onAccessChanged,
       onFilesMoved: options.onFilesMoved,
     })
@@ -213,6 +214,44 @@ function fixture(t, initial = 'base source\n', options = {}) {
   })
   return { store, socket, server, hook, rerender }
 }
+
+test('file change bursts refresh each affected buffer and never overtake a slow refresh', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+  const batches = []
+  let releaseFirst
+  const { store, socket } = fixture(t, undefined, {
+    deferReady: true,
+    onFilesChanged: (affected) => {
+      batches.push(
+        ['Main.lean', 'Folder/Proof.lean', 'lakefile.toml'].filter(affected),
+      )
+      if (batches.length === 1)
+        return new Promise((resolve) => {
+          releaseFirst = resolve
+        })
+    },
+  })
+  // Admission must refresh even when no editor tab is open.
+  store.closeFile('Main.lean')
+  socket.receive({ type: 'ready' })
+  t.mock.timers.tick(350)
+  assert.deepEqual(batches, [
+    ['Main.lean', 'Folder/Proof.lean', 'lakefile.toml'],
+  ])
+  socket.receive({ type: 'files', paths: ['Folder'] })
+  t.mock.timers.tick(350)
+  socket.receive({ type: 'files', paths: ['lakefile.toml', 'Closed.lean'] })
+  t.mock.timers.tick(350)
+  assert.equal(batches.length, 1)
+  releaseFirst()
+  await Promise.resolve()
+  for (let index = 0; index < 6; index++) {
+    t.mock.timers.tick(300)
+    socket.receive({ type: 'files', paths: ['lakefile.toml'] })
+  }
+  t.mock.timers.tick(200)
+  assert.deepEqual(batches[1], ['Folder/Proof.lean', 'lakefile.toml'])
+})
 
 test('cursor selection publishes separately from text and clears when editing loses focus', async (t) => {
   const { hook, socket, store } = fixture(t)
@@ -748,6 +787,36 @@ test('temporary capacity errors reconnect and replay unacknowledged edits', asyn
   assert.deepEqual(store.dirty(), [])
 })
 
+test('browser send backpressure reconnects and replays the local draft', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { store, socket, server, hook } = fixture(t)
+  socket.bufferedAmount = 16 * 1024 * 1024
+  const close = socket.close.bind(socket)
+  socket.close = (code) => {
+    if (code !== undefined && code !== 1000 && !(code >= 3000 && code <= 4999))
+      throw new DOMException(
+        'Invalid browser WebSocket close code',
+        'InvalidAccessError',
+      )
+    close(code)
+  }
+  const draft = 'saved after backpressure\n'
+  store.change('Main.lean', draft)
+  await assert.rejects(hook.flush(), /catching up/)
+  assert.equal(store.getSnapshot().file.content, draft)
+  t.mock.timers.tick(500)
+  const reopened = Socket.instances.at(-1)
+  assert.notEqual(reopened, socket)
+  reopened.receive({ type: 'ready' })
+  reopened.receive(openedWire(server, reopened))
+  const replay = reopened.sent.find((message) => message.type === 'update')
+  Y.applyUpdate(server, Buffer.from(replay.update, 'base64'))
+  reopened.receive(wire(server, undefined, { ack: replay.requestId }))
+  assert.equal(server.getText('source').toString(), draft)
+  assert.equal(await hook.flush(), true)
+  assert.deepEqual(store.dirty(), [])
+})
+
 test('remote middle edits preserve distant source and track selection offsets', () => {
   const original = 'header\n\nexample : True := by trivial\n\nfooter\n'
   const next = original.replace('by trivial', 'by\n  trivial')
@@ -885,6 +954,30 @@ test('reconnection discovers a membership change that occurred while no live soc
   assert.notEqual(reconnect, socket)
   reconnect.receive({ type: 'ready' })
   assert.equal(displayedRole, 'admin')
+})
+
+test('a temporary membership refresh failure allows a disconnected editor to rejoin', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let refreshes = 0
+  const { socket, store, server, hook } = fixture(t, undefined, {
+    onAccessChanged: async () => {
+      if (++refreshes === 2) throw new Error('Temporarily offline')
+    },
+  })
+  socket.close(1008)
+  store.change('Main.lean', 'my offline typing\n')
+  await Promise.resolve()
+  t.mock.timers.tick(500)
+  const reconnect = Socket.instances.at(-1)
+  assert.notEqual(reconnect, socket)
+  reconnect.receive({ type: 'ready' })
+  reconnect.receive(openedWire(server, reconnect))
+  const request = reconnect.sent.find((message) => message.type === 'update')
+  Y.applyUpdate(server, Buffer.from(request.update, 'base64'))
+  reconnect.receive(wire(server, undefined, { ack: request.requestId }))
+  assert.equal(await hook.flush(), true)
+  assert.equal(server.getText('source').toString(), 'my offline typing\n')
+  assert.equal(refreshes, 3)
 })
 
 test('read-only reconnection preserves a dirty editor draft rather than replacing it with saved text', async (t) => {
@@ -1027,11 +1120,11 @@ function serviceFixture(t, initial) {
   let content = initial
   const packets = []
   const workspaces = {
-    get() {
+    accessibleProject() {
       return { id: 'project', accessRole: 'editor' }
     },
     requireEditor() {
-      return this.get()
+      return this.accessibleProject()
     },
     subscribeChanges() {
       return () => {}
@@ -2650,9 +2743,9 @@ test('the document service tells a peer where a moved file went, and the peer sa
   const files = new Map([['Main.lean', baseline]])
   let notify = () => {}
   const workspaces = {
-    get: () => ({ id: 'project', accessRole: 'editor' }),
+    accessibleProject: () => ({ id: 'project', accessRole: 'editor' }),
     requireEditor() {
-      return this.get()
+      return this.accessibleProject()
     },
     subscribeChanges(listener) {
       notify = listener

@@ -28,7 +28,9 @@ export class ProjectPresence {
   }
 
   set(client, request, record) {
-    this.workspaces.requireEditor(client.projectId, client.actor)
+    this.workspaces.requireEditor(client.projectId, client.actor, {
+      details: false,
+    })
     if (
       client.ws.readyState !== 1 ||
       !client.paths.has(record.path) ||
@@ -56,22 +58,21 @@ export class ProjectPresence {
     this.schedule(client.projectId)
   }
 
-  clear(client) {
-    client.presenceRevision = (client.presenceRevision || 0) + 1
-    if (!client.presence) return
-    client.presence = null
+  clear(client, path) {
+    if (!path || client.pendingCursor?.path === path)
+      client.pendingCursor = null
+    if (!path && !client.presence) return
+    if (!path || client.presence?.path === path) client.presence = null
     this.broadcast(client.projectId)
   }
 
   clearDocument(record) {
-    for (const client of this.clients)
-      if (
-        client.projectId === record.projectId &&
-        client.presence?.documentId === record.id
-      ) {
-        client.presenceRevision = (client.presenceRevision || 0) + 1
-        client.presence = null
-      }
+    for (const client of this.clients) {
+      if (client.projectId !== record.projectId) continue
+      if (client.pendingCursor?.documentId === record.id)
+        client.pendingCursor = null
+      if (client.presence?.documentId === record.id) client.presence = null
+    }
     this.broadcast(record.projectId)
   }
 
@@ -93,10 +94,12 @@ export class ProjectPresence {
       if (client.projectId !== projectId || client.ws.readyState !== 1) continue
       try {
         if (!this.authenticated(client)) throw new Error('Signed out')
-        this.workspaces.get(projectId, client.actor)
+        this.workspaces.accessibleProject(projectId, client.actor)
         recipients.push(client)
         if (!client.presence) continue
-        this.workspaces.requireEditor(projectId, client.actor)
+        this.workspaces.requireEditor(projectId, client.actor, {
+          details: false,
+        })
         const presence = client.presence
         const record = this.record(projectId, presence.path)
         if (

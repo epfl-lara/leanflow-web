@@ -73,40 +73,47 @@ try {
       if (request.url().startsWith('https://provider.example/'))
         report.providerCalls++
     })
+    let budgetPatched = false
     if (queueFixture)
-      await page.route('**/assets/index-*.js', async (route) => {
-        const response = await route.fetch()
-        let body = await response.text()
-        if (
-          !body.includes(
-            '[LeanFlow Web] Could not finish closing the Lean editor.',
-          )
-        )
-          return route.fulfill({ response, body })
-        // Checked transform of LeanWorkspace's actual serialize() function.
-        // Only this isolated browser can deliberately hold the existing queue.
-        const pattern =
-          /function ([\w$]+)\(([\w$]+)\)\{const ([\w$]+)=([\w$]+)\.then\(\2\);return \4=\3\.catch\(\(\)=>\{\}\),\3\}/g
-        const matches = [...body.matchAll(pattern)]
-        assert.equal(
-          matches.length,
-          1,
-          'Review the editor queue fixture transform',
-        )
-        const budget =
-          'maxComputationTimeMs:200,maxOperations:2e6,maxTokens:3e5'
-        assert.equal(
-          body.split(budget).length,
-          2,
-          'Review the live diff budget fixture transform',
-        )
-        body = body.replace(
-          budget,
-          'maxComputationTimeMs:200,maxOperations:2e6,maxTokens:64',
-        )
-        body += `\nglobalThis.__sharingEditorQueue=${matches[0][1]};\n`
-        await route.fulfill({ response, body })
-      })
+      await page.route(
+        /\/assets\/(?:index|LeanWorkspace)-[\w-]+\.js$/,
+        async (route) => {
+          const response = await route.fetch()
+          let body = await response.text()
+          // The diff algorithm and the lazy Lean editor can live in separate chunks.
+          const budget =
+            'maxComputationTimeMs:200,maxOperations:2e6,maxTokens:3e5'
+          if (body.includes(budget)) {
+            assert.equal(
+              body.split(budget).length,
+              2,
+              'Review the live diff budget fixture transform',
+            )
+            body = body.replace(
+              budget,
+              'maxComputationTimeMs:200,maxOperations:2e6,maxTokens:64',
+            )
+            budgetPatched = true
+          }
+          if (
+            body.includes(
+              '[LeanFlow Web] Could not finish closing the Lean editor.',
+            )
+          ) {
+            // Expose the real editor queue only inside this fixture browser.
+            const pattern =
+              /function ([\w$]+)\(([\w$]+)\)\{const ([\w$]+)=([\w$]+)\.then\(\2\);return \4=\3\.catch\(\(\)=>\{\}\),\3\}/g
+            const matches = [...body.matchAll(pattern)]
+            assert.equal(
+              matches.length,
+              1,
+              'Review the editor queue fixture transform',
+            )
+            body += `\nglobalThis.__sharingEditorQueue=${matches[0][1]};\n`
+          }
+          await route.fulfill({ response, body })
+        },
+      )
     const login = await context.request.post(fixture.origin + '/api/login', {
       data: { token: fixture.accounts[actor].token },
       headers: { Origin: fixture.origin },
@@ -134,6 +141,8 @@ try {
     await page
       .getByText('Joining live editing…', { exact: true })
       .waitFor({ state: 'hidden' })
+    if (queueFixture)
+      assert(budgetPatched, 'Review the live diff budget fixture transform')
     pages[actor] = page
     return page
   }

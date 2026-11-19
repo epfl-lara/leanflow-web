@@ -42,7 +42,7 @@ If a saved file disappears, its unsaved draft stays in a read-only view. Other f
 
 Large batches hold the write queue for that project until they finish. Another save in the same project can wait for the batch; your local draft remains editable and other projects keep responding. Keep the tab open until saving is confirmed. Replacing an existing file preserves its name throughout the replacement, so readers see complete old or new contents rather than a temporarily missing file.
 
-Configuration files use the normal save path and its active-work checks. They do not use the live text connection. Changing Lean or Lake configuration requires preparing the shared environment again. The selected Lean release and dependency pins are preserved.
+Configuration files use version-checked saves and the project's active-work checks. If another person saves a configuration file you have open, your tab refreshes it. If you have also edited the file, your draft stays available for review. Changing Lean or Lake configuration requires preparing the shared environment again. The selected Lean release and dependency pins are preserved.
 
 If the connection fails, keep the tab open until saving succeeds. Files that switch to normal version-checked saving stay in that mode until you switch to another project and back, or reload the page, which prevents the same edit from being saved twice during reconnection. Unacknowledged edits remain local. If both the saved file and a local draft changed while a document was disconnected, download the draft before reloading. The interface does not silently replace it.
 
@@ -53,6 +53,8 @@ If an edit exceeds the file limit or includes unsupported text, remove that text
 Each terminal opens a private working copy. Saved project changes arrive in clean files while its own text edits publish with version checks. File and folder moves also reach an open terminal. A conflict pauses synchronization and preserves the private copy. Close the terminal and choose **Recover terminal files** to download it. Recovery downloads belong to the account that opened the terminal, including after project access is removed or the shared project is deleted. Open your account settings and choose **Private terminal files** to find copies from projects you can no longer access. Keep at most eight copies per account; download what you need, then use **Discard recovery copy** to free a slot. Copies that are open or still publishing their final changes cannot be downloaded or discarded. They appear in recovery only after closing; interrupted copies remain available after a server restart.
 
 Moving a text file with `mv` also updates recognized project imports and file links when the original file can be identified safely. This includes SVG diagrams linked from Lean comments. The updated references reach the terminal and other connected editors. A warning asks you to review references that could not be updated. Copying and deleting a file, changing its contents during the move, or moving binary files may require a manual reference update.
+
+If two people move the same file to different destinations before the terminal syncs, the first published move stays in the project. The conflicting terminal pauses. Close it and use **Recover terminal files** to retrieve its private version.
 
 Recovery downloads can include earlier file versions under `.terminal-sync-recovery/`. Check that folder when recovering an interrupted write.
 

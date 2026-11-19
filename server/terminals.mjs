@@ -13,6 +13,7 @@ const workerScript = readFileSync(
   'utf8',
 )
 const maxInput = 16 * 1024
+const inputWindow = 64 * 1024
 const outputWindow = 256 * 1024
 
 export function validateTerminalOpeningId(value) {
@@ -108,6 +109,7 @@ export class Terminals {
     let setup = Promise.resolve()
     let initialized = false
     const pendingInput = []
+    let pendingBytes = 0
     let outstanding = 0
     let lastActivity = Date.now()
     let alive = true
@@ -213,7 +215,7 @@ export class Terminals {
             throw new Error()
         } else throw new Error()
         lastActivity = Date.now()
-        if ((child?.stdin.writableLength || 0) > 64 * 1024)
+        if ((child?.stdin.writableLength || 0) > inputWindow)
           return fail(
             'Too much terminal input is waiting. Reopen the terminal and send a smaller paste.',
             1008,
@@ -223,11 +225,13 @@ export class Terminals {
           message.type === 'input'
             ? { type: 'input', data: message.data }
             : { type: 'resize', cols: message.cols, rows: message.rows }
-        if (initialized) child.stdin.write(JSON.stringify(input) + '\n')
+        const frame = JSON.stringify(input) + '\n'
+        if (initialized) child.stdin.write(frame)
         else {
-          if (pendingInput.length >= 8)
+          pendingBytes += Buffer.byteLength(frame)
+          if (pendingBytes > inputWindow)
             return fail('Too much terminal input arrived before startup.', 1008)
-          pendingInput.push(input)
+          pendingInput.push(frame)
         }
       } catch {
         fail('Invalid terminal input. Reopen the terminal to continue.', 1008)
@@ -484,8 +488,7 @@ export class Terminals {
             )
             session.mirror.start()
           }
-          for (const input of pendingInput)
-            child.stdin.write(JSON.stringify(input) + '\n')
+          for (const frame of pendingInput) child.stdin.write(frame)
           pendingInput.length = 0
         })()
         setup.catch(() =>
@@ -526,27 +529,34 @@ export class Terminals {
               // Other tabs with an open socket retain their own live shells.
               session.ws.readyState !== 1),
         )
-        .map(async (session) => {
-          session.ws.close(1000, 'Terminal closed')
-          session.child?.kill()
-          try {
-            await session.startup
-          } catch (error) {
-            if (session.child) throw error
-            // A failed startup keeps its private copy guarded until cleanup
-            // succeeds. Retry that cleanup even though no worker was started.
-            await session.finalize()
-          }
-          session.child?.kill()
-          try {
-            await session.finished
-          } catch (error) {
-            if (!session.child?.cleanupWorker) throw error
-            await session.child.cleanupWorker()
-            await session.finalize()
-          }
+        .map((session) => {
+          session.stopping ??= this.#stopSession(session).finally(() => {
+            session.stopping = undefined
+          })
+          return session.stopping
         }),
     )
+  }
+
+  async #stopSession(session) {
+    session.ws.close(1000, 'Terminal closed')
+    session.child?.kill()
+    try {
+      await session.startup
+    } catch (error) {
+      if (session.child) throw error
+      // A failed startup keeps its private copy guarded until cleanup
+      // succeeds. Retry that cleanup even though no worker was started.
+      await session.finalize()
+    }
+    session.child?.kill()
+    try {
+      await session.finished
+    } catch (error) {
+      if (!session.child?.cleanupWorker) throw error
+      await session.child.cleanupWorker()
+      await session.finalize()
+    }
   }
 
   async close() {

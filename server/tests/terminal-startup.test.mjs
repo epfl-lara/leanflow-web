@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { Runtime } from '../runtime.mjs'
 import { Terminals } from '../terminals.mjs'
@@ -81,6 +82,58 @@ async function fixture(t) {
     project: store.get(initial.id, 'alice'),
   }
 }
+
+for (const occupied of [false, true])
+  test(`competing browser and terminal renames preserve a ${occupied ? 'privately occupied' : 'missing private'} destination`, async (t) => {
+    const f = await fixture(t)
+    await f.store.setMember(f.project.id, 'alice', 'bob', 'editor')
+    await f.store.writeFile(
+      f.project.id,
+      'alice',
+      'Old.lean',
+      '-- baseline\n',
+      null,
+    )
+    const snapshot = await f.store.terminalSnapshot(
+      f.project.id,
+      'bob',
+      'competing-renames',
+    )
+    f.cleanup.push(() =>
+      f.store.cleanupTerminalSnapshot(snapshot, { finalize: true }),
+    )
+    await fs.rename(
+      path.join(snapshot.root, 'Old.lean'),
+      path.join(snapshot.root, 'Private.lean'),
+    )
+    if (occupied)
+      await fs.writeFile(
+        path.join(snapshot.root, 'Shared.lean'),
+        '-- other local work\n',
+      )
+    await f.store.moveEntry(f.project.id, 'alice', {
+      from: 'Old.lean',
+      to: 'Shared.lean',
+    })
+    await assert.rejects(f.store.syncTerminal(snapshot), { status: 409 })
+    assert.equal(
+      (await f.store.readFile(f.project.id, 'alice', 'Shared.lean')).content,
+      '-- baseline\n',
+    )
+    await assert.rejects(
+      f.store.readFile(f.project.id, 'alice', 'Private.lean'),
+      { status: 404 },
+    )
+    assert.equal(
+      await fs.readFile(path.join(snapshot.root, 'Private.lean'), 'utf8'),
+      '-- baseline\n',
+    )
+    if (occupied)
+      assert.equal(
+        await fs.readFile(path.join(snapshot.root, 'Shared.lean'), 'utf8'),
+        '-- other local work\n',
+      )
+  })
 
 test('closing terminal startup cancels its queued Git lookup without stopping an active editor', async (t) => {
   const f = await fixture(t)
@@ -250,6 +303,50 @@ test('closing a terminal waiting for an interactive worker cancels startup and r
   assert.equal(f.store.terminalCopies.size, 0)
   assert.deepEqual(await fs.readdir(f.store.snapshotsDir), [])
   assert.doesNotThrow(() => terminals.assertIdle(f.project.id))
+})
+
+test('overlapping terminal stops finish the last file synchronization and release its private copy once after a cleanup failure', async (t) => {
+  const f = await fixture(t)
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    cleanupWorker: async () => {},
+    kill() {
+      if (this.killed) return
+      this.killed = true
+      this.emit('close', 0)
+    },
+  })
+  f.runtime.spawn = () => child
+  const terminals = new Terminals({
+    runtime: f.runtime,
+    workspaces: f.store,
+    capacity: {},
+  })
+  f.cleanup.push(() => terminals.close())
+  const cleanup = f.store.cleanupTerminalSnapshot.bind(f.store)
+  let calls = 0
+  f.store.cleanupTerminalSnapshot = (...args) => {
+    if (++calls === 1)
+      throw Object.assign(new Error('Transient private copy cleanup failure'), {
+        status: 503,
+      })
+    return cleanup(...args)
+  }
+  const ws = socket()
+  terminals.connect(ws, f.project, 'alice')
+  const session = [...terminals.sessions][0]
+  await session.startup
+  ws.close()
+  await assert.rejects(session.finished, { status: 503 })
+  await Promise.all([
+    terminals.closeProject(f.project.id, 'alice'),
+    terminals.closeProject(f.project.id, 'alice'),
+  ])
+  assert.equal(calls, 2)
+  assert.equal(terminals.sessions.size, 0)
+  assert.deepEqual(await fs.readdir(f.store.snapshotsDir), [])
 })
 
 test('a queued terminal rechecks collaborator permissions before starting its worker', async (t) => {

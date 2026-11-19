@@ -556,7 +556,11 @@ export class TexBuildManager {
     return this.get(owner, id)
   }
   async stop(owner, id) {
-    const job = this.#job(owner, id)
+    await this.#stop(this.#job(owner, id))
+    return this.get(owner, id)
+  }
+  async #stop(job) {
+    const { id, owner, projectId } = job
     if (!TERMINAL.has(job.status)) {
       const controller = this.controllers.get(id)
       if (!controller) fail('This TeX build is no longer running.', 409)
@@ -568,8 +572,12 @@ export class TexBuildManager {
     } catch (error) {
       if (!error.workerCleanup) throw error
     }
-    await this.#retryCleanup(owner, job.projectId)
-    return this.get(owner, id)
+    await this.#retryCleanup(owner, projectId)
+  }
+  async stopRevokedProject(owner, projectId) {
+    const id = this.projectBuilds.get(this.#key(owner, projectId))
+    if (id) await this.#stop(this.#job(owner, id, { requireProject: false }))
+    else await this.#retryCleanup(owner, projectId)
   }
   async stopProject(owner, projectId) {
     this.workspaces.get(projectId, owner)

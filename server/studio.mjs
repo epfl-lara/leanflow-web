@@ -841,6 +841,9 @@ export async function createStudio({
         )
           ws.close(1008, 'Project access changed. Reopen the project.')
       const stopping = [terminals.closeProject(projectId, actor)]
+      // Viewers may compile. Only losing project access cancels their TeX build.
+      if (!currentRole)
+        stopping.push(texBuilds.stopRevokedProject(actor, projectId))
       let editor = false
       try {
         workspaces.requireEditor(projectId, actor)

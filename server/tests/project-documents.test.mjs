@@ -45,7 +45,7 @@ function fixture(t, options = {}) {
       listener({ projectId: 'shared', paths, kind, ...extra })
   }
   const store = {
-    get(id, actor) {
+    accessibleProject(id, actor) {
       if (id !== 'shared' || !roles.has(actor)) throw forbidden()
       return {
         id,
@@ -54,7 +54,7 @@ function fixture(t, options = {}) {
       }
     },
     requireEditor(id, actor) {
-      const project = this.get(id, actor)
+      const project = this.accessibleProject(id, actor)
       if (project.accessRole === 'viewer')
         throw Object.assign(new Error('Editor access required'), {
           status: 403,
@@ -66,7 +66,7 @@ function fixture(t, options = {}) {
       return () => listeners.delete(listener)
     },
     async readFile(id, actor, name) {
-      this.get(id, actor)
+      this.accessibleProject(id, actor)
       const content = options.root
         ? await fs.readFile(path.join(options.root, name), 'utf8')
         : files.get(name)
@@ -259,6 +259,40 @@ test('cursor snapshots are scoped to subscribed files and disappear after access
   assert.deepEqual(latestPresence(bob), [])
 })
 
+test('moving a cursor during a slow save leaves both collaborators connected and able to save', async (t) => {
+  const started = Promise.withResolvers()
+  const finish = Promise.withResolvers()
+  t.after(() => finish.resolve())
+  const f = fixture(t, {
+    beforeWrite: () => {
+      started.resolve()
+      return finish.promise
+    },
+  })
+  const alice = await f.client('alice')
+  const bob = await f.client('bob')
+  const send = (entry, packet) =>
+    entry.ws.emit('message', Buffer.from(JSON.stringify(packet)))
+  send(
+    alice,
+    update(alice, 1, (source) => source.insert(source.length, '-- first\n')),
+  )
+  await started.promise
+  for (let i = 0; i < 80; i++) send(alice, cursor(alice, i % 10))
+  send(
+    bob,
+    update(bob, 2, (source) => source.insert(source.length, '-- second\n')),
+  )
+  finish.resolve()
+  await untilPresence(bob, (peers) => peers[0]?.head === 9)
+  assert.equal(alice.ws.readyState, 1)
+  assert.equal(bob.ws.readyState, 1)
+  assert.match(f.files.get('Main.lean'), /-- first/)
+  assert.match(f.files.get('Main.lean'), /-- second/)
+  assert.ok(alice.ws.packets.some((packet) => packet.ack === 1))
+  assert.ok(bob.ws.packets.some((packet) => packet.ack === 2))
+})
+
 test('clearing a cursor cancels an older cursor packet queued behind a file operation', async (t) => {
   const f = fixture(t)
   const alice = await f.client('alice')
@@ -281,12 +315,42 @@ test('clearing a cursor cancels an older cursor packet queued behind a file oper
   assert.deepEqual(latestPresence(bob), [])
 })
 
+test('closing the previous file preserves the queued cursor in the newly selected file', async (t) => {
+  const f = fixture(t)
+  f.files.set('Next.lean', '-- next file\n')
+  const alice = await f.client('alice')
+  const bob = await f.client('bob')
+  for (const peer of [alice, bob])
+    await f.service.message(peer.client, { type: 'open', path: 'Next.lean' })
+  await f.service.message(alice.client, cursor(alice, 1))
+  await untilPresence(bob, (peers) => peers[0]?.path === 'Main.lean')
+
+  const next = f.service.documents.get(f.service.key('shared', 'Next.lean'))
+  const { promise, resolve } = Promise.withResolvers()
+  const held = f.service.queue(next, () => promise)
+  const pending = f.service.message(alice.client, {
+    type: 'presence',
+    path: 'Next.lean',
+    documentId: next.id,
+    anchor: 3,
+    head: 3,
+  })
+  await f.service.message(alice.client, { type: 'close', path: 'Main.lean' })
+  resolve()
+  await Promise.all([held, pending])
+  const peers = await untilPresence(
+    bob,
+    (peers) => peers[0]?.path === 'Next.lean',
+  )
+  assert.equal(peers[0].head, 3)
+})
+
 test('cursor updates cannot cross project boundaries or reach revoked members', async (t) => {
   const f = fixture(t)
   const alice = await f.client('alice')
   const bob = await f.client('bob')
-  const get = f.store.get.bind(f.store)
-  f.store.get = (projectId, actor) =>
+  const get = f.store.accessibleProject.bind(f.store)
+  f.store.accessibleProject = (projectId, actor) =>
     projectId === 'unrelated'
       ? { id: projectId, accessRole: 'editor' }
       : get(projectId, actor)
@@ -497,22 +561,45 @@ test('malformed or oversized hidden document state never reaches saved sources',
   assert.equal(value.files.get('Main.lean'), before)
 })
 
-test('terminal writes reach open live documents without a workspace save notification', async (t) => {
+test('external writes notify peers of the changed paths and refresh only affected documents', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-doc-watch-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
   await fs.writeFile(path.join(root, 'Main.lean'), 'initial source')
+  await fs.writeFile(path.join(root, 'Other.lean'), 'another source')
   const value = fixture(t, { root })
   const alice = await value.client('alice')
-  await fs.writeFile(path.join(root, 'Main.lean'), 'terminal changed source')
+  await value.service.message(alice.client, {
+    type: 'open',
+    path: 'Other.lean',
+  })
+  const reads = []
+  const originalRead = value.store.readFile.bind(value.store)
+  value.store.readFile = (...args) => {
+    reads.push(args[2])
+    return originalRead(...args)
+  }
+  await Promise.all([
+    fs.writeFile(path.join(root, 'Main.lean'), 'terminal changed source'),
+    fs.writeFile(path.join(root, 'lakefile.toml'), 'name = "Shared"'),
+  ])
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       clearInterval(poll)
       reject(new Error('terminal change was not published'))
     }, 4000)
     const poll = setInterval(() => {
+      const changes = alice.ws.packets.filter(
+        (packet) => packet.type === 'files',
+      )
       if (
-        !documentPackets(alice).some(
-          (packet) => packet.content === 'terminal changed source',
+        !changes.some((packet) => packet.paths.includes('lakefile.toml')) ||
+        !changes.some((packet) => packet.paths.includes('Main.lean')) ||
+        !reads.includes('Main.lean') ||
+        !alice.ws.packets.some(
+          (packet) =>
+            packet.type === 'document' &&
+            packet.path === 'Main.lean' &&
+            packet.hash === sha('terminal changed source'),
         )
       )
         return
@@ -521,6 +608,7 @@ test('terminal writes reach open live documents without a workspace save notific
       resolve()
     }, 20)
   })
+  assert.ok(!reads.includes('Other.lean'), 'unrelated open file was read again')
 })
 
 test('minimal text replacement keeps Unicode boundaries and unchanged identities', () => {

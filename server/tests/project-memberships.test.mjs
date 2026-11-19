@@ -411,6 +411,11 @@ test('durable project roles enforce file, metadata and sharing permissions', asy
 
 test('share links store hashes, can be revoked, and never downgrade existing access', async (t) => {
   const { store, project, dataDir } = await fixture(t)
+  const accessEvents = []
+  const unsubscribe = store.subscribeChanges((event) => {
+    if (event.kind === 'access') accessEvents.push(event.projectId)
+  })
+  t.after(unsubscribe)
   const editor = await store.createShareLink(project.id, 'alice', 'editor')
   const viewer = await store.createShareLink(project.id, 'alice', 'viewer')
   assert.equal(editor.token.length, 43)
@@ -436,6 +441,19 @@ test('share links store hashes, can be revoked, and never downgrade existing acc
     (await store.joinShareLink('alice', viewer.token)).accessRole,
     'admin',
   )
+  assert.equal(
+    (await store.joinShareLink('eve', viewer.token)).accessRole,
+    'viewer',
+  )
+  assert.equal(
+    (await store.joinShareLink('eve', viewer.token)).accessRole,
+    'viewer',
+  )
+  assert.equal(
+    (await store.joinShareLink('eve', editor.token)).accessRole,
+    'editor',
+  )
+  assert.deepEqual(accessEvents, [project.id, project.id, project.id])
   await store.revokeShareLink(project.id, 'alice', editor.id)
   await assert.rejects(store.joinShareLink('carol', editor.token), {
     status: 404,

@@ -164,6 +164,11 @@ test('25 participants concurrently edit two files in one shared project and conv
       for (const { doc } of peer.documents.values()) doc.destroy()
   })
   await Promise.all(peers.map((peer) => peer.open(files[1])))
+  let dependencyChecks = 0
+  f.studio.runtime.dependencyPreparationReason = () => {
+    dependencyChecks++
+    return null
+  }
   const marker = (path, index) => `-- ${path} participant ${index + 1}\n`
   await Promise.all(
     peers.flatMap((peer, index) =>
@@ -197,6 +202,11 @@ test('25 participants concurrently edit two files in one shared project and conv
       `${path} convergence across 25 editors`,
     )
   }
+  assert.equal(
+    dependencyChecks,
+    0,
+    'Saving and delivering shared text should not inspect dependency files for every reader.',
+  )
 })
 
 test('real WebSocket peers converge under seeded concurrent insert/delete/paste rounds and server restart', async (t) => {

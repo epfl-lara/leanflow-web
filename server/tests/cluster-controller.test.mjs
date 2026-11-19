@@ -1596,7 +1596,6 @@ test('held editors use fewer status polls while cancellation wakes cleanup immed
   })
   await f.ready()
   await f.controller.prepareNode('node-a', f.input)
-  f.transport.requests.length = 0
   const editor = await f.controller.openEditor(
     f.input,
     options({ jobId: 'quiet-editor' }),
@@ -1604,12 +1603,51 @@ test('held editors use fewer status polls while cancellation wakes cleanup immed
   assert(editor)
   editor.stdout.resume()
   editor.stderr.resume()
+  // Startup polls cover workspace materialization and use a shorter interval.
+  f.transport.requests.length = 0
   await delay(200)
   const polls = f.transport.requests.filter(
     (call) => call.method === 'attempt.get',
   )
-  assert(polls.length <= 3, `Unexpected editor polling: ${polls.length}`)
+  assert(polls.length <= 1, `Unexpected idle editor polling: ${polls.length}`)
   editor.kill()
+  await until(() => f.controller.status().active === 0, 1000)
+  assert.deepEqual(counts(f.controller.status()), {
+    active: 0,
+    held: 0,
+    queued: 0,
+  })
+})
+
+test('closing an editor during its status request releases the worker without waiting for another poll', async (t) => {
+  const f = await cluster(t, {
+    nodes: [editorNode()],
+    timing: { editorPollMs: 10000 },
+  })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input)
+  const release = Promise.withResolvers()
+  let held = false
+  f.transport.hook = async ({ method, params, options, request }) => {
+    const reply = await request(method, params, options)
+    if (
+      method === 'attempt.get' &&
+      reply.attempt.state === 'running' &&
+      !held
+    ) {
+      held = true
+      await release.promise
+    }
+    return reply
+  }
+  try {
+    const editor = await f.controller.openEditor(f.input, options())
+    assert(editor)
+    await until(() => held)
+    editor.kill()
+  } finally {
+    release.resolve()
+  }
   await until(() => f.controller.status().active === 0, 1000)
   assert.deepEqual(counts(f.controller.status()), {
     active: 0,

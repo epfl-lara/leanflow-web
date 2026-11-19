@@ -1719,6 +1719,50 @@ test('viewer checks use read-only sources and private homes; TeX compiles only c
   )
 })
 
+test('removing project access releases only that collaborator’s TeX worker while viewers may keep compiling', async (t) => {
+  const f = await fixture(t)
+  await fs.writeFile(
+    path.join(f.project.root, 'main.tex'),
+    '\\documentclass{article}',
+  )
+  f.runtime.texInfo = async () => ({ available: true, engines: ['pdflatex'] })
+  let started
+  f.runtime.runTex = async (_source, _output, { signal, onSpawn }) => {
+    onSpawn()
+    started.resolve(signal)
+    await once(signal, 'abort')
+    return { code: 130, stdout: '', stderr: '' }
+  }
+  const compile = async (actor) => {
+    started = Promise.withResolvers()
+    const response = await f.request(`${f.base}/tex/build`, {
+      actor,
+      method: 'POST',
+      body: { rootFile: 'main.tex' },
+    })
+    assert.equal(response.status, 202)
+    return { build: await response.json(), signal: await started.promise }
+  }
+  const target = await compile(f.editor)
+  const other = await compile(f.viewer)
+  assert.equal((await f.member(f.editor, 'viewer')).status, 200)
+  assert.equal(target.signal.aborted, false)
+  assert.equal(
+    (
+      await f.request(`${f.base}/sharing/members/${f.editor.id}`, {
+        method: 'DELETE',
+        body: {},
+      })
+    ).status,
+    200,
+  )
+  assert.equal(target.signal.aborted, true)
+  await f.texBuilds.active.get(target.build.id)
+  assert.equal(f.events.getMetadata(target.build.id).status, 'cancelled')
+  assert.equal(other.signal.aborted, false)
+  assert.equal(f.events.getMetadata(other.build.id).status, 'running')
+})
+
 test('removing editor access cancels only that member’s active check outside the workspace lock', async (t) => {
   const f = await fixture(t)
   let entered, signal

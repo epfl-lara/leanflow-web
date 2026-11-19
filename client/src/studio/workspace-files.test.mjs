@@ -175,12 +175,23 @@ test('reference refresh preserves existing drafts and typing that arrives during
     store,
     store.getSnapshot().scope,
     ['Main.lean'],
-    async () => {
-      assert.fail('Dirty files must not be replaced by a reference refresh')
-    },
+    async () => ({ content: 'peer change', hash: 'b'.repeat(64) }),
   )
   assert.deepEqual(result.pendingPaths, ['Main.lean'])
   assert.equal(store.getSnapshot().file, baseline)
+  for (const latest of [
+    { content: baseline.savedContent, hash: baseline.hash },
+    { content: baseline.content, hash: 'b'.repeat(64) },
+  ]) {
+    const unchanged = await refreshChangedBuffers(
+      store,
+      store.getSnapshot().scope,
+      ['Main.lean'],
+      async () => latest,
+    )
+    assert.deepEqual(unchanged.pendingPaths, [])
+    assert.equal(store.getSnapshot().file, baseline)
+  }
 
   store.setFile(file('Main.lean'))
   let finish

@@ -110,7 +110,7 @@ export class ProjectDocuments {
       )
       return
     }
-    this.workspaces.get(projectId, actor)
+    this.workspaces.accessibleProject(projectId, actor)
     this.wss.handleUpgrade(req, socket, head, (ws) =>
       this.connect(ws, projectId, actor, req),
     )
@@ -138,7 +138,7 @@ export class ProjectDocuments {
       if (!client.alive) return ws.terminate()
       try {
         this.assertAuthenticated(client)
-        this.workspaces.get(projectId, actor)
+        this.workspaces.accessibleProject(projectId, actor)
       } catch {
         return ws.close(1008, 'Project access changed.')
       }
@@ -162,6 +162,29 @@ export class ProjectDocuments {
         )
         return
       }
+      let request
+      try {
+        request = JSON.parse(data.toString())
+      } catch {
+        ws.close(1008, 'Invalid document message.')
+        return
+      }
+      // Replace a waiting selection in place. Cursor movement during a slow
+      // save must not use up this connection's allowance for durable edits.
+      const cursor = client.pendingCursor
+      if (
+        cursor &&
+        request?.type === 'presence' &&
+        request.path === cursor.path &&
+        request.documentId === cursor.documentId &&
+        cursor.after === cursor.record.queue &&
+        Number.isSafeInteger(request.anchor) &&
+        Number.isSafeInteger(request.head)
+      ) {
+        cursor.anchor = request.anchor
+        cursor.head = request.head
+        return
+      }
       client.pending++
       this.pendingPerActor.set(actor, actorPending + 1)
       this.pendingBytes += data.length
@@ -171,14 +194,6 @@ export class ProjectDocuments {
         const remaining = (this.pendingPerActor.get(actor) || 1) - 1
         if (remaining) this.pendingPerActor.set(actor, remaining)
         else this.pendingPerActor.delete(actor)
-      }
-      let request
-      try {
-        request = JSON.parse(data.toString())
-      } catch {
-        release()
-        ws.close(1008, 'Invalid document message.')
-        return
       }
       void this.message(client, request)
         .catch((error) =>
@@ -244,11 +259,9 @@ export class ProjectDocuments {
     return JSON.stringify([projectId, name])
   }
   detach(client, name) {
-    client.presenceRevision = (client.presenceRevision || 0) + 1
     client.paths.delete(name)
     client.vectors.delete(name)
-    if (client.presence?.path === name) this.presence.clear(client)
-    else this.presence.broadcast(client.projectId)
+    this.presence.clear(client, name)
     const record = this.documents.get(this.key(client.projectId, name))
     if (!record) return
     record.clients.delete(client)
@@ -379,7 +392,7 @@ export class ProjectDocuments {
   }
   readerProject(record, actor) {
     try {
-      return this.workspaces.get(record.projectId, actor)
+      return this.workspaces.accessibleProject(record.projectId, actor)
     } catch (error) {
       // A revoked reader says nothing about the lifetime of the file. Close
       // only that reader; another member may still use the same document.
@@ -475,12 +488,14 @@ export class ProjectDocuments {
     }
   }
   watchDirectory(projectId, actor, relative) {
-    const project = this.workspaces.get(projectId, actor)
+    const project = this.workspaces.accessibleProject(projectId, actor)
     if (!project.root) return
     const directory = relative === '.' ? '' : relative
     const key = this.key(projectId, directory)
     if (this.watchers.has(key) || this.watchers.size >= 256) return
     try {
+      const paths = new Set()
+      let refreshAll = false
       // Nonrecursive directory watchers never traverse user-created symlinks.
       // Open file parents have already passed WorkspaceStore's guarded read.
       const watcher = watch(
@@ -488,17 +503,27 @@ export class ProjectDocuments {
         { persistent: false },
         (_kind, filename) => {
           const name = filename?.toString()
-          if (!name || name.startsWith('.lemex-write-')) return
-          try {
-            sourcePath(directory ? `${directory}/${name}` : name)
-          } catch {
-            return
+          if (name?.startsWith('.lemex-write-')) return
+          if (name) {
+            let relativePath
+            try {
+              relativePath = validateWorkspaceFilePath(
+                directory ? `${directory}/${name}` : name,
+              )
+            } catch {
+              return
+            }
+            if (!refreshAll) paths.add(relativePath)
           }
-          clearTimeout(watcher.timer)
-          watcher.timer = setTimeout(
-            () => this.changed({ projectId, kind: 'files', paths: [] }),
-            100,
-          )
+          if (!name || paths.size > 128) refreshAll = true
+          if (watcher.timer) return
+          watcher.timer = setTimeout(() => {
+            watcher.timer = null
+            const changedPaths = refreshAll ? [] : [...paths]
+            paths.clear()
+            refreshAll = false
+            this.changed({ projectId, kind: 'files', paths: changedPaths })
+          }, 100)
           watcher.timer.unref?.()
         },
       )
@@ -527,7 +552,10 @@ export class ProjectDocuments {
       const client = [...record.clients][0]
       record.polling = true
       void (async () => {
-        const root = this.workspaces.get(record.projectId, client.actor).root
+        const root = this.workspaces.accessibleProject(
+          record.projectId,
+          client.actor,
+        ).root
         if (
           !root ||
           (await this.diskSignature(path.join(root, record.path))) ===
@@ -542,7 +570,7 @@ export class ProjectDocuments {
         })
     }
   }
-  packet(record, ack, vector) {
+  packet(record, vector) {
     return {
       type: 'document',
       path: record.path,
@@ -550,25 +578,28 @@ export class ProjectDocuments {
       update: encoded(Y.encodeStateAsUpdate(record.doc, vector)),
       ...(vector ? {} : { content: record.doc.getText('source').toString() }),
       hash: record.hash,
-      ...(ack === undefined ? {} : { ack }),
     }
   }
   broadcast(record, origin, ack) {
     const vector = Y.encodeStateVector(record.doc)
+    const packets = new Map()
     for (const client of record.clients) {
       try {
-        this.workspaces.get(record.projectId, client.actor)
+        this.workspaces.accessibleProject(record.projectId, client.actor)
       } catch {
         client.ws.close(1008, 'Project access changed.')
         continue
       }
+      // Peers that received the same broadcast share a state vector.
+      const previous = client.vectors.get(record.path)
+      let packet = packets.get(previous)
+      if (!packet) {
+        packet = this.packet(record, previous)
+        packets.set(previous, packet)
+      }
       this.send(
         client,
-        this.packet(
-          record,
-          client === origin ? ack : undefined,
-          client.vectors.get(record.path),
-        ),
+        client === origin && ack !== undefined ? { ...packet, ack } : packet,
       )
       client.vectors.set(record.path, vector)
     }
@@ -636,10 +667,8 @@ export class ProjectDocuments {
     if (!request || typeof request !== 'object' || Array.isArray(request))
       fail('Invalid shared document message.')
     this.assertAuthenticated(client)
-    this.workspaces.get(client.projectId, client.actor)
+    this.workspaces.accessibleProject(client.projectId, client.actor)
     if (request.type === 'presence') {
-      const revision = (client.presenceRevision || 0) + 1
-      client.presenceRevision = revision
       if (request.path === null) {
         this.presence.clear(client)
         return
@@ -648,11 +677,25 @@ export class ProjectDocuments {
       const record = this.documents.get(this.key(client.projectId, name))
       if (!record || !client.paths.has(name))
         fail('Open the shared file before sending its cursor.', 409)
-      await this.queue(record, () => {
-        if (revision !== client.presenceRevision) return
+      const cursor = {
+        path: name,
+        documentId: request.documentId,
+        anchor: request.anchor,
+        head: request.head,
+        record,
+        after: record.queue,
+      }
+      client.pendingCursor = cursor
+      try {
+        // Offsets describe the text after preceding edits from this socket.
+        // Observing that boundary does not need a slot in the write queue.
+        await cursor.after.catch(() => {})
+        if (client.pendingCursor !== cursor) return
         this.assertAuthenticated(client)
-        this.presence.set(client, request, record)
-      })
+        this.presence.set(client, cursor, record)
+      } finally {
+        if (client.pendingCursor === cursor) client.pendingCursor = null
+      }
       return
     }
     if (request.type === 'close') {
@@ -700,7 +743,9 @@ export class ProjectDocuments {
       }
       return
     }
-    this.workspaces.requireEditor(client.projectId, client.actor)
+    this.workspaces.requireEditor(client.projectId, client.actor, {
+      details: false,
+    })
     if (!client.paths.has(name))
       fail('Open the shared file before editing it.', 409)
     if (!Number.isSafeInteger(request.requestId) || request.requestId < 1)
@@ -717,6 +762,7 @@ export class ProjectDocuments {
         const project = this.workspaces.requireEditor(
           client.projectId,
           client.actor,
+          { details: false },
         )
         if (
           project.status === 'preparing' ||
@@ -807,8 +853,8 @@ export class ProjectDocuments {
             }
             if (
               (error.status || error.statusCode) === 409 &&
-              (this.workspaces.get(client.projectId, client.actor).status ===
-                'preparing' ||
+              (this.workspaces.accessibleProject(client.projectId, client.actor)
+                .status === 'preparing' ||
                 this.workspaces.jobs?.has(client.projectId))
             )
               fail(
@@ -845,7 +891,7 @@ export class ProjectDocuments {
     for (const client of this.clients)
       if (client.projectId === event.projectId) {
         try {
-          this.workspaces.get(event.projectId, client.actor)
+          this.workspaces.accessibleProject(event.projectId, client.actor)
           this.send(client, {
             type:
               event.kind === 'access'
@@ -865,6 +911,7 @@ export class ProjectDocuments {
           client.ws.close(1008, 'Project access changed.')
         }
       }
+    if (event.kind === 'access') return
     for (const record of this.documents.values()) {
       if (
         record.projectId === event.projectId &&
@@ -890,7 +937,7 @@ export class ProjectDocuments {
         continue
       const actor = [...record.clients].find((client) => {
         try {
-          this.workspaces.get(event.projectId, client.actor)
+          this.workspaces.accessibleProject(event.projectId, client.actor)
           return true
         } catch {
           return false
@@ -917,7 +964,7 @@ export class ProjectDocuments {
         await this.queue(record, () => {
           const active = [...record.clients].find((client) => {
             try {
-              this.workspaces.get(record.projectId, client.actor)
+              this.workspaces.accessibleProject(record.projectId, client.actor)
               return true
             } catch {
               return false
@@ -932,7 +979,7 @@ export class ProjectDocuments {
         if (error.documentReaderDenied) {
           record.refreshNeeded = [...record.clients].some((client) => {
             try {
-              this.workspaces.get(record.projectId, client.actor)
+              this.workspaces.accessibleProject(record.projectId, client.actor)
               return true
             } catch {
               return false
@@ -962,7 +1009,7 @@ export class ProjectDocuments {
       if (client.projectId !== projectId || (actor && client.actor !== actor))
         continue
       try {
-        this.workspaces.get(projectId, client.actor)
+        this.workspaces.accessibleProject(projectId, client.actor)
       } catch {
         client.ws.close(1008, 'Project access changed.')
         continue

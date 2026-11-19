@@ -1248,8 +1248,10 @@ export class WorkspaceStore {
     return project
   }
 
-  requireEditor(id, actor) {
-    const project = this.get(id, actor)
+  requireEditor(id, actor, { details = true } = {}) {
+    const project = details
+      ? this.get(id, actor)
+      : this.accessibleProject(id, actor)
     if (project.accessRole === 'viewer')
       fail(
         'This project is shared with view access. Ask a project admin for editor access.',
@@ -1542,9 +1544,10 @@ export class WorkspaceStore {
         fail('This invitation is no longer available.', 404)
       const previous = this.memberships.role(project.id, actor)
       // Joining a viewer link must not downgrade an existing Editor or Admin.
-      if (previous !== 'admin' && previous !== 'editor')
+      if (!previous || (previous === 'viewer' && current.role === 'editor')) {
         this.memberships.set(project, actor, current.role)
-      this.#changed(project.id, [], 'access')
+        this.#changed(project.id, [], 'access')
+      }
       return this.get(project.id, actor)
     })
   }
@@ -4779,7 +4782,7 @@ export class WorkspaceStore {
   }
 
   async readFile(id, owner, filename) {
-    const project = this.get(id, owner)
+    const project = this.accessibleProject(id, owner)
     relativeFile(filename)
     const root = filename.startsWith('.lake/packages/')
       ? (await this.runtime.dependencyRoot?.(project.root)) || project.root
@@ -4805,10 +4808,10 @@ export class WorkspaceStore {
   }
 
   async readCollaborativeFile(id, actor, filename) {
-    this.get(id, actor)
+    this.accessibleProject(id, actor)
     return this.#locked(id, async () => {
       const source = await this.readFile(id, actor, filename)
-      this.get(id, actor)
+      this.accessibleProject(id, actor)
       return source
     })
   }
@@ -5001,7 +5004,7 @@ export class WorkspaceStore {
     { assertAuthorized } = {},
   ) {
     assertAuthorized?.()
-    const project = this.requireEditor(id, owner)
+    const project = this.requireEditor(id, owner, { details: false })
     this.#ready(project, true)
     if (isBinaryAssetFile(filename))
       fail(
@@ -5026,7 +5029,7 @@ export class WorkspaceStore {
       fail('Send the original file version before retrying this save.')
     return this.#locked(id, async () => {
       assertAuthorized?.()
-      const project = this.requireEditor(id, owner)
+      const project = this.requireEditor(id, owner, { details: false })
       if (project.archivedAt) fail('Project not found', 404)
       this.#ready(project, true)
       if (this.jobs.has(id))
@@ -5082,7 +5085,7 @@ export class WorkspaceStore {
           unchanged: before?.content === content,
           authorize: async () => {
             assertAuthorized?.()
-            this.requireEditor(id, owner)
+            this.requireEditor(id, owner, { details: false })
             const current = await textFile(destination, true)
             if ((current?.hash ?? null) !== (before?.hash ?? null))
               fail(
@@ -5090,7 +5093,7 @@ export class WorkspaceStore {
                 409,
               )
             assertAuthorized?.()
-            this.requireEditor(id, owner)
+            this.requireEditor(id, owner, { details: false })
           },
         })
         committed = true

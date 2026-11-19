@@ -265,6 +265,7 @@ export function createTerminalReconciliation() {
     ignoredPaths: new Set(),
     ignoredHashes: new Map(),
     ignoredStamps: new Map(),
+    receivedFolders: new Set(),
     identityPaths: new Set(),
     deletedPaths: new Set(),
     previousChanges: undefined,
@@ -467,22 +468,21 @@ async function move(root, from, targetRoot, to, openParent, kind) {
   }
 }
 
-async function treeFiles(
+async function treeEntries(
   root,
   filename,
   openParent,
   result = [],
   depth = 0,
   check = () => {},
+  includeFolders = false,
 ) {
   check()
   if (depth > 64 || result.length >= MAX_PROJECT_FILES) throw conflict(filename)
   const state = await fileKind(root, filename, openParent)
   if (!state) return result
-  if (!state.directory) {
-    result.push(filename)
-    return result
-  }
+  if (!state.directory || includeFolders) result.push(filename)
+  if (!state.directory) return result
   const parent = await openParent(root, `${filename}/.terminal-sync-list`, {
     create: false,
   })
@@ -492,13 +492,14 @@ async function treeFiles(
     })) {
       if (entry.isSymbolicLink() || (!entry.isFile() && !entry.isDirectory()))
         throw conflict(filename)
-      await treeFiles(
+      await treeEntries(
         root,
         `${filename}/${entry.name}`,
         openParent,
         result,
         depth + 1,
         check,
+        includeFolders,
       )
     }
   } finally {
@@ -522,6 +523,23 @@ async function removeEmptyFolder(root, filename, openParent) {
   }
 }
 
+async function receiveFolder({ manifest, openParent, authorize }, filename) {
+  const parent = await openParent(manifest.root, filename)
+  try {
+    await parentCurrent(parent, manifest.root, filename)
+    authorize()
+    try {
+      await fs.mkdir(`${parent.anchor}/${parent.name}`, { mode: 0o700 })
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+    }
+    if (!(await fileKind(manifest.root, filename, openParent))?.directory)
+      throw conflict(filename)
+  } finally {
+    await parent.handle.close()
+  }
+}
+
 async function followCompleteFolderMoves(
   event,
   expected,
@@ -529,6 +547,7 @@ async function followCompleteFolderMoves(
   touched,
   checkBudget,
 ) {
+  const carriedFiles = new Set()
   const mapping = new Map(event.moves.map(({ from, to }) => [from, to]))
   const candidates = new Map()
   for (const { from, to } of event.moves) {
@@ -577,7 +596,7 @@ async function followCompleteFolderMoves(
       continue
     if (await fileKind(context.manifest.root, to, context.openParent)) {
       const targets = new Set(files.map((filename) => mapping.get(filename)))
-      const destinationFiles = await treeFiles(
+      const destinationFiles = await treeEntries(
         context.sharedRoot,
         to,
         context.openParent,
@@ -608,11 +627,13 @@ async function followCompleteFolderMoves(
       context.openParent,
       'folder',
     )
+    for (const filename of files) carriedFiles.add(filename)
     if (!event.own) context.state.deletedPaths.add(from)
     context.state.deletedPaths.delete(to)
     touched.add(from)
     touched.add(to)
   }
+  return carriedFiles
 }
 
 async function exposeBackup(state, backup, context) {
@@ -855,18 +876,23 @@ export async function reconcileTerminal(context) {
     if ((local?.hash ?? null) !== expectedHash) throw conflict(filename)
   }
   if (state.overflow) throw conflict()
-  const base = new Map(manifest.files.map((file) => [file.path, file.hash]))
-  const accepted = new Map(
-    (state.previousChanges ?? previousChanges).map((change) => [
-      change.path,
-      change,
-    ]),
-  )
-  let acceptedBytes = [...accepted.values()].reduce(
+  const previous = state.previousChanges ?? previousChanges
+  let acceptedBytes = previous.reduce(
     (total, change) => total + changedTextBytes(change),
     0,
   )
   if (acceptedBytes > MAX_SOURCE_UPLOAD_BYTES * 2) throw pullCapacity()
+  if (!state.pendingEvents.length) {
+    // Between saves there is no shared namespace to replay. Keep the backup
+    // and private-file checks above without rebuilding and hashing the manifest.
+    authorize()
+    state.previousChanges ??= [...previous].sort((a, b) =>
+      a.path.localeCompare(b.path),
+    )
+    return state.previousChanges
+  }
+  const base = new Map(manifest.files.map((file) => [file.path, file.hash]))
+  const accepted = new Map(previous.map((change) => [change.path, change]))
   const expected = new Map(base)
   for (const change of accepted.values()) {
     if (change.after === null) expected.delete(change.path)
@@ -930,11 +956,14 @@ export async function reconcileTerminal(context) {
   const pending = state.pendingEvents.splice(0)
   state.queuedEntries = 0
   const touched = new Set()
+  // A destination may already exist if the shell independently moved a file.
+  // Only carry divergent private edits when we actually relocated their path.
+  const movedFiles = new Map()
   for (const event of pending) {
     checkBudget()
     authorize()
     for (const filename of event.paths) touched.add(filename)
-    await followCompleteFolderMoves(
+    const carriedFiles = await followCompleteFolderMoves(
       event,
       expected,
       context,
@@ -987,6 +1016,11 @@ export async function reconcileTerminal(context) {
         }
         touched.add(filename)
         touched.add(target)
+        const carried =
+          movedFiles.get(filename) !== false &&
+          (Boolean(source) || carriedFiles.has(filename))
+        movedFiles.delete(filename)
+        if (!event.own) movedFiles.set(target, carried)
         if (!event.own) state.deletedPaths.add(filename)
       }
       if (!event.own) state.deletedPaths.add(from)
@@ -1000,17 +1034,33 @@ export async function reconcileTerminal(context) {
   // Replay all move identities before reading the final shared paths. A -> B
   // -> C may be queued between polls; reading missing B between the two moves
   // would otherwise delete the live private inode before its second rename.
-  for (const filename of [...touched]) {
+  const reportedPaths = new Set(touched)
+  for (const known of new Set([
+    ...base.keys(),
+    ...accepted.keys(),
+    ...state.receivedFolders,
+  ])) {
+    for (
+      let folder = path.posix.dirname(known);
+      folder !== '.';
+      folder = path.posix.dirname(folder)
+    ) {
+      if (reportedPaths.has(folder)) {
+        touched.add(known)
+        break
+      }
+    }
+  }
+  for (const filename of reportedPaths) {
     checkBudget()
-    for (const known of [...base.keys(), ...accepted.keys()])
-      if (contains(filename, known)) touched.add(known)
-    for (const current of await treeFiles(
+    for (const current of await treeEntries(
       sharedRoot,
       filename,
       openParent,
       [],
       0,
       checkBudget,
+      true,
     ))
       touched.add(current)
   }
@@ -1028,8 +1078,30 @@ export async function reconcileTerminal(context) {
     checkBudget()
     authorize()
     const shared = await fileState(sharedRoot, filename, openParent)
-    if (shared?.directory) continue
+    if (shared?.directory) {
+      if (
+        !state.receivedFolders.has(filename) &&
+        state.receivedFolders.size >= MAX_PROJECT_FILES
+      )
+        throw pullCapacity()
+      await receiveFolder(context, filename)
+      state.receivedFolders.add(filename)
+      continue
+    }
+    state.receivedFolders.delete(filename)
     const local = await fileState(manifest.root, filename, openParent)
+    // A missing source cannot authorize deleting the collaborator's moved
+    // file or replacing it with unrelated bytes already at the destination.
+    if (
+      shared &&
+      movedFiles.has(filename) &&
+      (!local ||
+        local.directory ||
+        (!movedFiles.get(filename) &&
+          local.hash !== expected.get(filename) &&
+          local.hash !== shared.hash))
+    )
+      throw conflict(filename)
     if (local?.directory) {
       if (!shared && removed(filename)) removedFolders.add(filename)
       continue

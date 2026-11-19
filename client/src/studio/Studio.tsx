@@ -503,6 +503,7 @@ export function Studio() {
   const fileRef = useRef(file)
   const filesRef = useRef(files)
   const projectIdRef = useRef(projectId)
+  const projectsRequest = useRef(0)
   const setupLogRef = useRef<{
     owner: string
     project: Pick<
@@ -528,6 +529,7 @@ export function Studio() {
     column?: number
     reload: boolean
     preview: boolean
+    recheck?: (path: string) => void
   } | null>(null)
   const pendingReload = useRef<{
     scope: WorkspaceScope
@@ -964,7 +966,9 @@ export function Studio() {
   }, [theme])
 
   const loadProjects = useCallback(async () => {
+    const request = ++projectsRequest.current
     const value = await api<Project[]>('/api/projects')
+    if (request !== projectsRequest.current) return value
     const selected = value.findIndex((item) => item.id === projectIdRef.current)
     if (selected >= 0) {
       const metadata = value[selected]
@@ -982,13 +986,23 @@ export function Studio() {
       ) {
         value[selected] = { ...metadata, log: cached.project.log }
       } else {
-        setupLogRef.current = null
-        const detail = await api<Project>(
-          `/api/projects/${encodeURIComponent(metadata.id)}`,
-        )
-        value[selected] = detail
-        if (detail.status !== 'preparing' && sessionUser)
-          setupLogRef.current = { owner: sessionUser, project: detail }
+        try {
+          const detail = await api<Project>(
+            `/api/projects/${encodeURIComponent(metadata.id)}`,
+          )
+          if (request !== projectsRequest.current) return value
+          value[selected] = detail
+          setupLogRef.current =
+            detail.status !== 'preparing' && sessionUser
+              ? { owner: sessionUser, project: detail }
+              : null
+        } catch (error) {
+          if (request !== projectsRequest.current) return value
+          if (!(error instanceof ApiError && error.status === 404)) throw error
+          // Access can end between the list and detail requests.
+          value.splice(selected, 1)
+          setupLogRef.current = null
+        }
       }
     }
     setProjects(value)
@@ -997,12 +1011,13 @@ export function Studio() {
 
   useEffect(() => {
     if (!account || invitationToken) return
+    const request = ++projectsRequest.current
     let cancelled = false
     setProjectListLoading(true)
     setProjectListError('')
     void api<Project[]>('/api/projects')
       .then((value) => {
-        if (cancelled) return
+        if (cancelled || request !== projectsRequest.current) return
         setProjects(value)
         // Refreshing the account must keep the current visit, including drafts
         // retained after project access ends. Explicit navigation owns leaving it.
@@ -1015,7 +1030,8 @@ export function Studio() {
         )
       })
       .catch((error) => {
-        if (!cancelled) setProjectListError(errorText(error))
+        if (!cancelled && request === projectsRequest.current)
+          setProjectListError(errorText(error))
       })
       .finally(() => {
         if (!cancelled) setProjectListLoading(false)
@@ -1228,8 +1244,11 @@ export function Studio() {
       } catch (error) {
         if (request === openRequest.current) setError(errorText(error))
       } finally {
-        if (pendingFileOpen.current?.request === request)
+        if (pendingFileOpen.current?.request === request) {
+          const { recheck } = pendingFileOpen.current
           pendingFileOpen.current = null
+          recheck?.(path)
+        }
         if (request === openRequest.current) setOpening(false)
       }
     },
@@ -1392,19 +1411,46 @@ export function Studio() {
     scope,
     enabled: !!session && !authRequired && workspaceEditable,
     canEdit: projectCanEdit,
-    onFilesChanged: async () => {
+    onFilesChanged: async (affected, recheck): Promise<void> => {
       const id = scope.projectId
       if (!id) return
-      const listing = await loadFiles(id)
-      await reconcileMissingBuffers(
-        bufferStore,
-        scope,
-        listing.map((entry) => entry.path),
-        (path) =>
-          api(
-            `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
-          ),
+      // A navigation GET may already contain the previous saved bytes. Queue
+      // a fresh read once that response has actually installed its buffer.
+      const opening = pendingFileOpen.current
+      if (opening?.scope === scope && affected(opening.path))
+        opening.recheck = recheck
+      const paths = [...bufferStore.getSnapshot().buffers.keys()].filter(
+        (path) => !path.startsWith('.lake/') && affected(path),
       )
+      const readFile = (path: string) =>
+        api<{ content: string; hash: string }>(
+          `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
+        )
+      await Promise.allSettled([
+        loadFiles(id).then((listing) =>
+          reconcileMissingBuffers(
+            bufferStore,
+            scope,
+            listing.map((entry) => entry.path),
+            readFile,
+          ),
+        ),
+        refreshChangedBuffers(
+          bufferStore,
+          scope,
+          paths,
+          readFile,
+          collaboration.manages,
+        ).then(({ pendingPaths }) => {
+          const active = bufferStore.getSnapshot().file
+          if (
+            bufferStore.isCurrent(scope) &&
+            active &&
+            pendingPaths.includes(active.path)
+          )
+            setAgentPendingFile(active.path)
+        }),
+      ])
     },
     onFilesMoved: handleFilesMoved,
     onAccessChanged: async () => {
@@ -2398,17 +2444,11 @@ export function Studio() {
       const id = expected.projectId
       if (!id) return
       const current = bufferStore.getSnapshot().file
-      const [, updated] = await Promise.all([
+      await Promise.all([
         loadFiles(id),
-        source !== 'terminal'
-          ? api<Project>(`/api/projects/${encodeURIComponent(id)}`)
-          : Promise.resolve(null),
+        source !== 'terminal' && loadProjects(),
       ])
       if (!bufferStore.isCurrent(expected)) return
-      if (updated)
-        setProjects((previous) =>
-          previous.map((item) => (item.id === id ? updated : item)),
-        )
       if (source !== 'terminal') void loadGit(id)
       if (!current || (paths.length && !paths.includes(current.path))) return
       const selected = bufferStore.getSnapshot().file
@@ -2504,7 +2544,15 @@ export function Studio() {
             : 'Agent edits updated live',
       )
     },
-    [bufferStore, loadFiles, loadGit, openFile, setFile, collaboration.manages],
+    [
+      bufferStore,
+      loadFiles,
+      loadProjects,
+      loadGit,
+      openFile,
+      setFile,
+      collaboration.manages,
+    ],
   )
 
   useEffect(() => {
@@ -4820,12 +4868,9 @@ export function Studio() {
           }
           onSave={saveCompletely}
           onUpdated={acceptGit}
-          onPulled={async (result) => {
-            await Promise.all([
-              loadProjects(),
-              refreshLiveFiles(result.paths || [], 'git', scope),
-            ])
-          }}
+          onPulled={(result) =>
+            refreshLiveFiles(result.paths || [], 'git', scope)
+          }
           onClose={() => setGitOpen(null)}
           onOpenConnections={() => setGitConnectionsOpen(true)}
         />

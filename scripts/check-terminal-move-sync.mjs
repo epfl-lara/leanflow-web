@@ -112,6 +112,7 @@ try {
     'Uncertain/A.svg': '<svg><!-- copied instead of renamed --></svg>\n',
     'Uncertain/Use.lean': '-- [Diagram](A.svg)\n',
     'Scratch.lean': '-- baseline for conflict recovery\n',
+    'Race.lean': '-- competing rename baseline\n',
   }))
     await save(filename, content)
   for (const name of ['Problems/figures', 'Archive'])
@@ -221,6 +222,22 @@ try {
   const assertBoth = async (condition) => {
     for (const term of [first, second])
       await term.command(waitForFiles(condition))
+  }
+  const stopAndRecover = async (term, expectedCopies) => {
+    await json(term.actor, `${prefix}/terminal/stop`, {
+      method: 'POST',
+      body: {},
+    })
+    const recoveries = await json(term.actor, `${prefix}/terminal-recoveries`)
+    assert.equal(recoveries.length, expectedCopies)
+    const runId = path.basename(path.dirname(term.root))
+    assert(recoveries.some((copy) => copy.runId === runId))
+    const response = await fixture.request(
+      term.actor,
+      `${prefix}/terminal-recoveries/${runId}/download`,
+    )
+    assert.equal(response.status, 200)
+    return JSZip.loadAsync(await response.arrayBuffer())
   }
   await record(
     'An unchanged open PTY receives a shared SVG move and its exact Lean diagram reference',
@@ -585,25 +602,57 @@ assert missing==0, f'Terminal source disappeared {missing} times during web save
           "import pathlib; assert pathlib.Path('Scratch.lean').read_text() == '-- PRIVATE_TERMINAL_DRAFT\\n'",
         ),
       )
-      await json('editorA', `${prefix}/terminal/stop`, {
-        method: 'POST',
-        body: {},
-      })
-      const recoveries = await json('editorA', `${prefix}/terminal-recoveries`)
-      assert.equal(recoveries.length, 1)
-      const response = await fixture.request(
-        'editorA',
-        `${prefix}/terminal-recoveries/${recoveries[0].runId}/download`,
-      )
-      assert.equal(response.status, 200)
-      const archive = await JSZip.loadAsync(await response.arrayBuffer())
-      const recovered = Object.values(archive.files).find((file) =>
-        file.name.endsWith('Scratch.lean'),
-      )
-      assert(recovered)
+      const archive = await stopAndRecover(first, 1)
       assert.equal(
-        await recovered.async('string'),
+        await archive.file('Scratch.lean')?.async('string'),
         '-- PRIVATE_TERMINAL_DRAFT\n',
+      )
+    },
+  )
+  await record(
+    'Competing PTY renames preserve the published file, recover the private draft, and leave the publishing shell live',
+    async () => {
+      const reopened = await terminal('editorA')
+      terminals.push(reopened)
+      const release = await pauseNextSync(reopened)
+      await Promise.all([
+        reopened.command(
+          "mv Race.lean Draft.lean && printf '%s\\n' '-- private draft' >> Draft.lean",
+        ),
+        second.command('mv Race.lean Published.lean'),
+      ])
+      const baseline = '-- competing rename baseline\n'
+      await until(
+        async () => (await optionalSource('Published.lean')) === baseline,
+        'first rename published while the other terminal is waiting',
+        20_000,
+      )
+      release()
+      await until(
+        () =>
+          reopened.packets.some(
+            (packet) => packet.type === 'sync' && packet.state === 'paused',
+          ),
+        'competing terminal rename paused for recovery',
+        20_000,
+      )
+      const archive = await stopAndRecover(reopened, 2)
+      assert.equal(
+        await archive.file('Draft.lean')?.async('string'),
+        baseline + '-- private draft\n',
+      )
+      assert.equal(await optionalSource('Race.lean'), null)
+      assert.equal(await optionalSource('Draft.lean'), null)
+      assert.equal(await optionalSource('Published.lean'), baseline)
+      await second.command(
+        "printf '%s\\n' '-- still publishing' >> Published.lean",
+      )
+      await until(
+        async () =>
+          (await optionalSource('Published.lean')) ===
+          baseline + '-- still publishing\n',
+        'surviving terminal can still write to its published destination',
+        20_000,
       )
     },
   )

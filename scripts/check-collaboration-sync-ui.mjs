@@ -44,9 +44,9 @@ const notify = (event) => {
     listener({ projectId, kind: 'files', ...event })
 }
 const workspaces = {
-  get: () => ({ id: projectId, accessRole: 'admin' }),
+  accessibleProject: () => ({ id: projectId, accessRole: 'admin' }),
   requireEditor() {
-    return this.get()
+    return this.accessibleProject()
   },
   subscribeChanges(listener) {
     listeners.add(listener)
@@ -381,17 +381,6 @@ try {
   await terminal
     .getByRole('button', { name: 'Close terminal', exact: true })
     .click()
-  await owner.page
-    .locator('.file-item')
-    .and(owner.page.getByTitle('lakefile.toml', { exact: true }))
-    .click()
-  await opened(owner, 'lakefile.toml')
-  await type(owner, '\n# CONFIG_AFTER_MOVE\n')
-  await until(
-    () => sources['lakefile.toml'].includes('CONFIG_AFTER_MOVE'),
-    'configuration still saves through HTTP',
-  )
-
   const select = async (fixture, filename) => {
     await fixture.page
       .locator('.file-item')
@@ -399,6 +388,45 @@ try {
       .click()
     await opened(fixture, path.posix.basename(filename))
   }
+  await select(owner, 'lakefile.toml')
+  const configRead = Promise.withResolvers()
+  const releaseConfig = Promise.withResolvers()
+  releaseReads.push(releaseConfig.resolve)
+  await peer.page.route(
+    `**/api/projects/${projectId}/file?path=lakefile.toml`,
+    async (route) => {
+      const content = sources['lakefile.toml']
+      configRead.resolve()
+      await releaseConfig.promise
+      await route.fulfill({ json: { content, hash: hash(content) } })
+    },
+    { times: 1 },
+  )
+  await peer.page.locator('.file-item[title="lakefile.toml"]').click()
+  await configRead.promise
+  const configNotice = peer.page.waitForRequest(
+    (request) =>
+      request.method() === 'GET' &&
+      new URL(request.url()).pathname === `/api/projects/${projectId}/files` &&
+      sources['lakefile.toml'].includes('CONFIG_AFTER_MOVE'),
+  )
+  await type(owner, '\n# CONFIG_AFTER_MOVE\n')
+  await configNotice
+  releaseConfig.resolve()
+  await opened(peer, 'lakefile.toml')
+  await until(
+    async () => (await text(peer)).includes('CONFIG_AFTER_MOVE'),
+    'a saved configuration edit reaches a second open editor',
+  )
+  await type(peer, '\n# PEER_CONFIG_EDIT\n')
+  await until(
+    async () => (await text(owner)).includes('PEER_CONFIG_EDIT'),
+    'the second configuration editor saves against the new version',
+  )
+  assert.match(
+    sources['lakefile.toml'],
+    /CONFIG_AFTER_MOVE[\s\S]*PEER_CONFIG_EDIT/,
+  )
 
   for (const fixture of [owner, peer]) {
     await fixture.page
@@ -969,6 +997,7 @@ try {
       'Two live editors follow terminal file moves and continue receiving and saving each other’s edits.',
       'Late old-path errors cannot stop destination saves or recreate old files.',
       'Repeated terminal moves keep the editor attached, and unrelated configuration saves still work.',
+      'Two open configuration editors receive each other’s version-checked saves.',
       'Moving a folder while rewriting imports preserves a peer’s unpublished typing and both editors continue saving at the new path.',
       'Terminal startup waits for durable browser saves before taking its working copy.',
       'Terminal reconnect also waits for durable browser saves before opening another private copy.',

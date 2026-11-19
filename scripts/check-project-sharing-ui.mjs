@@ -780,6 +780,17 @@ try {
     .getByRole('button', { name: 'Close terminal', exact: true })
     .click()
   await terminalPanel.waitFor({ state: 'hidden' })
+  // Hold one older editor-role response until the viewer role is visible.
+  const earlierProjects = structuredClone(state.projects)
+  let heldProjects
+  const projectListUrl = (url) => url.pathname === '/api/projects'
+  const holdProjectList = (route) => {
+    if (heldProjects) return route.fallback()
+    heldProjects = route
+  }
+  await page.route(projectListUrl, holdProjectList)
+  liveSockets.get('sharing-viewer').send(JSON.stringify({ type: 'access' }))
+  await until(() => heldProjects, 'older editor-role project list')
   state.projects.find((project) => project.id === 'sharing-viewer').accessRole =
     'viewer'
   liveSockets.get('sharing-viewer').send(JSON.stringify({ type: 'access' }))
@@ -788,9 +799,24 @@ try {
     async () => /read only/i.test(await page.locator('.file-tab').innerText()),
     'live viewer downgrade',
   )
+  const delivered = page.waitForEvent('requestfinished', {
+    predicate: (request) => request === heldProjects.request(),
+  })
+  await heldProjects.fulfill({ json: earlierProjects })
+  await delivered
+  await page.evaluate(
+    () =>
+      new Promise((done) =>
+        requestAnimationFrame(() => requestAnimationFrame(done)),
+      ),
+  )
+  await page.unroute(projectListUrl, holdProjectList)
   assert.equal(
     await page.getByRole('button', { name: 'Terminal', exact: true }).count(),
     0,
+  )
+  report.checks.push(
+    'A delayed editor-role response cannot restore terminal access after a newer viewer-role update.',
   )
   state.projects.find((project) => project.id === 'sharing-viewer').accessRole =
     'editor'

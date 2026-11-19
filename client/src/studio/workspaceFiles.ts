@@ -25,10 +25,6 @@ export async function refreshChangedBuffers(
   for (const previous of candidates) {
     if (!store.isCurrent(scope)) return result
     if (manages(previous.path)) continue
-    if (previous.content !== previous.savedContent) {
-      result.pendingPaths.push(previous.path)
-      continue
-    }
     let latest: Pick<OpenFile, 'content' | 'hash'>
     try {
       latest = await readFile(previous.path)
@@ -55,7 +51,10 @@ export async function refreshChangedBuffers(
     )
       continue
     if (current.content !== current.savedContent) {
-      result.pendingPaths.push(previous.path)
+      // A change notification can also be a directory scan or an echo of
+      // this tab's own save before its HTTP receipt arrives.
+      if (current.hash !== latest.hash && current.content !== latest.content)
+        result.pendingPaths.push(previous.path)
       continue
     }
     if (latest.hash !== current.hash)

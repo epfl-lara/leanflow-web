@@ -32,7 +32,7 @@ const requests = []
 const sockets = new Map()
 const report = { passed: false, checks: [], visualSamples: [] }
 const workspaces = {
-  get(_project, actor) {
+  accessibleProject(_project, actor) {
     return { id: projectId, accessRole: profiles[actor].role }
   },
   requireEditor(project, actor) {
@@ -40,7 +40,7 @@ const workspaces = {
       throw Object.assign(new Error('This project is read only.'), {
         status: 403,
       })
-    return this.get(project, actor)
+    return this.accessibleProject(project, actor)
   },
   subscribeChanges(listener) {
     listeners.add(listener)

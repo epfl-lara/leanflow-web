@@ -1370,6 +1370,8 @@ export class ClusterController {
   }
 
   #sleep(job, ms) {
+    // Cancellation or a disconnect may have arrived during the status request.
+    if (job.stop || job.lost) return
     return new Promise((resolve) => {
       const wake = () => {
         clearTimeout(timer)

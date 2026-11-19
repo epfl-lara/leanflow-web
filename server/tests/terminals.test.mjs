@@ -149,10 +149,18 @@ test('terminal startup configures a public identity and buffers input until its 
     owner: 'alice',
     root: '/owned/checkout/Lean',
   })
-  ws.emit(
-    'message',
-    Buffer.from(JSON.stringify({ type: 'input', data: 'git status\r' })),
-    false,
+  // Browsers send ordinary typing as one frame per keystroke.
+  const command = 'git status\r'
+  for (const data of command)
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'input', data })),
+      false,
+    )
+  assert.equal(
+    ws.readyState,
+    1,
+    'typing while a worker starts keeps the terminal open',
   )
   assert.equal(input, '')
   release({ name: 'Fixture User', email: 'fixture@example.test' })
@@ -164,7 +172,7 @@ test('terminal startup configures a public identity and buffers input until its 
       type: 'setup',
       identity: { name: 'Fixture User', email: 'fixture@example.test' },
     },
-    { type: 'input', data: 'git status\r' },
+    ...Array.from(command, (data) => ({ type: 'input', data })),
   ])
   assert.equal(options.repositoryRoot, '/owned/checkout')
   assert.equal(options.freshHome, true)
