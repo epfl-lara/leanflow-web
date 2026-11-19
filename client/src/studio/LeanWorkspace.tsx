@@ -22,7 +22,7 @@ import {
   useState,
   type CSSProperties,
 } from 'react'
-import type { FileEntry, OpenFile } from './api'
+import type { FileEntry, OpenFile, PaperLink } from './api'
 import { sessionBoundUrl } from './api'
 import { connectInfoviewTheme } from './infoviewTheme'
 import { leanEditorTheme } from './leanEditorTheme'
@@ -58,6 +58,7 @@ import {
 import type { ChatMode } from './chatModes'
 import { ProofDiagnostics, proofCheckStatuses } from './proofDiagnostics'
 import { MacroProofDeclarations } from './macroProofDeclarations'
+import { decoratePaperLinks } from './paperLinkDecorations'
 import {
   outlineCode,
   proofDeclarationsFromCode,
@@ -294,6 +295,9 @@ export function LeanWorkspace({
   onProofStateChange,
   focusEditorRequest,
   onFocusEditorHandled,
+  paperLinks,
+  onOpenPaperLink,
+  onShowPaperLinks,
   joining = false,
 }: {
   projectId: string
@@ -325,6 +329,11 @@ export function LeanWorkspace({
   onProofStateChange?: (state: EditorProofState | null) => void
   focusEditorRequest?: ProofEditorRequest | null
   onFocusEditorHandled?: (id: number) => void
+  paperLinks?: readonly PaperLink[]
+  onOpenPaperLink?: (
+    location: PaperLink['source'] | PaperLink['target'],
+  ) => void
+  onShowPaperLinks?: () => void
   joining?: boolean
   revealTarget?: {
     id: number
@@ -343,6 +352,8 @@ export function LeanWorkspace({
   const runtime = useRef<Runtime | null>(null)
   const listedFiles = useRef<readonly FileEntry[] | undefined>(undefined)
   const fileRef = useRef(file)
+  const paperLinkActions = useRef({ onOpenPaperLink, onShowPaperLinks })
+  paperLinkActions.current = { onOpenPaperLink, onShowPaperLinks }
   const joiningRef = useRef(joining)
   joiningRef.current = joining
   const retainedPathsRef = useRef(retainedPaths)
@@ -1472,6 +1483,31 @@ export function LeanWorkspace({
   useLayoutEffect(() => {
     runtime.current?.collaboratorCursors?.update(collaborators || [])
   }, [collaborators])
+
+  useLayoutEffect(() => {
+    const editor = runtime.current?.editor?.editor
+    const model = editor?.getModel()
+    if (
+      loading ||
+      joining ||
+      !file ||
+      file.unavailable ||
+      file.savedContent !== file.content ||
+      !editor ||
+      !model ||
+      !paperLinks?.length ||
+      model.uri.path !== `/workspace/${file.path}`
+    )
+      return
+    return decoratePaperLinks(
+      editor,
+      model,
+      file.path,
+      paperLinks,
+      (location) => paperLinkActions.current.onOpenPaperLink?.(location),
+      () => paperLinkActions.current.onShowPaperLinks?.(),
+    )
+  }, [file, joining, loading, paperLinks])
 
   useEffect(() => {
     void serialize(() =>

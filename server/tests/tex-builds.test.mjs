@@ -175,6 +175,85 @@ test('TeX status stays queued until the compiler obtains a worker slot', async (
   )
 })
 
+test('SyncTeX serves only current, retained build pages to their owner', async (t) => {
+  const f = await fixture(t)
+  const older = await f.compile()
+  assert.equal(older.syncTexAvailable, false)
+  assert.equal(
+    (await f.request(`/tex/builds/${older.id}/synctex?page=1`)).status,
+    404,
+  )
+  const run = f.runtime.runTex
+  let syncTex = {
+    schema: 1,
+    paths: ['main.tex', 'section.tex'],
+    pages: { 1: [[1, 1, 140, 125, 48, 8]] },
+  }
+  f.runtime.runTex = async (source, output, options) => {
+    const result = await run(source, output, options)
+    const report = path.join(output, 'result.json')
+    await fs.writeFile(
+      report,
+      JSON.stringify({
+        ...JSON.parse(await fs.readFile(report, 'utf8')),
+        pageCount: 2,
+      }),
+    )
+    await fs.writeFile(
+      path.join(output, 'synctex.json'),
+      JSON.stringify(syncTex),
+    )
+    return result
+  }
+  const job = await f.compile()
+  assert.equal(job.syncTexAvailable, true)
+  const endpoint = `/tex/builds/${job.id}/synctex`
+  const page = (number) => `${endpoint}?page=${number}`
+  const expected = {
+    page: 1,
+    boxes: [
+      { path: 'section.tex', line: 1, x: 140, y: 125, width: 48, height: 8 },
+    ],
+    links: [],
+  }
+  assert.deepEqual(await (await f.request(page(1))).json(), expected)
+  assert.deepEqual(await (await f.request(page(2))).json(), {
+    page: 2,
+    boxes: [],
+    links: [],
+  })
+  assert.equal((await f.request(page(3))).status, 404)
+  assert.equal((await f.request(page(-1))).status, 400)
+  assert.equal((await f.request(page(1), {}, f.otherToken)).status, 404)
+
+  await fs.writeFile(
+    path.join(f.project.root, 'leanflow.paper-links.json'),
+    '{invalid',
+  )
+  assert.deepEqual(await (await f.request(page(1))).json(), expected)
+  const file = path.join(
+    f.dataDir,
+    'tex-builds',
+    job.id,
+    'output',
+    'synctex.json',
+  )
+  await fs.appendFile(file, ' ')
+  assert.equal((await f.request(page(1))).status, 409)
+  await fs.writeFile(file, JSON.stringify(syncTex))
+  await fs.writeFile(
+    path.join(f.project.root, 'section.tex'),
+    'Changed after the PDF build',
+  )
+  assert.equal((await f.request(page(1))).status, 409)
+
+  syncTex = { ...syncTex, paths: ['../outside.tex', 'section.tex'] }
+  const rejected = await f.compile()
+  assert.equal(rejected.status, 'completed')
+  assert.equal(rejected.syncTexAvailable, false)
+  assert.equal((await f.request(`/tex/builds/${rejected.id}/pdf`)).status, 200)
+})
+
 test('multi-file TeX uses a bounded immutable capture with exact hashes and protected binary inputs', async (t) => {
   const f = await fixture(t)
   await fs.writeFile(path.join(f.project.root, 'figure.png'), png)

@@ -2,22 +2,49 @@
 
 import json
 import base64
+import gzip
 import os
+from dataclasses import dataclass
 from pathlib import Path
 import re
 import stat
 import subprocess
 import sys
 import tempfile
+import zlib
 
 
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_PDF_BYTES = 16 * 1024 * 1024
 MAX_TEXT_BYTES = 512 * 1024
+MAX_SYNCTEX_BYTES = 1024 * 1024
+MAX_SYNCTEX_INPUT_BYTES = 32 * 1024 * 1024
+MAX_SYNCTEX_BOXES = 20000
 MAX_LOG_BYTES = 256 * 1024
 MAX_FILES = 4096
 SOURCE = Path("/workspace")
 OUTPUT = Path("/output")
+
+SYNCTEX_BOX = re.compile(
+    rb"([\(h])(\d{1,9}),(\d{1,9})(?:,\d{1,9})?:"
+    rb"(-?\d{1,12}),(-?\d{1,12}):(-?\d{1,12}),(-?\d{1,12}),(-?\d{1,12})$"
+)
+SYNCTEX_POINT = re.compile(
+    rb"x(\d{1,9}),(\d{1,9})(?:,\d{1,9})?:(-?\d{1,12}),(-?\d{1,12})$"
+)
+
+
+@dataclass
+class SyncTexBox:
+    tag: int
+    line: int
+    x: int
+    y: int
+    width: int
+    height: int
+    depth: int
+    cursor: int
+    has_children: bool = False
 
 
 def regular_file(path, limit):
@@ -208,6 +235,184 @@ def write_output(name, content):
     os.replace(temporary, OUTPUT / name)
 
 
+def synctex_source(filename, work, cwd, entry_path, root_file, checked):
+    try:
+        name = filename.decode("utf-8")
+        if any(ord(character) < 32 for character in name) or "\\" in name:
+            return None
+        candidate = Path(os.path.abspath(cwd / name))
+        relative = (
+            root_file
+            if candidate == entry_path
+            else candidate.relative_to(work).as_posix()
+        )
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if (
+        len(relative) > 1024
+        or not relative.lower().endswith(".tex")
+        or any(part.startswith(".") for part in relative.split("/"))
+    ):
+        return None
+    if relative not in checked:
+        # A compiler may create files in its scratch copy. Only the original,
+        # read-only sources can be navigation destinations.
+        try:
+            with regular_file(SOURCE / relative, MAX_SOURCE_BYTES) as stream:
+                checked[relative] = 1 + sum(
+                    chunk.count(b"\n")
+                    for chunk in iter(lambda: stream.read(65536), b"")
+                )
+        except (OSError, ValueError):
+            checked[relative] = 0
+    return relative if checked[relative] else None
+
+
+def synctex_map(filename, work, cwd, entry_path, root_file, page_count):
+    """Discard unknown records and retain bounded source boxes from pdfTeX SyncTeX v1."""
+    checked = {}
+    tags = {}
+    paths = {}
+    pages = {}
+    headers = {}
+    stack = []
+    box_count = 0
+    page = 0
+    size = 0
+    scale = None
+    layout = None
+    offset_x = offset_y = 0
+
+    def add(tag, line, left, top, right, bottom):
+        nonlocal box_count
+        source = tags.get(tag)
+        if not source or not 1 <= line <= checked[source] or scale is None:
+            return
+        x = max(0, round(left * scale + offset_x, 2))
+        y = max(0, round(top * scale + offset_y, 2))
+        w = round(right * scale + offset_x - x, 2)
+        h = round(bottom * scale + offset_y - y, 2)
+        if w < 0.5 or h < 0.5 or max(x + w, y + h) > 65536:
+            return
+        if h > 240 or layout is None:
+            return
+        key = (source, line, y, h)
+        # Consecutive SyncTeX glyph runs usually share the same source line.
+        # Join adjacent fragments, keeping genuinely separate columns apart.
+        groups = layout.setdefault(key, [])
+        if groups and groups[-1][0] <= x <= groups[-1][1] + 4:
+            groups[-1][1] = max(groups[-1][1], x + w)
+            return
+        if box_count >= MAX_SYNCTEX_BOXES:
+            raise ValueError("SyncTeX map exceeds its box limit.")
+        groups.append([x, x + w])
+        box_count += 1
+
+    with regular_file(filename, MAX_SYNCTEX_INPUT_BYTES) as raw, gzip.GzipFile(
+        fileobj=raw
+    ) as stream:
+        if stream.readline(4097) != b"SyncTeX Version:1\n":
+            return None
+        while row := stream.readline(4097):
+            size += len(row)
+            if size > MAX_SYNCTEX_INPUT_BYTES or len(row) > 4096:
+                return None
+            row = row.rstrip(b"\r\n")
+            if row.startswith(b"Input:"):
+                tag, _, name = row[6:].partition(b":")
+                if tag.isdigit() and 0 < len(tag) <= 9:
+                    tags[int(tag)] = synctex_source(
+                        name, work, cwd, entry_path, root_file, checked
+                    )
+                continue
+            if scale is None:
+                if row == b"Content:":
+                    if headers.get(b"Output") != b"pdf":
+                        return None
+                    unit = int(headers[b"Unit"])
+                    magnification = int(headers[b"Magnification"])
+                    if not (1 <= unit <= 65536 and 1 <= magnification <= 100000):
+                        return None
+                    # 65,536 scaled points per TeX point, 72.27 TeX points per
+                    # inch, and 72 PDF points per inch (see SyncTeX parser).
+                    factor = unit * 72 / (65536 * 72.27)
+                    scale = factor * magnification / 1000
+                    offset_x = int(headers[b"X Offset"]) * factor
+                    offset_y = int(headers[b"Y Offset"]) * factor
+                else:
+                    key, _, value = row.partition(b":")
+                    if len(value) <= 16:
+                        headers[key] = value
+                continue
+            if row == b"Postamble:":
+                break
+            if row.startswith(b"{"):
+                number = row[1:]
+                page = int(number) if number.isdigit() and len(number) < 7 else 0
+                layout = pages.setdefault(page, {}) if 1 <= page <= page_count else None
+                stack.clear()
+                continue
+            if row.startswith(b"}"):
+                page = 0
+                layout = None
+                stack.clear()
+                continue
+            if not page or layout is None:
+                continue
+            if match := SYNCTEX_BOX.fullmatch(row):
+                tag, line, x, y, width, height, depth = map(int, match.groups()[1:])
+                if match[1] == b"(":
+                    if len(stack) >= 256:
+                        return None
+                    if stack:
+                        stack[-1].has_children = True
+                    stack.append(SyncTexBox(tag, line, x, y, width, height, depth, x))
+                else:
+                    add(tag, line, x, y - height, x + width, y + depth)
+                    if stack:
+                        stack[-1].cursor = x + width
+                continue
+            if row == b")" and stack:
+                box = stack.pop()
+                if not box.has_children:
+                    add(
+                        box.tag,
+                        box.line,
+                        box.x,
+                        box.y - box.height,
+                        box.x + box.width,
+                        box.y + box.depth,
+                    )
+                if stack:
+                    stack[-1].cursor = box.x + box.width
+                continue
+            if stack and (match := SYNCTEX_POINT.fullmatch(row)):
+                tag, line, x, y = map(int, match.groups())
+                box = stack[-1]
+                if x > box.cursor and y == box.y:
+                    add(tag, line, box.cursor, y - box.height, x, y + box.depth)
+                box.cursor = x
+                box.has_children = True
+
+    result = {}
+    for page, layout in pages.items():
+        boxes = []
+        for (source, line, y, height), groups in layout.items():
+            index = paths.setdefault(source, len(paths))
+            for x, right in groups:
+                boxes.append([index, line, x, y, round(right - x, 2), height])
+        if boxes:
+            result[page] = boxes
+    if not result:
+        return None
+    encoded = json.dumps(
+        {"schema": 1, "paths": list(paths), "pages": result},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return encoded if len(encoded) <= MAX_SYNCTEX_BYTES else None
+
+
 def compile_project(root_file):
     if (
         len(root_file) > 1024
@@ -273,7 +478,7 @@ def compile_project(root_file):
             "-interaction=nonstopmode",
             "-halt-on-error",
             "-file-line-error",
-            "-pdflatex=pdflatex -no-shell-escape %O %S",
+            "-pdflatex=pdflatex -no-shell-escape -synctex=1 %O %S",
             "-e",
             "$max_repeat=5; $biber='false'; $makeindex='makeindex -o "
             + str(build / "document.ind")
@@ -327,6 +532,19 @@ def compile_project(root_file):
             page_match = re.search(r"^Pages:\s+(\d+)\s*$", pdf_info, re.MULTILINE)
             if page_match:
                 page_count = int(page_match[1])
+                try:
+                    navigation = synctex_map(
+                        build / "document.synctex.gz",
+                        work,
+                        cwd,
+                        entry_path,
+                        root_file,
+                        page_count,
+                    )
+                except (OSError, EOFError, KeyError, ValueError, zlib.error):
+                    navigation = None
+                if navigation:
+                    write_output("synctex.json", navigation)
             text_code, text, text_truncated = capture(
                 [
                     "pdftotext",
@@ -421,6 +639,7 @@ def main():
     for name, limit in [
         ("document.pdf", MAX_PDF_BYTES),
         ("document.txt", MAX_TEXT_BYTES),
+        ("synctex.json", MAX_SYNCTEX_BYTES),
         ("result.json", 1024 * 1024),
     ]:
         try:

@@ -18,7 +18,6 @@ import { ChatPicker, type ChatChoice } from './ChatPicker'
 import { FileContextPicker } from './FileContextPicker'
 import { FileMentionTextarea } from './FileMentionTextarea'
 import { ChatOptions } from './ChatOptions'
-import type { BookChatRequest } from './BooksPanel'
 import { ConversationTurn } from './ConversationTurn'
 import { ChangeDiff, Verification } from './RunReview'
 import { mergeRunSnapshot } from './runStream'
@@ -43,6 +42,8 @@ import type {
 import './chat-workbench.css'
 import { texLanguage } from './texBuilds'
 import { messageId } from './messageId'
+import { isPdfFile } from '../../../shared/file-previews.mjs'
+import { isTexFile } from '../../../shared/tex.mjs'
 import {
   reasoningPreferenceKey,
   selectedReasoningEffort,
@@ -64,6 +65,13 @@ const mergeRun = (values: Run[], value: Run) =>
 export interface SetupHelpRequest {
   id: number
   projectId: string
+}
+
+export interface ChatDraftRequest {
+  id: number
+  projectId: string
+  text: string
+  contextFile?: string
 }
 
 const setupHelpPrompt =
@@ -108,8 +116,8 @@ export function AssistantPanel({
   setupHelpRequest,
   onSetupHelpHandled,
   focusRequest,
-  bookRequest,
-  onBookHandled,
+  draftRequest,
+  onDraftRequestHandled,
   onOpenTarget,
   onFocusHandled,
   editorProof,
@@ -136,8 +144,8 @@ export function AssistantPanel({
   setupHelpRequest?: SetupHelpRequest | null
   onSetupHelpHandled?: (id: number) => void
   focusRequest?: ProofFocusRequest | null
-  bookRequest?: BookChatRequest | null
-  onBookHandled?: (id: number) => void
+  draftRequest?: ChatDraftRequest | null
+  onDraftRequestHandled?: (id: number) => void
   onOpenTarget?: (target: RunProofTarget) => void
   onFocusHandled?: (id: number) => void
   editorProof?: EditorProofState
@@ -190,7 +198,7 @@ export function AssistantPanel({
       new Map<string, DraftSubmission & { currentFile: string | null }>(),
     )
   const handledFocus = useRef<number | null>(null)
-  const handledBook = useRef<number | null>(null)
+  const handledDraftRequest = useRef<number | null>(null)
   const handledSetupHelp = useRef<number | null>(null)
   draftRef.current = draft
   const liveSeen = useRef(new Map<string, string>()),
@@ -264,6 +272,11 @@ export function AssistantPanel({
     [currentFile, ...contextFiles].some(
       (path) => path && !path.endsWith('.lean'),
     )
+  const formalizingPaper =
+    formalizingDocument &&
+    [currentFile, ...contextFiles].some(
+      (path) => isPdfFile(path) || isTexFile(path),
+    )
   useEffect(() => {
     if (
       !focusRequest ||
@@ -303,12 +316,25 @@ export function AssistantPanel({
   ])
   useEffect(() => {
     if (
-      !bookRequest ||
-      bookRequest.projectId !== projectId ||
-      handledBook.current === bookRequest.id
+      !draftRequest ||
+      draftRequest.projectId !== projectId ||
+      handledDraftRequest.current === draftRequest.id
     )
       return
-    handledBook.current = bookRequest.id
+    handledDraftRequest.current = draftRequest.id
+    const current = draftRef.current
+    if (
+      draftRequest.contextFile &&
+      (activeSetup || current.value.purpose === 'setup')
+    ) {
+      setErrors((previous) => ({
+        ...previous,
+        [draft.key]:
+          'Leave setup help before asking Lemex to find paper links here.',
+      }))
+      onDraftRequestHandled?.(draftRequest.id)
+      return
+    }
     ++navigation.current
     setChatBusy(false)
     try {
@@ -316,13 +342,29 @@ export function AssistantPanel({
     } catch {
       /* Keep the visible draft when storage is unavailable. */
     }
-    const existing = draftRef.current.value.text
-    draftRef.current.setText(
-      existing ? `${existing}\n\n${bookRequest.text}` : bookRequest.text,
+    const { text, files, proofTarget, purpose } = current.value
+    if (draftRequest.contextFile) {
+      if (!text.trim() && !proofTarget && !purpose) current.setMode('search')
+      if (!files.includes(draftRequest.contextFile) && files.length < 12)
+        current.setFiles([...files, draftRequest.contextFile])
+    }
+    current.setText(
+      draftRequest.contextFile && text.includes(draftRequest.text)
+        ? text
+        : text
+          ? `${text}\n\n${draftRequest.text}`
+          : draftRequest.text,
     )
     document.getElementById('assistant-prompt')?.focus()
-    onBookHandled?.(bookRequest.id)
-  }, [bookRequest, projectId, onBookHandled, chatSelectionKey])
+    onDraftRequestHandled?.(draftRequest.id)
+  }, [
+    draftRequest,
+    projectId,
+    onDraftRequestHandled,
+    chatSelectionKey,
+    activeSetup,
+    draft.key,
+  ])
   useEffect(() => {
     if (
       !setupHelpRequest ||
@@ -1032,7 +1074,9 @@ export function AssistantPanel({
       {(texLanguage(currentFile) || formalizingDocument) && (
         <div className="assistant-tex-note">
           {formalizingDocument
-            ? 'Use your source document to formalize mathematics in Lean.'
+            ? formalizingPaper
+              ? 'Use your source document to formalize mathematics in Lean. Lemex creates paper links as it works.'
+              : 'Use your source document to formalize mathematics in Lean.'
             : 'Lemex can read, edit, and compile your LaTeX document here.'}
         </div>
       )}

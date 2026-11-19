@@ -28,10 +28,11 @@ const server = await new Promise((resolve) => {
 const projectId = 'tex-ui-project'
 const hash = (content) => createHash('sha256').update(content).digest('hex')
 const files = {
-  'Main.lean': 'example : True := by trivial\n',
+  'Main.lean': 'theorem linked_statement : True := by trivial\n',
   'main.tex':
     '\\documentclass{article}\n\\begin{document}\n\\section{Fixture title}\nPlain document text.\n\\input{chapter}\n\\end{document}\n',
-  'chapter.tex': '\\section{Chapter title}\nChapter text.\n',
+  'chapter.tex':
+    '\\section{Chapter title}\\label{sec:fixture}\nChapter text.\n',
   'refs.bib':
     '@book{fixture,\n  title = {A bibliography},\n  author = {Fixture}\n}\n',
   'custom.sty': '\\ProvidesPackage{custom}\n\\newcommand{\\fixture}{Fixture}\n',
@@ -74,6 +75,18 @@ let stopped = 0
 const pdfRequests = []
 const popupPdfRequests = []
 const popupErrors = []
+const syncRequests = []
+const sourceBoxes = [
+  { path: 'chapter.tex', line: 2, x: 68, y: 57, width: 125, height: 25 },
+  { path: 'main.tex', line: 5, x: 270, y: 57, width: 60, height: 25 },
+]
+const linkedStatement = {
+  id: 'generated-pdf-link',
+  source: { path: 'chapter.tex', line: 1, label: 'sec:fixture' },
+  renderRange: { startLine: 1, endLine: 2 },
+  target: { path: 'Main.lean', line: 1, declaration: 'linked_statement' },
+  status: 'current',
+}
 try {
   fixture = await chatBrowserFixture({
     base: `http://127.0.0.1:${server.address().port}`,
@@ -146,6 +159,13 @@ try {
   await page.route('**/api/projects/*/tex**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
+    if (url.pathname.endsWith('/synctex')) {
+      const page = Number(url.searchParams.get('page'))
+      syncRequests.push({ page, pathname: url.pathname })
+      return route.fulfill({
+        json: { page, boxes: sourceBoxes, links: [linkedStatement] },
+      })
+    }
     if (url.pathname.endsWith('/pdf')) {
       pdfRequests.push(url.pathname)
       return route.fulfill({
@@ -1123,6 +1143,76 @@ try {
   report.checks.push(
     'Refresh build status shows a failed refresh without discarding the last PDF; a successful manual refresh permits one idle retry, while persistent 409 responses cannot create an automatic retry loop.',
   )
+
+  rejectBuilds = 0
+  if ((await optionsButton.getAttribute('aria-expanded')) !== 'true')
+    await optionsButton.click()
+  await panel.getByLabel('Rebuild on save').uncheck()
+  await panel.getByLabel('LaTeX root document').selectOption('main.tex')
+  await open('main.tex')
+  const beforeMappedBuild = builds.length
+  await buildButton.click()
+  await until(() => builds.length === beforeMappedBuild + 1, 'mapped PDF build')
+  build.syncTexAvailable = true
+  finish('completed')
+  const sheet = panel.locator('.linked-pdf-sheet')
+  const highlight = sheet.locator('.linked-pdf-source-hit')
+  await highlight.waitFor()
+  assert.equal(
+    await highlight.count(),
+    1,
+    'Only the saved paper link gets a Lean mark',
+  )
+  assert.deepEqual(syncRequests.at(-1), {
+    page: 1,
+    pathname: `/api/projects/${projectId}/tex/builds/${build.id}/synctex`,
+  })
+  const selectedTab = (name) =>
+    page.getByRole('tab', { name, selected: true, exact: true })
+  const sourceLine = (number) =>
+    page.locator('.line-numbers.active-line-number', {
+      hasText: new RegExp(`^${number}$`),
+    })
+  const doubleClickPdfPoint = async (x, y) => {
+    const bounds = await sheet.boundingBox()
+    await sheet.dblclick({
+      position: { x: (x * bounds.width) / 612, y: (y * bounds.height) / 792 },
+    })
+  }
+  await doubleClickPdfPoint(300, 66)
+  await selectedTab('main.tex').waitFor()
+  await sourceLine(5).waitFor()
+  await highlight.click()
+  await selectedTab('main.tex').waitFor()
+  await highlight.dblclick()
+  await selectedTab('chapter.tex').waitFor()
+  await sourceLine(2).waitFor()
+  assert(await editor().evaluate((editor) => editor === document.activeElement))
+  await highlight.hover()
+  const openLean = sheet.getByRole('button', {
+    name: 'Open linked_statement in Lean',
+  })
+  await until(
+    () =>
+      openLean.evaluate(
+        (button) =>
+          getComputedStyle(button.closest('.linked-pdf-source-actions'))
+            .opacity === '1',
+      ),
+    'Lean action on PDF hover',
+  )
+  await openLean.click()
+  await selectedTab('Main.lean').waitFor()
+  await sourceLine(1).waitFor()
+  await open('main.tex')
+  await highlight.waitFor()
+  await append('\n% Unsaved edit disables compiled source links.\n')
+  await highlight.waitFor({ state: 'hidden' })
+  await panel.getByText('PDF may be out of date').waitFor()
+  report.checks.push(
+    'A compiled PDF double-click focuses a saved LaTeX position, even over a linked statement. Hover offers a separate Lean jump only for existing paper links. Unsaved edits disable mappings.',
+  )
+
   await page.screenshot({ path: path.join(output, 'tex-workspace.png') })
   fixture.assertClean()
   report.ok = true

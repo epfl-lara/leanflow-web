@@ -63,6 +63,16 @@ export default defineConfig({
           dest: 'assets',
           rename: { stripBase: true },
         },
+        ...['cmaps', 'standard_fonts', 'wasm', 'iccs'].map((directory) => ({
+          src: [`../node_modules/pdfjs-dist/${directory}/*`],
+          dest: `pdfjs/${directory}`,
+          rename: { stripBase: true },
+        })),
+        {
+          src: ['../node_modules/pdfjs-dist/LICENSE'],
+          dest: 'pdfjs',
+          rename: { stripBase: true },
+        },
       ],
     }),
   ],

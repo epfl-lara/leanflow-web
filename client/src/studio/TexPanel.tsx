@@ -1,6 +1,6 @@
 /* eslint-disable jsx-a11y/no-noninteractive-tabindex -- Keyboard users need to focus and scroll compiler output. */
 import { useEffect, useId, useRef, useState } from 'react'
-import type { OpenFile } from './api'
+import type { OpenFile, PaperLink } from './api'
 import { PdfFileViewer } from './PdfFileViewer'
 import { defaultTexRoot, texPdfIsStale, texInputInRoot } from './texBuilds'
 import { useTexBuild } from './useTexBuild'
@@ -17,6 +17,9 @@ export function TexPanel({
   savedPaths,
   save,
   onOpenFile,
+  onOpenPaperLink,
+  dirtyPaths,
+  paperLinkRevision,
 }: {
   projectId: string
   files: string[]
@@ -27,7 +30,10 @@ export function TexPanel({
   saveVersion: number
   savedPaths: readonly string[]
   save: () => Promise<void>
-  onOpenFile: (path: string, line?: number) => void
+  onOpenFile: (path: string, line?: number, column?: number) => void
+  onOpenPaperLink?: (location: PaperLink['target']) => void
+  dirtyPaths?: ReadonlySet<string>
+  paperLinkRevision?: string
 }) {
   const [selectedRoot, setSelectedRoot] = useState(() => {
     try {
@@ -274,6 +280,18 @@ export function TexPanel({
           revision={successful.pdf.revision}
           showActions={showOptions}
           fitWidth
+          onOpenPaperLink={onOpenPaperLink}
+          sourceNavigation={
+            successful.syncTexAvailable
+              ? {
+                  endpoint: `/api/projects/${encodeURIComponent(projectId)}/tex/builds/${encodeURIComponent(successful.id)}/synctex`,
+                  enabled: visible && !stale,
+                  revision: JSON.stringify([saveVersion, paperLinkRevision]),
+                  dirtyPaths,
+                  onOpenSource: onOpenFile,
+                }
+              : undefined
+          }
         />
       ) : (
         <div className="tex-preview-empty">

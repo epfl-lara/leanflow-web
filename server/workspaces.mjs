@@ -115,6 +115,12 @@ import {
   applyReferenceUpdates,
 } from './workspace-reference-scan.mjs'
 import { validatePdfBytes } from './pdf-preview.mjs'
+import {
+  makePaperLink,
+  mergePaperLinkChanges,
+  PAPER_LINKS_FILE,
+  upsertPaperLink,
+} from './paper-links.mjs'
 import { validateBinaryAsset } from './binary-assets.mjs'
 import {
   safeTexPath,
@@ -126,24 +132,19 @@ import {
 import { validateSetupBuildTimeout } from './capacity.mjs'
 import { validateGitBranch } from './git-branches.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
+import {
+  CONFIGURATION_FILES,
+  WorkspaceError,
+  fail,
+  isSecret,
+  relativeFile,
+} from './workspace-paths.mjs'
+export {
+  WorkspaceError,
+  validateWorkspaceFilePath,
+} from './workspace-paths.mjs'
 const MAX_FILES = MAX_PROJECT_FILES
 const PRESETS = new Set(['lean', 'mathlib', 'cslib', 'physlib'])
-const CONFIGURATION_FILES = new Set(PROJECT_CONFIGURATION_FILES)
-const SECRET_PARTS = new Set([
-  '.git',
-  '.lemex',
-  '.codex',
-  '.ssh',
-  '.aws',
-  '.azure',
-  '.config',
-  '.netrc',
-  '.npmrc',
-  '.pypirc',
-  'credentials',
-  'credentials.json',
-  'auth.json',
-])
 const GIT_ARGS = [
   'git',
   '-c',
@@ -167,20 +168,6 @@ const SETUP_EVENT_TYPES = new Set([
 ])
 const sha = (value) => createHash('sha256').update(value).digest('hex')
 const clone = (value) => JSON.parse(JSON.stringify(value))
-
-export class WorkspaceError extends Error {
-  constructor(message, status = 400) {
-    super(message)
-    this.name = 'WorkspaceError'
-    this.status = this.statusCode = status
-  }
-}
-
-function fail(message, status = 400, code) {
-  const error = new WorkspaceError(message, status)
-  if (code) error.code = code
-  throw error
-}
 
 function validateOwner(owner) {
   if (
@@ -239,61 +226,6 @@ function validateRef(value) {
   )
     fail('Invalid Git branch or revision')
   return value
-}
-
-function isSecret(part) {
-  const p = part.toLowerCase()
-  return (
-    SECRET_PARTS.has(p) ||
-    p === '.env' ||
-    p.startsWith('.env.') ||
-    /\.(?:pem|key|p12|pfx)$/.test(p) ||
-    p === 'settings.local.json'
-  )
-}
-
-function relativeFile(value, { write = false } = {}) {
-  if (
-    typeof value !== 'string' ||
-    !value ||
-    value.length > 1024 ||
-    value.includes('\\') ||
-    /[\x00-\x1f]/.test(value) ||
-    path.posix.isAbsolute(value)
-  )
-    fail('Invalid file path')
-  const parts = value.split('/')
-  if (
-    parts.length > 64 ||
-    parts.some(
-      (p) =>
-        !p ||
-        p === '.' ||
-        p === '..' ||
-        Buffer.byteLength(p) > 255 ||
-        isSecret(p),
-    )
-  )
-    fail('File path is not permitted')
-  if (parts.includes('node_modules'))
-    fail('Dependency installation directories are not accessible')
-  if (write && parts.length > 1 && CONFIGURATION_FILES.has(parts[0]))
-    fail(
-      'Project setup files cannot be used as folders. Choose another location.',
-    )
-  if (
-    parts.includes('.lake') &&
-    (parts[0] !== '.lake' ||
-      parts[1] !== 'packages' ||
-      parts.length < 4 ||
-      write)
-  )
-    fail('Dependency files are read only')
-  return parts.join('/')
-}
-
-export function validateWorkspaceFilePath(value) {
-  return relativeFile(value)
 }
 
 // Reject all non-public IP ranges, including IPv4 mapped IPv6. HTTP redirects
@@ -4900,7 +4832,7 @@ export class WorkspaceStore {
     return { content, mode, path: relative }
   }
 
-  async readPdfPreview(id, owner, filename) {
+  async readPdfPreview(id, owner, filename, { signal } = {}) {
     const project = this.get(id, owner)
     const relative = relativeFile(filename)
     if (!isPdfFile(relative)) fail('Choose a .pdf file to preview.', 415)
@@ -4911,6 +4843,7 @@ export class WorkspaceStore {
       await guarded(root, relative),
       {
         byteLimit: MAX_PDF_FILE_BYTES,
+        signal,
         tooLargeMessage:
           'PDF files must be at most 16 MiB. Reduce the PDF and upload it again.',
       },
@@ -5341,9 +5274,9 @@ export class WorkspaceStore {
     }
   }
 
-  async texSourceVersion(id, owner, rootFile = 'main.tex') {
+  async texSourceVersion(id, owner, rootFile = 'main.tex', { signal } = {}) {
     const project = this.get(id, owner)
-    return (await captureTexInputs(project.root, null, undefined, rootFile))
+    return (await captureTexInputs(project.root, null, signal, rootFile))
       .workspaceRevision
   }
 
@@ -6475,6 +6408,78 @@ export class WorkspaceStore {
     return textFile(await guarded(manifest.root, filename, { write: true }))
   }
 
+  async stageSnapshotPaperLink(
+    snapshot,
+    projectId,
+    actor,
+    input,
+    { signal } = {},
+  ) {
+    const { manifest, container } = await this.#manifest(snapshot)
+    const assertAuthorized = () => {
+      signal?.throwIfAborted()
+      const project = this.requireEditor(projectId, actor)
+      if (
+        manifest.projectId !== projectId ||
+        manifest.owner !== project.owner ||
+        (manifest.actor || manifest.owner) !== actor ||
+        manifest.purpose !== undefined
+      )
+        fail('This paper link belongs to a different assistant run.', 403)
+    }
+    return this.#locked(`\0paper-links\0${manifest.runId}`, async () => {
+      assertAuthorized()
+      const destination = await guarded(manifest.root, PAPER_LINKS_FILE, {
+        write: true,
+      })
+      const before = await textFile(destination, true)
+      const link = await makePaperLink(input, {
+        signal,
+        readText: async (filename) =>
+          textFile(await guarded(manifest.root, filename, { write: true })),
+        readPdf: async (filename) => {
+          const { content } = await workspaceFileBytes(
+            await guarded(manifest.root, filename, { write: true }),
+            { byteLimit: MAX_PDF_FILE_BYTES, signal, requireUnchanged: true },
+          )
+          return { content: validatePdfBytes(filename, content) }
+        },
+      })
+      const content = upsertPaperLink(before?.content, link)
+      assertAuthorized()
+      if (before?.content !== content) {
+        const parent = await writeParent(manifest.root, PAPER_LINKS_FILE)
+        let stagingParent
+        try {
+          // Live diffs scan the candidate. Keep the staging file beside it.
+          stagingParent = await writeParent(container, PAPER_LINKS_FILE)
+          await durableSourceWrite({
+            parent,
+            stagingParent,
+            destination,
+            content,
+            mode: before?.mode ?? 0o600,
+            authorize: async () => {
+              const current = await textFile(destination, true)
+              if (current?.hash !== before?.hash)
+                fail(
+                  'Paper links changed during saving. Retry the tool call.',
+                  409,
+                )
+              assertAuthorized()
+            },
+          })
+        } finally {
+          await Promise.all([
+            parent.handle.close(),
+            stagingParent?.handle.close(),
+          ])
+        }
+      }
+      return link
+    })
+  }
+
   #checkLinks(manifest, entries, message) {
     const expected = new Map(
       (manifest.links || []).map((link) => [link.path, link.target]),
@@ -6544,6 +6549,7 @@ export class WorkspaceStore {
       entries,
       'Project symbolic links changed during the assistant run. Start a new run from the current project.',
     )
+    const paper = await this.#livePaperTransition(project.root, previous, next)
     const base = new Map(manifest.files.map((file) => [file.path, file.hash]))
     for (const change of previous) {
       if (change.after === null) base.delete(change.path)
@@ -6565,7 +6571,8 @@ export class WorkspaceStore {
       configuration.has(path.posix.basename(filename)) || touched.has(filename)
     for (const filename of new Set([...base.keys(), ...current.keys()])) {
       signal?.throwIfAborted()
-      if (!protectedPath(filename)) continue
+      if (!protectedPath(filename) || (paper && filename === PAPER_LINKS_FILE))
+        continue
       const expected = base.get(filename) ?? null
       const actual = current.has(filename)
         ? await fileHash(await guarded(project.root, filename), signal)
@@ -6576,13 +6583,15 @@ export class WorkspaceStore {
           409,
         )
     }
-    return true
+    return paper
   }
 
   async #assertTouched(manifest, project, live) {
     if (manifest.projectId !== project.id || manifest.owner !== project.owner)
       fail('Candidate belongs to another project', 403)
+    const paper = await this.#livePaperTransition(project.root, live, [])
     for (const change of live) {
+      if (paper && change.path === PAPER_LINKS_FILE) continue
       const actual = await textFile(
         await guarded(project.root, change.path, { write: true }),
         true,
@@ -6596,7 +6605,7 @@ export class WorkspaceStore {
           409,
         )
     }
-    return true
+    return paper
   }
 
   async assertSnapshotCurrent(snapshot) {
@@ -6684,13 +6693,42 @@ export class WorkspaceStore {
     return result
   }
 
-  #liveTransition(previous, next) {
+  async #livePaperTransition(root, previous, next) {
+    const old = previous.find((change) => change.path === PAPER_LINKS_FILE)
+    const desired = next.find((change) => change.path === PAPER_LINKS_FILE)
+    if (!old && !desired) return
+    const baseline = (old || desired).before
+    const current = await textFile(
+      await guarded(root, PAPER_LINKS_FILE, { write: true }),
+      true,
+    )
+    const before = current?.content ?? null
+    const after = mergePaperLinkChanges({
+      baseline,
+      before: old ? old.after : baseline,
+      after: desired ? desired.after : baseline,
+      current: before,
+    })
+    if (after !== undefined)
+      return {
+        path: PAPER_LINKS_FILE,
+        before,
+        after,
+        beforeHash: current?.hash ?? null,
+      }
+  }
+
+  #liveTransition(previous, next, paper) {
     const old = new Map(previous.map((change) => [change.path, change]))
     const desired = new Map(next.map((change) => [change.path, change]))
     const transition = []
     for (const filename of [
       ...new Set([...old.keys(), ...desired.keys()]),
     ].sort()) {
+      if (paper && filename === PAPER_LINKS_FILE) {
+        if (paper.before !== paper.after) transition.push(paper)
+        continue
+      }
       const original = old.get(filename) || desired.get(filename)
       const before = old.has(filename)
         ? old.get(filename).after
@@ -6733,8 +6771,14 @@ export class WorkspaceStore {
         changes,
         options,
       )
-      await this.#assertLiveCurrent(manifest, project, previous, next)
-      const transition = this.#liveTransition(previous, next)
+      const paper = await this.#assertLiveCurrent(
+        manifest,
+        project,
+        previous,
+        next,
+        options,
+      )
+      const transition = this.#liveTransition(previous, next, paper)
       if (transition.some((change) => CONFIGURATION_FILES.has(change.path)))
         this.assertConfigurationIdle?.(
           project.id,
@@ -6773,7 +6817,8 @@ export class WorkspaceStore {
         liveChanges,
         options,
       )
-      return this.#assertLiveCurrent(manifest, project, live)
+      await this.#assertLiveCurrent(manifest, project, live, live, options)
+      return true
     })
   }
 
@@ -6795,8 +6840,8 @@ export class WorkspaceStore {
         liveChanges,
         options,
       )
-      await this.#assertTouched(manifest, project, live)
-      const transition = this.#liveTransition(live, [])
+      const paper = await this.#assertTouched(manifest, project, live)
+      const transition = this.#liveTransition(live, [], paper)
       if (transition.some((change) => CONFIGURATION_FILES.has(change.path)))
         this.assertConfigurationIdle?.(
           project.id,
@@ -6962,15 +7007,18 @@ export class WorkspaceStore {
           signal,
         },
       )
-      if (Object.hasOwn(options, 'liveChanges'))
-        await this.#assertLiveCurrent(
-          manifest,
-          currentProject,
-          previous,
-          proposed,
-          { signal },
-        )
-      else await this.#assertCurrent(manifest, currentProject, [], { signal })
+      const live = Object.hasOwn(options, 'liveChanges')
+      const paper = live
+        ? await this.#assertLiveCurrent(
+            manifest,
+            currentProject,
+            previous,
+            proposed,
+            { signal },
+          )
+        : undefined
+      if (!live)
+        await this.#assertCurrent(manifest, currentProject, [], { signal })
       // Live runs intentionally retain unrelated collaborator edits. Bind the
       // copy to that current context; review-first runs stay bound to their
       // original snapshot. Neither path can accept edits raced into the copy.
@@ -6981,7 +7029,7 @@ export class WorkspaceStore {
         if (change.after === null) expected.delete(change.path)
         else expected.set(change.path, sha(change.after))
       }
-      if (Object.hasOwn(options, 'liveChanges')) {
+      if (live) {
         const entries = await this.#walk(currentProject.root, {
           includeLinks: true,
           limit: Infinity,
@@ -7004,6 +7052,7 @@ export class WorkspaceStore {
           ...previous.map((change) => change.path),
           ...proposed.map((change) => change.path),
         ])
+        if (paper) protectedPaths.delete(PAPER_LINKS_FILE)
         for (const filename of protectedPaths) {
           if (
             (capturedContext.get(filename) ?? null) !==
@@ -7053,7 +7102,19 @@ export class WorkspaceStore {
           )
         }
         this.requireEditor(project.id, manifest.actor || manifest.owner)
-        const transitions = this.#liveTransition(previous, proposed)
+        const verifiedPaper = paper
+          ? await this.#livePaperTransition(verified.root, previous, proposed)
+          : undefined
+        if (paper && !verifiedPaper)
+          fail(
+            'Paper links changed while preparing verification. Retry from the current project.',
+            409,
+          )
+        const transitions = this.#liveTransition(
+          previous,
+          proposed,
+          verifiedPaper,
+        )
         for (const change of transitions) {
           signal?.throwIfAborted()
           const destination = await guarded(verified.root, change.path, {

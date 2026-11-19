@@ -16,6 +16,11 @@ import { fixtureModelDiscovery } from './fixtures/model-discovery.mjs'
 import JSZip from 'jszip'
 import { frame } from '../rpc.mjs'
 import { loadCapacity } from '../capacity.mjs'
+import {
+  PAPER_LINKS_FILE,
+  makePaperLink,
+  upsertPaperLink,
+} from '../paper-links.mjs'
 
 async function fixture(t, { capacity } = {}) {
   const dataDir = await fs.mkdtemp(
@@ -132,6 +137,53 @@ async function fixture(t, { capacity } = {}) {
     origin,
   }
 }
+
+test('paper link lookup admits project viewers and scopes linked files to the saved project', async (t) => {
+  const f = await fixture(t)
+  const source = { path: 'Paper.tex', line: 1, label: 'result' }
+  const target = { path: 'Main.lean', line: 1, declaration: 'result' }
+  const paper = '\\label{result}\n'
+  const lean = 'theorem result : True := by trivial\n'
+  const link = await makePaperLink(
+    { source, target },
+    {
+      readText: (filename) => ({
+        content: filename === source.path ? paper : lean,
+      }),
+    },
+  )
+  await Promise.all([
+    fs.writeFile(path.join(f.project.root, source.path), paper),
+    fs.writeFile(path.join(f.project.root, target.path), lean),
+    fs.writeFile(
+      path.join(f.project.root, PAPER_LINKS_FILE),
+      upsertPaperLink(null, link),
+    ),
+  ])
+
+  const endpoint = `${f.base}/paper-links`
+  const query = `${endpoint}?path=${source.path}`
+  for (const [actor, status] of [
+    [null, 401],
+    [f.outsider, 404],
+  ])
+    assert.equal((await f.request(query, { actor })).status, status)
+  const viewer = await f.request(query, { actor: f.viewer })
+  assert.equal(viewer.status, 200)
+  assert.equal(viewer.headers.get('cache-control'), 'no-store')
+  assert.deepEqual(await viewer.json(), {
+    links: [{ id: link.id, source, target, status: 'current' }],
+  })
+  assert.equal((await f.request(endpoint)).status, 400)
+  assert.equal((await f.request(`${endpoint}?path=../Paper.tex`)).status, 400)
+
+  const outside = path.join(path.dirname(f.project.root), 'outside.lean')
+  await fs.writeFile(outside, lean)
+  await fs.unlink(path.join(f.project.root, target.path))
+  await fs.symlink(outside, path.join(f.project.root, target.path))
+  const stale = await (await f.request(query, { actor: f.viewer })).json()
+  assert.equal(stale.links[0].status, 'stale')
+})
 
 test('older update recovery HTTP requires an idle Admin and preserves later edits', async (t) => {
   const f = await fixture(t)

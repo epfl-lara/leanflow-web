@@ -4,12 +4,6 @@ import { bookPageUrl } from '../../../shared/lean-books.mjs'
 import { Icon } from './Icons'
 import './books.css'
 
-export interface BookChatRequest {
-  id: number
-  projectId: string
-  text: string
-}
-
 export function BooksPanel({
   open,
   canAsk,

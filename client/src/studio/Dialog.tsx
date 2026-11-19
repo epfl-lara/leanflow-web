@@ -2,12 +2,14 @@ import { useEffect, useId, useRef, type ReactNode } from 'react'
 import { Icon } from './Icons'
 
 export function Dialog({
+  id,
   title,
   subtitle,
   children,
   onClose,
   busy = false,
 }: {
+  id?: string
   title: string
   subtitle?: string
   children: ReactNode
@@ -28,6 +30,7 @@ export function Dialog({
   return (
     <dialog
       ref={ref}
+      id={id}
       className="studio-dialog"
       onCancel={(event) => {
         event.preventDefault()

@@ -48,6 +48,7 @@ import { repairProjectSetup, withSetupRepairDeadline } from './setup-repair.mjs'
 import { GitPublisher } from './git-publish.mjs'
 import { validateGitBranch } from './git-branches.mjs'
 import { pdfDisposition } from './pdf-preview.mjs'
+import { projectPaperLinks, projectTexPaperLinks } from './paper-links.mjs'
 import { isPdfFile } from '../shared/file-previews.mjs'
 import { readMediaPreview, sendMediaPreview } from './media-preview.mjs'
 import { installProjectDownloadRoutes } from './project-downloads.mjs'
@@ -1099,6 +1100,25 @@ export async function createStudio({
     ),
   )
   installProjectDownloadRoutes(app, workspaces)
+  app.get('/api/projects/:id/paper-links', async (req, res) => {
+    const controller = new AbortController()
+    const disconnected = () => controller.abort()
+    res.once('close', disconnected)
+    try {
+      const result = await projectPaperLinks(
+        workspaces,
+        req.params.id,
+        req.user.id,
+        req.query.path,
+        { signal: controller.signal },
+      )
+      if (!res.destroyed) res.json(result)
+    } catch (error) {
+      if (!controller.signal.aborted) throw error
+    } finally {
+      res.off('close', disconnected)
+    }
+  })
   app.get('/api/projects/:id/file-preview', async (req, res) => {
     if (!isPdfFile(req.query.path)) {
       const preview = await readMediaPreview(
@@ -1496,6 +1516,47 @@ export async function createStudio({
     res.type('application/pdf')
     res.setHeader('Content-Disposition', pdfDisposition(preview.path))
     res.send(preview.content)
+  })
+  app.get('/api/projects/:id/tex/builds/:buildId/synctex', async (req, res) => {
+    const job = projectTexBuild(req)
+    if (
+      typeof req.query.page !== 'string' ||
+      !/^[1-9]\d{0,6}$/u.test(req.query.page)
+    )
+      throw Object.assign(new Error('Choose a positive PDF page number.'), {
+        status: 400,
+      })
+    const page = Number(req.query.page)
+    const controller = new AbortController()
+    const disconnected = () => controller.abort()
+    res.once('close', disconnected)
+    try {
+      const boxes = await texBuilds.readSyncTex(req.user.id, job.id, page)
+      const paths = [...new Set(boxes.map((box) => box.path))]
+      let links = []
+      try {
+        links = await projectTexPaperLinks(
+          workspaces,
+          job.projectId,
+          req.user.id,
+          paths,
+          {
+            signal: controller.signal,
+          },
+        )
+      } catch (error) {
+        if (![400, 403, 404, 409, 413, 415].includes(error.status)) throw error
+      }
+      controller.signal.throwIfAborted()
+      await texBuilds.assertSyncTexCurrent(req.user.id, job.id, {
+        signal: controller.signal,
+      })
+      if (!res.destroyed) res.json({ page, boxes, links })
+    } catch (error) {
+      if (!controller.signal.aborted) throw error
+    } finally {
+      res.off('close', disconnected)
+    }
   })
   app.post('/api/projects/:id/check', (req, res) => {
     requireNoGit(req.params.id, req.user.id)

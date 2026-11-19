@@ -6,6 +6,11 @@ import { TERMINAL } from './events.mjs'
 import { validatePdfBytes } from './pdf-preview.mjs'
 import { MAX_PDF_FILE_BYTES } from '../shared/file-previews.mjs'
 import { isTexFile, safeTexPath, TEX_ENGINES } from '../shared/tex.mjs'
+import {
+  TEX_SYNCTEX_MAX_BYTES,
+  texSyncTexPage,
+  validateTexSyncTex,
+} from './tex-synctex.mjs'
 
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status })
@@ -219,6 +224,7 @@ export class TexBuildManager {
         job.textAvailable !== false &&
         !job.artifactsRemoved,
       textTruncated: job.textTruncated === true,
+      syncTexAvailable: !!job.syncTexRevision && !job.artifactsRemoved,
       ...(Number.isSafeInteger(job.pageCount) && job.pageCount >= 0
         ? { pageCount: job.pageCount }
         : {}),
@@ -470,11 +476,22 @@ export class TexBuildManager {
             2 * 1024 * 1024,
             true,
           )
+          const syncTex = await artifact(
+            output,
+            'synctex.json',
+            TEX_SYNCTEX_MAX_BYTES,
+            true,
+          )
+          const synced =
+            syncTex &&
+            validateTexSyncTex(syncTex, source.files, record?.pageCount)
+          controller.signal.throwIfAborted()
           this.events.updateMetadata(job.id, {
             status: 'completed',
             diagnostics,
             pdfRevision: hash(pdf),
             ...(documentText ? { textRevision: hash(documentText) } : {}),
+            ...(synced ? { syncTexRevision: hash(syncTex) } : {}),
             textAvailable: !!documentText && record?.textAvailable !== false,
             textTruncated: record?.textTruncated === true,
             ...(Number.isSafeInteger(record?.pageCount) && record.pageCount >= 0
@@ -624,6 +641,50 @@ export class TexBuildManager {
         ? { pageCount: job.pageCount }
         : {}),
     }
+  }
+  async readSyncTex(owner, id, page) {
+    const job = this.#job(owner, id)
+    if (
+      !job.syncTexRevision ||
+      job.artifactsRemoved ||
+      job.status !== 'completed' ||
+      page > job.pageCount
+    )
+      fail(
+        'This build has no source map for that page. Compile the document again.',
+        404,
+      )
+    const content = await artifact(
+      path.join(this.#directory(id), 'output'),
+      'synctex.json',
+      TEX_SYNCTEX_MAX_BYTES,
+      true,
+    )
+    if (!content || hash(content) !== job.syncTexRevision)
+      fail(
+        'The PDF source map changed after compilation. Compile the document again.',
+        409,
+      )
+    return texSyncTexPage(content, page)
+  }
+  async assertSyncTexCurrent(owner, id, { signal } = {}) {
+    const job = this.#job(owner, id)
+    const revision = await this.workspaces.texSourceVersion(
+      job.projectId,
+      owner,
+      job.rootFile,
+      { signal },
+    )
+    const current = this.#job(owner, id)
+    if (
+      current.artifactsRemoved ||
+      !revision ||
+      revision !== job.workspaceRevision
+    )
+      fail(
+        'Saved TeX sources changed after compilation. Build the PDF again to jump to its source.',
+        409,
+      )
   }
   #rows(owner, projectId) {
     return this.events.db

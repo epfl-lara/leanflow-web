@@ -41,6 +41,7 @@ async function sync(handle, committed) {
 
 export async function durableSourceWrite({
   parent,
+  stagingParent = parent,
   destination,
   content,
   mode,
@@ -81,7 +82,7 @@ export async function durableSourceWrite({
       }
       return
     }
-    temporary = `${parent.anchor}/.lemex-write-${randomUUID()}`
+    temporary = `${stagingParent.anchor}/.lemex-write-${randomUUID()}`
     staged = await fs.open(
       temporary,
       constants.O_WRONLY |
@@ -100,6 +101,7 @@ export async function durableSourceWrite({
     await fs.rename(temporary, `${parent.anchor}/${parent.name}`)
     committed = true
     await sync(parent.handle, true)
+    if (stagingParent !== parent) await sync(stagingParent.handle, true)
     await assertParent(parent, destination)
   } catch (cause) {
     if (committed && !cause.sourceCommitted) throw syncError(cause, true)

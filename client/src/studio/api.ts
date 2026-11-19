@@ -334,6 +334,15 @@ export interface OpenFile {
   column?: number
   preview?: 'pdf' | 'image'
 }
+export interface PaperLink {
+  id: string
+  source:
+    | { path: string; page: number; quote?: string }
+    | { path: string; line: number; label?: string }
+  target: { path: string; line: number; declaration: string }
+  status: 'current' | 'stale'
+  renderRange?: { startLine: number; endLine: number }
+}
 export interface TexDiagnostic {
   severity: 'error' | 'warning' | 'info'
   message: string
@@ -356,6 +365,7 @@ export interface TexBuild {
   log: string
   textAvailable: boolean
   textTruncated: boolean
+  syncTexAvailable?: boolean
   pageCount?: number
   error?: string
   pdf?: { url: string; revision: string; filename: string }

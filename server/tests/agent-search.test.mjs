@@ -179,16 +179,24 @@ async function fixture(
             requests.push(request)
             if (request.id === undefined) continue
             queueMicrotask(() => {
+              const paperLinkTurn =
+                request.params?.sandboxPolicy?.type === 'readOnly'
+              const turnId = paperLinkTurn ? 'paper-link-turn' : 'turn'
               send({
                 id: request.id,
                 result:
                   request.method === 'thread/start'
                     ? { thread: { id: 'thread' } }
                     : request.method === 'turn/start'
-                      ? { turn: { id: 'turn' } }
+                      ? { turn: { id: turnId } }
                       : {},
               })
-              if (request.method === 'turn/start')
+              if (request.method === 'turn/start' && paperLinkTurn)
+                send({
+                  method: 'turn/completed',
+                  params: { turn: { id: turnId, status: 'completed' } },
+                })
+              else if (request.method === 'turn/start')
                 void edit(workspace, request.params).then(
                   () => {
                     send({
@@ -617,10 +625,16 @@ test('Formalize receives open or attached documents and independently verifies n
           3,
           'Lean output must run the independent verification pipeline',
         )
-        const envelope = JSON.parse(
-          requests.find((request) => request.method === 'turn/start').params
-            .input[0].text,
-        )
+        const turns = requests.filter(({ method }) => method === 'turn/start')
+        const paperSource =
+          document.endsWith('.PDF') || document.endsWith('.tex')
+        assert.equal(turns.length, paperSource ? 2 : 1)
+        if (paperSource)
+          assert.deepEqual(turns[1].params.sandboxPolicy, {
+            type: 'readOnly',
+            networkAccess: false,
+          })
+        const envelope = JSON.parse(turns[0].params.input[0].text)
         assert(
           envelope.leanflowContext.sections
             .join('\n')

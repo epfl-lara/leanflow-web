@@ -1,11 +1,13 @@
 import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
+import { TEX_SYNCTEX_MAX_BYTES } from './tex-synctex.mjs'
 
 const limits = new Map([
   ['result.json', 1024 * 1024],
   ['document.pdf', 16 * 1024 * 1024],
   ['document.txt', 512 * 1024],
+  ['synctex.json', TEX_SYNCTEX_MAX_BYTES],
 ])
 const maxFrame = 26 * 1024 * 1024
 const maxLog = 256 * 1024

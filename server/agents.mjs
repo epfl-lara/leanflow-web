@@ -37,6 +37,14 @@ import {
   texAgentToolSpecs,
   texAgentInstructions,
 } from './tex-agent-tools.mjs'
+import {
+  createPaperLinkAgentTool,
+  paperLinkToolSpec,
+  paperLinkAgentInstructions,
+  selectedPaperSources,
+  automaticPaperLinkRetry,
+  runPaperLinkTurn,
+} from './paper-link-agent-tool.mjs'
 import { FollowupInbox } from './agent-followups.mjs'
 import {
   agentConversationContext,
@@ -724,7 +732,7 @@ export class AgentManager {
       accepting: null,
       completed: false,
       childClosed: null,
-      texTools: null,
+      documentTools: [],
     }
     active.done = new Promise((resolve) => {
       active.resolveDone = resolve
@@ -821,6 +829,12 @@ export class AgentManager {
         snapshot,
         sourceRevision: snapshot.sourceRevision,
       })
+      const paperSources = selectedPaperSources(job, snapshot)
+      if (paperSources.length)
+        contextSections.push({
+          kind: 'formalization-paper-sources',
+          paths: paperSources,
+        })
       // A focused run may have waited in the queue while the editor changed.
       // Check the actual captured copy before any agent or Lean tool starts.
       if (job.proofTarget) {
@@ -1084,32 +1098,83 @@ export class AgentManager {
         onFailure: rejectFinished,
       })
       const withTex = Boolean(this.texBuilds)
+      const withPaperLinks =
+        job.purpose !== 'setup' &&
+        Boolean(this.workspaces.stageSnapshotPaperLink)
+      const stagedPaperLinks = []
+      let paperLinkRetry
+      const dynamicTools = []
       if (withTex) {
-        active.texTools = createTexAgentTools({
-          manager: this.texBuilds,
-          parentWorker: child,
-          job,
-          snapshot,
-          active,
-          rpc,
-          redact: this.config.redact,
-          onBuild: (build) => {
-            this.#log(id, `TeX build ${build.rootFile}: ${build.status}.\n`)
-            this.#progress(
-              id,
-              ['queued', 'running'].includes(build.status)
-                ? 'Compiling LaTeX'
-                : 'Working',
-              `TeX build ${build.rootFile}: ${build.status}.`,
-            )
-          },
-        })
-        rpc.on('closed', () => {
-          void active.texTools.dispose()
-        })
+        dynamicTools.push(...texAgentToolSpecs)
+        active.documentTools.push(
+          createTexAgentTools({
+            manager: this.texBuilds,
+            parentWorker: child,
+            job,
+            snapshot,
+            active,
+            rpc,
+            redact: this.config.redact,
+            onBuild: (build) => {
+              this.#log(id, `TeX build ${build.rootFile}: ${build.status}.\n`)
+              this.#progress(
+                id,
+                ['queued', 'running'].includes(build.status)
+                  ? 'Compiling LaTeX'
+                  : 'Working',
+                `TeX build ${build.rootFile}: ${build.status}.`,
+              )
+            },
+          }),
+        )
       }
+      if (withPaperLinks) {
+        dynamicTools.push(paperLinkToolSpec)
+        active.documentTools.push(
+          createPaperLinkAgentTool({
+            active,
+            rpc,
+            redact: this.config.redact,
+            stage: async (input, signal) => {
+              const paperLinkSignal = active.paperLinkPass?.signal
+              if (paperLinkSignal)
+                signal = AbortSignal.any([signal, paperLinkSignal])
+              signal.throwIfAborted()
+              if (
+                paperLinkRetry &&
+                (!paperLinkRetry.sources.includes(input?.source?.path) ||
+                  !paperLinkRetry.targets.some(
+                    ({ path, declaration }) =>
+                      path === input?.target?.path &&
+                      declaration === input?.target?.declaration,
+                  ))
+              )
+                throw new Error(
+                  'Choose a selected paper and one of the changed Lean declarations named for this link pass.',
+                )
+              const link = await this.workspaces.stageSnapshotPaperLink(
+                snapshot,
+                job.projectId,
+                job.owner,
+                input,
+                { signal },
+              )
+              stagedPaperLinks.push(link)
+              return link
+            },
+          }),
+        )
+      }
+      rpc.on('closed', () => {
+        void Promise.all(active.documentTools.map((tool) => tool.dispose()))
+      })
       rpc.on('request', (request) => {
-        if (active.texTools?.handle(request)) return
+        if (
+          (!paperLinkRetry ||
+            request.params?.tool === paperLinkToolSpec.name) &&
+          active.documentTools.some((tool) => tool.handle(request))
+        )
+          return
         this.#log(
           id,
           `Lemex requested ${request.method}; interactive escalation was declined.\n`,
@@ -1134,8 +1199,11 @@ export class AgentManager {
       })
       rpc.on('notification', ({ method, params }) => {
         if (
+          active.paperLinkPass?.signal.aborted ||
           ['cancelled', 'stopping'].includes(this.events.getMetadata(id).status)
         )
+          return
+        if (active.previousTurnId && params?.turn?.id === active.previousTurnId)
           return
         if (output.handle(method, params)) {
           if (active.providerWaiting) {
@@ -1219,7 +1287,9 @@ export class AgentManager {
         }
       })
       await rpc.call('initialize', {
-        ...(withTex ? { capabilities: { experimentalApi: true } } : {}),
+        ...(dynamicTools.length
+          ? { capabilities: { experimentalApi: true } }
+          : {}),
         clientInfo: {
           name: 'lemex_web',
           title: 'LeanFlow Web',
@@ -1228,7 +1298,7 @@ export class AgentManager {
       })
       rpc.notify('initialized')
       const thread = await rpc.call('thread/start', {
-        ...(withTex ? { dynamicTools: texAgentToolSpecs } : {}),
+        ...(dynamicTools.length ? { dynamicTools } : {}),
         model: job.model,
         cwd: '/workspace',
         approvalPolicy: 'never',
@@ -1238,6 +1308,7 @@ export class AgentManager {
           agentImageInstructions(supportsImages) +
           bookInstructions +
           (withTex ? texAgentInstructions : '') +
+          (withPaperLinks ? paperLinkAgentInstructions : '') +
           (optimizationInstructions ? '\n\n' + optimizationInstructions : '') +
           `\nCurrent mode: ${job.mode}.\nProject toolchain hint (inspect lean-toolchain): ${project.toolchain || 'not configured'}.\n` +
           (!environmentReady
@@ -1319,7 +1390,68 @@ export class AgentManager {
           )
       }
       const result = await finished
-      await active.texTools?.dispose()
+      if (
+        withPaperLinks &&
+        result.status === 'completed' &&
+        !active.controller.signal.aborted
+      ) {
+        const sources = selectedPaperSources(
+          this.events.getMetadata(id),
+          snapshot,
+        )
+        try {
+          paperLinkRetry = await automaticPaperLinkRetry({
+            sources,
+            linked: stagedPaperLinks,
+            readChanges: () => this.workspaces.changes(snapshot),
+            signal: active.controller.signal,
+          })
+        } catch {
+          active.controller.signal.throwIfAborted()
+          this.#log(
+            id,
+            'The automatic paper link pass could not inspect the completed edits.\n',
+          )
+        }
+        if (paperLinkRetry) {
+          const pass = (active.paperLinkPass = new AbortController())
+          active.previousTurnId = active.turnId
+          active.turnId = null
+          active.completed = false
+          this.events.updateMetadata(id, { status: 'verifying' })
+          this.#progress(
+            id,
+            'Linking paper and Lean',
+            'Finding paper passages for the changed declarations.',
+          )
+          try {
+            await this.followups.finish(id)
+            active.controller.signal.throwIfAborted()
+            pass.signal.throwIfAborted()
+            await runPaperLinkTurn(rpc, active, paperLinkRetry, job.effort)
+          } catch (error) {
+            active.controller.signal.throwIfAborted()
+            if (!pass.signal.aborted)
+              this.#log(
+                id,
+                `The automatic paper link pass could not finish: ${this.config.redact(error.message)}\n`,
+              )
+          }
+          if (pass.signal.aborted) {
+            this.#log(id, 'Skipped the automatic paper link pass.\n')
+          } else if (
+            !stagedPaperLinks.some(({ source }) =>
+              sources.includes(source.path),
+            )
+          )
+            this.#log(
+              id,
+              'No reliable paper link was recorded for the changed Lean declarations.\n',
+            )
+          if (!pass.signal.aborted) active.paperLinkPass = null
+        }
+      }
+      await Promise.all(active.documentTools.map((tool) => tool.dispose()))
       if (active.controller.signal.aborted) return
       this.#progress(
         id,
@@ -1331,6 +1463,7 @@ export class AgentManager {
       active.rpc = null
       await active.childClosed
       await active.workerStopped
+      active.paperLinkPass = null
       await this.#closeGit(id, active)
       await active.mirror?.stop({ flush: result.status === 'completed' })
       if (active.controller.signal.aborted) return
@@ -1521,7 +1654,7 @@ export class AgentManager {
       await this.#closeGit(id, active)
       active.accepting = false
       active.rpc?.close()
-      await active.texTools?.dispose()
+      await Promise.all(active.documentTools.map((tool) => tool.dispose()))
       try {
         await active.childClosed
         let cleanupError
@@ -1590,7 +1723,19 @@ export class AgentManager {
       verificationCleanupPending: false,
     })
   }
-  async stop(owner, id, reason = 'Stopped by the user.') {
+  #interruptWorker(active) {
+    if (active?.rpc && active.threadId && active.turnId)
+      active.rpc
+        .call(
+          'turn/interrupt',
+          { threadId: active.threadId, turnId: active.turnId },
+          2000,
+        )
+        .catch(() => {})
+    active?.rpc?.close()
+    active?.output?.flush()
+  }
+  async stop(owner, id, reason) {
     const job = this.events.getMetadata(id, owner)
     assertAgentJob(job)
     const active = this.active.get(id)
@@ -1602,6 +1747,24 @@ export class AgentManager {
       return this.events.get(id, owner)
     }
     if (active?.stopPromise) return active.stopPromise
+    if (
+      reason === undefined &&
+      active?.paperLinkPass &&
+      !active.controller.signal.aborted
+    ) {
+      const pass = active.paperLinkPass
+      if (!pass.signal.aborted) {
+        pass.abort(new Error('The optional paper link pass was stopped.'))
+        this.#progress(
+          id,
+          'Skipping paper links',
+          'Continuing to independent Lean verification.',
+        )
+        this.#interruptWorker(active)
+      }
+      return this.events.get(id, owner)
+    }
+    reason ??= 'Stopped by the user.'
     this.events.updateMetadata(id, { status: 'stopping', error: reason })
     this.#progress(
       id,
@@ -1615,16 +1778,7 @@ export class AgentManager {
       this.providerReservations.delete(id)
     }
     active?.controller.abort()
-    if (active?.rpc && active.threadId && active.turnId)
-      active.rpc
-        .call(
-          'turn/interrupt',
-          { threadId: active.threadId, turnId: active.turnId },
-          2000,
-        )
-        .catch(() => {})
-    active?.rpc?.close()
-    active?.output?.flush()
+    this.#interruptWorker(active)
     const stopped = (async () => {
       await active?.mirror?.stop()
       await active?.done

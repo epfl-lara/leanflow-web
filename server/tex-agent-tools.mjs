@@ -1,4 +1,5 @@
 import { isTexFile, safeTexPath } from '../shared/tex.mjs'
+import { createAgentToolCallbacks } from './agent-tool-callbacks.mjs'
 
 const objectSchema = (properties, required) => ({
   type: 'object',
@@ -79,11 +80,7 @@ export function createTexAgentTools({
   onBuild = () => {},
   redact = String,
 }) {
-  const controller = new AbortController()
-  const signal = AbortSignal.any([active.controller.signal, controller.signal])
-  const pending = new Set()
   const builds = new Set()
-  const calls = new Set()
 
   function ownedBuild(id) {
     if (typeof id !== 'string' || !builds.has(id))
@@ -103,23 +100,7 @@ export function createTexAgentTools({
     return build
   }
 
-  async function invoke(params) {
-    signal.throwIfAborted()
-    if (
-      !params ||
-      active.completed === true ||
-      params.threadId !== active.threadId ||
-      !active.threadId ||
-      (active.turnId && params.turnId !== active.turnId) ||
-      (params.namespace != null && params.namespace !== '') ||
-      typeof params.callId !== 'string' ||
-      !params.callId ||
-      calls.has(params.callId)
-    )
-      throw new Error(
-        'This TeX tool call is outside the active assistant turn.',
-      )
-    calls.add(params.callId)
+  async function invoke(params, signal) {
     if (params.tool === 'tex_build') {
       const input = argumentsObject(params.arguments, ['rootFile', 'engine'])
       const rootFile = safeTexPath(input.rootFile)
@@ -145,11 +126,11 @@ export function createTexAgentTools({
       const result = await manager.wait(job.owner, build.id)
       signal.throwIfAborted()
       onBuild(result)
-      return result
+      return boundedLog(result)
     }
     if (params.tool === 'tex_build_status') {
       const input = argumentsObject(params.arguments, ['buildId'])
-      return ownedBuild(input.buildId)
+      return boundedLog(ownedBuild(input.buildId))
     }
     if (params.tool === 'tex_read_pdf') {
       const input = argumentsObject(params.arguments, [
@@ -189,44 +170,18 @@ export function createTexAgentTools({
     throw new Error('Unknown TeX tool.')
   }
 
-  return {
-    handle(request) {
-      if (request.method !== 'item/tool/call') return false
-      const task = (async () => {
-        let response
-        try {
-          const result = await invoke(request.params)
-          // Logs are useful context but must not swamp the model's next turn.
-          if (typeof result.log === 'string')
-            result.log = result.log.slice(-24000)
-          response = {
-            success: true,
-            contentItems: [{ type: 'inputText', text: JSON.stringify(result) }],
-          }
-        } catch (error) {
-          response = {
-            success: false,
-            contentItems: [
-              {
-                type: 'inputText',
-                text: redact(error.message || 'The TeX tool could not finish.'),
-              },
-            ],
-          }
-        }
-        if (!rpc.closed) {
-          try {
-            rpc.respond(request.id, response)
-          } catch {}
-        }
-      })()
-      pending.add(task)
-      void task.finally(() => pending.delete(task))
-      return true
-    },
-    async dispose() {
-      controller.abort(new Error('The assistant session ended.'))
-      await Promise.allSettled([...pending])
-    },
-  }
+  return createAgentToolCallbacks({
+    active,
+    rpc,
+    invoke,
+    label: 'TeX',
+    redact,
+    accepts: (name) => texAgentToolSpecs.some((tool) => tool.name === name),
+  })
+}
+
+function boundedLog(build) {
+  return typeof build.log === 'string'
+    ? { ...build, log: build.log.slice(-24000) }
+    : build
 }

@@ -22,12 +22,17 @@ import {
   type GitInfo,
   type Project,
   type Preset,
+  type PaperLink,
   type Session,
   type ModelAccess,
   type TrashItem,
   type TrashDeleteResult,
 } from './api'
-import { AssistantPanel, type SetupHelpRequest } from './AssistantPanel'
+import {
+  AssistantPanel,
+  type ChatDraftRequest,
+  type SetupHelpRequest,
+} from './AssistantPanel'
 import { TerminalPanel } from './TerminalPanel'
 import { TerminalRecoveries } from './TerminalRecoveries'
 import { Dialog } from './Dialog'
@@ -42,6 +47,8 @@ import { FileTabs } from './FileTabs'
 import { WorkspaceBuffers, type WorkspaceScope } from './workspaceBuffers'
 import { useAutosave } from './useAutosave'
 import { PdfFileViewer } from './PdfFileViewer'
+import { PaperLinksPanel } from './PaperLinksPanel'
+import { usePaperLinks } from './usePaperLinks'
 import { ImageFileViewer } from './ImageFileViewer'
 import { HtmlFileViewer } from './HtmlFileViewer'
 import { MarkdownFilePreview } from './MarkdownFilePreview'
@@ -49,6 +56,8 @@ import { TexPanel } from './TexPanel'
 import { texLanguage } from './texBuilds'
 import { isMarkdownPath } from './fileReading'
 import { PROJECT_CONFIGURATION_FILES } from '../../../shared/project-configuration.mjs'
+import { PAPER_LINKS_FILE } from '../../../shared/paper-links.mjs'
+import { isTexFile } from '../../../shared/tex.mjs'
 import {
   isPdfFile,
   isImageFile,
@@ -77,7 +86,7 @@ import { playgroundDownloadName } from './playgroundNames'
 import { downloadProject, downloadWorkspaceFile } from './downloads'
 import { saveAs } from 'file-saver'
 import { SearchPanel } from './SearchPanel'
-import { BooksPanel, type BookChatRequest } from './BooksPanel'
+import { BooksPanel } from './BooksPanel'
 import { LibrarySourceDialog, type SourceRequest } from './LibrarySourceDialog'
 import { SettingsModal } from './SettingsModal'
 import { Brand } from './Brand'
@@ -359,6 +368,13 @@ export function Studio() {
     line: number
     column: number
   } | null>(null)
+  const setupEditor = useRef<HTMLTextAreaElement>(null)
+  const [paperLinksOpen, setPaperLinksOpen] = useState(false)
+  const [paperPage, setPaperPage] = useState<{
+    id: number
+    path: string
+    page: number
+  } | null>(null)
   const proofRequestId = useRef(0)
   const [git, setGit] = useState<GitInfo | null>(null)
   const [error, setError] = useState('')
@@ -413,8 +429,9 @@ export function Studio() {
   const [editorHidden, setEditorHidden] = useState(false)
   const [booksOpen, setBooksOpen] = useState(false)
   const [booksMounted, setBooksMounted] = useState(false)
-  const [bookChatRequest, setBookChatRequest] =
-    useState<BookChatRequest | null>(null)
+  const [chatDraftRequest, setChatDraftRequest] =
+    useState<ChatDraftRequest | null>(null)
+  const chatDraftRequestId = useRef(0)
   const [setupHelpRequest, setSetupHelpRequest] =
     useState<SetupHelpRequest | null>(null)
   const setupHelpRequestId = useRef(0)
@@ -422,7 +439,7 @@ export function Studio() {
     id: number
     url: string
   } | null>(null)
-  const bookRequestId = useRef(0)
+  const bookPageRequestId = useRef(0)
   const closeBooks = useCallback(() => setBooksOpen(false), [])
   const [showInfoview, setShowInfoview] = useState(true)
   const [terminalActive, setTerminalActive] = useState(false)
@@ -650,11 +667,75 @@ export function Studio() {
   const texFiles = useMemo(
     () =>
       files
-        .filter((entry) => !entry.readOnly && /\.tex$/i.test(entry.path))
+        .filter((entry) => !entry.readOnly && isTexFile(entry.path))
         .map((entry) => entry.path),
     [files],
   )
   const texVisible = !!texLanguage(file?.path) && texFiles.length > 0
+  const hasPaperFiles = useMemo(
+    () => files.some(({ path }) => isPdfFile(path) || isTexFile(path)),
+    [files],
+  )
+  const paperLinkPath =
+    !singleFileMode &&
+    file &&
+    !file.unavailable &&
+    !file.path.startsWith('.lake/') &&
+    (pdfPreview ||
+      isTexFile(file.path) ||
+      (hasPaperFiles && file.path.endsWith('.lean')))
+      ? file.path
+      : null
+  const hasPaperLinks = files.some(({ path }) => path === PAPER_LINKS_FILE)
+  const {
+    result: paperLinkResult,
+    previousLinks: previousPaperLinks,
+    refresh: refreshPaperLinks,
+    revision: paperLinkRevision,
+  } = usePaperLinks({
+    accountId: session?.user.id,
+    projectId,
+    path: paperLinksOpen || hasPaperLinks ? paperLinkPath : null,
+    files,
+    buffers,
+  })
+  useEffect(() => {
+    const editor = setupEditor.current
+    if (
+      !editor ||
+      !revealPosition ||
+      revealPosition.path !== file?.path ||
+      !isTexFile(file.path)
+    )
+      return
+    const lines = editor.value.split('\n')
+    const index = Math.min(revealPosition.line, lines.length) - 1
+    const offset =
+      lines
+        .slice(0, index)
+        .reduce((length, line) => length + line.length + 1, 0) +
+      Math.min(revealPosition.column - 1, lines[index].length)
+    editor.focus()
+    editor.setSelectionRange(offset, offset)
+    const style = getComputedStyle(editor)
+    const rowHeight =
+      parseFloat(style.lineHeight) || 1.2 * parseFloat(style.fontSize)
+    editor.scrollTop = Math.max(0, index * rowHeight - editor.clientHeight / 3)
+  }, [revealPosition, file?.path])
+  const validatedPaperLinks = useMemo(
+    () =>
+      paperLinkResult && 'links' in paperLinkResult
+        ? paperLinkResult.links.filter(({ status }) => status === 'current')
+        : [],
+    [paperLinkResult],
+  )
+  const currentPaperLinks = useMemo(() => {
+    const blocked = ({ source, target }: PaperLink) =>
+      dirtyPaths.has(source.path) || dirtyPaths.has(target.path)
+    return validatedPaperLinks.some(blocked)
+      ? validatedPaperLinks.filter((link) => !blocked(link))
+      : validatedPaperLinks
+  }, [validatedPaperLinks, dirtyPaths])
   const readingFile =
     binaryPreview ||
     imagePreview ||
@@ -699,11 +780,14 @@ export function Studio() {
       setUploadProjectId(null)
       setLibrarySource(null)
       setProofFocus(null)
+      setChatDraftRequest(null)
       setSetupHelpRequest(null)
       setEditorProof(null)
       setFocusEditorRequest(null)
       setRevealProof(null)
       setRevealPosition(null)
+      setPaperLinksOpen(false)
+      setPaperPage(null)
       setGit(null)
       setGitOpen(null)
       setTerminalProjectId(null)
@@ -1662,6 +1746,62 @@ export function Studio() {
     },
     [navigate, openFile, bufferStore],
   )
+
+  const openPaperLocation = useCallback(
+    (location: PaperLink['source'] | PaperLink['target']) => {
+      if (!projectId || !bufferStore.isCurrent(scope)) return
+      const { path } = location
+      const current = bufferStore.getSnapshot().file
+      const action = async () => {
+        if (current && current.path !== path) bufferStore.keepOpen(current.path)
+        await openFile(
+          projectId,
+          path,
+          'line' in location ? location.line : undefined,
+          undefined,
+          { preview: false },
+        )
+        if (
+          'page' in location &&
+          bufferStore.isCurrent(scope) &&
+          bufferStore.getSnapshot().file?.path === path
+        )
+          setPaperPage({
+            id: ++proofRequestId.current,
+            path,
+            page: location.page,
+          })
+      }
+      if (bufferStore.getSnapshot().buffers.has(path))
+        void action().catch((error) => setError(errorText(error)))
+      else void navigate(action, '', true)
+    },
+    [projectId, bufferStore, scope, openFile, navigate],
+  )
+  const showPaperLinks = useCallback(() => setPaperLinksOpen(true), [])
+  const closePaperLinks = useCallback(() => setPaperLinksOpen(false), [])
+
+  function findPaperLinks() {
+    if (
+      !projectId ||
+      !paperLinkPath ||
+      !projectCanEdit ||
+      !bufferStore.isCurrent(scope)
+    )
+      return
+    const file = JSON.stringify(paperLinkPath)
+    const comparison = paperLinkPath.endsWith('.lean')
+      ? `Compare the declarations in ${file} with the project's saved PDF or LaTeX sources.`
+      : `Compare the statements in ${file} with the project's existing Lean declarations.`
+    setChatDraftRequest({
+      id: ++chatDraftRequestId.current,
+      projectId,
+      contextFile: paperLinkPath,
+      text: `Find paper links for this existing formalization. ${comparison} Use paper_link to record clear matches. For a PDF, include a short exact excerpt from the matching page when its text is readable. Keep the paper and Lean sources unchanged and report any ambiguous matches.`,
+    })
+    if (mobileLayout) closePaperLinks()
+    setToolsOpen(true)
+  }
 
   const keepFileOpen = useCallback(
     (path: string) => {
@@ -2853,7 +2993,7 @@ export function Studio() {
           return
         event.preventDefault()
         setBookPageRequest({
-          id: ++bookRequestId.current,
+          id: ++bookPageRequestId.current,
           url: target.pathname + target.hash,
         })
         setBooksMounted(true)
@@ -3805,6 +3945,20 @@ export function Studio() {
                     {markdownPreview ? 'Edit Markdown' : 'Preview Markdown'}
                   </button>
                 )}
+                {paperLinkPath && (
+                  <button
+                    type="button"
+                    className="button small secondary"
+                    aria-expanded={paperLinksOpen}
+                    aria-haspopup={mobileLayout ? 'dialog' : undefined}
+                    aria-controls={
+                      paperLinksOpen ? 'paper-links-panel' : undefined
+                    }
+                    onClick={() => setPaperLinksOpen((value) => !value)}
+                  >
+                    Paper links
+                  </button>
+                )}
                 {(isHtmlFile(file?.path) || isSvgFile(file?.path)) && (
                   <button
                     className="button small secondary"
@@ -3916,177 +4070,247 @@ export function Studio() {
                 />
               </div>
             </div>
-            <div
-              ref={setTexWorkspaceElement}
-              id="file-editor-panel"
-              role="tabpanel"
-              aria-label={file?.path || 'File editor'}
-              className={`file-reading-workspace ${readingFile ? 'reading' : ''} ${texVisible ? 'tex-reading' : ''} ${texVisible && texStacked ? 'tex-stacked' : ''}`}
-              style={
-                { '--tex-source-size': `${texSourceSize}%` } as CSSProperties
-              }
-            >
-              {project.status === 'ready' ? (
-                <LeanWorkspace
-                  queuedFileCheck={
-                    checkAvailable
-                      ? {
-                          submit: () => void check('file'),
-                          inProgress: startingCheck || !!activeCheck,
-                        }
+            <div className="file-reading-layout">
+              <div
+                ref={setTexWorkspaceElement}
+                id="file-editor-panel"
+                role="tabpanel"
+                aria-label={file?.path || 'File editor'}
+                className={`file-reading-workspace ${readingFile ? 'reading' : ''} ${texVisible ? 'tex-reading' : ''} ${texVisible && texStacked ? 'tex-stacked' : ''}`}
+                style={
+                  { '--tex-source-size': `${texSourceSize}%` } as CSSProperties
+                }
+              >
+                {project.status === 'ready' ? (
+                  <LeanWorkspace
+                    queuedFileCheck={
+                      checkAvailable
+                        ? {
+                            submit: () => void check('file'),
+                            inProgress: startingCheck || !!activeCheck,
+                          }
+                        : undefined
+                    }
+                    key={`editor:${project.id}`}
+                    projectId={project.id}
+                    files={files}
+                    file={binaryPreview ? null : file}
+                    joining={!!file && collaboration.joining(file.path)}
+                    buffers={buffers}
+                    retainedPaths={retainedPaths}
+                    bufferDiscardVersion={discardVersion}
+                    bufferSaveVersion={saveVersion}
+                    editorImportsVersion={project.editorImportsVersion}
+                    savedPaths={savedPaths}
+                    bufferRemoveVersion={removeVersion}
+                    removedPaths={removedPaths}
+                    onRenameSources={(sources) => {
+                      requireScope(scope)
+                      bufferStore.register(sources)
+                    }}
+                    onCollaborativeUndo={collaboration.undo}
+                    onCollaborativeRedo={collaboration.redo}
+                    collaborators={collaboration.peers}
+                    onCollaborativeSelection={collaboration.setSelection}
+                    theme={theme}
+                    showInfoview={
+                      showInfoview && !!file?.path.endsWith('.lean')
+                    }
+                    goalsSize={goalsSize}
+                    onGoalsSizeChange={setGoalsSize}
+                    revealTarget={revealProof || undefined}
+                    revealPosition={revealPosition}
+                    paperLinks={currentPaperLinks}
+                    onOpenPaperLink={openPaperLocation}
+                    onShowPaperLinks={showPaperLinks}
+                    onProofStateChange={acceptEditorProof}
+                    focusEditorRequest={focusEditorRequest}
+                    onFocusEditorHandled={(id) =>
+                      setFocusEditorRequest((current) =>
+                        current?.id === id ? null : current,
+                      )
+                    }
+                    onFocusProof={(target, mode) => {
+                      if (!bufferStore.isCurrent(scope)) return
+                      setProofFocus({
+                        id: ++proofRequestId.current,
+                        projectId: project.id,
+                        target,
+                        mode,
+                      })
+                      setToolsOpen(true)
+                      setSidebarOpen(false)
+                    }}
+                    onState={(state) => {
+                      if (bufferStore.isCurrent(scope)) setLeanState(state)
+                    }}
+                    onChange={(path, content) => {
+                      if (bufferStore.isCurrent(scope))
+                        bufferStore.change(path, content)
+                    }}
+                    onOpenFile={(path, line, column) => {
+                      if (!bufferStore.isCurrent(scope)) return
+                      const source = bufferStore.getSnapshot().file?.path
+                      if (source && source !== path)
+                        bufferStore.keepOpen(source)
+                      const action = () =>
+                        openFile(project.id, path, line, column)
+                      if (bufferStore.getSnapshot().buffers.has(path))
+                        void action().catch((error) =>
+                          setError(errorText(error)),
+                        )
+                      else navigate(action, '', true)
+                    }}
+                    onOpenLibrary={(source) => {
+                      if (bufferStore.isCurrent(scope)) setLibrarySource(source)
+                    }}
+                  />
+                ) : (
+                  <textarea
+                    ref={setupEditor}
+                    className="setup-file-editor"
+                    aria-label="Project file content"
+                    spellCheck={false}
+                    readOnly={file?.readOnly || !file}
+                    value={file?.content || ''}
+                    onChange={(event) =>
+                      setFile((current) =>
+                        current
+                          ? { ...current, content: event.target.value }
+                          : current,
+                      )
+                    }
+                  />
+                )}
+                {texVisible && (
+                  <ResizeHandle
+                    label="Resize LaTeX source and PDF"
+                    orientation={texStacked ? 'horizontal' : 'vertical'}
+                    value={texSourceSize}
+                    min={20}
+                    max={80}
+                    onChange={setTexSourceSize}
+                    onReset={() => setTexSourceSize(50)}
+                    pixelsPerUnit={() =>
+                      (texStacked
+                        ? texWorkspaceSize.height
+                        : texWorkspaceSize.width) / 100
+                    }
+                    unit="percent"
+                    className="tex-resize-handle"
+                  />
+                )}
+                {texFiles.length > 0 && (
+                  <TexPanel
+                    key={`tex:${project.id}`}
+                    projectId={project.id}
+                    files={texFiles}
+                    currentPath={file?.path}
+                    visible={texVisible}
+                    buffers={buffers}
+                    saving={saving}
+                    saveVersion={saveVersion}
+                    savedPaths={savedPaths}
+                    dirtyPaths={dirtyPaths}
+                    paperLinkRevision={
+                      hasPaperLinks ? paperLinkRevision : undefined
+                    }
+                    save={saveWorkspace}
+                    onOpenPaperLink={openPaperLocation}
+                    onOpenFile={(path, line, column) => {
+                      if (!bufferStore.isCurrent(scope)) return
+                      const action = async () => {
+                        const needsSetupReveal =
+                          project.status !== 'ready' &&
+                          bufferStore.getSnapshot().file?.path !== path
+                        await openFile(project.id, path, line, column)
+                        if (
+                          needsSetupReveal &&
+                          line &&
+                          bufferStore.isCurrent(scope) &&
+                          bufferStore.getSnapshot().file?.path === path
+                        )
+                          setRevealPosition({
+                            id: ++proofRequestId.current,
+                            path,
+                            line,
+                            column: column || 1,
+                          })
+                      }
+                      if (bufferStore.getSnapshot().buffers.has(path))
+                        void action().catch((error) =>
+                          setError(errorText(error)),
+                        )
+                      else navigate(action, '', true)
+                    }}
+                  />
+                )}
+                {pdfPreview && file ? (
+                  <PdfFileViewer
+                    key={`pdf:${project.id}:${file.path}:${file.generation}`}
+                    projectId={project.id}
+                    path={file.path}
+                    revision={
+                      files.find(({ path }) => path === file.path)?.revision
+                    }
+                    revealPage={
+                      paperPage?.path === file.path ? paperPage : undefined
+                    }
+                    paperLinks={currentPaperLinks}
+                    keepLinkedReader={previousPaperLinks?.some(
+                      ({ source, status }) =>
+                        status === 'current' &&
+                        source.path === file.path &&
+                        'page' in source &&
+                        !!source.quote?.trim(),
+                    )}
+                    onOpenPaperLink={openPaperLocation}
+                  />
+                ) : imagePreview && file ? (
+                  <ImageFileViewer
+                    key={`image:${project.id}:${file.path}:${file.generation}`}
+                    projectId={project.id}
+                    path={file.path}
+                    revision={file.hash}
+                  />
+                ) : htmlPreview && file ? (
+                  <HtmlFileViewer
+                    key={`html:${project.id}:${file.path}:${file.generation}`}
+                    projectId={project.id}
+                    path={file.path}
+                    revision={file.hash}
+                  />
+                ) : readingFile && file ? (
+                  <MarkdownFilePreview
+                    key={`markdown:${project.id}:${file.path}`}
+                    projectId={project.id}
+                    path={file.path}
+                    content={file.content}
+                    files={files}
+                    onOpenFile={chooseFile}
+                  />
+                ) : null}
+              </div>
+              {paperLinksOpen && paperLinkPath && (
+                <PaperLinksPanel
+                  result={paperLinkResult}
+                  previousLinks={previousPaperLinks}
+                  onRefresh={refreshPaperLinks}
+                  dirtyPaths={dirtyPaths}
+                  onClose={mobileLayout ? closePaperLinks : undefined}
+                  onOpen={(location) => {
+                    if (mobileLayout) closePaperLinks()
+                    openPaperLocation(location)
+                  }}
+                  onFindLinks={
+                    projectCanEdit &&
+                    assistantProjectAvailable &&
+                    project.status !== 'preparing'
+                      ? findPaperLinks
                       : undefined
                   }
-                  key={`editor:${project.id}`}
-                  projectId={project.id}
-                  files={files}
-                  file={binaryPreview ? null : file}
-                  joining={!!file && collaboration.joining(file.path)}
-                  buffers={buffers}
-                  retainedPaths={retainedPaths}
-                  bufferDiscardVersion={discardVersion}
-                  bufferSaveVersion={saveVersion}
-                  editorImportsVersion={project.editorImportsVersion}
-                  savedPaths={savedPaths}
-                  bufferRemoveVersion={removeVersion}
-                  removedPaths={removedPaths}
-                  onRenameSources={(sources) => {
-                    requireScope(scope)
-                    bufferStore.register(sources)
-                  }}
-                  onCollaborativeUndo={collaboration.undo}
-                  onCollaborativeRedo={collaboration.redo}
-                  collaborators={collaboration.peers}
-                  onCollaborativeSelection={collaboration.setSelection}
-                  theme={theme}
-                  showInfoview={showInfoview && !!file?.path.endsWith('.lean')}
-                  goalsSize={goalsSize}
-                  onGoalsSizeChange={setGoalsSize}
-                  revealTarget={revealProof || undefined}
-                  revealPosition={revealPosition}
-                  onProofStateChange={acceptEditorProof}
-                  focusEditorRequest={focusEditorRequest}
-                  onFocusEditorHandled={(id) =>
-                    setFocusEditorRequest((current) =>
-                      current?.id === id ? null : current,
-                    )
-                  }
-                  onFocusProof={(target, mode) => {
-                    if (!bufferStore.isCurrent(scope)) return
-                    setProofFocus({
-                      id: ++proofRequestId.current,
-                      projectId: project.id,
-                      target,
-                      mode,
-                    })
-                    setToolsOpen(true)
-                    setSidebarOpen(false)
-                  }}
-                  onState={(state) => {
-                    if (bufferStore.isCurrent(scope)) setLeanState(state)
-                  }}
-                  onChange={(path, content) => {
-                    if (bufferStore.isCurrent(scope))
-                      bufferStore.change(path, content)
-                  }}
-                  onOpenFile={(path, line, column) => {
-                    if (!bufferStore.isCurrent(scope)) return
-                    const source = bufferStore.getSnapshot().file?.path
-                    if (source && source !== path) bufferStore.keepOpen(source)
-                    const action = () =>
-                      openFile(project.id, path, line, column)
-                    if (bufferStore.getSnapshot().buffers.has(path))
-                      void action().catch((error) => setError(errorText(error)))
-                    else navigate(action, '', true)
-                  }}
-                  onOpenLibrary={(source) => {
-                    if (bufferStore.isCurrent(scope)) setLibrarySource(source)
-                  }}
-                />
-              ) : (
-                <textarea
-                  className="setup-file-editor"
-                  aria-label="Project file content"
-                  spellCheck={false}
-                  readOnly={file?.readOnly || !file}
-                  value={file?.content || ''}
-                  onChange={(event) =>
-                    setFile((current) =>
-                      current
-                        ? { ...current, content: event.target.value }
-                        : current,
-                    )
-                  }
                 />
               )}
-              {texVisible && (
-                <ResizeHandle
-                  label="Resize LaTeX source and PDF"
-                  orientation={texStacked ? 'horizontal' : 'vertical'}
-                  value={texSourceSize}
-                  min={20}
-                  max={80}
-                  onChange={setTexSourceSize}
-                  onReset={() => setTexSourceSize(50)}
-                  pixelsPerUnit={() =>
-                    (texStacked
-                      ? texWorkspaceSize.height
-                      : texWorkspaceSize.width) / 100
-                  }
-                  unit="percent"
-                  className="tex-resize-handle"
-                />
-              )}
-              {texFiles.length > 0 && (
-                <TexPanel
-                  key={`tex:${project.id}`}
-                  projectId={project.id}
-                  files={texFiles}
-                  currentPath={file?.path}
-                  visible={texVisible}
-                  buffers={buffers}
-                  saving={saving}
-                  saveVersion={saveVersion}
-                  savedPaths={savedPaths}
-                  save={saveWorkspace}
-                  onOpenFile={(path, line) => {
-                    if (!bufferStore.isCurrent(scope)) return
-                    const action = () => openFile(project.id, path, line)
-                    if (bufferStore.getSnapshot().buffers.has(path))
-                      void action().catch((error) => setError(errorText(error)))
-                    else navigate(action, '', true)
-                  }}
-                />
-              )}
-              {pdfPreview && file ? (
-                <PdfFileViewer
-                  key={`pdf:${project.id}:${file.path}:${file.generation}`}
-                  projectId={project.id}
-                  path={file.path}
-                />
-              ) : imagePreview && file ? (
-                <ImageFileViewer
-                  key={`image:${project.id}:${file.path}:${file.generation}`}
-                  projectId={project.id}
-                  path={file.path}
-                  revision={file.hash}
-                />
-              ) : htmlPreview && file ? (
-                <HtmlFileViewer
-                  key={`html:${project.id}:${file.path}:${file.generation}`}
-                  projectId={project.id}
-                  path={file.path}
-                  revision={file.hash}
-                />
-              ) : readingFile && file ? (
-                <MarkdownFilePreview
-                  key={`markdown:${project.id}:${file.path}`}
-                  projectId={project.id}
-                  path={file.path}
-                  content={file.content}
-                  files={files}
-                  onOpenFile={chooseFile}
-                />
-              ) : null}
             </div>
             {job && outcome && (
               <section className={`build-output ${jobOpen ? 'expanded' : ''}`}>
@@ -4191,8 +4415,8 @@ export function Studio() {
             onClose={closeBooks}
             onAsk={(text) => {
               if (!project || project.status !== 'ready') return
-              setBookChatRequest({
-                id: ++bookRequestId.current,
+              setChatDraftRequest({
+                id: ++chatDraftRequestId.current,
                 projectId: project.id,
                 text,
               })
@@ -4284,9 +4508,9 @@ export function Studio() {
                 currentFile={file?.unavailable ? undefined : file?.path}
                 files={assistantFiles}
                 focusRequest={proofFocus || undefined}
-                bookRequest={bookChatRequest}
-                onBookHandled={(id) =>
-                  setBookChatRequest((current) =>
+                draftRequest={chatDraftRequest}
+                onDraftRequestHandled={(id) =>
+                  setChatDraftRequest((current) =>
                     current?.id === id ? null : current,
                   )
                 }

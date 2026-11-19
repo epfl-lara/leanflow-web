@@ -124,7 +124,13 @@ test('native TeX callbacks reject cross-thread, stale-turn, unknown and foreign 
     (await f.call('tex_read_pdf', { buildId: 'foreign' })).success,
     false,
   )
-  assert.equal((await f.call('arbitrary_command', {})).success, false)
+  assert.equal(
+    f.tools.handle({
+      method: 'item/tool/call',
+      params: { tool: 'arbitrary_command' },
+    }),
+    false,
+  )
   assert.equal(f.starts.length, 0)
   await f.call('tex_build', { rootFile: 'main.tex' })
   f.manager.get = () => ({ id: 'build', projectId: 'other-project' })
@@ -229,9 +235,34 @@ test('completed turns reject late native TeX callbacks and extracted text report
   await f.tools.dispose()
 })
 
-test('native assistant advertises and executes requested TeX work in every mode', async (t) => {
-  for (const mode of ['search', 'proofs', 'formalize', 'optimize'])
-    await t.test(mode, async (t) => {
+test('native assistant advertises and executes document tools in every mode', async (t) => {
+  const scenarios = ['search', 'proofs', 'formalize', 'optimize'].map(
+    (mode) => ({ label: mode, mode }),
+  )
+  scenarios.push(
+    {
+      label: 'formalize retries a missed PDF link with a read-only turn',
+      mode: 'formalize',
+      retry: 'link',
+    },
+    {
+      label: 'stopping automatic linking still verifies the review-first proof',
+      mode: 'formalize',
+      retry: 'skip',
+    },
+    {
+      label: 'a run deadline during automatic linking still cancels the run',
+      mode: 'formalize',
+      retry: 'deadline',
+    },
+    {
+      label: 'a failed link turn preserves the completed formalization',
+      mode: 'formalize',
+      retry: 'fail',
+    },
+  )
+  for (const { label, mode, retry } of scenarios)
+    await t.test(label, { timeout: 10000 }, async (t) => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tex-native-rpc-'))
       const candidate = path.join(root, 'candidate'),
         home = path.join(root, 'home')
@@ -239,7 +270,31 @@ test('native assistant advertises and executes requested TeX work in every mode'
       await fs.mkdir(path.join(home, '.lemex'), { recursive: true })
       const events = new EventStore(root),
         requests = [],
-        starts = []
+        starts = [],
+        links = [],
+        verificationCommands = []
+      const linkSaveStarted = Promise.withResolvers()
+      let linkSaveAttempts = 0
+      const paperLink = {
+        source: retry
+          ? {
+              path: 'paper.pdf',
+              page: 3,
+              quote: 'Theorem 1. The identity holds.',
+            }
+          : { path: 'main.tex', line: 6, label: 'thm:main' },
+        target: { path: 'Main.lean', line: 3, declaration: 'mainTheorem' },
+      }
+      const leanChange = {
+        path: 'Main.lean',
+        before: '\n\ntheorem mainTheorem : True := by sorry\n',
+        after: '\n\ntheorem mainTheorem : True := by trivial\n',
+      }
+      if (retry)
+        await fs.writeFile(
+          path.join(candidate, leanChange.path),
+          leanChange.after,
+        )
       const build = {
         id: 'native-build',
         projectId: 'p',
@@ -260,41 +315,110 @@ test('native assistant advertises and executes requested TeX work in every mode'
           projectId: 'p',
           owner: 'alice',
           sourceRevision: 'saved',
+          files: [{ path: paperLink.source.path }],
         }),
-        changes: async () => [],
+        changes: async () => (retry ? [leanChange] : []),
         verificationCopy: async () => ({ root: candidate }),
+        stageSnapshotPaperLink: async (
+          snapshot,
+          projectId,
+          owner,
+          input,
+          { signal },
+        ) => {
+          linkSaveAttempts++
+          if (retry === 'skip') {
+            linkSaveStarted.resolve(signal)
+            await new Promise((resolve) =>
+              signal.addEventListener('abort', resolve, { once: true }),
+            )
+            signal.throwIfAborted()
+          }
+          links.push({ root: snapshot.root, projectId, owner, input })
+          return { id: 'fixture-link', ...input }
+        },
       }
       const runtime = {
         home: async () => home,
+        run: async (_root, args, options) => {
+          verificationCommands.push(args.slice(0, 2))
+          let stdout = ''
+          if (args[1] === 'env')
+            stdout = JSON.stringify({
+              LEAN_SYSROOT: '/opt/lean-toolchains/fixture',
+              LEAN_PATH: '/workspace/.lake/build/lib/lean',
+              LEAN_SRC_PATH: '/workspace',
+            })
+          if (args[0] === 'python3') {
+            assert.deepEqual(JSON.parse(options.input), [leanChange.path])
+            stdout = JSON.stringify({
+              kernelChecked: true,
+              compiled: true,
+              complete: true,
+              files: [{ path: leanChange.path, code: 0 }],
+              axioms: [],
+              errors: [],
+              warnings: [],
+            })
+          }
+          return { code: 0, stdout, stderr: '' }
+        },
         spawn: () => {
           const child = new EventEmitter()
           child.stdout = new PassThrough()
           child.stderr = new PassThrough()
           const send = (value) =>
             child.stdout.write(JSON.stringify(value) + '\n')
-          const complete = () =>
+          const complete = (id = 'turn', status = 'completed') =>
             send({
               method: 'turn/completed',
-              params: { turn: { id: 'turn', status: 'completed' } },
+              params: { turn: { id, status } },
+            })
+          const reply = (itemId, delta) =>
+            send({
+              method: 'item/agentMessage/delta',
+              params: { itemId, delta },
+            })
+          const link = (id, turnId, args = paperLink) =>
+            send({
+              id,
+              method: 'item/tool/call',
+              params: {
+                threadId: 'thread',
+                turnId,
+                callId: `link-${id}`,
+                tool: 'paper_link',
+                arguments: args,
+              },
             })
           child.stdin = new Writable({
             write(chunk, _encoding, callback) {
               for (const line of chunk.toString().trim().split('\n')) {
                 const request = JSON.parse(line)
                 requests.push(request)
+                if (request.method === 'turn/interrupt' && retry === 'skip')
+                  link(1008, 'link-turn')
                 queueMicrotask(() => {
                   if (request.method && request.id !== undefined) {
+                    const linkTurn = Boolean(request.params?.sandboxPolicy)
                     send({
                       id: request.id,
                       result:
                         request.method === 'thread/start'
                           ? { thread: { id: 'thread' } }
                           : request.method === 'turn/start'
-                            ? { turn: { id: 'turn' } }
+                            ? { turn: { id: linkTurn ? 'link-turn' : 'turn' } }
                             : {},
                     })
                     if (request.method === 'turn/start')
                       queueMicrotask(() => {
+                        if (linkTurn) {
+                          if (retry === 'link') link(1004, 'turn')
+                          else if (retry === 'skip') link(1007, 'link-turn')
+                          else if (retry === 'fail')
+                            complete('link-turn', 'failed')
+                          return
+                        }
                         send({
                           id: 1001,
                           method: 'item/tool/call',
@@ -319,7 +443,28 @@ test('native assistant advertises and executes requested TeX work in every mode'
                         arguments: { buildId: 'native-build' },
                       },
                     })
-                  } else if (request.id === 1002) complete()
+                  } else if (request.id === 1002) {
+                    if (retry) {
+                      reply('formalization-answer', 'Formalized Theorem 1.')
+                      complete()
+                    } else link(1003, 'turn')
+                  } else if (request.id === 1003) complete()
+                  else if (request.id === 1004)
+                    link(1005, 'link-turn', {
+                      ...paperLink,
+                      target: {
+                        ...paperLink.target,
+                        declaration: 'untouchedTheorem',
+                      },
+                    })
+                  else if (request.id === 1005) link(1006, 'link-turn')
+                  else if (request.id === 1006) {
+                    reply(
+                      'paper-link-answer',
+                      'Linked the statement on page 3.',
+                    )
+                    complete('link-turn')
+                  }
                 })
               }
               callback()
@@ -370,11 +515,45 @@ test('native assistant advertises and executes requested TeX work in every mode'
       })
       const job = await manager.start('alice', 'p', {
         mode,
-        prompt: 'Inspect the current document',
-        currentFile: 'main.tex',
+        prompt: retry ? 'Formalize Theorem 1.' : 'Inspect the current document',
+        currentFile: paperLink.source.path,
         model: DEFAULT_MODEL,
         effort: 'max',
+        ...(retry ? { liveEdits: false } : {}),
       })
+      if (retry === 'skip' || retry === 'deadline') {
+        for (
+          let i = 0;
+          i < 200 && !requests.some(({ params }) => params?.sandboxPolicy);
+          i++
+        )
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        assert.equal(
+          events.getMetadata(job.id).progress.label,
+          'Linking paper and Lean',
+        )
+        if (retry === 'skip') {
+          const linkSignal = await linkSaveStarted.promise
+          const stopped = await manager.stop('alice', job.id)
+          assert.equal(stopped.status, 'verifying')
+          assert.equal(linkSignal.aborted, true)
+        } else {
+          const stopped = await manager.stop(
+            'alice',
+            job.id,
+            'The run reached its time limit.',
+          )
+          assert.equal(stopped.status, 'cancelled')
+          assert.deepEqual(verificationCommands, [])
+        }
+        assert.equal(
+          requests.find(({ method }) => method === 'turn/interrupt').params
+            .turnId,
+          'link-turn',
+        )
+        assert.deepEqual(links, [])
+        if (retry === 'deadline') return
+      }
       for (
         let i = 0;
         i < 200 &&
@@ -406,6 +585,7 @@ test('native assistant advertises and executes requested TeX work in every mode'
           ['function', 'tex_build'],
           ['function', 'tex_build_status'],
           ['function', 'tex_read_pdf'],
+          ['function', 'paper_link'],
         ],
       )
       assert.equal(starts.length, 1)
@@ -420,6 +600,73 @@ test('native assistant advertises and executes requested TeX work in every mode'
           .text,
         /Rendered theorem text/,
       )
-      assert.equal(events.get(job.id).verification.kind, 'chat')
+      const turns = requests.filter(({ method }) => method === 'turn/start')
+      if (retry) {
+        assert.equal(turns.length, 2)
+        assert.match(turn.input[0].text, /formalization-paper-sources/)
+        assert.match(
+          thread.developerInstructions,
+          /even if the user does not ask for links/,
+        )
+        assert.equal(turns[1].params.threadId, turn.threadId)
+        assert.equal(turns[1].params.effort, turn.effort)
+        assert.deepEqual(turns[1].params.sandboxPolicy, {
+          type: 'readOnly',
+          networkAccess: false,
+        })
+        assert.match(turns[1].params.input[0].text, /paper\.pdf.*mainTheorem/)
+      } else {
+        assert.equal(turns.length, 1)
+        assert.equal(events.get(job.id).verification.kind, 'chat')
+      }
+      if (retry === 'skip') {
+        const completed = events.get(job.id)
+        assert.deepEqual(completed.changes, [leanChange])
+        assert.equal(completed.message, 'Formalized Theorem 1.')
+        assert.equal(completed.verification.complete, true)
+        assert.equal(completed.verification.kernelChecked, true)
+        assert.equal(completed.verification.editsAllowed, true)
+        assert.match(completed.log, /Skipped the automatic paper link pass/)
+        assert.deepEqual(verificationCommands, [
+          ['lake', 'env'],
+          ['lake', 'build'],
+          ['python3', '-I'],
+        ])
+        assert.equal(
+          linkSaveAttempts,
+          1,
+          'A late link call must not reach storage',
+        )
+        assert.deepEqual(links, [])
+      } else if (retry === 'fail') {
+        const completed = events.get(job.id)
+        assert.equal(completed.message, 'Formalized Theorem 1.')
+        assert.deepEqual(completed.changes, [leanChange])
+        assert.match(completed.log, /paper link pass did not complete/)
+        assert.deepEqual(links, [])
+      } else {
+        assert.equal(
+          requests.find(({ id }) => id === (retry ? 1006 : 1003)).result
+            .success,
+          true,
+        )
+        assert.deepEqual(links, [
+          { root: candidate, projectId: 'p', owner: 'alice', input: paperLink },
+        ])
+        if (retry === 'link') {
+          assert.equal(
+            requests.find(({ id }) => id === 1004).result.success,
+            false,
+          )
+          assert.equal(
+            requests.find(({ id }) => id === 1005).result.success,
+            false,
+          )
+          assert.equal(
+            events.get(job.id).message,
+            'Formalized Theorem 1.\n\nLinked the statement on page 3.',
+          )
+        }
+      }
     })
 })

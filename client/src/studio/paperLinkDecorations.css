@@ -1,0 +1,14 @@
+.monaco-editor .paper-editor-anchor {
+  text-decoration: underline dotted var(--accent);
+  text-underline-offset: 0.22em;
+}
+
+.monaco-editor .paper-editor-jump {
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.monaco-editor .paper-editor-jump:hover {
+  background: var(--accent-soft);
+}

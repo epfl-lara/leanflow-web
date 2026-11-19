@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { Runtime } from '../runtime.mjs'
+import { texSyncTexPage, validateTexSyncTex } from '../tex-synctex.mjs'
 
 const imageId = `sha256:${'a'.repeat(64)}`
 
@@ -315,6 +316,7 @@ test(
       'document.pdf',
       'document.txt',
       'result.json',
+      'synctex.json',
     ])
     const result = JSON.parse(
       await fs.readFile(path.join(output, 'result.json'), 'utf8'),
@@ -328,6 +330,23 @@ test(
     )
     assert.equal(await fs.readFile(mainPath, 'utf8'), main)
     assert(result.pageCount >= 1)
+    const map = await fs.readFile(path.join(output, 'synctex.json'))
+    const texFiles = ['main;echo trap.tex', 'chapters/intro.tex'].map(
+      (path) => ({ path }),
+    )
+    assert(validateTexSyncTex(map, texFiles, result.pageCount))
+    const boxes = Array.from({ length: result.pageCount }, (_, index) =>
+      texSyncTexPage(map, index + 1),
+    ).flat()
+    assert(
+      boxes.some((box) => box.path === 'main;echo trap.tex' && box.line === 5),
+    )
+    assert(
+      boxes.some(
+        (box) =>
+          box.path === 'chapters/intro.tex' && box.line === 1 && box.width > 20,
+      ),
+    )
     assert.equal(result.textAvailable, true)
     assert.match(
       await fs.readFile(path.join(output, 'document.txt'), 'utf8'),
@@ -362,6 +381,15 @@ test(
     assert.match(
       await fs.readFile(path.join(nestedOutput, 'document.txt'), 'utf8'),
       /Nested source chapter/,
+    )
+    assert(
+      texSyncTexPage(
+        await fs.readFile(path.join(nestedOutput, 'synctex.json')),
+        1,
+      ).some(
+        (box) =>
+          box.path === 'nested/sections/descendant.tex' && box.line === 1,
+      ),
     )
 
     const longPath =

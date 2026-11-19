@@ -1,22 +1,11 @@
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
 import test from 'node:test'
-import ts from 'typescript'
+import {
+  proofDeclarations,
+  proofTargetForSelection,
+  MAX_PROOF_SOURCE_LENGTH,
+} from './proofTarget.ts'
 
-const source = fs.readFileSync(
-  new URL('./proofTarget.ts', import.meta.url),
-  'utf8',
-)
-const { outputText } = ts.transpileModule(source, {
-  compilerOptions: {
-    target: ts.ScriptTarget.ES2023,
-    module: ts.ModuleKind.CommonJS,
-  },
-})
-const module = { exports: {} }
-new Function('exports', 'module', outputText)(module.exports, module)
-const { proofDeclarations, proofTargetForSelection, MAX_PROOF_SOURCE_LENGTH } =
-  module.exports
 const uri = 'file:///workspace/Main.lean'
 const content =
   'namespace Demo\n/-- Doc --/\ntheorem one : True := by\n  trivial\n\nexample : True := by trivial\nend Demo\n'

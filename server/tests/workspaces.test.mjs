@@ -4,6 +4,8 @@ import * as fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { WorkspaceStore, validateRepository } from '../workspaces.mjs'
+import { PAPER_LINKS_FILE, projectPaperLinks } from '../paper-links.mjs'
+import { fixturePdf } from '../../scripts/lib/pdf-fixture.mjs'
 
 const TOOLCHAIN = 'leanprover/lean4:v4.34.1'
 
@@ -696,6 +698,246 @@ test('applies new, edited and deleted files while preserving backups', async (t)
     ),
   )
   assert.ok(contents.includes('keep this original\n'))
+})
+
+test('paper links remain private until their candidate is applied', async (t) => {
+  const { store, project } = await fixture(t)
+  const paper = 'paper.tex'
+  await store.writeFile(
+    project.id,
+    'alice',
+    paper,
+    '\\label{thm:main}\n\\label{thm:other}\n',
+    null,
+  )
+  const snapshot = await store.snapshot(project.id, 'alice', 'link-candidate')
+  await fs.writeFile(
+    path.join(snapshot.root, 'Paper.lean'),
+    'theorem mainResult : True := by trivial\ntheorem otherResult : True := by trivial\n',
+  )
+  const input = {
+    source: { path: paper, line: 1, label: 'thm:main' },
+    target: { path: 'Paper.lean', line: 1, declaration: 'mainResult' },
+  }
+  const other = {
+    source: { path: paper, line: 2, label: 'thm:other' },
+    target: { path: 'Paper.lean', line: 2, declaration: 'otherResult' },
+  }
+  const stage = (args, options) =>
+    store.stageSnapshotPaperLink(snapshot, project.id, 'alice', args, options)
+  await assert.rejects(
+    store.stageSnapshotPaperLink(snapshot, project.id, 'bob', input),
+    { status: 404 },
+  )
+  await assert.rejects(stage(input, { signal: AbortSignal.abort() }), {
+    name: 'AbortError',
+  })
+  const [first, second, retried] = await Promise.all([
+    stage(input),
+    stage(other),
+    stage(input),
+  ])
+  assert.equal(first.id, retried.id)
+  assert.notEqual(first.id, second.id)
+  assert.deepEqual(await projectPaperLinks(store, project.id, 'alice', paper), {
+    links: [],
+  })
+
+  const changes = await store.changes(snapshot)
+  assert.deepEqual(changes.map(({ path }) => path).sort(), [
+    'Paper.lean',
+    PAPER_LINKS_FILE,
+  ])
+  await store.applyChanges(project.id, 'alice', changes, { snapshot })
+  for (const filename of [paper, 'Paper.lean']) {
+    const { links } = await projectPaperLinks(
+      store,
+      project.id,
+      'alice',
+      filename,
+    )
+    assert.equal(links.length, 2)
+    assert.ok(links.every(({ status }) => status === 'current'))
+  }
+})
+
+test('a live PDF link publishes only its manifest and can be undone', async (t) => {
+  const { store, project } = await fixture(t)
+  const owner = 'alice'
+  const pdf = 'paper.pdf'
+  const lean = 'Paper.lean'
+  await fs.writeFile(path.join(project.root, pdf), fixturePdf())
+  await store.writeFile(
+    project.id,
+    owner,
+    lean,
+    'theorem result : True := by trivial\n',
+    null,
+  )
+  const snapshot = await store.snapshot(project.id, owner, 'link-live')
+  const link = await store.stageSnapshotPaperLink(snapshot, project.id, owner, {
+    source: { path: pdf, page: 1, quote: 'Fixture PDF' },
+    target: { path: lean, line: 1, declaration: 'result' },
+  })
+
+  const changes = await store.changes(snapshot)
+  assert.deepEqual(
+    changes.map(({ path }) => path),
+    [PAPER_LINKS_FILE],
+  )
+  const options = { allowProjectFiles: true }
+  const live = await store.syncLive(snapshot, changes, [], options)
+  const { links } = await projectPaperLinks(store, project.id, owner, lean)
+  assert.deepEqual(links, [
+    {
+      id: link.id,
+      source: link.source,
+      target: link.target,
+      status: 'current',
+    },
+  ])
+  await store.undoLive(snapshot, live, options)
+  assert.deepEqual(await projectPaperLinks(store, project.id, owner, pdf), {
+    links: [],
+  })
+})
+
+test('concurrent live paper links verify and undo independently', async (t) => {
+  const { store, project } = await fixture(t)
+  const owner = 'alice'
+  const paper = 'paper.tex'
+  const options = { allowProjectFiles: true }
+  await store.writeFile(
+    project.id,
+    owner,
+    paper,
+    'First claim\nSecond claim\n',
+    null,
+  )
+  const runs = await Promise.all(
+    ['first', 'second'].map(async (name, index) => {
+      const snapshot = await store.snapshot(
+        project.id,
+        owner,
+        `live-link-${name}`,
+      )
+      const lean = `${name}.lean`
+      await fs.writeFile(
+        path.join(snapshot.root, lean),
+        `theorem ${name} : True := by trivial\n`,
+      )
+      const link = await store.stageSnapshotPaperLink(
+        snapshot,
+        project.id,
+        owner,
+        {
+          source: { path: paper, line: index + 1 },
+          target: { path: lean, line: 1, declaration: name },
+        },
+      )
+      return { snapshot, lean, link, changes: await store.changes(snapshot) }
+    }),
+  )
+  const live = await Promise.all(
+    runs.map(({ snapshot, changes }) =>
+      store.syncLive(snapshot, changes, [], options),
+    ),
+  )
+  const ids = runs.map(({ link }) => link.id).sort()
+  const savedIds = async () =>
+    (await projectPaperLinks(store, project.id, owner, paper)).links
+      .map(({ id }) => id)
+      .sort()
+  assert.deepEqual(await savedIds(), ids)
+  for (const [index, { snapshot, changes }] of runs.entries()) {
+    await store.assertLive(snapshot, live[index], options)
+    const verification = await store.verificationCopy(snapshot, changes, {
+      ...options,
+      liveChanges: live[index],
+    })
+    const saved = JSON.parse(
+      await fs.readFile(path.join(verification.root, PAPER_LINKS_FILE), 'utf8'),
+    )
+    assert.deepEqual(saved.links.map(({ id }) => id).sort(), ids)
+    for (const { lean } of runs)
+      assert.match(
+        await fs.readFile(path.join(verification.root, lean), 'utf8'),
+        /theorem/u,
+      )
+    await store.cleanupVerificationCopy(verification)
+  }
+
+  await store.undoLive(runs[0].snapshot, live[0], options)
+  assert.deepEqual(await savedIds(), [runs[1].link.id])
+  await assert.rejects(store.readFile(project.id, owner, runs[0].lean), {
+    status: 404,
+  })
+  assert.match(
+    (await store.readFile(project.id, owner, runs[1].lean)).content,
+    /theorem second/u,
+  )
+  await store.undoLive(runs[1].snapshot, live[1], options)
+  assert.deepEqual(await savedIds(), [])
+  await assert.rejects(store.readFile(project.id, owner, PAPER_LINKS_FILE), {
+    status: 404,
+  })
+})
+
+test('live publication and undo reject a conflicting change to the same paper link', async (t) => {
+  const { store, project } = await fixture(t)
+  const owner = 'alice'
+  const pdf = 'paper.pdf'
+  const lean = 'Paper.lean'
+  const options = { allowProjectFiles: true }
+  await fs.writeFile(path.join(project.root, pdf), fixturePdf())
+  await store.writeFile(
+    project.id,
+    owner,
+    lean,
+    'theorem result : True := by trivial\n',
+    null,
+  )
+  const stage = async (name, quote) => {
+    const snapshot = await store.snapshot(project.id, owner, `link-${name}`)
+    const link = await store.stageSnapshotPaperLink(
+      snapshot,
+      project.id,
+      owner,
+      {
+        source: { path: pdf, page: 1, quote },
+        target: { path: lean, line: 1, declaration: 'result' },
+      },
+    )
+    return { snapshot, link }
+  }
+  const first = await stage('first', 'First quote')
+  const stale = await stage('stale', 'Stale quote')
+  assert.equal(stale.link.id, first.link.id)
+  const publish = async ({ snapshot }) =>
+    store.syncLive(snapshot, await store.changes(snapshot), [], options)
+  const firstLive = await publish(first)
+  await fs.writeFile(
+    path.join(stale.snapshot.root, 'Other.lean'),
+    'example : True := by trivial\n',
+  )
+  await assert.rejects(publish(stale), {
+    status: 409,
+    message: /A paper link changed/u,
+  })
+  await assert.rejects(store.readFile(project.id, owner, 'Other.lean'), {
+    status: 404,
+  })
+
+  await publish(await stage('newer', 'Newer quote'))
+  await assert.rejects(store.undoLive(first.snapshot, firstLive, options), {
+    status: 409,
+    message: /A paper link changed/u,
+  })
+  const { links } = await projectPaperLinks(store, project.id, owner, pdf)
+  assert.deepEqual(
+    links.map(({ source }) => source.quote),
+    ['Newer quote'],
+  )
 })
 
 test('saving several editor buffers checks every hash before changing any file', async (t) => {

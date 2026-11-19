@@ -125,9 +125,11 @@ Open a `.tex` file to edit highlighted LaTeX beside its PDF. Choose **Options** 
 
 Enable **Rebuild on save** to update the PDF after saving edits. Unsaved typing does not trigger a build. Changes made through the terminal or Lemex mark an older preview as out of date. Choose **Build PDF** to capture the latest saved files. A failed build keeps the last successful PDF visible; open its reported errors to jump to the source line. **Stop** cancels a queued or running build.
 
+Double-click a position in a current compiled PDF to focus the corresponding LaTeX source. Hover or tap a passage that has a Lean link and choose **Open in Lean** to follow it. Rebuild after a source edit to refresh these locations.
+
 Use **Ask & Search** to ask Lemex to read, edit, and compile a document. It can read the generated PDF's extracted text and use compiler diagnostics to repair LaTeX. Text extraction can omit figures and mathematical layout. Review-first edits remain candidates until accepted; live editing follows the option selected for Ask & Search. A successful TeX build does not verify Lean proofs.
 
-The first version supports pdfLaTeX, automatic reruns through latexmk, and BibTeX. XeLaTeX, LuaLaTeX, Biber, custom compiler recipes, shell escape, and source-to-PDF navigation are not available. The server needs a separate [TeX worker image](Configuration.md#latex-compilation). Existing Lean toolchains stay pinned.
+The compiler supports pdfLaTeX, automatic reruns through latexmk, and BibTeX. It requires a separate [TeX worker image](Configuration.md#latex-compilation). Existing Lean toolchains stay pinned.
 
 Put the root document at the common parent of its inputs and use paths such as `\input{chapters/introduction}`. Parent paths such as `../chapter.tex` and absolute paths are blocked by the isolated compiler. A root in a subfolder can include files below that subfolder.
 
@@ -194,6 +196,10 @@ Modes choose a default workflow. Your explicit requests and follow-ups take prec
 Compare optimization's token and heartbeat measurements: a shorter proof can take more elaboration work. Repair invalid proofs first.
 
 To formalize a document, open its PDF, TeX, Markdown, plain text, or other readable source, choose **Formalize**, and describe the statement or argument to translate. Use **Select context** or **@** to add other sources. You do not need to select an existing Lean file: Lemex can create one for the formalization. Source documents stay unchanged, and Lean output still receives independent verification. The standard worker can extract PDF text. If extraction is unavailable on an older worker or loses essential mathematics, provide the relevant passage or TeX source. Scanned pages may need OCR.
+
+When you formalize an open or attached PDF or LaTeX file, Lemex also links the statements it can match to the resulting Lean declarations. In review-first mode, choose **Apply changes** to make the links visible. For a formalization you already have, open the PDF, LaTeX source, or Lean file, choose **Paper links → Find links with Lemex**, then send the prepared message.
+
+Hover a linked passage or declaration to see its counterpart and click to jump there. PDF passages become interactive when the viewer finds a unique match for the excerpt on its page. Use **PDF zoom** to enlarge the page while keeping its links. The **Paper links** panel also provides page jumps for scans and passages without a text match. On a narrow screen, **Paper links** opens a dialog that closes when you follow a link. LaTeX links can follow a `\label` when it moves within the file. Link data lives in `leanflow.paper-links.json` in the project.
 
 **Ask & Search** primarily helps with Lean, but also welcomes general questions, writing, planning, and open-ended tasks. Ask it to create or edit project text files and organize, rename, or delete non-Lean notes and documents. Ask Lemex to rename or delete Lean sources when needed, or use the file browser. Questions and explanations leave files unchanged. Live edits are on by default: Lemex saves requested edits as it works. To inspect the diff before saving, turn off **Options → Edit files live** before sending, then choose **Apply changes** after reviewing. This choice is saved separately from the other modes. Stop the run before undoing its edits. Lemex can use the workspace shell, Python, and other installed command-line tools in either editing mode. Lean source edits still receive independent Lean verification; ordinary conversation and non-Lean file tasks do not.
 
