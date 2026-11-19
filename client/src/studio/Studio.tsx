@@ -1065,20 +1065,25 @@ export function Studio() {
   }, [sessionUser, preparing, loadProjects])
 
   const loadFiles = useCallback(
-    async (id: string) => {
+    async (id: string, onFiles?: (entries: FileEntry[]) => void) => {
       const expected = bufferStore.getSnapshot().scope
       const request = ++filesRequest.current
       const base = `/api/projects/${encodeURIComponent(id)}`
-      const [value, directories] = await Promise.all([
-        api<FileEntry[]>(`${base}/files`),
-        api<string[]>(`${base}/folders`).catch(() => null),
-      ])
-      if (
+      const current = () =>
         request === filesRequest.current &&
         bufferStore.isCurrent(expected) &&
         expected.projectId === id
-      ) {
-        setFiles(value)
+      const [value, directories] = await Promise.all([
+        api<FileEntry[]>(`${base}/files`).then((entries) => {
+          // Folder discovery can retry independently while the tree and
+          // editor already have the file list they need.
+          if (current()) setFiles(entries)
+          onFiles?.(entries)
+          return entries
+        }),
+        api<string[]>(`${base}/folders`).catch(() => null),
+      ])
+      if (current()) {
         setFoldersAvailable(directories !== null)
         // A server being updated or an unavailable folder listing must not hide files.
         const parents = new Set<string>()
@@ -1261,33 +1266,31 @@ export function Studio() {
     if (!workspaceEditable) return
     const expected = scope
     let cancelled = false
-    void loadFiles(projectId)
-      .then((value) => {
-        if (cancelled || !bufferStore.isCurrent(expected)) return
-        const savedPath = readStoredValue('local', `lemex-file-${projectId}`)
-        const first =
-          value.find((item) => item.path === savedPath) ||
-          value.find((item) => item.path === 'Main.lean') ||
-          value.find((item) => item.path.endsWith('.lean')) ||
-          value[0]
-        if (first && (project?.status === 'ready' || !fileRef.current)) {
-          const currentPath = value.find(
-            (entry) => entry.path === fileRef.current?.path,
-          )?.path
-          void openFile(
-            projectId,
-            currentPath || first.path,
-            undefined,
-            undefined,
-            {
-              reload: !!currentPath,
-            },
-          )
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) setError(errorText(error))
-      })
+    void loadFiles(projectId, (value) => {
+      if (cancelled || !bufferStore.isCurrent(expected)) return
+      const savedPath = readStoredValue('local', `lemex-file-${projectId}`)
+      const first =
+        value.find((item) => item.path === savedPath) ||
+        value.find((item) => item.path === 'Main.lean') ||
+        value.find((item) => item.path.endsWith('.lean')) ||
+        value[0]
+      if (first && (project?.status === 'ready' || !fileRef.current)) {
+        const currentPath = value.find(
+          (entry) => entry.path === fileRef.current?.path,
+        )?.path
+        void openFile(
+          projectId,
+          currentPath || first.path,
+          undefined,
+          undefined,
+          {
+            reload: !!currentPath,
+          },
+        )
+      }
+    }).catch((error) => {
+      if (!cancelled) setError(errorText(error))
+    })
     return () => {
       cancelled = true
     }

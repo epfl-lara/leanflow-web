@@ -11,7 +11,11 @@ const root = path.resolve(new URL('../', import.meta.url).pathname)
 const output = path.join(root, '.runtime/file-creation-ui')
 await fs.mkdir(output, { recursive: true })
 const app = express()
-app.use(express.static(path.join(root, 'client/dist')))
+app.use(
+  express.static(
+    process.env.STUDIO_TEST_DIST || path.join(root, 'client/dist'),
+  ),
+)
 const server = await new Promise((resolve) => {
   const listening = app.listen(0, '127.0.0.1', () => resolve(listening))
 })
@@ -54,6 +58,7 @@ try {
   let releaseFolder = null
   let delayNextFolder = false
   let folderListingStatus = 200
+  let folderReadGate = null
   // The listing keeps failing until Refresh files, so bounded automatic
   // retries end in the creation acknowledgement.
   let failFileListing = false
@@ -69,7 +74,8 @@ try {
   })
   await page.route('**/api/projects/*/folders', async (route) => {
     const request = route.request()
-    if (request.method() === 'GET')
+    if (request.method() === 'GET') {
+      if (folderReadGate) await folderReadGate.promise
       return route.fulfill({
         status: folderListingStatus,
         json:
@@ -82,6 +88,7 @@ try {
                     : 'Folders temporarily unavailable.',
               },
       })
+    }
     assert.equal(request.method(), 'POST')
     const { path: filename } = request.postDataJSON()
     writes.push({ kind: 'folder', path: filename })
@@ -391,14 +398,34 @@ try {
       (id) => localStorage.setItem(`lemex-file-${id}`, 'Main.lean'),
       projectId,
     )
-    await fixture.ready()
-    await until(
-      () =>
-        page
-          .getByRole('button', { name: 'New folder', exact: true })
-          .isDisabled(),
-      `folder action unavailable after ${status}`,
+    const folderRequest = page.waitForRequest(
+      (request) =>
+        request.method() === 'GET' &&
+        new URL(request.url()).pathname.endsWith('/folders'),
     )
+    folderReadGate = Promise.withResolvers()
+    const ready = fixture.ready()
+    try {
+      await folderRequest
+      await fileButton('Main.lean').waitFor({ timeout: 10_000 })
+      await ready
+      assert.equal(
+        await page
+          .getByRole('button', { name: 'New folder', exact: true })
+          .getAttribute('title'),
+        'Loading folders…',
+      )
+    } finally {
+      folderReadGate.resolve()
+      folderReadGate = null
+      await ready
+    }
+    await page
+      .getByTitle(
+        'Folder creation is unavailable. Refresh files to try again.',
+        { exact: true },
+      )
+      .waitFor()
     assert(await fileButton('Main.lean').isVisible())
     assert(await folderButton('Main').isVisible())
     assert(
