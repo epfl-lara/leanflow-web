@@ -323,7 +323,7 @@ test('queued updates bound aggregate paths even when each event contains many fi
   assert.equal(state.pendingEvents.length, 12)
 })
 
-test('the pull time budget preserves private files and reports how to reopen the latest copy', async (t) => {
+test('the pull time budget preserves private files and reports that a fresh copy is needed', async (t) => {
   const f = await fixture(t)
   await fs.writeFile(path.join(f.sharedRoot, 'Main.lean'), '-- browser\n')
   f.event(['Main.lean'])
@@ -336,8 +336,7 @@ test('the pull time budget preserves private files and reports how to reopen the
     f.pull(),
     (error) =>
       error.code === 'TERMINAL_RECONCILIATION_LIMIT' &&
-      /private files are preserved/i.test(error.message) &&
-      /reopen/i.test(error.message),
+      /fresh copy/i.test(error.message),
   )
   assert.equal(await f.read('Main.lean'), '-- original\n')
   assert.equal(

@@ -26,14 +26,16 @@ const contains = (parent, child) =>
 const conflict = (filename) =>
   Object.assign(
     new Error(
-      `Terminal files changed while receiving project updates${filename ? `: ${filename}` : ''}. Your private files are preserved. Close this terminal and download its recovery copy before reopening it.`,
+      filename
+        ? `A private file conflicts with a project update affecting ${filename}.`
+        : 'The terminal could not safely receive the queued project updates.',
     ),
     { status: 409 },
   )
 const pullCapacity = () =>
   Object.assign(
     new Error(
-      'This terminal needs a fresh copy to receive this large set of project updates. Your private files are preserved. Close it, download its recovery copy if needed, and reopen it from the latest project.',
+      'This terminal needs a fresh copy to receive this large set of project updates.',
     ),
     { status: 413, code: 'TERMINAL_RECONCILIATION_LIMIT' },
   )
@@ -613,7 +615,7 @@ async function followCompleteFolderMoves(
         continue
       throw Object.assign(
         new Error(
-          `The project moved ${from} to ${to}, but that destination already exists in this terminal's private copy. Your files and current folder are preserved. Close this terminal and recover its private copy before reopening it.`,
+          `The project moved ${from} to ${to}, but that destination already exists in this terminal's private copy.`,
         ),
         { status: 409 },
       )
@@ -755,7 +757,7 @@ async function replacePrivate(state, filename, before, after, context) {
   )
     throw Object.assign(
       new Error(
-        'This terminal is keeping too many earlier file versions for active commands. Close it, download its recovery copy if needed, and reopen it to continue receiving project updates.',
+        'This terminal is keeping too many earlier file versions for active commands.',
       ),
       { status: 409 },
     )

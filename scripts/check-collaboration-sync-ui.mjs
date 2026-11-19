@@ -887,14 +887,14 @@ try {
     JSON.stringify({
       type: 'sync',
       state: 'paused',
-      message: 'Other.lean changed in the browser.',
+      message:
+        'Other.lean changed in the browser. Close this terminal and choose Recover terminal files to download your work. Open a new terminal to resume syncing.',
     }),
   )
   await terminal.locator('.terminal-sync-alert').waitFor()
-  assert(
-    (await terminal.locator('.terminal-sync-alert').innerText()).includes(
-      'Open a new terminal',
-    ),
+  assert.match(
+    await terminal.locator('.terminal-sync-alert').innerText(),
+    /File syncing paused\. Other\.lean changed in the browser\..*Recover terminal files.*Open a new terminal/s,
   )
   terminalSockets
     .at(-1)

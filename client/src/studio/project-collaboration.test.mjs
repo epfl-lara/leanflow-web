@@ -787,6 +787,79 @@ test('temporary capacity errors reconnect and replay unacknowledged edits', asyn
   assert.deepEqual(store.dirty(), [])
 })
 
+test('setup backoff keeps the socket and peer edits live and replays the draft once without a setup-end event', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { store, socket, server, hook, rerender } = fixture(t)
+  const packets = (type) =>
+    socket.sent.filter((message) => message.type === type)
+  store.change('Main.lean', '-- local\nbase source\n')
+  const flushing = hook.flush()
+  const first = packets('update').at(-1)
+  store.change('Main.lean', '-- local\nbase source\n-- later\n')
+  t.mock.timers.tick(70)
+  const dependent = packets('update').at(-1)
+  assert.notEqual(first.requestId, dependent.requestId)
+  const reject = (request, legacy = false) =>
+    socket.receive({
+      type: 'error',
+      path: 'Main.lean',
+      status: 503,
+      requestId: request.requestId,
+      ...(legacy ? {} : { code: 'PROJECT_PREPARING' }),
+      message: legacy
+        ? 'Project setup is running. Live saving will resume when it finishes; your draft remains in this tab.'
+        : 'Setup still running.',
+    })
+  reject(first, true)
+  await assert.rejects(flushing, /setup is running/i)
+  // A dependent delta was already on the wire when the first rejection arrived.
+  socket.receive({
+    type: 'error',
+    path: 'Main.lean',
+    status: 400,
+    requestId: dependent.requestId,
+    message: 'Missing earlier operations.',
+  })
+  const remoteVector = Y.encodeStateVector(server)
+  server.getText('source').insert(4, ' REMOTE')
+  socket.receive(deltaWire(server, remoteVector))
+  assert.match(store.getSnapshot().file.content, /REMOTE/)
+  assert.match(rerender().issue, /setup is running/i)
+  const delays = [2000, 4000, 8000, 16000, 30000, 30000]
+  for (const [index, delay] of delays.entries()) {
+    const updates = packets('update').length
+    t.mock.timers.tick(delay - 1)
+    assert.equal(packets('open').length, 1)
+    assert.equal(packets('update').length, updates)
+    t.mock.timers.tick(1)
+    assert.equal(packets('open').length, 1)
+    assert.equal(packets('update').length, updates + 1)
+    const probe = packets('update').at(-1)
+    if (index < delays.length - 1) reject(probe)
+    else {
+      store.change(
+        'Main.lean',
+        store.getSnapshot().file.content + '-- while saving\n',
+      )
+      t.mock.timers.tick(100)
+      assert.equal(packets('update').length, updates + 1)
+      Y.applyUpdate(server, Buffer.from(probe.update, 'base64'))
+      socket.receive(wire(server, undefined, { ack: probe.requestId }))
+      const final = packets('update').at(-1)
+      assert.notEqual(final.requestId, probe.requestId)
+      Y.applyUpdate(server, Buffer.from(final.update, 'base64'))
+      socket.receive(wire(server, undefined, { ack: final.requestId }))
+    }
+  }
+  assert.equal(await hook.flush(), true)
+  assert.equal(Socket.instances.length, 1)
+  assert.equal(
+    server.getText('source').toString(),
+    '-- local\nbase REMOTE source\n-- later\n-- while saving\n',
+  )
+  assert.equal(rerender().issue, null)
+})
+
 test('browser send backpressure reconnects and replays the local draft', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const { store, socket, server, hook } = fixture(t)
@@ -815,6 +888,56 @@ test('browser send backpressure reconnects and replays the local draft', async (
   assert.equal(server.getText('source').toString(), draft)
   assert.equal(await hook.flush(), true)
   assert.deepEqual(store.dirty(), [])
+})
+
+test('a move retires a setup retry and resumes the preserved draft only at its destination', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { store, socket, hook } = fixture(t)
+  const draft = '-- moved during setup\nbase source\n'
+  store.change('Main.lean', draft)
+  const saving = hook.flush()
+  socket.receive({
+    type: 'error',
+    path: 'Main.lean',
+    status: 503,
+    requestId: socket.sent.at(-1).requestId,
+    code: 'PROJECT_PREPARING',
+  })
+  await assert.rejects(saving, /setup is running/i)
+  const path = 'Moved.lean'
+  socket.receive({
+    type: 'files',
+    moves: [{ from: 'Main.lean', to: path }],
+    removedPaths: ['Main.lean'],
+    paths: ['Main.lean', path],
+  })
+  const afterMove = socket.sent.length
+  t.mock.timers.tick(2100)
+  const opens = socket.sent
+    .slice(afterMove)
+    .filter((message) => message.type === 'open')
+  assert.deepEqual(
+    opens.map((message) => message.path),
+    [path],
+  )
+  const destination = new Y.Doc()
+  t.after(() => destination.destroy())
+  destination.getText('source').insert(0, 'base source\n')
+  const identity = { path, documentId: 'moved' }
+  socket.receive(
+    wire(destination, undefined, {
+      ...identity,
+      openRequestId: opens[0].requestId,
+    }),
+  )
+  const update = socket.sent.filter((packet) => packet.type === 'update').at(-1)
+  assert.equal(update.path, path)
+  Y.applyUpdate(destination, Buffer.from(update.update, 'base64'))
+  socket.receive(
+    wire(destination, undefined, { ...identity, ack: update.requestId }),
+  )
+  assert.equal(await hook.flush(), true)
+  assert.equal(destination.getText('source').toString(), draft)
 })
 
 test('remote middle edits preserve distant source and track selection offsets', () => {

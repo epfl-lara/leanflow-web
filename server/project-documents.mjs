@@ -16,6 +16,12 @@ const MAX_SUBSCRIPTIONS = 16
 const fail = (message, status = 400, code) => {
   throw Object.assign(new Error(message), { status, ...(code ? { code } : {}) })
 }
+const failDuringSetup = () =>
+  fail(
+    'Project setup is running. Live saving will resume when it finishes; your draft remains in this tab.',
+    503,
+    'PROJECT_PREPARING',
+  )
 
 export { replaceDocumentText } from '../shared/document-text.mjs'
 import { replaceDocumentText } from '../shared/document-text.mjs'
@@ -205,7 +211,9 @@ export class ProjectDocuments {
                 ? request.requestId
                 : undefined,
             status: error.status || 400,
-            ...(error.code === 'DOCUMENT_REMOVED' ? { code: error.code } : {}),
+            ...(['DOCUMENT_REMOVED', 'PROJECT_PREPARING'].includes(error.code)
+              ? { code: error.code }
+              : {}),
             message: error.status
               ? error.message
               : 'The shared edit could not be saved. Your edits remain in this tab. Reload the saved file before retrying.',
@@ -768,10 +776,7 @@ export class ProjectDocuments {
           project.status === 'preparing' ||
           this.workspaces.jobs?.has(client.projectId)
         )
-          fail(
-            'Project setup is running. Live saving will resume when it finishes; your draft remains in this tab.',
-            503,
-          )
+          failDuringSetup()
         await this.refresh(record, client.actor)
         this.assertDocumentCurrent(record, request.documentId)
         const claims = this.updateOwners(record, incoming.structs, client.actor)
@@ -857,10 +862,7 @@ export class ProjectDocuments {
                 .status === 'preparing' ||
                 this.workspaces.jobs?.has(client.projectId))
             )
-              fail(
-                'Project setup is running. Live saving will resume when it finishes; your draft remains in this tab.',
-                503,
-              )
+              failDuringSetup()
             if ((error.status || error.statusCode) === 409 && attempt < 3)
               continue
             throw error

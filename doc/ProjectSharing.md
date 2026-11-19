@@ -50,7 +50,11 @@ If an edit exceeds the file limit or includes unsupported text, remove that text
 
 ## Private terminals and recovery
 
-Each terminal opens a private working copy. Saved project changes arrive in clean files while its own text edits publish with version checks. File and folder moves also reach an open terminal. A conflict pauses synchronization and preserves the private copy. Close the terminal and choose **Recover terminal files** to download it. Recovery downloads belong to the account that opened the terminal, including after project access is removed or the shared project is deleted. Open your account settings and choose **Private terminal files** to find copies from projects you can no longer access. Keep at most eight copies per account; download what you need, then use **Discard recovery copy** to free a slot. Copies that are open or still publishing their final changes cannot be downloaded or discarded. They appear in recovery only after closing; interrupted copies remain available after a server restart.
+Each terminal opens a private working copy. Saved project changes arrive in clean files while its own text edits publish with version checks. File and folder moves also reach an open terminal.
+
+When **File syncing paused** appears, the terminal stops receiving saved project updates. If a file conflicts during publication, the whole group of pending edits stays private. You can keep using the shell, and any later edits also stay in its private copy. Close the terminal and choose **Recover terminal files**. Download your work, compare it with the saved project, and copy back the changes you want to keep. Open a new terminal to resume syncing.
+
+Only the account that opened the terminal can download the recovery copy. If you lose project access, open **Private terminal files** in account settings. Your copy becomes available after the shell closes and finishes saving. Interrupted copies remain available after a server restart. You can keep eight copies per account. Use **Discard recovery copy** when you have downloaded what you need.
 
 Moving a text file with `mv` also updates recognized project imports and file links when the original file can be identified safely. This includes SVG diagrams linked from Lean comments. The updated references reach the terminal and other connected editors. A warning asks you to review references that could not be updated. Copying and deleting a file, changing its contents during the move, or moving binary files may require a manual reference update.
 

@@ -41,6 +41,11 @@ interface LiveDocument {
   openRequestId: number
   pending: Set<number>
   pendingSources: Map<number, string>
+  setupRetry?: {
+    attempts: number
+    unsent: boolean
+    timer?: ReturnType<typeof setTimeout>
+  }
   sourceLimitFailure?: string
   failedLocalContent?: string
 }
@@ -356,6 +361,7 @@ export function useProjectCollaboration({
         record?.id &&
         record.opened &&
         !record.blocked &&
+        !record.setupRetry &&
         !file?.readOnly &&
         !file?.unavailable
           ? { type: 'presence', ...selected, documentId: record.id }
@@ -372,6 +378,7 @@ export function useProjectCollaboration({
     }
 
     const destroyRecord = (record: LiveDocument) => {
+      clearTimeout(record.setupRetry?.timer)
       documentFailures.delete(record)
       record.undo.destroy()
       record.doc.destroy()
@@ -589,6 +596,17 @@ export function useProjectCollaboration({
       record: LiveDocument,
       vector?: Uint8Array,
     ) => {
+      if (record.setupRetry) {
+        if (
+          record.setupRetry.timer !== undefined ||
+          !record.opened ||
+          vector !== undefined
+        ) {
+          record.setupRetry.unsent = true
+          return
+        }
+        record.setupRetry.unsent = false
+      }
       const replay = record.sourceLimitFailure !== undefined
       if (replay) {
         if (!ready || socket?.readyState !== WebSocket.OPEN) return
@@ -986,6 +1004,48 @@ export function useProjectCollaboration({
           return
         }
         if (
+          status === 503 &&
+          path &&
+          record &&
+          failedRequest !== undefined &&
+          record.pending.has(failedRequest) &&
+          (('code' in message && message.code === 'PROJECT_PREPARING') ||
+            ('message' in message &&
+              typeof message.message === 'string' &&
+              message.message.startsWith('Project setup is running.')))
+        ) {
+          // Later deltas can depend on this rejected operation. Replay every
+          // missing causal ID behind them in the existing document queue.
+          record.pending.clear()
+          record.pending.add(failedRequest)
+          const setup = (record.setupRetry ??= { attempts: 0, unsent: false })
+          if (setup.timer === undefined)
+            setup.timer = setTimeout(
+              () => {
+                if (current() && ready) publishLocal()
+                setup.timer = undefined
+                if (!current() || !ready) return
+                if (
+                  documents.get(path) === record &&
+                  record.opened &&
+                  !record.blocked &&
+                  canEdit &&
+                  !store.getSnapshot().buffers.get(path)?.readOnly
+                ) {
+                  record.pending.clear()
+                  sendDelta(path, record)
+                }
+              },
+              Math.min(30_000, 2000 * 2 ** Math.min(setup.attempts++, 4)),
+            )
+          fail(
+            'Project setup is running. Live saving will retry automatically; your draft remains in this tab.',
+            record,
+            status,
+          )
+          return
+        }
+        if (
           status === 413 &&
           record &&
           failedRequest !== undefined &&
@@ -1067,6 +1127,8 @@ export function useProjectCollaboration({
         ? []
         : [...record.pendingSources.values()]
       if (!sameIdentity) {
+        clearTimeout(record.setupRetry?.timer)
+        delete record.setupRetry
         record.undo.destroy()
         record.doc.destroy()
         const local = localDocument()
@@ -1199,7 +1261,16 @@ export function useProjectCollaboration({
       admissionTimers.delete(message.path)
       managedHistory.add(message.path)
       record.opened = true
+      let replayAfterSetup = false
       if (message.ack !== undefined) {
+        if (
+          record.setupRetry &&
+          record.setupRetry.timer === undefined &&
+          record.pending.has(message.ack)
+        ) {
+          replayAfterSetup = record.setupRetry.unsent
+          delete record.setupRetry
+        }
         record.pending.delete(message.ack)
         record.pendingSources.delete(message.ack)
       }
@@ -1230,9 +1301,13 @@ export function useProjectCollaboration({
         sameIdentity &&
         reconnecting &&
         canEdit &&
+        record.setupRetry?.timer === undefined &&
         (!record.sourceLimitFailure ||
           sourceFits(message.path, record.doc.getText('source').toString())) &&
-        (record.pending.size || capturedLocal || record.sourceLimitFailure)
+        (record.pending.size ||
+          capturedLocal ||
+          record.sourceLimitFailure ||
+          record.setupRetry)
       ) {
         // Full updates are idempotent; replay edits whose durable ACK was lost.
         record.pending.clear()
@@ -1242,6 +1317,8 @@ export function useProjectCollaboration({
         if (!dirty || file.content === savedContent) record.blocked = false
         else return
       }
+      if (replayAfterSetup && canEdit && !file.readOnly)
+        sendDelta(message.path, record)
       applying = true
       try {
         record.bufferHash = message.hash
@@ -1254,7 +1331,7 @@ export function useProjectCollaboration({
       } finally {
         applying = false
       }
-      documentFailures.delete(record)
+      if (!record.setupRetry) documentFailures.delete(record)
       if (!hasDocumentFailure()) {
         failure = null
         clearIssue()

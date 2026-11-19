@@ -329,18 +329,21 @@ export class Terminals {
         session.child = child
         const preserve = (error) => {
           const status = error.status || error.statusCode
-          const message = [403, 404].includes(status)
-            ? 'Your project access changed. Download this private copy from Account settings to keep your files. Ask a project Admin to restore editing access before publishing.'
+          const accessChanged = [403, 404].includes(status)
+          const reason = accessChanged
+            ? 'Your project editing access changed.'
             : status
               ? this.redact(error.message)
-              : 'The file updates could not be published. Your private working copy is preserved for recovery.'
+              : 'The terminal could not finish synchronizing its files.'
+          const recovery = accessChanged
+            ? 'Close this terminal and download your work from Private terminal files in account settings. Ask a project admin to restore editing access before opening a new terminal.'
+            : 'Close this terminal and choose Recover terminal files to download your work. Open a new terminal to resume syncing.'
+          const message = `${reason} Project updates no longer reach this terminal. Its unpublished edits and any later file changes stay private. ${recovery}`
           session.recovery = true
           session.publicationPaused = true
-          session.recoveryMessage = message
+          session.recoveryMessage = reason
           syncStatus('paused', message)
-          notice(
-            `File updates paused: ${message} Close this terminal to recover its preserved private working copy (${session.snapshot.runId}) from /api/projects/${project.id}/terminal-recoveries/${session.snapshot.runId}/download.`,
-          )
+          notice(`File updates paused: ${message}`)
         }
         const refreshSyncStatus = () => {
           if (session.publicationPaused) return

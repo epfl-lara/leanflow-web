@@ -315,10 +315,9 @@ export function TerminalPanel({
                   ? 'File syncing paused. '
                   : 'Some terminal files remain private. '}
               </strong>
-              {syncIssue.message} Close this terminal to recover its private
-              files below.
-              {syncIssue.state === 'paused' &&
-                ' Open a new terminal to start from the latest saved files.'}
+              {syncIssue.message}
+              {syncIssue.state === 'limited' &&
+                ' Close this terminal to recover its private files below.'}
             </span>
           </div>
         )}

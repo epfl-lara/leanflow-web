@@ -5485,10 +5485,7 @@ export class WorkspaceStore {
         true,
       )
       if ((current?.hash ?? null) !== (configuration.get(filename) ?? null))
-        fail(
-          `Project configuration changed: ${filename}. Reopen the terminal from the current project.`,
-          409,
-        )
+        fail(`The project's ${filename} configuration changed.`, 409)
     }
     return project
   }
@@ -5666,7 +5663,7 @@ export class WorkspaceStore {
             ))
           )
             fail(
-              `The project moved or removed ${change.path}. Its stale terminal update was kept private. Close this terminal and recover the private copy before reopening it.`,
+              `The project moved or removed ${change.path} before this terminal could publish its edit.`,
               409,
             )
         }
@@ -7397,13 +7394,19 @@ export class WorkspaceStore {
       const before = assetUpload ? null : await textFile(destination, true)
       const exactSave =
         allowExactSaveRetries && before?.content === change.after
-      if ((before?.hash ?? null) !== change.beforeHash && !exactSave)
+      if ((before?.hash ?? null) !== change.beforeHash && !exactSave) {
+        if (originRunId)
+          fail(
+            `The saved version of ${filename} changed before this terminal could publish its group of edits.`,
+            409,
+          )
         fail(
           reason === 'saved'
             ? `Cannot save: ${filename} changed since it was opened. Reload it before saving.`
             : `Cannot apply: ${filename} changed since the assistant run started.`,
           409,
         )
+      }
       if (exactSave) {
         unchanged.push({
           path: filename,

@@ -581,7 +581,7 @@ assert missing==0, f'Terminal source disappeared {missing} times during web save
     async () => {
       const release = await pauseNextSync(first)
       await first.command(
-        "printf '%s\\n' '-- PRIVATE_TERMINAL_DRAFT' > Scratch.lean",
+        "printf '%s\\n' '-- PRIVATE_TERMINAL_DRAFT' > Scratch.lean && printf '%s\\n' '-- same group' > Atomic.lean",
       )
       await save('Scratch.lean', '-- NEWER_SHARED_SOURCE\n')
       release()
@@ -589,10 +589,25 @@ assert missing==0, f'Terminal source disappeared {missing} times during web save
         () =>
           first.packets.some(
             (packet) => packet.type === 'sync' && packet.state === 'paused',
-          ) || /File updates paused/.test(first.output),
+          ) && first.output.includes('Recover terminal files'),
         'private conflict notification',
         20_000,
       )
+      const paused = first.packets.find(
+        (packet) => packet.type === 'sync' && packet.state === 'paused',
+      )
+      assert.match(paused.message, /Scratch\.lean/)
+      assert.match(
+        paused.message,
+        /Project updates no longer reach this terminal/i,
+      )
+      assert.match(paused.message, /later file changes stay private/i)
+      assert.match(paused.message, /Recover terminal files/)
+      assert.doesNotMatch(
+        first.output,
+        /Reload it before saving|\/api\/projects\//i,
+      )
+      assert.equal(await optionalSource('Atomic.lean'), null)
       assert.equal(
         (await source('Scratch.lean')).content,
         '-- NEWER_SHARED_SOURCE\n',
@@ -602,11 +617,24 @@ assert missing==0, f'Terminal source disappeared {missing} times during web save
           "import pathlib; assert pathlib.Path('Scratch.lean').read_text() == '-- PRIVATE_TERMINAL_DRAFT\\n'",
         ),
       )
+      await save('IncomingAfterPause.lean', '-- later project edit\n')
+      await first.command("printf '%s\\n' '-- later private edit' > Later.lean")
       const archive = await stopAndRecover(first, 1)
       assert.equal(
         await archive.file('Scratch.lean')?.async('string'),
         '-- PRIVATE_TERMINAL_DRAFT\n',
       )
+      assert.equal(
+        await archive.file('Atomic.lean')?.async('string'),
+        '-- same group\n',
+      )
+      assert.equal(
+        await archive.file('Later.lean')?.async('string'),
+        '-- later private edit\n',
+      )
+      assert.equal(archive.file('IncomingAfterPause.lean'), null)
+      assert.equal(await optionalSource('Atomic.lean'), null)
+      assert.equal(await optionalSource('Later.lean'), null)
     },
   )
   await record(

@@ -433,7 +433,10 @@ test('setup conflicts are temporary and the same live draft publishes after proj
   )
   store.jobs = new Map([['shared', Promise.resolve()]])
   emit([], 'project')
-  await assert.rejects(service.message(alice.client, request), { status: 503 })
+  await assert.rejects(service.message(alice.client, request), {
+    status: 503,
+    code: 'PROJECT_PREPARING',
+  })
   assert.equal(files.get('Main.lean'), before)
   store.jobs.clear()
   emit([], 'project')
