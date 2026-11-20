@@ -1,6 +1,7 @@
 import { errorText, sessionBoundUrl, type RunProofTarget } from './api'
 import { useState } from 'react'
 import { downloadWorkspaceFile } from './downloads'
+import type { PaperPdf } from './PaperPdfDialog'
 
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object'
@@ -192,6 +193,7 @@ export function InformalizationResult({
   reviewFirst = true,
   onOpenTarget,
   onRecheck,
+  onOpenPdf,
 }: {
   value: unknown
   projectId?: string
@@ -199,6 +201,7 @@ export function InformalizationResult({
   reviewFirst?: boolean
   onOpenTarget?: (target: RunProofTarget) => void
   onRecheck?: () => Promise<void>
+  onOpenPdf?: (pdf: PaperPdf) => void
 }) {
   const [error, setError] = useState('')
   const [rechecking, setRechecking] = useState(false)
@@ -300,6 +303,20 @@ export function InformalizationResult({
                 href={pdfUrl}
                 target="_blank"
                 rel="noopener noreferrer"
+                onClick={(event) => {
+                  if (
+                    !onOpenPdf ||
+                    !document?.buildId ||
+                    event.button !== 0 ||
+                    event.metaKey ||
+                    event.ctrlKey ||
+                    event.altKey ||
+                    event.shiftKey
+                  )
+                    return
+                  event.preventDefault()
+                  onOpenPdf({ path, buildId: document.buildId, saved })
+                }}
               >
                 Open PDF
               </a>

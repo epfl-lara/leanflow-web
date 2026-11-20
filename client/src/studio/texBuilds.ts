@@ -27,6 +27,36 @@ export function texInputInRoot(rootFile: string, path: string) {
   return !!rootFile && path.startsWith(folder) && isTexInputFile(path)
 }
 
+interface ObservedTexPdf {
+  id: string
+  saveVersion: number
+  published: boolean
+}
+
+export function observeTexPdf(
+  status: TexStatus,
+  polledSave: number,
+  submitted: ReadonlyMap<string, number>,
+  previous: ObservedTexPdf | null,
+): ObservedTexPdf | null {
+  const pdf = status.lastSuccessful
+  if (!pdf) return null
+  // Editor saves and paper publication are delivered independently. The saved
+  // workspace stamp confirms that a previously displayed PDF still covers a save.
+  const published =
+    pdf.origin === 'agent' &&
+    !!pdf.workspaceRevision &&
+    pdf.workspaceRevision === status.workspaceRevision
+  const known =
+    submitted.get(pdf.id) ??
+    (previous?.id === pdf.id ? previous.saveVersion : undefined)
+  return {
+    id: pdf.id,
+    saveVersion: published ? polledSave : (known ?? polledSave),
+    published,
+  }
+}
+
 export function texPdfIsStale(
   status: TexStatus | null,
   rootFile: string,

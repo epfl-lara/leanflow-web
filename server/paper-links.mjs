@@ -4,9 +4,10 @@ import {
   declarationKeyword,
   outlineCode,
 } from '../shared/lean-outline-code.mjs'
-import { isTexFile } from '../shared/tex.mjs'
+import { isTexFile, TEX_SOURCE_MAX_BYTES } from '../shared/tex.mjs'
 import { PAPER_LINKS_FILE } from '../shared/paper-links.mjs'
 import { validateWorkspaceFilePath } from './workspace-paths.mjs'
+import { informalizationTexPassages } from './informalization-document.mjs'
 
 export { PAPER_LINKS_FILE }
 const MAX_LINKS = 200
@@ -505,6 +506,7 @@ async function readAnchor(cache, path, read) {
 }
 
 function currentTexLines(content, anchors, includeRenderRanges) {
+  if (!anchors.length) return new Map()
   const lines = linesOf(content)
   const labels = labelLines(
     lines,
@@ -517,7 +519,7 @@ function currentTexLines(content, anchors, includeRenderRanges) {
     includeRenderRanges && labeledLines.size
       ? labeledTexEnvironments(lines, labeledLines)
       : new Map()
-  return new Map(
+  const resolved = new Map(
     anchors.map(({ id, source, sourceRevision }) => {
       const line = texLine(lines, labels, source, sourceRevision)
       return [
@@ -526,6 +528,128 @@ function currentTexLines(content, anchors, includeRenderRanges) {
       ]
     }),
   )
+  // Keep an unlabeled line linked when inserting the source reference or a
+  // paragraph ahead of it. A moved line must still match its saved bytes
+  // uniquely; editing or duplicating it requires updating the original link.
+  const missing = anchors.filter(
+    ({ id, source }) => !source.label && !resolved.get(id).line,
+  )
+  if (missing.length) {
+    const revisions = new Set(missing.map((link) => link.sourceRevision))
+    const locations = new Map()
+    for (const [index, line] of lines.entries()) {
+      if (!line.trim()) continue
+      const revision = sha256(line)
+      if (revisions.has(revision))
+        locations.set(revision, locations.has(revision) ? null : index + 1)
+    }
+    for (const { id, sourceRevision } of missing)
+      resolved.get(id).line = locations.get(sourceRevision) ?? null
+  }
+  return resolved
+}
+
+function markedTexLinks(content, path, limit) {
+  const links = []
+  for (const { key, line, startLine, endLine } of informalizationTexPassages(
+    content,
+  )) {
+    if (links.length >= limit) break
+    const ref = /^(.+?\.lean)#(.+)$/.exec(key)
+    if (
+      !ref ||
+      ref[2].length > MAX_DECLARATION_LENGTH ||
+      !exactName.test(ref[2])
+    )
+      continue
+    let targetPath
+    try {
+      targetPath = projectFile(ref[1])
+    } catch (error) {
+      if (error.status === 400) continue
+      throw error
+    }
+    const source = { path, line }
+    const target = {
+      path: targetPath,
+      declaration: ref[2].replace(/^_root_\./u, ''),
+    }
+    links.push({
+      id: linkId({ source, target }),
+      source,
+      target,
+      renderRange: { startLine, endLine },
+    })
+  }
+  return links
+}
+
+async function resolveTexPassages(
+  links,
+  papers,
+  readText,
+  includeRanges,
+  signal,
+) {
+  const sources = new Map()
+  const marked = []
+  const texAnchors = Map.groupBy(
+    links.filter(({ source }) => 'line' in source),
+    ({ source }) => source.path,
+  )
+  let bytes = 0
+  for (const file of new Set([...texAnchors.keys(), ...papers])) {
+    signal?.throwIfAborted()
+    if (
+      !texAnchors.has(file) &&
+      (bytes >= TEX_SOURCE_MAX_BYTES || marked.length >= MAX_LINKS)
+    )
+      break
+    await readAnchor(sources, file, async (filename) => {
+      const { content } = await readText(filename)
+      const anchors = currentTexLines(
+        content,
+        texAnchors.get(file) || [],
+        includeRanges,
+      )
+      if (papers.has(file)) {
+        bytes += Buffer.byteLength(content)
+        if (marked.length >= MAX_LINKS || bytes > TEX_SOURCE_MAX_BYTES)
+          return anchors
+        for (const candidate of markedTexLinks(
+          content,
+          file,
+          MAX_LINKS - marked.length,
+        )) {
+          // A formalization may already have recorded this theorem. Keep that
+          // reviewed link and use the printed range supplied by the marker.
+          const existing = texAnchors.get(file)?.find(({ id, target }) => {
+            const line = anchors.get(id).line
+            return (
+              id === candidate.id ||
+              (target.path === candidate.target.path &&
+                target.declaration === candidate.target.declaration &&
+                line >= candidate.renderRange.startLine &&
+                line <= candidate.renderRange.endLine)
+            )
+          })
+          if (existing) {
+            const anchor = anchors.get(existing.id)
+            anchor.line ??= candidate.source.line
+            anchor.renderRange ??= candidate.renderRange
+          } else {
+            anchors.set(candidate.id, {
+              line: candidate.source.line,
+              renderRange: candidate.renderRange,
+            })
+            marked.push(candidate)
+          }
+        }
+      }
+      return anchors
+    })
+  }
+  return { sources, marked }
 }
 
 export async function listPaperLinks(
@@ -533,45 +657,41 @@ export async function listPaperLinks(
   { path, sourcePaths, readText, readPdf, signal },
 ) {
   const selected = path === undefined ? undefined : projectFile(path)
-  const links = parseManifest(content).filter(({ source, target }) =>
+  const stored = parseManifest(content).filter(({ source, target }) =>
     sourcePaths
       ? sourcePaths.has(source.path)
       : selected === undefined ||
         source.path === selected ||
         target.path === selected,
   )
-  const sourceCache = new Map()
+  const papers =
+    sourcePaths ?? (isTexFile(selected) ? new Set([selected]) : new Set())
+  const { sources, marked } = await resolveTexPassages(
+    stored,
+    papers,
+    readText,
+    !!sourcePaths,
+    signal,
+  )
+  const links = [...stored, ...marked]
+  const pdfCache = new Map()
   const targetCache = new Map()
   const names = new Map()
-  const texAnchors = new Map()
-  for (const link of links) {
-    const { source, target } = link
+  for (const { target } of links) {
     if (!names.has(target.path)) names.set(target.path, new Set())
     names.get(target.path).add(target.declaration)
-    if ('line' in source) {
-      if (!texAnchors.has(source.path)) texAnchors.set(source.path, [])
-      texAnchors.get(source.path).push(link)
-    }
   }
   const result = []
   for (const { id, source, target, sourceRevision, targetRevision } of links) {
     signal?.throwIfAborted()
-    const sourceData = await readAnchor(
-      sourceCache,
-      source.path,
-      async (filename) =>
-        isPdfFile(filename)
-          ? sha256((await readPdf(filename)).content)
-          : currentTexLines(
-              (await readText(filename)).content,
-              texAnchors.get(filename),
-              !!sourcePaths,
-            ),
-    )
-    const anchor = 'line' in source ? sourceData?.get(id) : null
+    const anchor = sources.get(source.path)?.get(id)
     const sourceLine = anchor?.line
     const sourceCurrent =
-      'page' in source ? sourceData === sourceRevision : !!sourceLine
+      'page' in source
+        ? (await readAnchor(pdfCache, source.path, async (filename) =>
+            sha256((await readPdf(filename)).content),
+          )) === sourceRevision
+        : !!sourceLine
     const candidates = await readAnchor(
       targetCache,
       target.path,
@@ -583,10 +703,14 @@ export async function listPaperLinks(
     )
     const destination =
       matching.length === 1 &&
-      (matching[0].revision === targetRevision ||
+      (!targetRevision ||
+        matching[0].revision === targetRevision ||
         matching[0].legacyRevision === targetRevision)
         ? matching[0]
         : null
+    // A comment supplies a name rather than a saved destination line. Only
+    // expose its link when that name resolves uniquely in the referenced file.
+    if (!targetRevision && !destination) continue
     result.push({
       id,
       source: sourceLine ? { ...source, line: sourceLine } : source,

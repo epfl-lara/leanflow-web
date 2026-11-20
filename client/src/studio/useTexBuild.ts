@@ -8,7 +8,7 @@ import {
   type TexBuild,
   type TexStatus,
 } from './api'
-import { texBuildIsActive } from './texBuilds'
+import { observeTexPdf, texBuildIsActive } from './texBuilds'
 
 export function useTexBuild({
   projectId,
@@ -16,6 +16,7 @@ export function useTexBuild({
   visible,
   dirty,
   saveVersion,
+  projectRevision,
   save,
 }: {
   projectId: string
@@ -23,6 +24,7 @@ export function useTexBuild({
   visible: boolean
   dirty: boolean
   saveVersion: number
+  projectRevision?: string
   save: () => Promise<void>
 }) {
   const [status, setStatus] = useState<TexStatus | null>(null)
@@ -45,11 +47,8 @@ export function useTexBuild({
   const manualPending = useRef(false)
   const conflictRetries = useRef(0)
   const latest = useRef({ saveVersion, dirty })
-  const buildVersions = useRef(new Map<string, { saveVersion: number }>())
-  const successVersion = useRef<{
-    id: string
-    saveVersion: number
-  } | null>(null)
+  const buildVersions = useRef(new Map<string, number>())
+  const successVersion = useRef<ReturnType<typeof observeTexPdf>>(null)
   latest.current = { saveVersion, dirty }
   const base = `/api/projects/${encodeURIComponent(projectId)}/tex`
   const statusPath = rootFile
@@ -62,6 +61,12 @@ export function useTexBuild({
       : null
   const active = !!activeBuild
   const buildId = status?.build?.id
+  const capturedSave =
+    successVersion.current?.published && successVersion.current.id === buildId
+      ? successVersion.current.saveVersion
+      : buildId
+        ? buildVersions.current.get(buildId)
+        : undefined
   const buildWorkspaceRevision = status?.build?.workspaceRevision
 
   useEffect(() => {
@@ -77,6 +82,7 @@ export function useTexBuild({
     const controller = new AbortController()
     const poll = async () => {
       const epoch = requestEpoch.current
+      const polledSave = latest.current.saveVersion
       let delay = visible ? 5000 : 30000
       try {
         const value = await api<TexStatus>(statusPath, {
@@ -104,15 +110,12 @@ export function useTexBuild({
             conflictRetries.current = 0
             setBusyBlocked(false)
           } else if (conflictRetries.current <= 1) setBusyBlocked(false)
-          const successful = value.lastSuccessful
-          if (successful && successful.id !== successVersion.current?.id) {
-            const versions =
-              buildVersions.current.get(successful.id) ?? latest.current
-            successVersion.current = {
-              id: successful.id,
-              saveVersion: versions.saveVersion,
-            }
-          }
+          successVersion.current = observeTexPdf(
+            value,
+            polledSave,
+            buildVersions.current,
+            successVersion.current,
+          )
         }
       } catch (error) {
         if (!cancelled && epoch === requestEpoch.current)
@@ -126,7 +129,7 @@ export function useTexBuild({
       controller.abort()
       clearTimeout(timer)
     }
-  }, [statusPath, visible, refresh, saveVersion])
+  }, [statusPath, visible, refresh, saveVersion, projectRevision])
 
   useEffect(() => {
     const retry = () => setRefresh((value) => value + 1)
@@ -181,7 +184,7 @@ export function useTexBuild({
         pendingWorkspace.current = null
         manualPending.current = false
         setQueued(false)
-        const versions = { ...latest.current }
+        const submittedSave = latest.current.saveVersion
         submitted = true
         const build = await post<TexBuild>(`${base}/build`, {
           rootFile,
@@ -191,7 +194,7 @@ export function useTexBuild({
         ++requestEpoch.current
         conflictRetries.current = 0
         setBusyBlocked(false)
-        buildVersions.current.set(build.id, versions)
+        buildVersions.current.set(build.id, submittedSave)
         if (buildVersions.current.size > 64) {
           const oldest = buildVersions.current.keys().next().value
           if (oldest) buildVersions.current.delete(oldest)
@@ -261,13 +264,12 @@ export function useTexBuild({
     // an input snapshot which is already running or has already finished.
     if (workspaceRevision && buildWorkspaceRevision === workspaceRevision)
       pendingWorkspace.current = null
-    const captured = buildId && buildVersions.current.get(buildId)
     if (
       !manualPending.current &&
       conflictRetries.current === 0 &&
-      captured &&
+      capturedSave !== undefined &&
       pendingSave.current !== null &&
-      captured.saveVersion >= pendingSave.current
+      capturedSave >= pendingSave.current
     )
       pendingSave.current = null
     const pending =
@@ -299,7 +301,7 @@ export function useTexBuild({
     status?.available,
     status?.workspaceRevision,
     buildWorkspaceRevision,
-    buildId,
+    capturedSave,
     start,
   ])
 

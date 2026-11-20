@@ -417,6 +417,8 @@ export function LeanWorkspace({
   const [requestIssue, setRequestIssue] = useState('')
   const [renameIssue, setRenameIssue] = useState('')
   const [loading, setLoading] = useState(true)
+  const [visibleEditor, setVisibleEditor] =
+    useState<monacoEditor.IStandaloneCodeEditor>()
   const proofChecksPaused = !!(
     sleeping ||
     restarting ||
@@ -900,6 +902,7 @@ export function LeanWorkspace({
   useEffect(() => {
     let cancelled = false
     let ownEditor: WorkspaceEditor | null = null
+    setVisibleEditor(undefined)
     setLoading(true)
     declarationsRef.current = []
     setRenameIssue('')
@@ -1003,6 +1006,7 @@ export function LeanWorkspace({
           await active.modelCache.retain(uri)
         if (cancelled || runtime.current !== active) return
         active.visibleReadyPath = snapshot.path
+        setVisibleEditor(editor)
         editor.updateOptions({
           scrollBeyondLastLine: false,
           padding: { top: 16, bottom: 16 },
@@ -1485,29 +1489,31 @@ export function LeanWorkspace({
   }, [collaborators])
 
   useLayoutEffect(() => {
-    const editor = runtime.current?.editor?.editor
-    const model = editor?.getModel()
+    // A cached link can arrive before the asynchronously opened editor. The
+    // editor identity changes even when React batches both loading updates.
+    const model = visibleEditor?.getModel()
     if (
       loading ||
       joining ||
       !file ||
       file.unavailable ||
       file.savedContent !== file.content ||
-      !editor ||
+      !visibleEditor ||
+      visibleEditor !== runtime.current?.editor?.editor ||
       !model ||
       !paperLinks?.length ||
       model.uri.path !== `/workspace/${file.path}`
     )
       return
     return decoratePaperLinks(
-      editor,
+      visibleEditor,
       model,
       file.path,
       paperLinks,
       (location) => paperLinkActions.current.onOpenPaperLink?.(location),
       () => paperLinkActions.current.onShowPaperLinks?.(),
     )
-  }, [file, joining, loading, paperLinks])
+  }, [file, joining, loading, paperLinks, visibleEditor])
 
   useEffect(() => {
     void serialize(() =>

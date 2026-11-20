@@ -554,7 +554,13 @@ async function copyWorkspace(
 
 // TeX receives a bounded immutable copy, never the editable project or candidate.
 // Descriptor anchors prevent a changing parent directory from redirecting reads.
-async function captureTexInputs(source, target, signal, rootFile = 'main.tex') {
+async function captureTexInputs(
+  source,
+  target,
+  signal,
+  rootFile = 'main.tex',
+  hashInputs = Boolean(target),
+) {
   const selected = safeTexPath(rootFile)
   const prefix =
     path.posix.dirname(selected) === '.' ? '' : path.posix.dirname(selected)
@@ -623,7 +629,7 @@ async function captureTexInputs(source, target, signal, rootFile = 'main.tex') {
               mtime: before.mtimeMs,
               ctime: before.ctimeMs,
             })
-            if (!destination) {
+            if (!hashInputs) {
               bytes += before.size
               if (bytes > TEX_SOURCE_MAX_BYTES)
                 fail('TeX inputs exceed 64 MiB.', 413)
@@ -667,7 +673,8 @@ async function captureTexInputs(source, target, signal, rootFile = 'main.tex') {
                 409,
               )
             const content = Buffer.concat(chunks, size)
-            await fs.writeFile(output, content, { flag: 'wx', mode: 0o400 })
+            if (output)
+              await fs.writeFile(output, content, { flag: 'wx', mode: 0o400 })
             bytes += size
             files.push({ path: relative, hash: sha(content), size })
           } finally {
@@ -5281,6 +5288,14 @@ export class WorkspaceStore {
     const project = this.get(id, owner)
     return (await captureTexInputs(project.root, null, signal, rootFile))
       .workspaceRevision
+  }
+
+  async savedTexInputs(id, owner, rootFile, { signal } = {}) {
+    return this.#locked(id, async () => {
+      const project = this.get(id, owner)
+      this.assertRecoveryReady(id)
+      return captureTexInputs(project.root, null, signal, rootFile, true)
+    })
   }
 
   async captureTexSource(

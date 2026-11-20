@@ -14,6 +14,8 @@ import { EventStore } from '../events.mjs'
 import { WorkspaceStore } from '../workspaces.mjs'
 import { Runtime } from '../runtime.mjs'
 import { TexBuildManager } from '../tex-builds.mjs'
+import { projectTexPaperLinks } from '../paper-links.mjs'
+import { pdfSourceLinkMatches } from '../../client/src/studio/pdfSourceNavigation.ts'
 import { prepareInformalizationSources } from '../informalization.mjs'
 import net from 'node:net'
 
@@ -1889,6 +1891,33 @@ test(
     assert.deepEqual([...output.paths].sort(), Object.keys(files).sort())
     const pdf = await tex.readPdf('alice', output.buildId)
     assert.equal(pdf.content.subarray(0, 5).toString(), '%PDF-')
+    const preview = await tex.state('alice', f.project.id, {
+      rootFile: output.path,
+    })
+    assert.equal(preview.lastSuccessful?.id, output.buildId)
+    assert.equal(
+      preview.lastSuccessful.workspaceRevision,
+      preview.workspaceRevision,
+    )
+    assert.equal(preview.lastSuccessful.syncTexAvailable, true)
+    const boxes = await tex.readSyncTex('alice', output.buildId, 1)
+    const links = await projectTexPaperLinks(
+      f.workspaces,
+      f.project.id,
+      'alice',
+      boxes.map((box) => box.path),
+    )
+    assert.deepEqual(
+      links
+        .filter((link) => boxes.some((box) => pdfSourceLinkMatches(link, box)))
+        .map(({ target }) => [target.path, target.line, target.declaration])
+        .sort(),
+      [
+        ['Pairs.lean', 1, 'pairSwap'],
+        ['Relations.lean', 2, 'Example.keep'],
+      ],
+    )
+    await tex.assertSyncTexCurrent('alice', output.buildId)
     const pdfText = (
       await tex.readText('alice', output.buildId)
     ).content.replace(/\s+/g, ' ')

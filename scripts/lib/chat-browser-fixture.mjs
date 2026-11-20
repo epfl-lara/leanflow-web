@@ -322,6 +322,7 @@ export async function chatBrowserFixture({
         const sources = state.files[project.id]
         if (endpoint === prefix) return respond(project)
         if (endpoint === `${prefix}/terminal-recoveries`) return respond([])
+        if (endpoint === `${prefix}/paper-links`) return respond({ links: [] })
         if (endpoint === `${prefix}/files`)
           return respond(
             Object.entries(sources).map(([path, content]) => ({

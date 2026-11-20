@@ -47,6 +47,7 @@ import { FileTabs } from './FileTabs'
 import { WorkspaceBuffers, type WorkspaceScope } from './workspaceBuffers'
 import { useAutosave } from './useAutosave'
 import { PdfFileViewer } from './PdfFileViewer'
+import { PaperPdfDialog, type PaperPdf } from './PaperPdfDialog'
 import { PaperLinksPanel } from './PaperLinksPanel'
 import { usePaperLinks } from './usePaperLinks'
 import { ImageFileViewer } from './ImageFileViewer'
@@ -370,6 +371,9 @@ export function Studio() {
   } | null>(null)
   const setupEditor = useRef<HTMLTextAreaElement>(null)
   const [paperLinksOpen, setPaperLinksOpen] = useState(false)
+  const [paperPdf, setPaperPdf] = useState<
+    (PaperPdf & { scope: WorkspaceScope; userId: string }) | null
+  >(null)
   const [paperPage, setPaperPage] = useState<{
     id: number
     path: string
@@ -689,6 +693,11 @@ export function Studio() {
       ? file.path
       : null
   const hasPaperLinks = files.some(({ path }) => path === PAPER_LINKS_FILE)
+  const savedTex = isTexFile(file?.path) ? file?.savedContent : undefined
+  const hasLeanReference = useMemo(
+    () => !!savedTex && /^[\t ]*% Lean: /m.test(savedTex),
+    [savedTex],
+  )
   const {
     result: paperLinkResult,
     previousLinks: previousPaperLinks,
@@ -697,7 +706,10 @@ export function Studio() {
   } = usePaperLinks({
     accountId: session?.user.id,
     projectId,
-    path: paperLinksOpen || hasPaperLinks ? paperLinkPath : null,
+    path:
+      paperLinksOpen || hasPaperLinks || hasLeanReference
+        ? paperLinkPath
+        : null,
     files,
     buffers,
   })
@@ -4263,9 +4275,7 @@ export function Studio() {
                     saveVersion={saveVersion}
                     savedPaths={savedPaths}
                     dirtyPaths={dirtyPaths}
-                    paperLinkRevision={
-                      hasPaperLinks ? paperLinkRevision : undefined
-                    }
+                    paperLinkRevision={paperLinkRevision}
                     save={saveWorkspace}
                     onOpenPaperLink={openPaperLocation}
                     onOpenFile={(path, line, column) => {
@@ -4551,6 +4561,9 @@ export function Studio() {
             {assistantProjectAvailable ? (
               <AssistantPanel
                 onOpenSettings={() => setSettingsModal(true)}
+                onOpenPdf={(pdf) =>
+                  setPaperPdf({ ...pdf, scope, userId: session.user.id })
+                }
                 key={`${session.user.id}:${project.id}`}
                 projectId={project.id}
                 file={
@@ -4663,6 +4676,25 @@ export function Studio() {
           onClose={() => setLibrarySource(null)}
         />
       )}
+      {paperPdf &&
+        paperPdf.scope === scope &&
+        paperPdf.userId === session.user.id &&
+        projectId && (
+          <PaperPdfDialog
+            key={paperPdf.buildId}
+            projectId={projectId}
+            pdf={paperPdf}
+            dirtyPaths={dirtyPaths}
+            revision={JSON.stringify([saveVersion, paperLinkRevision])}
+            onClose={() => setPaperPdf(null)}
+            onOpen={(target) => {
+              setPaperPdf(null)
+              setEditorHidden(false)
+              if (mobileLayout) setToolsOpen(false)
+              openPaperLocation(target)
+            }}
+          />
+        )}
       {deleteTarget && (
         <Dialog
           title={`Delete ${deleteTarget.kind === 'project' && projects.find((item) => item.id === deleteTarget.projectId)?.kind === 'single-file' ? 'playground' : deleteTarget.kind}?`}

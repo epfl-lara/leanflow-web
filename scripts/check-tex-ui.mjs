@@ -5,6 +5,10 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import express from 'express'
+import {
+  projectPaperLinks,
+  projectTexPaperLinks,
+} from '../server/paper-links.mjs'
 import { isTexInputFile } from '../shared/tex.mjs'
 import { fixturePdf } from './lib/pdf-fixture.mjs'
 import {
@@ -77,15 +81,18 @@ const popupPdfRequests = []
 const popupErrors = []
 const syncRequests = []
 const sourceBoxes = [
-  { path: 'chapter.tex', line: 2, x: 68, y: 57, width: 125, height: 25 },
+  { path: 'chapter.tex', line: 3, x: 68, y: 57, width: 125, height: 25 },
   { path: 'main.tex', line: 5, x: 270, y: 57, width: 60, height: 25 },
 ]
-const linkedStatement = {
-  id: 'generated-pdf-link',
-  source: { path: 'chapter.tex', line: 1, label: 'sec:fixture' },
-  renderRange: { startLine: 1, endLine: 2 },
-  target: { path: 'Main.lean', line: 1, declaration: 'linked_statement' },
-  status: 'current',
+const linkWorkspace = {
+  accessibleProject() {
+    return { id: projectId }
+  },
+  async readFile(_project, _actor, name) {
+    if (!Object.hasOwn(files, name))
+      throw Object.assign(new Error('File not found'), { status: 404 })
+    return { content: files[name], hash: hash(files[name]) }
+  },
 }
 try {
   fixture = await chatBrowserFixture({
@@ -156,15 +163,30 @@ try {
       },
     })
   })
+  await page.route('**/api/projects/*/paper-links?*', async (route) => {
+    const filename = new URL(route.request().url()).searchParams.get('path')
+    await route.fulfill({
+      json: await projectPaperLinks(
+        linkWorkspace,
+        projectId,
+        'fixture-owner',
+        filename,
+      ),
+    })
+  })
   await page.route('**/api/projects/*/tex**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
     if (url.pathname.endsWith('/synctex')) {
       const page = Number(url.searchParams.get('page'))
       syncRequests.push({ page, pathname: url.pathname })
-      return route.fulfill({
-        json: { page, boxes: sourceBoxes, links: [linkedStatement] },
-      })
+      const links = await projectTexPaperLinks(
+        linkWorkspace,
+        projectId,
+        'fixture-owner',
+        sourceBoxes.map((box) => box.path),
+      )
+      return route.fulfill({ json: { page, boxes: sourceBoxes, links } })
     }
     if (url.pathname.endsWith('/pdf')) {
       pdfRequests.push(url.pathname)
@@ -1144,16 +1166,36 @@ try {
     'Refresh build status shows a failed refresh without discarding the last PDF; a successful manual refresh permits one idle retry, while persistent 409 responses cannot create an automatic retry loop.',
   )
 
-  rejectBuilds = 0
   if ((await optionsButton.getAttribute('aria-expanded')) !== 'true')
     await optionsButton.click()
   await panel.getByLabel('Rebuild on save').uncheck()
   await panel.getByLabel('LaTeX root document').selectOption('main.tex')
+  // Start the publication case without the manual build deliberately left
+  // waiting for a busy compiler in the previous case.
+  await page.reload()
+  rejectBuilds = 0
   await open('main.tex')
-  const beforeMappedBuild = builds.length
-  await buildButton.click()
-  await until(() => builds.length === beforeMappedBuild + 1, 'mapped PDF build')
-  build.syncTexAvailable = true
+  await until(
+    () => buildButton.isEnabled(),
+    'paper preview ready before publication',
+  )
+  const beforePublication = buildAttempts
+  files['chapter.tex'] = [
+    '% Lean: Main.lean#linked_statement',
+    '\\begin{theorem}',
+    'The linked statement holds.',
+    '\\end{theorem}',
+    '\\begin{proof}This follows immediately.\\end{proof}',
+  ].join('\n')
+  workspaceVersion++
+  build = {
+    ...build,
+    id: 'saved-informalize',
+    origin: 'agent',
+    rootFile: 'main.tex',
+    workspaceRevision: workspaceRevision('main.tex'),
+    syncTexAvailable: true,
+  }
   finish('completed')
   const sheet = panel.locator('.linked-pdf-sheet')
   const highlight = sheet.locator('.linked-pdf-source-hit')
@@ -1162,6 +1204,11 @@ try {
     name: 'Open linked_statement in Lean',
   })
   await openLean.waitFor()
+  assert.equal(
+    buildAttempts,
+    beforePublication,
+    'Showing a saved Informalize PDF needs no build request',
+  )
   assert.equal(await sheet.locator('.linked-pdf-lean-badge').count(), 1)
   assert.equal(
     await highlight.count(),
@@ -1191,11 +1238,15 @@ try {
   await selectedTab('main.tex').waitFor()
   await highlight.dblclick()
   await selectedTab('chapter.tex').waitFor()
-  await sourceLine(2).waitFor()
+  await sourceLine(3).waitFor()
   assert(await editor().evaluate((editor) => editor === document.activeElement))
   await highlight.hover()
   await sheet.getByText('Open in Lean', { exact: true }).waitFor()
   await openLean.click()
+  await selectedTab('Main.lean').waitFor()
+  await sourceLine(1).waitFor()
+  await open('chapter.tex')
+  await page.locator('.monaco-editor .paper-editor-jump').first().click()
   await selectedTab('Main.lean').waitFor()
   await sourceLine(1).waitFor()
   await open('main.tex')
@@ -1204,7 +1255,7 @@ try {
   await highlight.waitFor({ state: 'hidden' })
   await panel.getByText('PDF may be out of date').waitFor()
   report.checks.push(
-    'A compiled PDF double-click focuses LaTeX, even over a linked statement. A visible Lean badge opens the declaration independently, with a preview on hover. Unsaved edits disable mappings.',
+    'A saved Informalize PDF appears automatically with Rebuild on save off. Its Lean badge and the TeX source link both open the declaration without a manifest. Double-clicking the PDF still opens LaTeX, and unsaved edits disable mappings.',
   )
 
   await page.screenshot({ path: path.join(output, 'tex-workspace.png') })

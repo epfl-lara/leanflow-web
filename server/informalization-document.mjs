@@ -270,7 +270,7 @@ const proofTitle = /^proof(?: sketch)?(?: of\s+.+)?[.:]?$/i
 
 // Markers identify the statement and the proof in any document language.
 // Recognize common native labels as well so existing papers retain their style.
-function translations(content, tex) {
+function translations(content, tex, passages) {
   const anchor = tex ? /^% Lean: (.*)$/ : /^<!-- Lean: (.*) -->$/
   const proofMarker = tex ? '% Lean proof' : '<!-- Lean proof -->'
   const sections = new Map()
@@ -279,8 +279,14 @@ function translations(content, tex) {
   let ignoredTexEnvironment
   let inProofEnvironment = false
   let inMarkdownComment = false
+  let lineNumber = 0
+  let passage
   const addVisible = (value) => {
     if (!current || !part) return
+    // A closing brace or environment may carry the printed statement's
+    // SyncTeX box even when the prose occurs on the preceding source line.
+    if (passage && part === 'statement' && value.trim())
+      passage.endLine = lineNumber
     const body = (
       tex
         ? value
@@ -321,9 +327,11 @@ function translations(content, tex) {
       return
     if (/^(?:theorem|lemma|proposition|statement|proof|sketch)$/i.test(words))
       return
+    if (passage && part === 'statement') passage.line ??= lineNumber
     current[part].push(body)
   }
   for (const value of (content || '').split(/\r?\n/)) {
+    lineNumber++
     const line = value.trim()
     if (tex) {
       if (ignoredTexEnvironment) {
@@ -362,6 +370,10 @@ function translations(content, tex) {
         sections.set(match[1], { statement: [], proof: [] })
       current = sections.get(match[1])
       part = 'statement'
+      if (passages) {
+        passage = { key: match[1], startLine: lineNumber + 1 }
+        passages.push(passage)
+      }
       proofLevel = undefined
       inProofEnvironment = false
       continue
@@ -377,6 +389,8 @@ function translations(content, tex) {
     if (tex) {
       if (/\\begin\s*\{document\}/.test(visible)) {
         sections.clear()
+        if (passages) passages.length = 0
+        passage = undefined
         current = undefined
         sectionLevel = undefined
       }
@@ -436,6 +450,15 @@ function translations(content, tex) {
     if (endDocument) break
   }
   return sections
+}
+
+// Read the same statement boundaries used by the paper coverage check. The
+// source comment itself is invisible in a PDF, so link its printed statement.
+export function informalizationTexPassages(content) {
+  if (!content.includes('% Lean: ')) return []
+  const passages = []
+  translations(content, true, passages)
+  return passages.filter(({ line }) => line !== undefined)
 }
 
 function requiresProofs(job, followups) {

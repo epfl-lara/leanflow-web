@@ -688,6 +688,154 @@ test('a clean replay PDF belongs only to its original run and must render the re
   )
 })
 
+test('the project PDF follows saved Informalize papers, with source maps checked against the saved files', async (t) => {
+  for (const scenario of [
+    'review and apply',
+    'historical save',
+    'undo without earlier PDF',
+  ]) {
+    await t.test(scenario, async (t) => {
+      const f = await fixture(t)
+      const original =
+        scenario === 'undo without earlier PDF' ? null : await f.compile()
+      const liveEdits = scenario !== 'review and apply'
+      const run = f.events.create('owner', {
+        kind: 'agent',
+        mode: 'informalize',
+        projectId: f.project.id,
+        liveEdits,
+      })
+      const snapshot = await f.workspaces.snapshot(
+        f.project.id,
+        'owner',
+        run.id,
+      )
+      await fs.writeFile(
+        path.join(snapshot.root, 'section.tex'),
+        'The completed proof.',
+      )
+      const changes = await f.workspaces.changes(snapshot)
+      const clean = await f.workspaces.verificationCopy(snapshot, changes, {
+        allowProjectFiles: true,
+      })
+      const compile = f.runtime.runTex
+      f.runtime.runTex = async (source, output, options) => {
+        const result = await compile(source, output, options)
+        await fs.writeFile(
+          path.join(output, 'result.json'),
+          JSON.stringify({ success: true, pageCount: 1 }),
+        )
+        await fs.writeFile(
+          path.join(output, 'synctex.json'),
+          JSON.stringify({
+            schema: 1,
+            paths: ['section.tex'],
+            pages: { 1: [[0, 1, 100, 50, 40, 9]] },
+          }),
+        )
+        return result
+      }
+      const checked = await f.texBuilds.wait(
+        'owner',
+        (
+          await f.start(undefined, {
+            sourceRoot: clean.root,
+            runId: run.id,
+            verificationRunId: clean.runId,
+            origin: 'agent',
+          })
+        ).id,
+      )
+      assert.equal(checked.status, 'completed', checked.error)
+      const state = async () =>
+        (await f.request('/tex?rootFile=main.tex')).json()
+      assert.equal((await state()).lastSuccessful?.id, original?.id)
+      const map = () => f.request(`/tex/builds/${checked.id}/synctex?page=1`)
+      assert.equal((await map()).status, 409)
+      const verification = {
+        complete: true,
+        editsAllowed: true,
+        kind: 'workspace',
+        informalization: {
+          document: { path: 'main.tex', buildId: checked.id },
+          sources: { status: 'checked', entries: [] },
+        },
+      }
+      f.events.updateMetadata(run.id, {
+        status: 'completed',
+        snapshot,
+        changes,
+        verification,
+      })
+      if (liveEdits) {
+        await f.workspaces.applyChanges(f.project.id, 'owner', changes, {
+          snapshot,
+          agentRunId: run.id,
+          liveEdits: true,
+        })
+        f.events.updateMetadata(run.id, {
+          liveChanges: changes,
+          liveRevision: 1,
+        })
+        // Reopen legacy receipts written before automatic PDF publication.
+        await f.texBuilds.init()
+      } else {
+        await f.compile()
+        assert.notEqual((await state()).lastSuccessful.id, checked.id)
+        const applied = await f.post(`/api/runs/${run.id}/apply`, {})
+        assert.equal(applied.status, 200, await applied.clone().text())
+      }
+      // The map must work on the first request, even before the editor checks status.
+      assert.equal((await map()).status, 200)
+      const saved = await state()
+      assert.equal(saved.build.id, checked.id)
+      assert.equal(saved.lastSuccessful.id, checked.id)
+      assert.equal(
+        saved.lastSuccessful.workspaceRevision,
+        saved.workspaceRevision,
+      )
+      assert.notEqual(saved.workspaceRevision, checked.workspaceRevision)
+      assert.equal(saved.lastSuccessful.origin, 'agent')
+      assert.equal(saved.lastSuccessful.pdf.url, checked.pdf.url)
+      await fs.writeFile(path.join(f.project.root, 'figure.png'), png)
+      assert.notEqual(
+        (await state()).workspaceRevision,
+        saved.workspaceRevision,
+      )
+      assert.equal((await map()).status, 409)
+      await fs.unlink(path.join(f.project.root, 'figure.png'))
+      assert.equal((await map()).status, 200)
+      if (liveEdits) {
+        const undone = await f.post(`/api/runs/${run.id}/undo`, {})
+        assert.equal(undone.status, 200, await undone.clone().text())
+        let preview = await state()
+        if (preview.activeBuild) {
+          await f.texBuilds.wait('owner', preview.activeBuild.id)
+          preview = await state()
+        }
+        assert.equal(
+          await fs.readFile(path.join(f.project.root, 'section.tex'), 'utf8'),
+          'Hello',
+        )
+        assert.ok(preview.lastSuccessful?.pdf)
+        assert.equal(
+          preview.lastSuccessful.workspaceRevision,
+          preview.workspaceRevision,
+        )
+        assert.notEqual(preview.lastSuccessful.id, checked.id)
+        if (original) assert.equal(preview.lastSuccessful.id, original.id)
+        const restoredId = preview.lastSuccessful.id
+        await f.texBuilds.init()
+        assert.equal((await state()).lastSuccessful.id, restoredId)
+      } else {
+        await f.texBuilds.removeRuns('owner', [run.id])
+        assert.equal((await state()).lastSuccessful.id, checked.id)
+        assert.equal((await f.request(checked.pdf.url)).status, 200)
+      }
+    })
+  }
+})
+
 test('TeX rejects missing or symlinked roots, oversized inputs, and source captures above the file-count limit', async (t) => {
   const f = await fixture(t)
   await fs.symlink(

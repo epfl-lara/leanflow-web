@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import { mkdir } from 'node:fs/promises'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
+import { fixturePdf } from './lib/pdf-fixture.mjs'
 
 const output = new URL(
   '../.runtime/informalization-result-ui/',
@@ -129,6 +130,71 @@ const turn = (run) => page.locator(`[data-run-id="${run.id}"]`)
 const card = (run) =>
   turn(run).getByRole('region', { name: 'Informalization checks' })
 try {
+  const buildBase = `/api/projects/${projectId}/tex/builds/`
+  const pdfRequests = []
+  const mappingRequests = []
+  let stale = false
+  await page.route(
+    (url) => url.pathname.startsWith(buildBase),
+    async (route) => {
+      const [id, action] = new URL(route.request().url()).pathname
+        .slice(buildBase.length)
+        .split('/')
+      assert(['paper-build', 'retry-pdf'].includes(id))
+      assert.equal(route.request().method(), 'GET')
+      if (action === 'pdf') {
+        pdfRequests.push(id)
+        return route.fulfill({
+          contentType: 'application/pdf',
+          body: fixturePdf(),
+        })
+      }
+      assert.equal(
+        id,
+        'retry-pdf',
+        'project navigation is restricted to saved papers',
+      )
+      if (!action)
+        return route.fulfill({
+          json: {
+            id,
+            rootFile: 'draft.tex',
+            pdf: { filename: 'draft.pdf' },
+            syncTexAvailable: true,
+          },
+        })
+      assert.equal(action, 'synctex')
+      mappingRequests.push(id)
+      if (stale)
+        return route.fulfill({
+          status: 409,
+          json: { error: 'Saved TeX sources changed.' },
+        })
+      return route.fulfill({
+        json: {
+          page: 1,
+          boxes: [
+            {
+              path: 'draft.tex',
+              line: 2,
+              x: 68,
+              y: 57,
+              width: 125,
+              height: 25,
+            },
+          ],
+          links: [
+            {
+              id: 'source-proof',
+              status: 'current',
+              source: { path: 'draft.tex', line: 2 },
+              target: { path: 'Main.lean', line: 1, declaration: 'proof1' },
+            },
+          ],
+        },
+      })
+    },
+  )
   await page.route(
     (url) => url.pathname === `/api/projects/${projectId}/tex`,
     (route) =>
@@ -210,7 +276,12 @@ try {
   await turn(paper).getByRole('link', { name: 'the new chapter' }).click()
   const dialog = page.getByRole('dialog', { name: 'Review document' })
   await dialog.getByText('New chapter text', { exact: false }).first().waitFor()
-  await dialog
+  await dialog.getByRole('link', { name: 'Open PDF', exact: true }).click()
+  const draftPdf = page.getByRole('dialog', { name: 'paper.pdf', exact: true })
+  await draftPdf.getByRole('button', { name: 'Reload PDF' }).waitFor()
+  assert.deepEqual(pdfRequests, ['paper-build'])
+  assert.deepEqual(mappingRequests, [])
+  await draftPdf
     .getByRole('button', { name: 'Close dialog', exact: true })
     .click()
   await turn(paper).getByRole('link', { name: 'the main paper' }).click()
@@ -284,6 +355,74 @@ try {
   await turn(failedDraft)
     .getByRole('button', { name: 'Undo agent edits' })
     .waitFor()
+  const savedPdf = card(failedDraft).getByRole('link', {
+    name: 'Open PDF',
+    exact: true,
+  })
+  assert.equal(
+    new URL(await savedPdf.getAttribute('href'), page.url()).pathname,
+    buildBase + 'retry-pdf/pdf',
+  )
+  assert.equal(
+    await card(failedDraft)
+      .getByRole('link', { name: 'Download PDF' })
+      .getAttribute('download'),
+    'draft.pdf',
+  )
+  const modifiedClickHandled = await savedPdf.evaluate((link) => {
+    let handled
+    window.addEventListener(
+      'click',
+      (event) => {
+        handled = event.defaultPrevented
+        event.preventDefault()
+      },
+      { once: true },
+    )
+    link.dispatchEvent(
+      new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: true,
+      }),
+    )
+    return handled
+  })
+  assert.equal(
+    modifiedClickHandled,
+    false,
+    'modified click keeps browser link behavior',
+  )
+  stale = true
+  await savedPdf.click()
+  const checkedPdf = page.getByRole('dialog', {
+    name: 'draft.pdf',
+    exact: true,
+  })
+  await checkedPdf
+    .getByText('LaTeX source locations are unavailable for this page.')
+    .waitFor()
+  assert.equal(
+    await checkedPdf
+      .getByRole('button', { name: 'Open proof1 in Lean' })
+      .count(),
+    0,
+  )
+  await checkedPdf.getByRole('button', { name: 'Close dialog' }).click()
+  stale = false
+  await savedPdf.click()
+  await checkedPdf.getByRole('button', { name: 'Open proof1 in Lean' }).click()
+  await checkedPdf.waitFor({ state: 'hidden' })
+  await until(
+    () =>
+      page
+        .locator('.file-tab')
+        .getAttribute('aria-label')
+        .then((s) => s?.includes('Main.lean')),
+    'open Lean from the saved chat PDF',
+  )
+  assert.equal(pdfRequests.at(-1), 'retry-pdf')
+  assert.equal(mappingRequests.at(-1), 'retry-pdf')
   await page.reload()
   await page.getByRole('button', { name: 'Lemex', exact: true }).click()
   await card(failedDraft).getByRole('button', { name: 'Open document' }).click()
@@ -295,7 +434,7 @@ try {
   assert.equal(attempts, 1)
   fixture.assertClean()
   console.log(
-    'PASS: source diagnostics, mobile layout, paper review, and rechecking a retained draft through save and Undo.',
+    'PASS: source diagnostics, mobile layout, draft recovery, and exact chat PDFs with checked Lean navigation.',
   )
 } finally {
   await browser.close()

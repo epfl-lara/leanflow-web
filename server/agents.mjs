@@ -490,6 +490,8 @@ export class AgentManager {
       verification,
       ...(saved ? { liveChanges: changes, liveRevision: 1 } : {}),
     })
+    if (saved && document.buildId)
+      this.texBuilds?.publishPaper?.(job, document.buildId)
     this.#emit(id, 'changes', { changes })
     if (saved)
       this.#emit(id, 'files-updated', {
@@ -2282,6 +2284,8 @@ export class AgentManager {
       })
     this.#log(id, 'Accepted candidate changes.\n')
     this.events.update(id, { status: 'applied' })
+    const paper = job.verification?.informalization?.document
+    if (paper?.buildId) this.texBuilds?.publishPaper?.(job, paper.buildId)
     // Live edits were rebuilt when the turn finished. Review-first edits reach
     // the saved workspace here and need their own build before editor refresh.
     if (
@@ -2332,6 +2336,17 @@ export class AgentManager {
       liveUndone: true,
       liveRevision: (job.liveRevision || 0) + 1,
     })
+    const paper = job.verification?.informalization?.document
+    if (paper?.buildId && this.texBuilds?.restorePaperPreview) {
+      try {
+        await this.texBuilds.restorePaperPreview(job, paper)
+      } catch (error) {
+        this.#log(
+          id,
+          `The files were restored. PDF refresh: ${error.message}\n`,
+        )
+      }
+    }
     this.#emit(id, 'files-updated', { paths, live: true, reason: 'undo' })
     this.#log(id, 'Restored the saved files from before this run.\n')
     return this.events.get(id, owner)

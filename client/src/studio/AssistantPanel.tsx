@@ -14,6 +14,7 @@ import {
 import { Icon } from './Icons'
 import { HelpTip } from './HelpTip'
 import { Dialog } from './Dialog'
+import type { PaperPdf } from './PaperPdfDialog'
 import { ChatPicker, type ChatChoice } from './ChatPicker'
 import { FileContextPicker } from './FileContextPicker'
 import { FileMentionTextarea } from './FileMentionTextarea'
@@ -129,11 +130,13 @@ export function AssistantPanel({
   draftRequest,
   onDraftRequestHandled,
   onOpenTarget,
+  onOpenPdf,
   onFocusHandled,
   editorProof,
   onFocusEditor,
 }: {
   projectId: string
+  onOpenPdf?: (pdf: PaperPdf) => void
   file?: string
   currentFile?: string
   files: FileEntry[]
@@ -1276,6 +1279,7 @@ export function AssistantPanel({
                 onUndo={(id) => void undo(id)}
                 onInspect={inspect}
                 onRecheck={onRecheck}
+                onOpenPdf={onOpenPdf}
                 canUndo={
                   canRun &&
                   !runUnavailableReason &&
@@ -1584,6 +1588,14 @@ export function AssistantPanel({
                 projectId={projectId}
                 saved={runFilesSaved(dialogRun)}
                 reviewFirst={!dialogRun.liveEdits}
+                onOpenPdf={
+                  onOpenPdf && !applying && !discarding
+                    ? (pdf) => {
+                        setDialogId(null)
+                        onOpenPdf(pdf)
+                      }
+                    : undefined
+                }
                 onRecheck={
                   onRecheck && !runIsActive(dialogRun) && !dialogRun.liveUndone
                     ? () => onRecheck(dialogRun)

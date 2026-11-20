@@ -7,6 +7,7 @@ import {
   listPaperLinks,
   makePaperLink,
   PAPER_LINKS_FILE,
+  projectPaperLinks,
   projectTexPaperLinks,
   upsertPaperLink,
 } from '../paper-links.mjs'
@@ -118,9 +119,11 @@ test('TeX label moves are resolved and duplicate live labels or Lean declaration
   f.files.set(texPath, 'Preface\n' + f.files.get(texPath))
   const [labelled, bare] = await f.list(manifest, texPath)
   assert.deepEqual(
-    [labelled.status, labelled.source.line, bare.status],
-    ['current', 3, 'stale'],
+    [labelled.status, labelled.source.line, bare.status, bare.source.line],
+    ['current', 3, 'current', 4],
   )
+  f.files.set(texPath, f.files.get(texPath) + 'The trace exists.\n')
+  assert.equal((await f.list(manifest, texPath))[1].status, 'stale')
 
   f.files.set(
     leanPath,
@@ -138,6 +141,82 @@ test('TeX label moves are resolved and duplicate live labels or Lean declaration
   )
   f.files.set(texPath, f.files.get(texPath) + '\\label{thm:trace}\n')
   assert.equal((await f.list(manifest, texPath))[0].status, 'stale')
+})
+
+test('an informalized theorem in a multi-file TeX paper links from its statement and printed PDF lines without a manifest', async () => {
+  const f = fixture()
+  const chapter = 'chapters/results.tex'
+  const theorem = '% Lean: ' + leanPath + '#Trace.existsTrace'
+  const paper = [
+    '% Lean: Forbidden.lean#beforeDocument',
+    'not printed',
+    '\\begin{document}',
+    '\\begin{verbatim}',
+    '% Lean: Forbidden.lean#inExample',
+    'not a statement',
+    '\\end{verbatim}',
+    theorem,
+    '\\theorembox{%',
+    'The trace exists.',
+    '}',
+    '\\heading{Proof}',
+    'By induction.',
+    '% Lean: ../Forbidden.lean#outside',
+    'Outside the project.',
+    '% Lean: .lake/packages/Foo/Forbidden.lean#dependency',
+    'Dependency.',
+    '% Lean: ' + leanPath + '#Trace.missing',
+    'A missing declaration.',
+    '\\end{document}',
+    '% Lean: Forbidden.lean#afterDocument',
+    'not printed',
+  ].join('\n')
+  f.files.set(chapter, paper)
+  const reads = []
+  const store = {
+    accessibleProject() {},
+    readFile(_project, _actor, path) {
+      reads.push(path)
+      assert([PAPER_LINKS_FILE, chapter, leanPath].includes(path), path)
+      return f.readers.readText(path)
+    },
+  }
+  const { links } = await projectPaperLinks(store, 'project', 'reader', chapter)
+  assert.equal(links.length, 1)
+  const link = links[0]
+  assert.equal(link.status, 'current')
+  assert.deepEqual(link.source, { path: chapter, line: 10 })
+  assert.deepEqual(link.renderRange, { startLine: 9, endLine: 11 })
+  assert.deepEqual(link.target, {
+    path: leanPath,
+    line: 2,
+    declaration: 'Trace.existsTrace',
+  })
+  assert.deepEqual(reads, [PAPER_LINKS_FILE, chapter, leanPath])
+  assert.deepEqual(
+    await projectTexPaperLinks(store, 'project', 'reader', [chapter]),
+    links,
+  )
+
+  // Formalize and Informalize can both identify the same printed statement.
+  const stored = await f.make({ path: chapter, line: 10 })
+  f.files.set(PAPER_LINKS_FILE, upsertPaperLink(null, stored))
+  assert.deepEqual(
+    await projectTexPaperLinks(store, 'project', 'reader', [chapter]),
+    links,
+  )
+
+  f.files.delete(PAPER_LINKS_FILE)
+  f.files.set(leanPath, '\n' + f.files.get(leanPath))
+  const [moved] = await projectTexPaperLinks(store, 'project', 'reader', [
+    chapter,
+  ])
+  assert.equal(moved.target.line, 3)
+  f.files.set(leanPath, f.files.get(leanPath) + f.files.get(leanPath))
+  assert.deepEqual(
+    await projectTexPaperLinks(store, 'project', 'reader', [chapter]),
+    [],
+  )
 })
 
 test('editing an inline Lean proof keeps the link while changing its statement makes it stale', async () => {

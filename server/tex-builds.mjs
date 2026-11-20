@@ -165,6 +165,38 @@ export class TexBuildManager {
         job.projectId,
       ])
     }
+    // Restore the project preview from durable save receipts, including papers
+    // saved before checked assistant PDFs were published in the editor.
+    for (const {
+      id,
+      owner,
+      projectId,
+      originRunId,
+      pdfRevision,
+      publishedAt,
+    } of jobs) {
+      if (!originRunId || !pdfRevision) continue
+      const parent = this.events.db
+        .prepare('SELECT payload FROM jobs WHERE id=? AND owner=?')
+        .get(originRunId, owner)
+      if (!parent) continue
+      const run = JSON.parse(parent.payload)
+      if (
+        run.mode !== 'informalize' ||
+        run.projectId !== projectId ||
+        run.verification?.informalization?.document?.buildId !== id
+      )
+        continue
+      if (run.liveUndone) {
+        if (publishedAt)
+          this.events.updateMetadata(id, { publishedAt: undefined })
+      } else if (
+        !publishedAt &&
+        (run.status === 'applied' || (run.liveEdits && run.liveRevision))
+      ) {
+        this.publishPaper(run, id, run.updatedAt)
+      }
+    }
     for (const [owner, projectId] of projects.values())
       await this.#prune(owner, projectId)
     return this
@@ -229,7 +261,7 @@ export class TexBuildManager {
         ? { pageCount: job.pageCount }
         : {}),
       log: (job.log || '').slice(-64000),
-      origin: job.originRunId ? 'agent' : 'user',
+      origin: job.origin || (job.originRunId ? 'agent' : 'user'),
       cleanupFailed: job.cleanupFailed === true,
       ...(job.error ? { error: job.error } : {}),
       ...(job.pdfRevision && !job.artifactsRemoved
@@ -258,7 +290,13 @@ export class TexBuildManager {
     const latest = (successful = false, selectedRoot) => {
       const row = this.events.db
         .prepare(
-          `SELECT id FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.kind')='tex' AND json_extract(payload,'$.originRunId') IS NULL ${selectedRoot ? "AND json_extract(payload,'$.rootFile')=?" : ''} ${successful ? "AND json_extract(payload,'$.status')='completed' AND json_extract(payload,'$.pdfRevision') IS NOT NULL" : ''} ORDER BY rowid DESC LIMIT 1`,
+          `SELECT id FROM jobs
+           WHERE owner=? AND json_extract(payload,'$.projectId')=?
+             AND json_extract(payload,'$.kind')='tex'
+             AND (json_extract(payload,'$.originRunId') IS NULL OR json_extract(payload,'$.publishedAt') IS NOT NULL)
+             ${selectedRoot ? "AND json_extract(payload,'$.rootFile')=?" : ''}
+             ${successful ? "AND json_extract(payload,'$.status')='completed' AND json_extract(payload,'$.pdfRevision') IS NOT NULL" : ''}
+           ORDER BY coalesce(json_extract(payload,'$.publishedAt'),json_extract(payload,'$.createdAt')) DESC, rowid DESC LIMIT 1`,
         )
         .get(owner, projectId, ...(selectedRoot ? [selectedRoot] : []))
       return row ? this.#public(this.events.getMetadata(row.id, owner)) : null
@@ -282,11 +320,101 @@ export class TexBuildManager {
           owner,
           selectedRoot,
         )
+        if (lastSuccessful && workspaceRevision) {
+          const previous = this.#job(owner, lastSuccessful.id)
+          if (
+            previous.publishedAt &&
+            previous.workspaceRevision !== workspaceRevision
+          ) {
+            lastSuccessful.workspaceRevision = await this.#boundRevision(
+              previous,
+              workspaceRevision,
+            )
+            if (build?.id === lastSuccessful.id)
+              build.workspaceRevision = lastSuccessful.workspaceRevision
+          }
+        }
       } catch {
         /* A retained PDF remains usable when current inputs cannot be inspected. */
       }
     }
     return { ...info, workspaceRevision, build, activeBuild, lastSuccessful }
+  }
+
+  #paperBuild(job, buildId) {
+    if (!buildId) return null
+    let build
+    try {
+      build = this.#job(job.owner, buildId, { requireProject: false })
+    } catch (error) {
+      if (error.status === 404) return null
+      throw error
+    }
+    return build.projectId === job.projectId &&
+      build.originRunId === job.id &&
+      build.status === 'completed' &&
+      build.pdfRevision &&
+      !build.artifactsRemoved
+      ? build
+      : null
+  }
+
+  publishPaper(job, buildId, at = new Date().toISOString()) {
+    const build = this.#paperBuild(job, buildId)
+    if (build && !build.publishedAt)
+      this.events.updateMetadata(buildId, { publishedAt: at })
+  }
+
+  // A verification copy has its own inodes and timestamps. Rebind its source map
+  // only when every saved compiler input matches the immutable build by content.
+  async #boundRevision(job, current, signal) {
+    if (
+      job.workspaceRevision === current ||
+      job.comparedWorkspaceRevision === current
+    )
+      return job.workspaceRevision
+    const saved = await this.workspaces.savedTexInputs(
+      job.projectId,
+      job.owner,
+      job.rootFile,
+      { signal },
+    )
+    const fields = { comparedWorkspaceRevision: saved.workspaceRevision }
+    if (saved.sourceRevision === job.sourceRevision)
+      fields.workspaceRevision = saved.workspaceRevision
+    this.events.updateMetadata(job.id, fields)
+    return fields.workspaceRevision || job.workspaceRevision
+  }
+
+  async restorePaperPreview(job, document) {
+    const build = this.#paperBuild(job, document.buildId)
+    if (build?.publishedAt)
+      this.events.updateMetadata(build.id, { publishedAt: undefined })
+    const rootFile = build?.rootFile || document.path
+    if (!isTexFile(rootFile)) return
+    const { owner, projectId } = job
+    const saved = await this.workspaces.savedTexInputs(
+      projectId,
+      owner,
+      rootFile,
+    )
+    if (!saved.files.some((file) => file.path === rootFile)) return
+    const previous = this.#rows(owner, projectId).find(
+      (row) =>
+        (!row.originRunId || row.publishedAt) &&
+        row.rootFile === rootFile &&
+        row.status === 'completed' &&
+        row.pdfRevision &&
+        row.sourceRevision === saved.sourceRevision,
+    )
+    if (previous) {
+      this.events.updateMetadata(previous.id, {
+        publishedAt: new Date().toISOString(),
+        workspaceRevision: saved.workspaceRevision,
+      })
+      return
+    }
+    await this.start(owner, projectId, { rootFile }, { waitForProject: true })
   }
 
   async start(
@@ -730,12 +858,12 @@ export class TexBuildManager {
       job.rootFile,
       { signal },
     )
+    const workspaceRevision =
+      revision && job.publishedAt
+        ? await this.#boundRevision(job, revision, signal)
+        : job.workspaceRevision
     const current = this.#job(owner, id)
-    if (
-      current.artifactsRemoved ||
-      !revision ||
-      revision !== job.workspaceRevision
-    )
+    if (current.artifactsRemoved || !revision || revision !== workspaceRevision)
       fail(
         'Saved TeX sources changed after compilation. Build the PDF again to jump to its source.',
         409,
@@ -744,7 +872,17 @@ export class TexBuildManager {
   #rows(owner, projectId) {
     return this.events.db
       .prepare(
-        "SELECT id,owner,json_extract(payload,'$.projectId') AS projectId,json_extract(payload,'$.status') AS status,json_extract(payload,'$.originRunId') AS originRunId,json_extract(payload,'$.pdfRevision') AS pdfRevision,json_extract(payload,'$.cleanupFailed') AS cleanupFailed FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=? AND json_extract(payload,'$.kind')='tex' ORDER BY rowid DESC",
+        `SELECT id, owner,
+           json_extract(payload,'$.projectId') AS projectId,
+           json_extract(payload,'$.status') AS status,
+           json_extract(payload,'$.originRunId') AS originRunId,
+           json_extract(payload,'$.publishedAt') AS publishedAt,
+           json_extract(payload,'$.rootFile') AS rootFile,
+           json_extract(payload,'$.sourceRevision') AS sourceRevision,
+           json_extract(payload,'$.pdfRevision') AS pdfRevision,
+           json_extract(payload,'$.cleanupFailed') AS cleanupFailed
+         FROM jobs WHERE owner=? AND json_extract(payload,'$.projectId')=?
+           AND json_extract(payload,'$.kind')='tex' ORDER BY rowid DESC`,
       )
       .all(owner, projectId)
   }
@@ -785,6 +923,10 @@ export class TexBuildManager {
     const retained = new Set(
       jobs.slice(0, this.retainedBuilds).map((job) => job.id),
     )
+    const published = jobs
+      .filter((job) => job.publishedAt)
+      .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))[0]
+    if (published) retained.add(published.id)
     for (const origin of [false, true]) {
       const success = jobs.find(
         (job) =>
@@ -824,13 +966,16 @@ export class TexBuildManager {
       if (!TERMINAL.has(metadata.status) || this.active.has(job.id))
         fail('Stop TeX builds before permanently deleting this chat.', 409)
     }
-    for (const job of jobs)
-      await fs.rm(this.#directory(job.id), { recursive: true, force: true })
-    if (jobs.length)
-      this.events.deleteRuns(
-        owner,
-        jobs.map((job) => job.id),
-      )
+    const removed = []
+    for (const job of jobs) {
+      if (this.events.getMetadata(job.id, owner).publishedAt) {
+        this.events.updateMetadata(job.id, { originRunId: undefined })
+      } else {
+        await fs.rm(this.#directory(job.id), { recursive: true, force: true })
+        removed.push(job.id)
+      }
+    }
+    if (removed.length) this.events.deleteRuns(owner, removed)
   }
 
   async removeProject(owner, projectId) {

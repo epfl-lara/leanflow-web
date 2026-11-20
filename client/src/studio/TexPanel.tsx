@@ -67,6 +67,7 @@ export function TexPanel({
     visible,
     dirty,
     saveVersion: inputSaveVersion,
+    projectRevision: visible ? paperLinkRevision : undefined,
     save,
   })
   const optionsId = useId()

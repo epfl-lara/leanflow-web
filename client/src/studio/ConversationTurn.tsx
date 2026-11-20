@@ -24,6 +24,7 @@ import {
 } from './InformalizationResult'
 import { CopyButton } from './CopyButton'
 import { chatFileLink } from './chatFileLink'
+import type { PaperPdf } from './PaperPdfDialog'
 
 function TargetLabel({
   target,
@@ -57,6 +58,7 @@ export const ConversationTurn = memo(function ConversationTurn({
   onUndo,
   onInspect,
   onRecheck,
+  onOpenPdf,
   canUndo,
   undoing,
   onOpenTarget,
@@ -67,6 +69,7 @@ export const ConversationTurn = memo(function ConversationTurn({
   onUndo: (id: string) => void
   onInspect: (id: string) => Promise<void>
   onRecheck?: (run: Run) => Promise<void>
+  onOpenPdf?: (pdf: PaperPdf) => void
   canUndo: boolean
   undoing: boolean
   onOpenTarget?: (target: RunProofTarget) => void
@@ -229,6 +232,7 @@ export const ConversationTurn = memo(function ConversationTurn({
             projectId={projectId || run.projectId}
             saved={saved}
             reviewFirst={!run.liveEdits}
+            onOpenPdf={onOpenPdf}
             onOpenTarget={onOpenTarget}
             onRecheck={
               onRecheck && !run.liveUndone ? () => onRecheck(run) : undefined

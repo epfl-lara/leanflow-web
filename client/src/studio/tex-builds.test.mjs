@@ -24,11 +24,46 @@ new Function('exports', 'module', 'require', outputText)(
 )
 const {
   defaultTexRoot,
+  observeTexPdf,
   texBuildIsActive,
   texLanguage,
   texPdfIsStale,
   texInputInRoot,
 } = module.exports
+
+test('an already displayed published PDF covers a late editor save only after its saved inputs match', () => {
+  const status = {
+    workspaceRevision: 'checked-proof',
+    lastSuccessful: {
+      id: 'checked-pdf',
+      origin: 'agent',
+      rootFile: 'main.tex',
+      workspaceRevision: 'checked-proof',
+      pdf: { revision: 'checked-pdf' },
+    },
+  }
+  const submitted = new Map()
+  const current = (status, seen, saved) =>
+    !texPdfIsStale(status, 'main.tex', false, saved !== seen.saveVersion)
+  const first = observeTexPdf(status, 0, submitted, null)
+  assert(current(status, first, 0))
+  assert(
+    !current(status, first, 1),
+    'the newer editor receipt has not been checked yet',
+  )
+  const matched = observeTexPdf(status, 1, submitted, first)
+  assert(current(status, matched, 1))
+  assert(matched.published)
+  const changed = { ...status, workspaceRevision: 'edited-proof' }
+  const stale = observeTexPdf(changed, 2, submitted, matched)
+  assert(!current(changed, stale, 2))
+  assert.equal(stale.saveVersion, 1)
+  assert.equal(stale.published, false)
+  assert.equal(
+    observeTexPdf({ ...status, lastSuccessful: null }, 2, submitted, stale),
+    null,
+  )
+})
 
 test('TeX save and dirty tracking includes eligible input descendants of the selected root folder', () => {
   assert.equal(texInputInRoot('paper/main.tex', 'paper/main.tex'), true)
