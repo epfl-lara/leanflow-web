@@ -499,6 +499,28 @@ test('recognizes an existing boxed theorem and its headed induction proof in a p
         /Missing proof text for Main\.lean#add_zero/,
       )
   }
+  for (const title of ['Proof', 'Preuve']) {
+    const marked = front + '\\subsection{' + title + '}\n% Lean proof\n'
+    const notes = '\\subsection{Notes}\nThese notes describe tactics.\n' + end
+    await assert.rejects(
+      verify(changed(null, marked + notes), options),
+      /Missing proof text/,
+    )
+    assert.equal(
+      (
+        await verify(
+          changed(
+            null,
+            marked +
+              '\\subsubsection{Base case}\nThe initial equation holds.\n' +
+              notes,
+          ),
+          options,
+        )
+      ).buildId,
+      'pdf',
+    )
+  }
   const absent =
     front +
     '\\heading{Proof}\n\\heading{Formalization notes}\nThese notes describe tactics.\n' +

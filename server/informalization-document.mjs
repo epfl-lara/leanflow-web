@@ -274,7 +274,7 @@ function translations(content, tex) {
   const anchor = tex ? /^% Lean: (.*)$/ : /^<!-- Lean: (.*) -->$/
   const proofMarker = tex ? '% Lean proof' : '<!-- Lean proof -->'
   const sections = new Map()
-  let current, part, proofLevel
+  let current, part, proofLevel, sectionLevel
   let definitionDepth = 0
   let ignoredTexEnvironment
   let inProofEnvironment = false
@@ -368,7 +368,9 @@ function translations(content, tex) {
     }
     if (line === proofMarker && !inMarkdownComment) {
       part = 'proof'
-      proofLevel = undefined
+      // A marker may follow a translated or custom proof heading. Keep the
+      // heading’s scope so a sibling section cannot supply its missing text.
+      proofLevel ??= sectionLevel ?? Infinity
       continue
     }
     let endDocument
@@ -376,6 +378,7 @@ function translations(content, tex) {
       if (/\\begin\s*\{document\}/.test(visible)) {
         sections.clear()
         current = undefined
+        sectionLevel = undefined
       }
       endDocument = /\\end\s*\{document\}/.exec(visible)
       if (endDocument) visible = visible.slice(0, endDocument.index)
@@ -398,18 +401,19 @@ function translations(content, tex) {
         offset = match.index + match[0].length
         const { env, section, title } = match.groups
         const level = texSectionLevel.get(section?.toLowerCase())
+        if (level !== undefined) sectionLevel = level
         if (env === 'end') {
           inProofEnvironment = false
           current = undefined
           part = undefined
         } else if (!section || proofTitle.test(title.trim())) {
           part = 'proof'
-          proofLevel = level ?? 1
+          proofLevel = sectionLevel ?? Infinity
           inProofEnvironment ||= env === 'begin'
         } else if (
           part === 'proof' &&
           !inProofEnvironment &&
-          level <= (proofLevel ?? 1)
+          level <= proofLevel
         ) {
           // A sibling heading starts a new section. Its text cannot fill an
           // empty proof above it. Nested headings can organize a longer proof.
