@@ -320,3 +320,9 @@ Drag separators to resize panels; double-click to reset.
 You stay signed in while using LeanFlow. Sign in again after 48 hours without activity. Typing, clicking, and scrolling renew your session; leaving a tab open does not. If sign-in expires, use the recovery dialog with the same access token to keep your edits and drafts. Your invitation token and saved API key are unchanged.
 
 For setup, see [Install and run](LemexWeb.md#install-and-run) and [Hosting](Hosting.md). Advanced settings are in [Configuration](Configuration.md).
+
+## Report a failure
+
+Open **Failure log** in the status bar below the editor. It updates while you work and keeps up to 50 recent summaries of failed requests, shared edits, project setup, Lean checks, editor and terminal connections, Lemex runs, and LaTeX builds. Repeated failures within a minute share an entry with a count. For compiler diagnostics or a run's full error, open the check output, project setup, or chat where it happened.
+
+Choose **Copy log** to include the timestamps, actions, and failure codes in a report to your administrator or in a bug report. The summary omits API keys, file contents, prompts, and raw output. Reloading the tab or signing out clears the log.

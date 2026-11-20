@@ -28,7 +28,7 @@ Each collaborator has an individual account and saves their own provider API key
 
 ## Contributions and issues
 
-- **Bugs and ideas:** search [existing issues](https://github.com/epfl-lara/leanflow-web/issues) before [opening an issue](https://github.com/epfl-lara/leanflow-web/issues/new). For bugs, include steps to reproduce, expected and actual behavior, and your browser and Lean version when relevant.
+- **Bugs and ideas:** search [existing issues](https://github.com/epfl-lara/leanflow-web/issues) before [opening an issue](https://github.com/epfl-lara/leanflow-web/issues/new). For bugs, include steps to reproduce, expected and actual behavior, and your browser and Lean version when relevant. Add the [failure log](doc/UsingLeanFlow.md#report-a-failure) if available.
 - **Contribute:** fork the repository, create a branch, and submit a focused pull request explaining the change and how you checked it. Discuss larger changes in an issue first.
 - **Security:** report vulnerabilities privately using the [security policy](SECURITY.md). Keep access tokens, API keys, and private project content out of issues and pull requests.
 

@@ -42,6 +42,8 @@ import { CheckControls } from './CheckControls'
 import { TrashDialog } from './TrashDialog'
 import { Icon } from './Icons'
 import { ToolbarAction } from './ToolbarAction'
+import { WorkspaceStatusBar } from './WorkspaceStatusBar'
+import { recordFailure } from './failureLog'
 import { LazyLeanWorkspace as LeanWorkspace } from './LazyLeanWorkspace'
 import { FileTabs } from './FileTabs'
 import { WorkspaceBuffers, type WorkspaceScope } from './workspaceBuffers'
@@ -165,6 +167,7 @@ interface Job {
     checkedSnapshot?: string
     hasWarnings?: boolean
     sourceChanged?: boolean
+    timedOut?: boolean
     truncated?: boolean
     [key: string]: unknown
   }
@@ -1054,6 +1057,35 @@ export function Studio() {
   }, [account, setProjectId, invitationToken, bufferStore, projectListAttempt])
 
   const preparing = projects.some((item) => item.status === 'preparing')
+  const preparingProjects = useRef(new Set<string>())
+  useEffect(() => {
+    const previous = preparingProjects.current
+    const current = new Set<string>()
+    if (sessionUser) {
+      for (const item of projects) {
+        if (item.status === 'preparing') current.add(item.id)
+        if (
+          item.status === 'error' &&
+          previous.has(item.id) &&
+          !item.error?.startsWith('Project setup stopped.') &&
+          !item.error?.startsWith(
+            'Project import stopped before cloning finished.',
+          )
+        ) {
+          recordFailure({
+            action: 'Project setup',
+            code: item.repositoryAuthenticationRequired
+              ? 'Repository access required'
+              : 'Setup failed',
+            message: item.repositoryAuthenticationRequired
+              ? 'Check the saved Git connection or update access before retrying setup.'
+              : 'Open Project setup to review the failed step, then retry setup.',
+          })
+        }
+      }
+    }
+    preparingProjects.current = current
+  }, [projects, sessionUser])
   useEffect(() => {
     setSetupDetails(false)
     if (projectId)
@@ -2114,6 +2146,44 @@ export function Studio() {
       clearTimeout(timer)
     }
   }, [job?.id, job?.status])
+
+  useEffect(() => {
+    if (
+      !sessionUser ||
+      !job ||
+      !['failed', 'error', 'interrupted'].includes(job.status)
+    )
+      return
+    const outcome = job.result?.timedOut
+      ? {
+          code: 'Check timed out',
+          message:
+            'Review the last module in the check output before retrying.',
+        }
+      : job.result?.sourceChanged && !job.result.checkedSnapshot
+        ? {
+            code: 'Sources changed',
+            message: 'Run the check again to check the current saved files.',
+          }
+        : job.status === 'interrupted'
+          ? {
+              code: 'Check interrupted',
+              message: 'Start the Lean check again.',
+            }
+          : {
+              code: 'Check failed',
+              message:
+                'Review the check output for Lean errors or worker details.',
+            }
+    recordFailure(
+      {
+        action:
+          job.checkScope === 'file' ? 'Lean file check' : 'Lean project check',
+        ...outcome,
+      },
+      `check:${job.id}`,
+    )
+  }, [job, sessionUser])
 
   async function refreshAfterApply() {
     if (!projectId || !bufferStore.isCurrent(scope)) return
@@ -4205,7 +4275,18 @@ export function Studio() {
                       setSidebarOpen(false)
                     }}
                     onState={(state) => {
-                      if (bufferStore.isCurrent(scope)) setLeanState(state)
+                      if (!bufferStore.isCurrent(scope)) return
+                      setLeanState(state)
+                      if (
+                        state === 'Lean connection failed' ||
+                        state === 'Editor update failed'
+                      )
+                        recordFailure({
+                          action: 'Lean editor',
+                          code: state,
+                          message:
+                            'Use Restart Lean to reconnect. Your open edits are kept.',
+                        })
                     }}
                     onChange={(path, content) => {
                       if (bufferStore.isCurrent(scope))
@@ -4486,7 +4567,7 @@ export function Studio() {
             }}
           />
         )}
-        <footer className="statusbar">
+        <WorkspaceStatusBar key={session.user.id}>
           <span>
             <span
               className={`status-dot ${project?.status === 'ready' && leanState === 'Lean connected' ? '' : 'muted'}`}
@@ -4515,7 +4596,7 @@ export function Studio() {
           <span title={project?.toolchain}>
             {project?.toolchain?.replace('leanprover/lean4:', 'Lean ')}
           </span>
-        </footer>
+        </WorkspaceStatusBar>
       </main>
       <aside
         className={`tools-panel ${toolsOpen ? '' : 'closed'}`}

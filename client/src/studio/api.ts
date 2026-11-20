@@ -1,4 +1,5 @@
-import { withApiRetries } from './apiTransport.mjs'
+import { ApiNetworkError, withApiRetries } from './apiTransport.mjs'
+import { recordApiFailure, resetFailureLog } from './failureLog'
 import type { ProofTarget } from './proofTarget'
 import type { ReasoningBlock } from '../../../shared/reasoning-timeline.mjs'
 export type { ReasoningBlock } from '../../../shared/reasoning-timeline.mjs'
@@ -500,6 +501,7 @@ export function bindSessionUser(userId: string | null) {
   sessionUserId = userId
   sessionBinding += 1
   sessionRevision += 1
+  resetFailureLog(userId !== null)
 }
 
 export function sessionBoundUrl(value: string | URL): string {
@@ -600,6 +602,7 @@ async function requestResult<T>(
 ): Promise<T> {
   const requestUserId = sessionUserId
   const binding = sessionBinding
+  const revision = sessionRevision
   const requireBinding = () => {
     requireCurrentSession(requestUserId)
     if (binding !== sessionBinding)
@@ -608,18 +611,30 @@ async function requestResult<T>(
         409,
       )
   }
-  return withApiRetries(
-    async () => {
-      const value = await read(await request(path, options))
-      requireBinding()
-      return value
-    },
-    {
-      method: options.method,
-      signal: options.signal,
-      beforeAttempt: requireBinding,
-    },
-  )
+  try {
+    return await withApiRetries(
+      async () => {
+        const value = await read(await request(path, options))
+        requireBinding()
+        return value
+      },
+      {
+        method: options.method,
+        signal: options.signal,
+        beforeAttempt: requireBinding,
+      },
+    )
+  } catch (error) {
+    if (requestUserId && revision === sessionRevision) {
+      const method = options.method || 'GET'
+      if (options.signal?.aborted) {
+        if (error instanceof DOMException && error.name === 'TimeoutError')
+          recordApiFailure(path, method, 'timeout')
+      } else if (error instanceof ApiError || error instanceof ApiNetworkError)
+        recordApiFailure(path, method, error.status)
+    }
+    throw error
+  }
 }
 
 export async function api<T>(

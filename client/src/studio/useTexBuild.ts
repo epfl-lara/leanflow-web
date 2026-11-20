@@ -8,6 +8,7 @@ import {
   type TexBuild,
   type TexStatus,
 } from './api'
+import { recordFailure } from './failureLog'
 import { observeTexPdf, texBuildIsActive } from './texBuilds'
 
 export function useTexBuild({
@@ -48,6 +49,7 @@ export function useTexBuild({
   const conflictRetries = useRef(0)
   const latest = useRef({ saveVersion, dirty })
   const buildVersions = useRef(new Map<string, number>())
+  const observedBuild = useRef<string | undefined>(undefined)
   const successVersion = useRef<ReturnType<typeof observeTexPdf>>(null)
   latest.current = { saveVersion, dirty }
   const base = `/api/projects/${encodeURIComponent(projectId)}/tex`
@@ -75,6 +77,28 @@ export function useTexBuild({
       mounted.current = false
     }
   }, [])
+
+  useEffect(() => {
+    const previous = observedBuild.current
+    observedBuild.current = activeBuild?.id
+    const build = status?.build
+    if (
+      !build ||
+      (build.id !== previous && !buildVersions.current.has(build.id)) ||
+      (build.status !== 'failed' && build.status !== 'interrupted')
+    )
+      return
+    recordFailure(
+      {
+        action: 'LaTeX build',
+        code:
+          build.status === 'interrupted' ? 'Build interrupted' : 'Build failed',
+        message:
+          'Open the LaTeX build log to review the diagnostics before compiling again.',
+      },
+      `tex:${build.id}`,
+    )
+  }, [activeBuild?.id, status?.build])
 
   useEffect(() => {
     let cancelled = false

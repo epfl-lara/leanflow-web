@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import ts from 'typescript'
+import * as failureLog from './failureLog.ts'
 
 function clientApi() {
   const { outputText } = ts.transpileModule(
@@ -20,6 +21,7 @@ function clientApi() {
     module.exports,
     (name) => {
       if (name === './apiTransport.mjs') return apiTransport
+      if (name === './failureLog') return failureLog
       throw new Error('Unexpected module ' + name)
     },
   )
@@ -154,6 +156,8 @@ test('a response body cannot populate a later visit to the same account', async 
 
 test('real api wiring retries a safe GET after an interrupted body', async (t) => {
   const client = clientApi()
+  client.bindSessionUser('alpha')
+  t.after(() => client.bindSessionUser(null))
   let calls = 0
   withFetch(t, async () => {
     calls++
@@ -169,6 +173,60 @@ test('real api wiring retries a safe GET after an interrupted body', async (t) =
   })
   assert.deepEqual(await client.api('/api/projects'), { ok: true })
   assert.equal(calls, 2)
+  assert.deepEqual(failureLog.getFailures(), [])
+})
+
+test('failure log summarizes rejected requests and ignores cancelled and previous-account requests', async (t) => {
+  const client = clientApi()
+  client.bindSessionUser('alpha')
+  t.after(() => client.bindSessionUser(null))
+  const path = '/api/projects/private-project/file?path=private-document.lean'
+  const failure = () =>
+    Response.json({ error: 'private-server-error' }, { status: 409 })
+  let request = async () => failure()
+  withFetch(t, () => request())
+  for (let i = 0; i < 2; i++)
+    await assert.rejects(client.api(path, { method: 'PUT' }), {
+      status: 409,
+      message: 'private-server-error',
+    })
+  assert.equal(failureLog.getFailures().length, 1)
+  const [entry] = failureLog.getFailures()
+  assert.equal(entry.action, 'Save file')
+  assert.equal(entry.code, 'HTTP 409')
+  assert.equal(entry.count, 2)
+  assert.doesNotMatch(JSON.stringify(entry), /private/)
+
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(client.api(path, { signal: controller.signal }), {
+    name: 'AbortError',
+  })
+  assert.deepEqual(failureLog.getFailures(), [entry])
+
+  let respond
+  request = () =>
+    new Promise((resolve) => {
+      respond = resolve
+    })
+  const pending = client.api(path)
+  client.bindSessionUser(null)
+  client.bindSessionUser('alpha')
+  respond(failure())
+  await assert.rejects(pending, { status: 409 })
+  assert.deepEqual(failureLog.getFailures(), [])
+})
+
+test('failure log keeps the newest 50 distinct entries', (t) => {
+  const client = clientApi()
+  client.bindSessionUser('alpha')
+  t.after(() => client.bindSessionUser(null))
+  for (let status = 400; status < 455; status++)
+    failureLog.recordApiFailure('/api/projects', 'GET', status)
+  const entries = failureLog.getFailures()
+  assert.equal(entries.length, 50)
+  assert.equal(entries[0].code, 'HTTP 454')
+  assert.equal(entries.at(-1).code, 'HTTP 405')
 })
 
 test('real api wiring never repeats mutations after a connection failure', async (t) => {

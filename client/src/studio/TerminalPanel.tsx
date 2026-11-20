@@ -6,6 +6,7 @@ import { ResizeHandle } from './ResizeHandle'
 import { useStoredSize } from './layout'
 import { messageId } from './messageId'
 import { errorText, sessionBoundUrl } from './api'
+import { recordFailure } from './failureLog'
 import '@xterm/xterm/css/xterm.css'
 import './terminal.css'
 
@@ -78,6 +79,17 @@ export function TerminalPanel({
     let connection: WebSocket | null = null
     let disposed = false
     let failure = ''
+    let connectionFailureReported = false
+    const reportConnectionFailure = () => {
+      if (connectionFailureReported) return
+      connectionFailureReported = true
+      recordFailure({
+        action: 'Project terminal',
+        code: 'Terminal connection failed',
+        message:
+          'Check the terminal status for details, then choose Reconnect terminal.',
+      })
+    }
     const send = (message: object) => {
       if (connection?.readyState === WebSocket.OPEN)
         connection.send(JSON.stringify(message))
@@ -182,6 +194,7 @@ export function TerminalPanel({
             ) {
               failure = message.message
               setStatus(failure)
+              reportConnectionFailure()
             } else if (
               'type' in message &&
               message.type === 'exit' &&
@@ -198,12 +211,15 @@ export function TerminalPanel({
           }
         }
         socket.onerror = () => {
+          if (disposed) return
           failure ||=
             'Could not open the terminal. Check your sign-in, close other terminals, and try again.'
-          if (!disposed) setStatus(failure)
+          setStatus(failure)
+          reportConnectionFailure()
         }
-        socket.onclose = () => {
+        socket.onclose = (event) => {
           if (disposed) return
+          if (!failure && event.code !== 1000) reportConnectionFailure()
           term.options.disableStdin = true
           setConnected(false)
           stateChange.current?.(false)

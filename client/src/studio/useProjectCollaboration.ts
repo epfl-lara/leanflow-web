@@ -14,6 +14,7 @@ const liveFile = (path: string) =>
   !path.startsWith('.lake/') && !CONFIGURATION_FILES.has(path)
 import type { WorkspaceBuffers, WorkspaceScope } from './workspaceBuffers'
 import { ApiError, sessionBoundUrl, type OpenFile } from './api'
+import { recordFailure } from './failureLog'
 import { LocalDocumentHistory } from './localDocumentHistory'
 import { mergeMovedDocumentText } from './movedDocumentText'
 import {
@@ -286,10 +287,28 @@ export function useProjectCollaboration({
       for (const done of [...waiters]) done()
     }
     const fail = (message: string, record?: LiveDocument, status = 409) => {
+      const previous = record ? documentFailures.get(record) : failure
       const error = new ApiError(message, status)
       if (record) documentFailures.set(record, error)
       else failure = error
-      if (current()) clearIssue()
+      if (current()) {
+        clearIssue()
+        if (
+          (record?.blocked || status === 413 || status === 403) &&
+          (previous?.message !== message || previous.status !== status)
+        )
+          recordFailure({
+            action: 'Save shared edits',
+            code:
+              status === 413
+                ? 'File size limit'
+                : status === 403
+                  ? 'Access changed'
+                  : 'Shared edit blocked',
+            message:
+              'Your draft is kept in this tab. Review the file notice before reloading or trying again.',
+          })
+      }
       notify()
     }
     const scheduleFileRefresh = () => {

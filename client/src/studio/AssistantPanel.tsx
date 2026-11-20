@@ -12,6 +12,7 @@ import {
   type RunProofTarget,
 } from './api'
 import { Icon } from './Icons'
+import { recordFailure } from './failureLog'
 import { HelpTip } from './HelpTip'
 import { Dialog } from './Dialog'
 import type { PaperPdf } from './PaperPdfDialog'
@@ -68,6 +69,35 @@ const mergeRun = (values: Run[], value: Run) =>
       value,
     ),
   ])
+
+function logRunFailure(run: Run) {
+  const verificationFailed =
+    run.status === 'completed' &&
+    !run.liveUndone &&
+    (run.progress?.label === 'Checks did not pass' ||
+      !!finalVerificationIssue(run))
+  if (
+    !verificationFailed &&
+    run.status !== 'failed' &&
+    run.status !== 'interrupted'
+  )
+    return
+  const code = verificationFailed
+    ? 'Final checks did not pass'
+    : run.status === 'interrupted'
+      ? 'Run interrupted'
+      : 'Run failed'
+  recordFailure(
+    {
+      action: 'Lemex run',
+      code,
+      message: verificationFailed
+        ? 'Open Checks & run details in the chat to review the final checks.'
+        : 'Open the chat for the reason and retry when ready.',
+    },
+    `run:${run.id}:${code}:${run.documentCheckAttempt || 0}`,
+  )
+}
 
 export interface SetupHelpRequest {
   id: number
@@ -182,6 +212,7 @@ export function AssistantPanel({
     Record<string, string>
   >({})
   const backgroundRequests = useRef(new Map<string, symbol>())
+  const observedRuns = useRef(new Set<string>())
   const backgroundErrorsRef = useRef(backgroundErrors)
   backgroundErrorsRef.current = backgroundErrors
   const [dialogId, setDialogId] = useState<string | null>(null),
@@ -490,6 +521,15 @@ export function AssistantPanel({
       const submission = receipts.current.get(receipt.id)
       if (!submission) continue
       if (receipt.status === 'failed') {
+        recordFailure(
+          {
+            action: 'Send Lemex follow-up',
+            code: 'Follow-up failed',
+            message:
+              'Lemex could not accept the follow-up. Your draft has been kept.',
+          },
+          `followup:${value.id}:${receipt.id}`,
+        )
         draftRef.current.restoreSubmitted(submission)
         setErrors((previous) => ({
           ...previous,
@@ -504,15 +544,20 @@ export function AssistantPanel({
       }
     }
   }, [])
+  const observeRun = useCallback((value: Run) => {
+    if (runIsActive(value)) observedRuns.current.add(value.id)
+    else if (observedRuns.current.delete(value.id)) logRunFailure(value)
+  }, [])
   const updateRun = useCallback(
     (value: Run) => {
       if (!mounted.current) return
+      observeRun(value)
       reconcileFollowups(value)
       setProjectRuns((previous) => mergeRun(previous, value))
       if (value.chatId === chatRef.current)
         setRuns((previous) => mergeRun(previous, value))
     },
-    [reconcileFollowups],
+    [observeRun, reconcileFollowups],
   )
   const loadChats = useCallback(async () => {
     const revision = ++chatNamesRevision.current
@@ -561,6 +606,7 @@ export function AssistantPanel({
     const firstLoad = !projectLoaded.current
     projectLoaded.current = true
     for (const metadata of values) {
+      observeRun(metadata)
       const revision = `${metadata.liveRevision || 0}:${!!metadata.liveUndone}`
       if (firstLoad && !runIsActive(metadata)) {
         liveSeen.current.set(metadata.id, revision)
@@ -609,7 +655,7 @@ export function AssistantPanel({
       ),
     )
     return values
-  }, [projectId, updateRun, recoverBackground])
+  }, [observeRun, projectId, updateRun, recoverBackground])
   const openChat = useCallback(
     async (id: string | null) => {
       const request = ++navigation.current
@@ -799,7 +845,13 @@ export function AssistantPanel({
     }
   }, [loadProject, loadHistory, loadChats, openChat])
   const connection = useRunStream(activeRun?.id || null, {
-    onRun: updateRun,
+    onRun: (value) => {
+      if (!mounted.current) return
+      // A project summary can settle this run before its final snapshot,
+      // which contains the verification result.
+      logRunFailure(value)
+      updateRun(value)
+    },
     onFilesUpdated: (paths, runId) =>
       recoverBackground(`files:${runId}`, () => onFilesUpdated(paths)),
     onTerminal: () => {
@@ -910,6 +962,7 @@ export function AssistantPanel({
           `/api/chats/${encodeURIComponent(destination)}/runs`,
           { ...settings, prompt: captured.text.trim(), maxSeconds: null },
         )
+        if (mounted.current) logRunFailure(created)
         updateRun(created)
         draft.clearSubmitted(submission)
         if (mounted.current) void loadChats().catch(() => undefined)

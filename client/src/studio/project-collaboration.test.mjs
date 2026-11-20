@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 import ts from 'typescript'
+import * as failureLog from './failureLog.ts'
 import * as Y from 'yjs'
 import { createHash } from 'node:crypto'
 import { ProjectDocuments } from '../../../server/project-documents.mjs'
@@ -42,6 +43,7 @@ function transpile(name, imports = {}) {
 const { WorkspaceBuffers } = transpile('./workspaceBuffers.ts')
 const { ApiError } = transpile('./api.ts', {
   './apiTransport.mjs': apiTransport,
+  './failureLog': failureLog,
 })
 const { refreshChangedBuffers } = transpile('./workspaceFiles.ts', {
   './api': { ApiError },
@@ -162,6 +164,7 @@ function fixture(t, initial = 'base source\n', options = {}) {
         '../../../shared/source-limits.mjs': { MAX_PROJECT_FILES },
       }),
       './api': { ApiError, sessionBoundUrl: (value) => value },
+      './failureLog': failureLog,
       '../../../shared/source-limits.mjs': { sourceFileByteLimit },
       '../../../shared/document-text.mjs': {
         replaceDocumentText: options.replaceDocumentText || replaceDocumentText,

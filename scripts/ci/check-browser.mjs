@@ -55,6 +55,7 @@ const workspaceSuites = [
   'storage-denied',
   'project-list-recovery',
   'api-recovery',
+  'failure-log',
   'account-controls',
   'session-account-switch',
   'account-setup-invitation',
