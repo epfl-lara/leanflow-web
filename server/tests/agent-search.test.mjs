@@ -1152,6 +1152,205 @@ test('Informalize delivers a follow-up once and checks the new source and destin
   assert.equal(run.followups[0].status, 'accepted')
 })
 
+test('rechecking a retained paper rebuilds and checks the exact draft without starting another writer', async (t) => {
+  for (const outcome of [
+    'auto save',
+    'manual',
+    'source changed',
+    'source unverified',
+    'stopped',
+  ])
+    await t.test(outcome, async (t) => {
+      const compiled = String.raw`\documentclass{article}
+\begin{document}
+% Lean: Relations.lean#Example.keep
+Every proposition implies itself.
+\textbf{Proof.} Assume the proposition. The hypothesis gives the conclusion.
+\end{document}`
+      let writers = 0,
+        builds = 0,
+        checks = 0
+      const f = await fixture(t, async (root) => {
+        writers++
+        await fs.writeFile(path.join(root, 'Paper.tex'), compiled)
+      })
+      const reachedCheck = Promise.withResolvers(),
+        finishCheck = Promise.withResolvers()
+      f.manager.informalizationSources = async (_runtime, root, options) => {
+        checks++
+        assert.deepEqual(options.paths, [sourceEntry.path])
+        if (checks > 1) {
+          assert.equal(
+            await fs.readFile(path.join(root, 'Paper.tex'), 'utf8'),
+            compiled,
+          )
+          reachedCheck.resolve()
+          options.signal.addEventListener(
+            'abort',
+            () => finishCheck.resolve(),
+            { once: true },
+          )
+          await finishCheck.promise
+          if (outcome === 'source unverified')
+            return {
+              status: 'incomplete',
+              entries: [],
+              detail: 'Could not replay the theorem.',
+            }
+        }
+        return { status: 'checked', entries: [sourceEntry], detail: 'Checked.' }
+      }
+      f.manager.texBuilds = {
+        async start() {
+          builds++
+          return { id: 'pdf' + builds }
+        },
+        async wait(_owner, id) {
+          return builds === 1
+            ? { id, status: 'failed', error: 'Build unavailable.' }
+            : { id, status: 'completed', pdf: {} }
+        },
+      }
+      await f.workspaces.writeFile(
+        f.project.id,
+        'alice',
+        sourceEntry.path,
+        leanSource,
+        null,
+      )
+      const run = await f.execute('Write the proofs in Paper.tex.', {
+        mode: 'informalize',
+        outputFile: 'Paper.tex',
+        file: sourceEntry.path,
+        liveEdits: outcome !== 'manual',
+      })
+      assert.equal(run.verification.complete, false)
+      assert.equal(run.verification.informalization.draft.path, 'Paper.tex')
+      assert.throws(() => f.manager.recheckDocument('bob', run.id), {
+        status: 404,
+      })
+      assert.throws(() => f.manager.recheckDocument('alice', run.id, 42), {
+        status: 400,
+      })
+      if (outcome === 'auto save') {
+        const fields = { projectId: f.project.id, kind: 'agent' }
+        const competing = f.events.create('alice', fields)
+        const newerRuns = []
+        for (let index = 0; index < 101; index++) {
+          const other = f.events.create('alice', { ...fields, chatId: 'other' })
+          f.events.updateMetadata(other.id, { status: 'completed' })
+          newerRuns.push(other.id)
+        }
+        assert.throws(() => f.manager.recheckDocument('alice', run.id, 0), {
+          status: 409,
+        })
+        f.events.updateMetadata(competing.id, { status: 'completed' })
+        f.events.deleteRuns('alice', [competing.id, ...newerRuns])
+      }
+      if (outcome === 'source changed') {
+        const saved = await f.workspaces.readFile(
+          f.project.id,
+          'alice',
+          sourceEntry.path,
+        )
+        await f.workspaces.writeFile(
+          f.project.id,
+          'alice',
+          sourceEntry.path,
+          leanSource + '-- collaborator edit\n',
+          saved.hash,
+        )
+      }
+      assert.equal(
+        f.manager.recheckDocument('alice', run.id, 0).status,
+        'verifying',
+      )
+      assert.equal(
+        f.manager.recheckDocument('alice', run.id, 0).documentCheckAttempt,
+        1,
+      )
+      await Promise.resolve()
+      const done = Promise.all([...f.manager.tasks])
+      if (outcome !== 'source changed') {
+        await Promise.race([
+          reachedCheck.promise,
+          done.then(() => assert.fail('The saved proof was not rechecked')),
+        ])
+        if (outcome === 'stopped') await f.manager.stop('alice', run.id)
+        else {
+          assert.equal(
+            f.manager.recheckDocument('alice', run.id).documentCheckAttempt,
+            1,
+          )
+          finishCheck.resolve()
+        }
+      }
+      await done
+      const checked = f.events.get(run.id)
+      assert.equal(checked.documentCheckAttempt, 1)
+      assert.equal(
+        f.events.summaries('alice', f.project.id)[0].documentCheckAttempt,
+        1,
+      )
+      assert.equal(writers, 1)
+      assert.equal(checks, outcome === 'source changed' ? 1 : 2)
+      if (outcome === 'auto save' || outcome === 'manual') {
+        assert.equal(
+          checked.verification.complete,
+          true,
+          checked.verification.reason,
+        )
+        assert.equal(
+          checked.verification.informalization.document.buildId,
+          'pdf2',
+        )
+        assert.equal(builds, 2)
+        assert.equal(
+          f.manager.recheckDocument('alice', run.id).status,
+          'completed',
+        )
+        if (outcome === 'manual') {
+          await assert.rejects(
+            f.workspaces.readFile(f.project.id, 'alice', 'Paper.tex'),
+            { status: 404 },
+          )
+          await f.manager.apply('alice', run.id)
+        }
+        assert.equal(
+          (await f.workspaces.readFile(f.project.id, 'alice', 'Paper.tex'))
+            .content,
+          compiled,
+        )
+        if (outcome === 'auto save') {
+          await f.manager.undo('alice', run.id)
+          await assert.rejects(
+            f.workspaces.readFile(f.project.id, 'alice', 'Paper.tex'),
+            { status: 404 },
+          )
+          assert.throws(() => f.manager.recheckDocument('alice', run.id), {
+            status: 409,
+          })
+        }
+      } else {
+        assert.equal(checked.verification.complete, false)
+        assert.equal(checked.changes[0].after, compiled)
+        assert.equal(
+          checked.status,
+          outcome === 'stopped' ? 'cancelled' : 'completed',
+        )
+        assert.equal(builds, 1)
+        assert.equal(
+          f.manager.recheckDocument('alice', run.id, 0).documentCheckAttempt,
+          1,
+        )
+        await assert.rejects(
+          f.workspaces.readFile(f.project.id, 'alice', 'Paper.tex'),
+          { status: 404 },
+        )
+      }
+    })
+})
+
 test('automatic Informalize keeps the working draft private through the PDF build and saves nothing on a conflict, failed build or stop', async (t) => {
   for (const outcome of [
     'source changed',

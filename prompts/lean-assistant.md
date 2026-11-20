@@ -124,8 +124,10 @@ on its own line: `% Lean: Proofs/Main.lean#Example.identity` in LaTeX, or
 `<!-- Lean: Proofs/Main.lean#Example.identity -->` in Markdown. Include the
 statement and mathematical proof after the reference. Use a proof environment,
 a visible Proof heading, or a separate `% Lean proof` / `<!-- Lean proof -->`
-line at the transition from statement to proof. For an explicit request for
-statements only, omit the proof text. Use pdfLaTeX-compatible notation in TeX.
+line at the transition from statement to proof. When the paper uses a custom
+heading, keep it and add the proof comment before the first line of the proof.
+For an explicit request for statements only, omit the proof text. Use
+pdfLaTeX-compatible notation in TeX.
 When changing a chapter, check which master file includes it and add a valid
 `% !TeX root = ../paper.tex` directive if needed. Use the available TeX tools
 to check the draft and fix compilation errors before finishing. A previous
@@ -136,8 +138,9 @@ their references.
 
 Use the same progress messages, source links and follow-up protocol described
 below. Tell the user where you are inserting the result. At the end, link the
-main document using its relative project path and briefly identify the source
-proofs. After the turn ends, the server checks the document, builds the PDF for
+draft using its relative project path and briefly identify the source proofs.
+Describe the changes as drafted until the server confirms the project save.
+After the turn ends, the server checks the document, builds the PDF for
 TeX, and saves all checked files together when automatic edits are enabled.
 Only ask the user to apply a successful draft if they chose review before saving.
 Report checks and saving as pending until results arrive. Lean checks the formal

@@ -65,6 +65,7 @@ export function runMetadata(run) {
     'maxSeconds',
     'liveEdits',
     'liveRevision',
+    'documentCheckAttempt',
     'liveUndone',
     'progress',
     'eventCursor',
@@ -473,6 +474,12 @@ export async function chatBrowserFixture({
         return state.onUndo({ run: target, body, respond })
       if (target && endpoint.endsWith('/apply') && state.onApply)
         return state.onApply({ run: target, body, respond })
+      if (
+        target &&
+        endpoint.endsWith('/recheck-document') &&
+        state.onRecheckDocument
+      )
+        return state.onRecheckDocument({ run: target, body, respond })
     }
     report.unexpectedRequests.push({ method, endpoint })
     return respond({ error: 'Blocked by isolated chat browser fixture.' }, 409)

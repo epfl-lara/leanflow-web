@@ -191,14 +191,17 @@ export function InformalizationResult({
   saved = false,
   reviewFirst = true,
   onOpenTarget,
+  onRecheck,
 }: {
   value: unknown
   projectId?: string
   saved?: boolean
   reviewFirst?: boolean
   onOpenTarget?: (target: RunProofTarget) => void
+  onRecheck?: () => Promise<void>
 }) {
   const [error, setError] = useState('')
+  const [rechecking, setRechecking] = useState(false)
   if (!hasInformalizationChecks(value)) return null
   const result = value.informalization
   const sources = record(result.sources) ? result.sources : {}
@@ -233,7 +236,7 @@ export function InformalizationResult({
             ? saved
               ? 'Document saved'
               : 'Document'
-            : 'Draft needs revision'
+            : 'Draft not saved'
           : 'No document to review'}
       </strong>
       {path && (
@@ -261,6 +264,30 @@ export function InformalizationResult({
       )}
       {!complete && documentIssue && <p>{documentIssue}</p>}
       <SourceChecks sources={sources} onOpenTarget={onOpenTarget} />
+      {!complete && path && onRecheck && (
+        <button
+          type="button"
+          className="turn-action"
+          disabled={rechecking}
+          onClick={async () => {
+            setRechecking(true)
+            setError('')
+            try {
+              await onRecheck()
+            } catch (error) {
+              setError(errorText(error))
+            } finally {
+              setRechecking(false)
+            }
+          }}
+        >
+          {rechecking
+            ? 'Checking draft…'
+            : reviewFirst
+              ? 'Recheck draft'
+              : 'Recheck and save draft'}
+        </button>
+      )}
       {complete && reviewFirst && !saved && (
         <p>Review the mathematical wording before applying the document.</p>
       )}

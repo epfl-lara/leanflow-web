@@ -56,6 +56,7 @@ export const ConversationTurn = memo(function ConversationTurn({
   onReview,
   onUndo,
   onInspect,
+  onRecheck,
   canUndo,
   undoing,
   onOpenTarget,
@@ -65,6 +66,7 @@ export const ConversationTurn = memo(function ConversationTurn({
   onReview: (id: string) => void
   onUndo: (id: string) => void
   onInspect: (id: string) => Promise<void>
+  onRecheck?: (run: Run) => Promise<void>
   canUndo: boolean
   undoing: boolean
   onOpenTarget?: (target: RunProofTarget) => void
@@ -228,6 +230,9 @@ export const ConversationTurn = memo(function ConversationTurn({
             saved={saved}
             reviewFirst={!run.liveEdits}
             onOpenTarget={onOpenTarget}
+            onRecheck={
+              onRecheck && !run.liveUndone ? () => onRecheck(run) : undefined
+            }
           />
         ) : (
           <TurnOutcome

@@ -129,6 +129,7 @@ const runMetadata = (job) => {
     'maxSeconds',
     'liveEdits',
     'liveRevision',
+    'documentCheckAttempt',
     'liveUndone',
     'progress',
   ]
@@ -1685,6 +1686,29 @@ export async function createStudio({
     res.json(
       publicRunReceipt(events.snapshotMetadata(req.params.id, req.user.id)),
     )
+  })
+  app.post('/api/runs/:id/recheck-document', (req, res) => {
+    if (
+      req.body !== undefined &&
+      (!req.body ||
+        typeof req.body !== 'object' ||
+        Array.isArray(req.body) ||
+        Object.keys(req.body).some((key) => key !== 'documentCheckAttempt'))
+    )
+      throw Object.assign(
+        new Error(
+          'Send the current document check attempt or an empty object.',
+        ),
+        { status: 400 },
+      )
+    const result = agents.recheckDocument(
+      req.user.id,
+      req.params.id,
+      req.body?.documentCheckAttempt,
+    )
+    res
+      .status(result.status === 'verifying' ? 202 : 200)
+      .json(publicJob(events.snapshot(req.params.id, req.user.id)))
   })
   for (const action of ['stop', 'undo', 'apply'])
     app.post(`/api/runs/:id/${action}`, async (req, res) => {

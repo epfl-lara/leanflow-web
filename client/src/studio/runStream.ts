@@ -32,7 +32,15 @@ function mergeVerification(previous: unknown, value: unknown): unknown {
 export function mergeRunSnapshot(previous: Run | null, value: Run): Run {
   if (!previous || previous.id !== value.id) return value
   if (cursor(value) < cursor(previous)) return previous
-  if (!runIsActive(previous) && runIsActive(value)) return previous
+  const previousAttempt = previous.documentCheckAttempt || 0
+  const attempt = value.documentCheckAttempt || 0
+  if (attempt < previousAttempt) return previous
+  if (
+    !runIsActive(previous) &&
+    runIsActive(value) &&
+    !(value.mode === 'informalize' && attempt > previousAttempt)
+  )
+    return previous
   const next = {
     ...previous,
     ...value,

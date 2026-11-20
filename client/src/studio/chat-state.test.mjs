@@ -274,7 +274,7 @@ test('document build errors keep the independent checked proof count and withhol
     draft: { path: 'Paper.tex' },
   })
   assert.match(invalid, /Lean checked 1 proof/)
-  assert.match(invalid, /Draft needs revision/)
+  assert.match(invalid, /Draft not saved/)
   assert.match(invalid, /The LaTeX build failed on line 7/)
   assert.doesNotMatch(invalid, /Open PDF|Download PDF|PDF built|Open document/)
 })
@@ -966,6 +966,30 @@ test('stale polls cannot drop details or revive a terminal run', () => {
     mergeRunSnapshot(original, run({ eventCursor: 9, status: 'running' })),
     original,
   )
+})
+
+test('a newer document check reopens a finished Informalize run while earlier receipts stay stale', () => {
+  const failed = run({
+    mode: 'informalize',
+    status: 'completed',
+    eventCursor: 8,
+  })
+  const retry = run({
+    mode: 'informalize',
+    status: 'verifying',
+    documentCheckAttempt: 1,
+    eventCursor: 9,
+  })
+  const active = mergeRunSnapshot(failed, retry)
+  assert.equal(active.status, 'verifying')
+  assert.equal(mergeRunSnapshot(active, { ...failed, eventCursor: 9 }), active)
+  const saved = mergeRunSnapshot(active, {
+    ...retry,
+    status: 'completed',
+    eventCursor: 11,
+  })
+  assert.equal(saved.status, 'completed')
+  assert.equal(mergeRunSnapshot(saved, { ...retry, eventCursor: 11 }), saved)
 })
 
 test('actual empty and nonempty change arrays supersede stale compact counts', () => {

@@ -324,6 +324,7 @@ export class EventStore extends EventEmitter {
       'createdAt',
       'updatedAt',
       'liveRevision',
+      'documentCheckAttempt',
       'liveEdits',
       'liveUndone',
     ]
@@ -349,6 +350,7 @@ export class EventStore extends EventEmitter {
           ? proofTargetReference(JSON.parse(row.proofTarget))
           : undefined,
         liveRevision: row.liveRevision === null ? undefined : row.liveRevision,
+        documentCheckAttempt: row.documentCheckAttempt ?? undefined,
         liveEdits: row.liveEdits === null ? undefined : !!row.liveEdits,
         liveUndone: row.liveUndone === null ? undefined : !!row.liveUndone,
       }))

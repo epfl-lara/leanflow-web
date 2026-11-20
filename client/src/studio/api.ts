@@ -437,6 +437,7 @@ export interface Run {
   liveEdits?: boolean
   liveChanges?: Change[]
   liveRevision?: number
+  documentCheckAttempt?: number
   liveUndone?: boolean
   liveEditConflict?: string
   maxSeconds?: number | null

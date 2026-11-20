@@ -26,6 +26,8 @@ const oldIssue =
 const missingName =
   'CharacteristicPolynomial.coefficient_recurrence_for_principal_minors'
 const sourcePath = 'Problems/Problem1_16.lean'
+const emptyPaper = '\\heading{Proof}\n'
+const completedPaper = emptyPaper + 'We prove the identity by induction.\n'
 function run(id, sources, rest = {}) {
   return {
     projectId,
@@ -86,9 +88,7 @@ const failedDraft = run(
   {
     liveEdits: true,
     message: 'The [paper](draft.tex) needs a correction.',
-    changes: [
-      { path: 'draft.tex', before: null, after: 'Candidate text to revise' },
-    ],
+    changes: [{ path: 'draft.tex', before: emptyPaper, after: completedPaper }],
     verification: {
       kind: 'workspace',
       complete: false,
@@ -119,6 +119,7 @@ const fixture = await chatBrowserFixture({
       'Main.lean': 'theorem proof1 : True := by trivial\n',
       [sourcePath]: 'theorem helper : True := by trivial\n',
       'paper.tex': '\\documentclass{article}\n',
+      'draft.tex': emptyPaper,
     },
   },
   runs: [history, paper, failedDraft, incomplete],
@@ -227,7 +228,7 @@ try {
   await dialog
     .getByText('This draft has not been saved to the project.')
     .waitFor()
-  await dialog.getByText(/Candidate text to revise/).waitFor()
+  await dialog.getByText(/We prove the identity by induction/).waitFor()
   await dialog.getByRole('button', { name: 'Continue in chat' }).waitFor()
   assert.equal(
     await dialog.getByRole('button', { name: 'Apply changes' }).count(),
@@ -246,9 +247,55 @@ try {
       .count(),
     0,
   )
+  let attempts = 0
+  fixture.state.onRecheckDocument = ({ run, body, respond }) => {
+    assert.equal(run.id, failedDraft.id)
+    assert.deepEqual(body, { documentCheckAttempt: 0 })
+    attempts++
+    Object.assign(run, {
+      status: 'verifying',
+      documentCheckAttempt: 1,
+      eventCursor: 1,
+    })
+    return respond(run, 202)
+  }
+  await card(failedDraft)
+    .getByRole('button', { name: 'Recheck and save draft' })
+    .click()
+  await page.waitForFunction(
+    (id) => window.__chatFixture.connected(id),
+    failedDraft.id,
+  )
+  const retried = fixture.state.runs.find((run) => run.id === failedDraft.id)
+  retried.liveChanges = retried.changes
+  retried.liveRevision = 1
+  retried.verification = {
+    kind: 'workspace',
+    complete: true,
+    editsAllowed: true,
+    informalization: {
+      sources: { status: 'checked', entries: checked },
+      document: { path: 'draft.tex', buildId: 'retry-pdf' },
+    },
+  }
+  fixture.state.files[projectId]['draft.tex'] = retried.changes[0].after
+  await fixture.emit(retried, 'status', { status: 'completed' })
+  await card(failedDraft).getByText('Document saved', { exact: true }).waitFor()
+  await turn(failedDraft)
+    .getByRole('button', { name: 'Undo agent edits' })
+    .waitFor()
+  await page.reload()
+  await page.getByRole('button', { name: 'Lemex', exact: true }).click()
+  await card(failedDraft).getByRole('button', { name: 'Open document' }).click()
+  await page
+    .locator('.monaco-editor .view-line')
+    .filter({ hasText: /We\s+prove\s+the\s+identity\s+by\s+induction/ })
+    .first()
+    .waitFor()
+  assert.equal(attempts, 1)
   fixture.assertClean()
   console.log(
-    'PASS: historical and named source failures, 550px and 390px layout, source navigation, and multi-file paper review.',
+    'PASS: source diagnostics, mobile layout, paper review, and rechecking a retained draft through save and Undo.',
   )
 } finally {
   await browser.close()

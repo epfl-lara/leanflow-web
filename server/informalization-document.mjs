@@ -252,13 +252,32 @@ async function texRoot(
   )
 }
 
+// The template uses its own heading command. TeX's sectioning commands and
+// amsthm proof environments are also common in existing papers.
+const texSectionLevel = new Map([
+  ['chapter', 0],
+  ['section', 1],
+  ['heading', 1],
+  ['subsection', 2],
+  ['subheading', 2],
+  ['subsubsection', 3],
+  ['paragraph', 4],
+  ['subparagraph', 5],
+])
+const texBoundary =
+  /\\(?:(?<env>begin|end)\s*\{proof\}(?:\[[^\]]*\])?|(?<section>chapter|(?:sub){0,2}section|(?:sub)?heading|(?:sub)?paragraph)\*?\s*(?:\[[^\]]*\]\s*)?\{(?<title>[^{}]*)\}|(?:textbf|emph|textit)\s*\{proof(?: sketch)?[.:]?\}[.:]?)|^proof(?: sketch)?[.:](?=\s|$)/gi
+const proofTitle = /^proof(?: sketch)?(?: of\s+.+)?[.:]?$/i
+
 // Markers identify the statement and the proof in any document language.
 // Recognize common native labels as well so existing papers retain their style.
 function translations(content, tex) {
   const anchor = tex ? /^% Lean: (.*)$/ : /^<!-- Lean: (.*) -->$/
   const proofMarker = tex ? '% Lean proof' : '<!-- Lean proof -->'
   const sections = new Map()
-  let current, part
+  let current, part, proofLevel
+  let definitionDepth = 0
+  let ignoredTexEnvironment
+  let inProofEnvironment = false
   let inMarkdownComment = false
   const addVisible = (value) => {
     if (!current || !part) return
@@ -273,8 +292,27 @@ function translations(content, tex) {
             .replace(/\\(?:textbf|emph|textit)\{(.*?)\}/g, '$1')
         : value
     ).trim()
-    if (!/[\p{L}\p{N}]/u.test(body) || /^#{1,6}\s/.test(body)) return
-    const words = body.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')
+    // Exclude spacing, labels and other markup from the content test. Keep
+    // the original body for detecting changes to the mathematical notation.
+    const visible = tex
+      ? body
+          .replace(
+            /\\(?:[vh]space\*?|label|index|color|phantom|[hv]phantom)\s*\{[^{}]*\}/g,
+            '',
+          )
+          .replace(/\\[a-zA-Z@]+\*?/g, '')
+      : body
+    const mathRelation =
+      tex &&
+      /\\[a-z]+\s*(?:[=<>]|\\(?:leq?|geq?|ne[q]?|equiv)\b)\s*\\[a-z]+/i.test(
+        body,
+      )
+    if (
+      (!mathRelation && !/[\p{L}\p{N}]/u.test(visible)) ||
+      /^#{1,6}\s/.test(visible)
+    )
+      return
+    const words = visible.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')
     if (
       /^(?:to[ -]?do|tbd|fixme|sorry|admit|placeholder|proof omitted|proof goes here)\b/i.test(
         words,
@@ -287,22 +325,54 @@ function translations(content, tex) {
   }
   for (const value of (content || '').split(/\r?\n/)) {
     const line = value.trim()
+    if (tex) {
+      if (ignoredTexEnvironment) {
+        if (line.startsWith('\\end{' + ignoredTexEnvironment + '}'))
+          ignoredTexEnvironment = undefined
+        continue
+      }
+      const ignored =
+        /^\\begin\{(comment|verbatim\*?|Verbatim|lstlisting|minted)\}/.exec(
+          line,
+        )
+      if (ignored) {
+        ignoredTexEnvironment = ignored[1]
+        continue
+      }
+    }
+    let visible = tex ? line.replace(/(^|[^\\])((?:\\\\)*)%.*/, '$1$2') : line
+    if (
+      tex &&
+      (definitionDepth ||
+        /^\\(?:newcommand|renewcommand|providecommand|DeclareRobustCommand|[gex]?def)\b/.test(
+          visible,
+        ))
+    ) {
+      // Defining a macro emits no document text. Ignore references, proof
+      // labels and prose inside the definition, including multi-line bodies.
+      for (const { 0: brace } of visible.matchAll(/\\.|[{}]/g)) {
+        if (brace === '{') definitionDepth++
+        if (brace === '}') definitionDepth = Math.max(0, definitionDepth - 1)
+      }
+      continue
+    }
     const match = anchor.exec(line)
     if (match && !inMarkdownComment) {
       if (!sections.has(match[1]))
         sections.set(match[1], { statement: [], proof: [] })
       current = sections.get(match[1])
       part = 'statement'
+      proofLevel = undefined
+      inProofEnvironment = false
       continue
     }
     if (line === proofMarker && !inMarkdownComment) {
       part = 'proof'
+      proofLevel = undefined
       continue
     }
-    let visible = line
     let endDocument
     if (tex) {
-      visible = line.replace(/(^|[^\\])%.*/, '$1')
       if (/\\begin\s*\{document\}/.test(visible)) {
         sections.clear()
         current = undefined
@@ -321,19 +391,44 @@ function translations(content, tex) {
         inMarkdownComment = true
       }
     }
-    const boundary = (
-      tex
-        ? /\\begin\s*\{proof\}(?:\[[^\]]*\])?|(?:\\noindent\s*)?\\(?:paragraph\*?|textbf|emph|textit)\s*\{proof(?: sketch)?[.:]?\}[.:]?|^proof(?: sketch)?[.:](?=\s|$)/i
-        : /^(?:#{1,6}\s*)?[*_]{0,2}proof(?: sketch)?\b[.:]?[*_]{0,2}[.:]?(?=\s|$)/i
-    ).exec(visible)
-    if (boundary) {
-      addVisible(visible.slice(0, boundary.index))
-      part = 'proof'
-      visible = visible.slice(boundary.index + boundary[0].length)
+    if (tex) {
+      let offset = 0
+      for (const match of visible.matchAll(texBoundary)) {
+        addVisible(visible.slice(offset, match.index))
+        offset = match.index + match[0].length
+        const { env, section, title } = match.groups
+        const level = texSectionLevel.get(section?.toLowerCase())
+        if (env === 'end') {
+          inProofEnvironment = false
+          current = undefined
+          part = undefined
+        } else if (!section || proofTitle.test(title.trim())) {
+          part = 'proof'
+          proofLevel = level ?? 1
+          inProofEnvironment ||= env === 'begin'
+        } else if (
+          part === 'proof' &&
+          !inProofEnvironment &&
+          level <= (proofLevel ?? 1)
+        ) {
+          // A sibling heading starts a new section. Its text cannot fill an
+          // empty proof above it. Nested headings can organize a longer proof.
+          current = undefined
+          part = undefined
+        }
+      }
+      addVisible(visible.slice(offset))
+    } else {
+      const boundary =
+        /^(?:#{1,6}\s*)?[*_]{0,2}proof(?: sketch)?\b[.:]?[*_]{0,2}[.:]?(?=\s|$)/i.exec(
+          visible,
+        )
+      if (boundary) {
+        part = 'proof'
+        visible = visible.slice(boundary[0].length)
+      }
+      addVisible(visible)
     }
-    const endProof = tex && /\\end\s*\{proof\}/.exec(visible)
-    addVisible(endProof ? visible.slice(0, endProof.index) : visible)
-    if (endProof) part = undefined
     if (endDocument) break
   }
   return sections
@@ -380,11 +475,13 @@ export function addedInformalizationReferences(change) {
   for (const [key, lines] of updated) {
     if (JSON.stringify(previous.get(key)) === JSON.stringify(lines)) continue
     const match = /^(.+?\.lean)#(.+)$/.exec(key)
-    if (!match || !lines.statement.length)
+    if (!match)
       fail(
-        `Every added source reference in ${file} needs a path.lean#name and its translation. Check "${key.slice(0, 180)}".`,
+        `Every added source reference in ${file} needs a path.lean#name. Check "${key.slice(0, 180)}".`,
         409,
       )
+    if (!lines.statement.length)
+      fail(`The source reference ${key} in ${file} has no statement text.`, 409)
     references.push({ path: relativeFile(match[1]), name: match[2] })
   }
   return references
@@ -411,20 +508,29 @@ export function informalizationDocumentChanges(changes) {
 
 async function assertSourceAnchors(changes, entries, proofs, chapters) {
   const keys = new Set(entries.map(({ path, name }) => `${path}#${name}`))
-  const covered = new Set()
+  const missingParts = new Map(
+    [...keys].map((key) => [key, 'source reference']),
+  )
+  const completeSection = (key, lines) => {
+    if (!keys.has(key)) return false
+    if (lines.statement.length && (!proofs || lines.proof.length)) {
+      missingParts.delete(key)
+      return true
+    }
+    if (missingParts.has(key))
+      missingParts.set(
+        key,
+        lines.statement.length ? 'proof text' : 'statement text',
+      )
+    return false
+  }
   const translatedFiles = new Set()
   let revised = false
   for (const { path: file, before, after } of changes) {
     const tex = isTexFile(file)
     const original = translations(before, tex)
     for (const [key, lines] of translations(after, tex)) {
-      if (
-        !keys.has(key) ||
-        !lines.statement.length ||
-        (proofs && !lines.proof.length)
-      )
-        continue
-      covered.add(key)
+      if (!completeSection(key, lines)) continue
       translatedFiles.add(file)
       if (JSON.stringify(lines) !== JSON.stringify(original.get(key)))
         revised = true
@@ -432,30 +538,27 @@ async function assertSourceAnchors(changes, entries, proofs, chapters) {
   }
   // Existing chapters may already cover part of the request. Count them only
   // when they are reachable from this paper; TeX coverage also needs PDF evidence.
-  if (revised && covered.size < keys.size) {
+  if (revised && missingParts.size) {
     const edited = new Set(changes.map((change) => change.path))
     for await (const { file, content } of chapters) {
       if (edited.has(file)) continue
       for (const [key, lines] of translations(content, isTexFile(file))) {
-        if (
-          !keys.has(key) ||
-          covered.has(key) ||
-          !lines.statement.length ||
-          (proofs && !lines.proof.length)
-        )
-          continue
-        covered.add(key)
+        if (!missingParts.has(key) || !completeSection(key, lines)) continue
         translatedFiles.add(file)
       }
-      if (covered.size === keys.size) break
+      if (!missingParts.size) break
     }
   }
-  const missing = [...keys].filter((key) => !covered.has(key))
-  if (missing.length)
-    fail(
-      `The paper needs a source reference and a substantive ${proofs ? 'statement and proof' : 'statement'} for ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ` and ${missing.length - 5} more` : ''}.`,
-      409,
-    )
+  if (missingParts.size) {
+    const details = [...missingParts]
+      .slice(0, 5)
+      .map(([key, part]) => `Missing ${part} for ${key}.`)
+    if (missingParts.size > details.length)
+      details.push(
+        `Check ${missingParts.size - details.length} more translations.`,
+      )
+    fail(details.join(' '), 409)
+  }
   if (!revised)
     fail(
       'Revise or add the requested translation in the paper. Its checked statements and proofs have not changed.',

@@ -996,6 +996,18 @@ export function AssistantPanel({
       if (mounted.current) setApplying(false)
     }
   }
+  async function recheckDocument(run: Run) {
+    if (run.liveEdits) await beforeApply()
+    const next = await post<Run>(
+      `/api/runs/${encodeURIComponent(run.id)}/recheck-document`,
+      { documentCheckAttempt: run.documentCheckAttempt ?? 0 },
+    )
+    updateRun(next)
+    if (mounted.current) setDialogId(null)
+    await loadProject()
+  }
+  const onRecheck =
+    canRun && !hasActive && !runUnavailableReason ? recheckDocument : undefined
   function continueInChat() {
     if (!dialogRun) return
     if (!draft.value.text.trim())
@@ -1263,6 +1275,7 @@ export function AssistantPanel({
                 onReview={(id) => void review(id)}
                 onUndo={(id) => void undo(id)}
                 onInspect={inspect}
+                onRecheck={onRecheck}
                 canUndo={
                   canRun &&
                   !runUnavailableReason &&
@@ -1571,6 +1584,11 @@ export function AssistantPanel({
                 projectId={projectId}
                 saved={runFilesSaved(dialogRun)}
                 reviewFirst={!dialogRun.liveEdits}
+                onRecheck={
+                  onRecheck && !runIsActive(dialogRun) && !dialogRun.liveUndone
+                    ? () => onRecheck(dialogRun)
+                    : undefined
+                }
                 onOpenTarget={
                   onOpenTarget && !applying && !discarding
                     ? (target) => {

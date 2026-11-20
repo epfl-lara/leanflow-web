@@ -59,6 +59,7 @@ export async function reviewInformalizationCandidate({
   snapshot,
   changes,
   sources,
+  refreshSources,
   checkSources,
   workspaces,
   texBuilds,
@@ -81,6 +82,17 @@ export async function reviewInformalizationCandidate({
       allowProjectFiles: true,
       onCaptured,
     })
+    // A retained draft gets a fresh proof check inside the same guarded
+    // verification copy that will supply the final paper build.
+    if (refreshSources) {
+      const fresh = await refreshSources(clean)
+      sources = fresh.sources
+      if (
+        !fresh.discover &&
+        (sources.status !== 'checked' || !sources.entries.length)
+      )
+        throw new Error(sources.detail)
+    }
     const requestedNames = new Set(
       sources.entries.length ? [] : explicitTheoremNames(job.prompt),
     )

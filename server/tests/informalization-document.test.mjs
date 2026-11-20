@@ -204,7 +204,7 @@ test('extracts only added or revised document references for independent Lean re
         path: 'a.md',
         after: md + '\n<!-- Lean: Main.lean#missing -->',
       }),
-    /its translation/,
+    /no statement text/,
   )
 })
 
@@ -342,7 +342,7 @@ test('requires visible text for every declaration at its own source reference an
   ])
     await assert.rejects(
       verify([{ path: 'notes.md', after }]),
-      /source reference/,
+      /Missing (?:source reference|statement text)/,
     )
   for (const after of [
     md + '\n## Empty section',
@@ -374,7 +374,7 @@ ${chapter}`,
   ])
     await assert.rejects(
       verify([{ path: 'paper.tex', after }]),
-      /source reference/,
+      /Missing (?:source reference|statement text)/,
     )
 })
 
@@ -393,7 +393,7 @@ test('requires statement and proof bodies for every theorem and honors an explic
   ])
     await assert.rejects(
       verify(candidate(after), options),
-      /statement and proof/,
+      /Missing (?:proof|statement) text/,
     )
   for (const label of [
     '## Proof',
@@ -430,7 +430,7 @@ test('requires statement and proof bodies for every theorem and honors an explic
       job: { ...job, outputFile: 'notes.md', prompt: 'Write statements only' },
       followups: [{ status: 'accepted', text: 'Actually add proofs.' }],
     }),
-    /statement and proof/,
+    /Missing (?:proof|statement) text/,
   )
   const chapterWithHeading = chapter
     .replace('\\begin{proof}', '\\paragraph{Proof.}')
@@ -442,6 +442,94 @@ test('requires statement and proof bodies for every theorem and honors an explic
     }),
     entries,
   )
+})
+
+test('recognizes an existing boxed theorem and its headed induction proof in a paper', async () => {
+  const front = String.raw`\documentclass{article}
+\newcommand{\heading}[1]{\par\textbf{#1}\par}
+\newcommand{\theorembox}[1]{\fbox{#1}}
+\begin{document}
+\heading{Theorem}
+% Lean: Main.lean#add_zero
+\theorembox{For every natural number \(n\), adding zero gives \(n\).}
+`
+  const proof = String.raw`We argue by induction on \(n\).
+\emph{Base case.} The initial equation holds by definition.
+\emph{Inductive step.} Use the inductive hypothesis for the preceding number.`
+  const end = String.raw`\end{document}`
+  const changed = (before, after) => [{ path: 'main.tex', before, after }]
+  const options = {
+    entries: [entries[0]],
+    texBuilds: {
+      start: async () => ({ id: 'pdf' }),
+      wait: async () => ({ id: 'pdf', status: 'completed', pdf: {} }),
+    },
+  }
+  for (const heading of [
+    '\\heading',
+    '\\section*',
+    '\\subsection',
+    '\\paragraph',
+    '\\subparagraph*',
+  ]) {
+    const before =
+      front +
+      heading +
+      '{Proof}\n\n' +
+      heading +
+      '{Formalization notes}\nThese notes describe tactics.\n' +
+      end
+    const withBody = (body) =>
+      before.replace('{Proof}\n', '{Proof}\n' + body + '\n')
+    assert.equal(
+      (await verify(changed(before, withBody(proof)), options)).buildId,
+      'pdf',
+    )
+    for (const body of [
+      '',
+      '% All the text is commented out.',
+      '\\medskip \\noindent \\qed',
+      '\\vspace{2em} \\label{some-label}',
+      '\\emph{Proof omitted.}',
+      '\\newcommand{\\unused}{%\nA proof that is never typeset.\n}',
+      '\\begin{comment}\nAn unused proof.\n\\end{comment}',
+    ])
+      await assert.rejects(
+        verify(changed(null, withBody(body)), options),
+        /Missing proof text for Main\.lean#add_zero/,
+      )
+  }
+  const absent =
+    front +
+    '\\heading{Proof}\n\\heading{Formalization notes}\nThese notes describe tactics.\n' +
+    end
+  assert.deepEqual(
+    addedInformalizationReferences(
+      changed(
+        absent,
+        absent.replace('describe tactics', 'explain induction'),
+      )[0],
+    ),
+    [],
+  )
+  await assert.rejects(
+    verify(
+      changed(
+        null,
+        absent.replace(
+          end,
+          '\\heading{Proof}\nA later unrelated proof.\n' + end,
+        ),
+      ),
+      options,
+    ),
+    /Missing proof text for Main\.lean#add_zero/,
+  )
+  const nested =
+    front +
+    '\\section{Proof}\n\\subsection{Base case}\nThe equation is reflexive.\n' +
+    end
+  assert.equal((await verify(changed(null, nested), options)).buildId, 'pdf')
 })
 
 test('compiles the final clean snapshot once, associates the PDF with the original run, and propagates diagnostics and cancellation', async () => {
@@ -645,7 +733,7 @@ test('one paper covers the checked proofs across linked Markdown files', async (
       ),
       options,
     ),
-    /statement and proof for Main\.lean#zero_add/,
+    /Missing source reference for Main\.lean#zero_add/,
   )
   for (const mention of ['![figure](left.md)', '[unused]: left.md']) {
     const suggested = changes.map((change) =>
@@ -705,7 +793,7 @@ test('counts an existing translation only when the unchanged chapter belongs to 
   saved.set('notes/index.md', '[Left](left.md)')
   await assert.rejects(
     verify(changed, options),
-    /statement and proof for Main\.lean#add_zero/,
+    /Missing source reference for Main\.lean#add_zero/,
   )
 })
 

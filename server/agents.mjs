@@ -207,6 +207,19 @@ export class AgentManager {
     })
     this.followups.recover()
   }
+  #hasActiveRun(owner, projectId, chatId) {
+    const sameChat = (job) =>
+      chatId === undefined || (job.chatId || null) === chatId
+    return (
+      this.events.activeMetadata(owner, projectId, 'agent').some(sameChat) ||
+      [...this.active.keys()].some((activeId) => {
+        const job = this.events.getMetadata(activeId)
+        return (
+          job.owner === owner && job.projectId === projectId && sameChat(job)
+        )
+      })
+    )
+  }
   #assertQueueCapacity(owner, setup = false) {
     if (this.queue.length >= this.maxQueue)
       throw Object.assign(
@@ -353,21 +366,7 @@ export class AgentManager {
       )
     this.assertCanStart(owner, projectId)
     this.#assertQueueCapacity(owner)
-    if (
-      this.events
-        .listMetadata(owner, projectId)
-        .some(
-          (job) => (job.chatId || null) === chatId && !TERMINAL.has(job.status),
-        ) ||
-      [...this.active.keys()].some((activeId) => {
-        const activeJob = this.events.getMetadata(activeId)
-        return (
-          activeJob.owner === owner &&
-          activeJob.projectId === projectId &&
-          (activeJob.chatId || null) === chatId
-        )
-      })
-    )
+    if (this.#hasActiveRun(owner, projectId, chatId))
       throw Object.assign(
         new Error(
           'This chat already has an active Lemex run. Send an update in this chat, wait for it to finish, or start another chat.',
@@ -572,6 +571,120 @@ export class AgentManager {
         })
     }
   }
+  #checkPaperSources(id, active, request, root, paths) {
+    return checkInformalizationBatches(request, paths, (batch) =>
+      this.informalizationSources(this.runtime, root, {
+        ...batch,
+        proofTarget: request.proofTarget,
+        prompt: request.prompt,
+        signal: active.controller.signal,
+        onOutput: (text) => this.#log(id, text),
+      }),
+    )
+  }
+
+  async #paperSources(job, snapshot, root, active, priorEntries) {
+    const id = job.id
+    this.#progress(
+      id,
+      'Checking source proofs',
+      'Finding declarations and checking their proofs with the project’s Lean version.',
+    )
+    const projectFiles = projectLeanSourcePaths(snapshot)
+    const mentions = mentionedLeanSources(job.prompt, projectFiles)
+    const detail =
+      mentions.issue ||
+      (!projectFiles.length &&
+        'This project has no saved Lean source files. Add a .lean file with the proof, then run Informalize again.')
+    if (detail)
+      return {
+        sources: { status: 'unavailable', entries: [], detail },
+        discover: false,
+      }
+    let request = job
+    let paths = informalizationSourcePaths(job, snapshot, mentions)
+    if (
+      !paths.length &&
+      priorEntries?.length &&
+      !job.proofTarget &&
+      !job.files?.some((file) => file.endsWith('.lean')) &&
+      !hasNamedInformalizationRequest(job.prompt)
+    ) {
+      request = { ...job, priorEntries }
+      paths = [...new Set(priorEntries.map((entry) => entry.path))]
+    }
+    if (paths.length) {
+      const sources = await this.#checkPaperSources(
+        id,
+        active,
+        request,
+        root,
+        paths,
+      )
+      active.controller.signal.throwIfAborted()
+      if (
+        sources.status !== 'checked' ||
+        sources.entries.length ||
+        job.proofTarget ||
+        job.files?.length ||
+        mentions.paths.length ||
+        projectFiles.length === 1
+      )
+        return { sources, discover: false }
+    }
+    this.#progress(
+      id,
+      'Finding source proofs',
+      'Looking through the project for the theorems in your request.',
+    )
+    return {
+      sources: {
+        status: 'unavailable',
+        entries: [],
+        detail: 'The draft has no checked Lean source references yet.',
+      },
+      discover: true,
+    }
+  }
+
+  async #reviewPaper(job, snapshot, changes, sources, active, refreshSources) {
+    const report = await reviewInformalizationCandidate({
+      job,
+      snapshot,
+      changes,
+      sources,
+      refreshSources,
+      checkSources: (request, root, paths) =>
+        this.#checkPaperSources(job.id, active, request, root, paths),
+      workspaces: this.workspaces,
+      texBuilds: this.texBuilds,
+      signal: active.controller.signal,
+      followups: this.events.getMetadata(job.id).followups || [],
+      onCaptured: (copy) => {
+        active.verificationCopy = copy
+        this.events.updateMetadata(job.id, { verificationRoot: copy.root })
+      },
+      onProgress: (label, detail) => this.#progress(job.id, label, detail),
+      savePaper: (report) =>
+        this.#savePaper(
+          job,
+          snapshot,
+          changes,
+          report,
+          active.controller.signal,
+        ),
+    })
+    // A stop can arrive after the atomic save commits. Record its changes
+    // and undo history even in that case.
+    if (!job.liveEdits || !report.document)
+      active.controller.signal.throwIfAborted()
+    this.#finishInformalization(
+      job,
+      { ...report, reason: this.config.redact(report.reason) },
+      report.document || report.draft ? changes : [],
+    )
+  }
+
   async #refreshEditorImports(job, signal) {
     const paths = (job.liveEdits ? job.liveChanges : job.changes)
       ?.map((change) => change.path)
@@ -885,6 +998,27 @@ export class AgentManager {
     try {
       this.#editableProject(job.projectId, job.owner)
       this.assertCanStart(job.owner, job.projectId)
+      if (job.documentCheckAttempt) {
+        active.accepting = false
+        const { draft, sources } = job.verification.informalization
+        job.previousDocument = draft.path
+        await this.#reviewPaper(
+          job,
+          job.snapshot,
+          job.changes,
+          sources,
+          active,
+          (clean) =>
+            this.#paperSources(
+              job,
+              job.snapshot,
+              clean.root,
+              active,
+              sources.entries,
+            ),
+        )
+        return
+      }
       provider = await providerFor(this.config, job.owner)
       if (!this.providerReservations.get(id)?.matches(provider))
         throw new Error(
@@ -995,81 +1129,20 @@ export class AgentManager {
         informalizing && priorRuns.filter((run) => run.id !== id).at(-1)
       const priorDraft = previous?.verification?.informalization?.draft
       if (priorDraft) job.previousDocument = priorDraft.path
-      const checkSources = (request, root, paths) =>
-        checkInformalizationBatches(request, paths, (batch) =>
-          this.informalizationSources(this.runtime, root, {
-            ...batch,
-            proofTarget: request.proofTarget,
-            prompt: request.prompt,
-            signal: active.controller.signal,
-            onOutput: (text) => this.#log(id, text),
-          }),
-        )
       if (informalizing) {
-        this.#progress(
-          id,
-          'Checking source proofs',
-          'Finding declarations and checking their proofs with the project’s Lean version.',
+        const { sources, discover } = await this.#paperSources(
+          job,
+          snapshot,
+          snapshot.root,
+          active,
+          priorDraft && previous.verification.informalization.sources.entries,
         )
-        const projectFiles = projectLeanSourcePaths(snapshot)
-        const mentions = mentionedLeanSources(job.prompt, projectFiles)
-        const scopeIssue =
-          mentions.issue ||
-          (!projectFiles.length &&
-            'This project has no saved Lean source files. Add a .lean file with the proof, then run Informalize again.')
-        if (scopeIssue) {
-          this.#finishInformalization(job, {
-            sources: { status: 'unavailable', entries: [], detail: scopeIssue },
-            reason: scopeIssue,
-          })
-          return
-        }
-        let request = job
-        let paths = informalizationSourcePaths(job, snapshot, mentions)
+        informalSources = sources
         if (
-          priorDraft &&
-          !job.proofTarget &&
-          !job.files?.some((file) => file.endsWith('.lean')) &&
-          !paths.length
+          !discover &&
+          (sources.status !== 'checked' || !sources.entries.length)
         ) {
-          const entries = previous.verification.informalization.sources.entries
-          if (entries.length && !hasNamedInformalizationRequest(job.prompt)) {
-            paths = [...new Set(entries.map((entry) => entry.path))]
-            request = { ...job, priorEntries: entries }
-          }
-        }
-        const automaticScope = !paths.length && projectFiles.length > 0
-        if (!automaticScope) {
-          informalSources = await checkSources(request, snapshot.root, paths)
-          active.controller.signal.throwIfAborted()
-        }
-        const discover =
-          automaticScope ||
-          (informalSources.status === 'checked' &&
-            !informalSources.entries.length &&
-            !job.proofTarget &&
-            !job.files?.length &&
-            !mentions.paths.length &&
-            projectFiles.length > 1)
-        if (discover) {
-          informalSources = {
-            status: 'unavailable',
-            entries: [],
-            detail: 'The draft has no checked Lean source references yet.',
-          }
-          this.#progress(
-            id,
-            'Finding source proofs',
-            'Looking through the project for the theorems in your request.',
-          )
-        } else if (
-          informalSources.status !== 'checked' ||
-          !informalSources.entries.length
-        ) {
-          this.#finishInformalization(job, {
-            sources: informalSources,
-            reason: informalSources.detail,
-          })
+          this.#finishInformalization(job, { sources, reason: sources.detail })
           return
         }
         contextSections.push({
@@ -1742,39 +1815,7 @@ export class AgentManager {
       )
       const changes = await this.workspaces.changes(snapshot)
       if (informalizing) {
-        const report = await reviewInformalizationCandidate({
-          job,
-          snapshot,
-          changes,
-          sources: informalSources,
-          checkSources,
-          workspaces: this.workspaces,
-          texBuilds: this.texBuilds,
-          signal: active.controller.signal,
-          followups: this.events.getMetadata(id).followups || [],
-          onCaptured: (copy) => {
-            active.verificationCopy = copy
-            this.events.updateMetadata(id, { verificationRoot: copy.root })
-          },
-          onProgress: (label, detail) => this.#progress(id, label, detail),
-          savePaper: (report) =>
-            this.#savePaper(
-              job,
-              snapshot,
-              changes,
-              report,
-              active.controller.signal,
-            ),
-        })
-        // A stop can arrive after the atomic save commits. Record its changes
-        // and undo history even in that case.
-        if (!job.liveEdits || !report.document)
-          active.controller.signal.throwIfAborted()
-        this.#finishInformalization(
-          job,
-          { ...report, reason: this.config.redact(report.reason) },
-          report.document || report.draft ? changes : [],
-        )
+        await this.#reviewPaper(job, snapshot, changes, informalSources, active)
         return
       }
       if (job.purpose === 'setup') assertSetupRequestChanges(changes)
@@ -2124,6 +2165,78 @@ export class AgentManager {
     const failed = results.find((result) => result.status === 'rejected')
     if (failed) throw failed.reason
   }
+  recheckDocument(owner, id, expectedAttempt) {
+    const job = this.events.getMetadata(id, owner)
+    assertAgentJob(job)
+    this.#editableProject(job.projectId, owner)
+    if (job.mode !== 'informalize' || job.liveUndone)
+      throw Object.assign(
+        new Error('Choose an Informalize run with a retained document draft.'),
+        { status: 409 },
+      )
+    const attempt = job.documentCheckAttempt || 0
+    if (
+      expectedAttempt !== undefined &&
+      (!Number.isSafeInteger(expectedAttempt) ||
+        expectedAttempt < 0 ||
+        expectedAttempt > attempt)
+    )
+      throw Object.assign(
+        new Error('Reload this run before rechecking the document.'),
+        { status: 400 },
+      )
+    if (job.pendingPaperSave)
+      throw Object.assign(
+        new Error('Finish file recovery before rechecking this document.'),
+        { status: 409 },
+      )
+    if (
+      expectedAttempt < attempt ||
+      job.verification?.complete ||
+      (attempt && !TERMINAL.has(job.status))
+    )
+      return job
+    if (
+      !TERMINAL.has(job.status) ||
+      !job.verification?.informalization?.draft ||
+      !job.snapshot ||
+      !job.changes?.length
+    )
+      throw Object.assign(
+        new Error('This run has no retained document draft to recheck.'),
+        { status: 409 },
+      )
+    if (this.stopping)
+      throw Object.assign(
+        new Error(
+          'The server is shutting down. Retry the document check after it restarts.',
+        ),
+        { status: 503 },
+      )
+    this.assertCanStart(owner, job.projectId)
+    this.#assertQueueCapacity(owner)
+    if (this.#hasActiveRun(owner, job.projectId, job.chatId || null))
+      throw Object.assign(
+        new Error(
+          'Wait for the current run in this chat to finish, then recheck the draft.',
+        ),
+        { status: 409 },
+      )
+    this.events.updateMetadata(id, {
+      status: 'verifying',
+      documentCheckAttempt: attempt + 1,
+      error: undefined,
+    })
+    this.#progress(
+      id,
+      'Rechecking document',
+      'Checking the retained draft against the saved project.',
+    )
+    this.queue.push(id)
+    queueMicrotask(() => this.#drain())
+    return this.events.getMetadata(id, owner)
+  }
+
   async apply(owner, id) {
     const job = this.events.get(id, owner)
     assertAgentJob(job)
@@ -2190,17 +2303,7 @@ export class AgentManager {
         new Error('Stop the run before undoing live edits.'),
         { status: 409 },
       )
-    const runningProject =
-      this.events
-        .listMetadata(owner, job.projectId)
-        .some((run) => !TERMINAL.has(run.status)) ||
-      [...this.active.keys()].some((activeId) => {
-        const activeJob = this.events.getMetadata(activeId)
-        return (
-          activeJob.owner === owner && activeJob.projectId === job.projectId
-        )
-      })
-    if (runningProject)
+    if (this.#hasActiveRun(owner, job.projectId))
       throw Object.assign(
         new Error(
           'Stop the running task in this project before undoing live edits.',

@@ -60,13 +60,9 @@ export function useRunStream(
       }
     }
     const publish = (value: Run) => {
-      if (
-        current &&
-        ((value.eventCursor || 0) < (current.eventCursor || 0) ||
-          (!runIsActive(current) && runIsActive(value)))
-      )
-        return
-      current = mergeRunSnapshot(current, value)
+      const next = mergeRunSnapshot(current, value)
+      if (current === next) return
+      current = next
       callbacksRef.current.onRun(current)
       const nextRevision = `${current.liveRevision || 0}:${!!current.liveUndone}`
       if (
