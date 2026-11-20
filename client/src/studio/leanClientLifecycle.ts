@@ -42,6 +42,7 @@ export function installLeanClientLifecycle(
   let requestedSleep = false
   let transition: Promise<void> = Promise.resolve()
   let generation = 0
+  let recovery: Promise<void> | undefined
   const enqueue = (action: () => Promise<void>) => {
     const next = transition.then(action)
     transition = next.catch(() => undefined)
@@ -96,6 +97,34 @@ export function installLeanClientLifecycle(
     )
     return pending
   }
+  type ClientUri = Parameters<LeanClientProvider['ensureClient']>[0]
+  const connect = async (uri?: ClientUri, restart = false) => {
+    const clients = provider.getClients()
+    if (clients.length)
+      await Promise.all(
+        clients
+          .filter((client) => restart || !client.isRunning())
+          .map((client) => client.restart()),
+      )
+    else if (uri) await provider.ensureClient(uri)
+    else return
+    if (closing || requestedSleep) await stop()
+    else if (!provider.getClients().some((client) => client.isRunning()))
+      throw new Error('Lean could not reconnect. Use Restart Lean to retry.')
+  }
+  const activate = (uri?: ClientUri, restart = false) => {
+    if (closing) return Promise.resolve()
+    requestedSleep = false
+    const requestedGeneration = ++generation
+    return enqueue(async () => {
+      await Promise.allSettled([...starts, ...factories])
+      if (closing || requestedSleep || requestedGeneration !== generation)
+        return
+      // Let pending starts and prior shutdown finish before trying to connect.
+      sleeping = false
+      await connect(uri, restart)
+    })
+  }
   return {
     get sleeping() {
       return sleeping
@@ -112,34 +141,34 @@ export function installLeanClientLifecycle(
         await stop()
       })
     },
-    resume(
-      uri: Parameters<LeanClientProvider['ensureClient']>[0],
-      startIfMissing = true,
-    ) {
-      if (closing) return Promise.resolve()
-      requestedSleep = false
-      const requestedGeneration = ++generation
-      return enqueue(async () => {
-        if (closing || requestedSleep || requestedGeneration !== generation)
-          return
-        // Prior shutdown has finished before background ensureClient calls
-        // may start a connection again. Latest activity wins rapid sleep/wake.
-        sleeping = false
-        const clients = provider.getClients()
-        if (!clients.length && !startIfMissing) return
-        if (clients.length)
-          await Promise.all(
-            clients
-              .filter((client) => !client.isRunning())
-              .map((client) => client.restart()),
-          )
-        else await provider.ensureClient(uri)
-        if (closing || requestedSleep) await stop()
-        else if (!provider.getClients().some((client) => client.isRunning()))
-          throw new Error(
-            'Lean could not reconnect. Use Restart Lean to retry.',
-          )
+    resume(uri: ClientUri, startIfMissing = true) {
+      return activate(startIfMissing ? uri : undefined)
+    },
+    restart(uri: ClientUri) {
+      return activate(uri, !sleeping && !recovery)
+    },
+    recover(visible: () => boolean) {
+      if (
+        closing ||
+        sleeping ||
+        !visible() ||
+        !provider.getClients().some((client) => !client.isRunning())
+      )
+        return Promise.resolve()
+      if (recovery) return recovery
+      const pending = enqueue(async () => {
+        await Promise.allSettled([...starts, ...factories])
+        if (closing || sleeping || !visible()) return
+        // An unopened file is started by the provider. Here we repair only the
+        // cached client that can no longer open the visible document.
+        await connect()
       })
+      recovery = pending
+      const forget = () => {
+        recovery = undefined
+      }
+      void pending.then(forget, forget)
+      return pending
     },
     async close() {
       closing = true

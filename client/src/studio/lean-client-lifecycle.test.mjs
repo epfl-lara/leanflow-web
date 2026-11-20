@@ -228,6 +228,47 @@ test('waking a document without a Lean client does not allocate one unnecessaril
   await f.lifecycle.close()
 })
 
+test('a stopped visible connection recovers once when a manual restart overlaps', async () => {
+  const f = fixture()
+  f.gate.resolve(f.raw)
+  await f.provider.ensureClient('root')
+  await f.raw.stop()
+  const finishing = deferred()
+  const restart = f.raw.restart
+  f.raw.restart = async () => {
+    await finishing.promise
+    await restart()
+  }
+  const recovery = f.lifecycle.recover(() => true)
+  assert.equal(
+    f.lifecycle.recover(() => true),
+    recovery,
+  )
+  const manual = f.lifecycle.restart('root')
+  finishing.resolve()
+  await Promise.all([recovery, manual])
+  assert.equal(f.restarts, 1)
+  assert.equal(f.raw.isRunning(), true)
+  await f.lifecycle.close()
+})
+
+test('auto recovery leaves a hidden or sleeping editor stopped', async () => {
+  const f = fixture()
+  f.gate.resolve(f.raw)
+  await f.provider.ensureClient('root')
+  await f.raw.stop()
+  let visible = true
+  const recovery = f.lifecycle.recover(() => visible)
+  visible = false
+  await recovery
+  assert.equal(f.restarts, 0)
+  await f.lifecycle.suspend()
+  await f.lifecycle.recover(() => true)
+  assert.equal(f.restarts, 0)
+  assert.equal(f.raw.isRunning(), false)
+  await f.lifecycle.close()
+})
+
 test('sleep requested during a pending wake waits for it and then releases its worker', async () => {
   const f = fixture()
   f.gate.resolve(f.raw)

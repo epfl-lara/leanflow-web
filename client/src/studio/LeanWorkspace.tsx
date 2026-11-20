@@ -245,6 +245,7 @@ interface Runtime {
   connectionSubscriptions?: { dispose(): void }[]
   outlineCleanup?: () => void
   visibleReadyPath?: string
+  sourceTooLarge?: boolean
   renameModels?: RenameModels
   modelCache: LeanModelCache
   viewStates: Map<string, monacoEditor.ICodeEditorViewState>
@@ -450,6 +451,25 @@ export function LeanWorkspace({
   onRenameSourcesRef.current = onRenameSources
   onFocusProofRef.current = onFocusProof
 
+  const recoverVisibleConnection = useCallback((active: Runtime) => {
+    const canRecover = () => {
+      const path = fileRef.current?.path
+      return (
+        runtime.current === active &&
+        !active.lean.disposed &&
+        !active.sourceTooLarge &&
+        !!path?.endsWith('.lean') &&
+        active.visibleReadyPath === path
+      )
+    }
+    // Do not block file switching or ordinary editing while a connection waits
+    // for a worker. The new client opens the current model when it is ready.
+    void active.clientLifecycle?.recover(canRecover).catch(() => {
+      if (canRecover())
+        setRestartIssue('Lean could not reconnect. Use Restart Lean to retry.')
+    })
+  }, [])
+
   useEffect(() => {
     if (!infoEl.current) return
     return connectInfoviewTheme(infoEl.current)
@@ -476,6 +496,7 @@ export function LeanWorkspace({
       const lean = new BrowserLeanMonaco(
         (message) => {
           if (cancelled) return
+          if (own) own.sourceTooLarge = true
           setConnectionIssue(message)
           onStateRef.current('Lean paused: source too large')
         },
@@ -658,12 +679,13 @@ export function LeanWorkspace({
                 onStateRef.current('Connecting to Lean')
                 own?.connectionSubscriptions?.push(
                   client.restarted(() => {
-                    if (!cancelled && !active.clientLifecycle?.sleeping)
+                    if (!cancelled && !active.clientLifecycle?.sleeping) {
+                      const connected = client.isRunning()
+                      if (connected) setRestartIssue('')
                       onStateRef.current(
-                        client.isRunning()
-                          ? 'Lean connected'
-                          : 'Lean connection failed',
+                        connected ? 'Lean connected' : 'Lean connection failed',
                       )
+                    }
                   }),
                   client.restarting(() => {
                     if (!cancelled) onStateRef.current('Restarting Lean')
@@ -880,9 +902,14 @@ export function LeanWorkspace({
     void serialize(async () => {
       if (cancelled) return
       const active = runtime.current
-      active?.modelCache.invalidate()
-      await active?.lean.closeHiddenDocuments()
-      await active?.lean.refreshVisibleDocument()
+      if (!active) return
+      active.modelCache.invalidate()
+      try {
+        await active.lean.closeHiddenDocuments()
+        await active.lean.refreshVisibleDocument()
+      } finally {
+        if (!cancelled) recoverVisibleConnection(active)
+      }
     }).catch(() => {
       if (!cancelled)
         setRestartIssue(
@@ -892,7 +919,7 @@ export function LeanWorkspace({
     return () => {
       cancelled = true
     }
-  }, [editorImportsVersion, projectId])
+  }, [editorImportsVersion, projectId, recoverVisibleConnection])
 
   useEffect(() => {
     runtime.current?.modelCache.removePaths(removedPaths)
@@ -1107,6 +1134,7 @@ export function LeanWorkspace({
           )
         const openingImportsRevision = importsRevision.current
         await active.lean.showVisibleDocument()
+        if (!cancelled) recoverVisibleConnection(active)
         if (cancelled) return
         if (
           importsRevision.current === openingImportsRevision &&
@@ -1383,7 +1411,7 @@ export function LeanWorkspace({
         ownEditor?.dispose()
       })
     }
-  }, [projectId, file?.path, file?.generation])
+  }, [projectId, file?.path, file?.generation, recoverVisibleConnection])
 
   useLayoutEffect(() => {
     runtime.current?.editor?.editor.updateOptions({
@@ -1778,34 +1806,15 @@ export function LeanWorkspace({
 
   async function restartLean() {
     const active = runtime.current
-    const provider = active?.lean.clientProvider
-    if (!active?.clientLifecycle || !provider || restarting || failure) return
+    if (!active?.clientLifecycle || restarting || failure) return
     setRestarting(true)
     setSleeping(false)
     setRestartIssue('')
     try {
-      if (active.clientLifecycle.sleeping) {
-        await active.clientLifecycle.resume(
-          new FileUri('/workspace/__lemex_client__.lean'),
-        )
-        return
-      }
-      let clients = provider.getClients()
-      if (clients.length) {
-        await Promise.all(clients.map((client) => client.restart()))
-      } else {
-        // A failed initial connection is removed from the provider. Retry its
-        // normal startup path instead of treating an empty client list as done.
-        const [, client] = await provider.ensureClient(
-          new FileUri('/workspace/__lemex_client__.lean'),
-        )
-        clients = client ? [client] : []
-      }
+      await active.clientLifecycle.restart(
+        new FileUri('/workspace/__lemex_client__.lean'),
+      )
       if (runtime.current !== active) return
-      if (!clients.length || clients.some((client) => !client.isRunning()))
-        throw new Error(
-          'Lean could not reconnect. Try Restart Lean again or reopen the project.',
-        )
       setRequestIssue('')
       setRestartIssue('')
       setImportsStale(null)
