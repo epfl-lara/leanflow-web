@@ -127,8 +127,9 @@ export function decoratePaperLinks(
             stickiness:
               monaco.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
             after: {
-              content: ' ↗',
+              content: '\u00a0↗\u00a0',
               inlineClassName: `paper-editor-jump paper-editor-jump-${line}`,
+              inlineClassNameAffectsLetterSpacing: true,
               cursorStops: monaco.InjectedTextCursorStops.None,
             },
           },

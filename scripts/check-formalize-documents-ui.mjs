@@ -422,7 +422,8 @@ try {
     name: 'Open trace_example in Lean',
     exact: true,
   })
-  await inlinePdfLink.waitFor()
+  const pdfLeanBadge = inlinePdfLink.locator('.linked-pdf-lean-badge')
+  await pdfLeanBadge.waitFor()
   const zoom = page.getByLabel('PDF zoom')
   const pdfSheet = page.locator('.linked-pdf-sheet')
   const fitWidth = await pdfSheet.evaluate((sheet) => sheet.offsetWidth)
@@ -449,10 +450,10 @@ try {
     'fit-width PDF',
   )
   await inlinePdfLink.hover()
-  await inlinePdfLink.click()
+  await inlinePdfLink.getByText('Open in Lean', { exact: true }).click()
   await page.getByRole('tab', { name: 'Main.lean', selected: true }).waitFor()
   report.checks.push(
-    'Paper links navigate both directions between PDF pages, TeX lines and Lean declarations, and stale links are disabled.',
+    'Paper links navigate both directions, the uploaded PDF shows a visible Lean action with a hover preview, and stale links are disabled.',
   )
 
   await open('paper.tex')
@@ -462,12 +463,25 @@ try {
   })
   if ((await paperLinksButton.getAttribute('aria-expanded')) === 'true')
     await paperLinksButton.click()
+  const editorJump = page.locator('.paper-editor-jump')
+  await editorJump.waitFor()
+  assert(
+    (await editorJump.boundingBox())?.width >= 20,
+    'The editor marker gives the jump arrow room to click',
+  )
+  assert.notEqual(
+    await editorJump.evaluate(
+      (marker) => getComputedStyle(marker).backgroundColor,
+    ),
+    'rgba(0, 0, 0, 0)',
+    'The editor marker has a visible fill before hover',
+  )
   const hover = page.locator('.monaco-hover')
   await page.locator('.paper-editor-anchor').first().hover()
   await hover.getByText('trace_example in Main.lean').waitFor()
-  await page.locator('.paper-editor-jump').click()
+  await editorJump.click()
   await page.getByRole('tab', { name: 'Main.lean', selected: true }).waitFor()
-  await page.locator('.paper-editor-jump').click()
+  await editorJump.click()
   await linkPanel
     .getByRole('button', { name: 'Open Appendix.pdf, page 1' })
     .waitFor()

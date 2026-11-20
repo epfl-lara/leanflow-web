@@ -1,7 +1,12 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { PaperLink } from './api'
 import type { PdfPaperLink } from './LinkedPdfReader'
+import {
+  PdfLeanBadgeText,
+  PdfLeanPreview,
+  pdfLeanBadgePosition,
+} from './PdfLeanBadge'
 import { indexPdfQuotes } from './pdfPaperQuotes'
 
 interface Bounds {
@@ -115,17 +120,16 @@ export function PdfPassageMarks({
   return createPortal(
     placed.placements.map(({ link, rectangles: [first, ...rest], width }) => {
       const { target } = link
-      const style: CSSProperties & { '--tooltip-anchor': string } = {
-        ...first,
-        // Keep the tooltip centered on the sheet's middle for long names.
-        '--tooltip-anchor': `${width / 2 - first.left}px`,
-      }
+      const { style, below, alignEnd, side } = pdfLeanBadgePosition(
+        first,
+        width,
+      )
       return (
         <button
           type="button"
           key={link.id}
           className="linked-pdf-passage"
-          style={style}
+          style={first}
           onClick={() => onOpen(target)}
           aria-label={`Open ${target.declaration} in Lean`}
         >
@@ -141,11 +145,16 @@ export function PdfPassageMarks({
               }}
             />
           ))}
-          <span className="linked-pdf-tooltip" aria-hidden="true">
-            <strong>{target.declaration}</strong>
-            <small>
-              {target.path}:{target.line}
-            </small>
+          <span
+            className="linked-pdf-lean-badge"
+            style={style}
+            data-preview-below={below || undefined}
+            data-preview-align-end={alignEnd || undefined}
+            data-lean-badge-side={side}
+            aria-hidden="true"
+          >
+            <PdfLeanBadgeText />
+            <PdfLeanPreview target={target} />
           </span>
         </button>
       )

@@ -1158,6 +1158,11 @@ try {
   const sheet = panel.locator('.linked-pdf-sheet')
   const highlight = sheet.locator('.linked-pdf-source-hit')
   await highlight.waitFor()
+  const openLean = sheet.getByRole('button', {
+    name: 'Open linked_statement in Lean',
+  })
+  await openLean.waitFor()
+  assert.equal(await sheet.locator('.linked-pdf-lean-badge').count(), 1)
   assert.equal(
     await highlight.count(),
     1,
@@ -1189,18 +1194,7 @@ try {
   await sourceLine(2).waitFor()
   assert(await editor().evaluate((editor) => editor === document.activeElement))
   await highlight.hover()
-  const openLean = sheet.getByRole('button', {
-    name: 'Open linked_statement in Lean',
-  })
-  await until(
-    () =>
-      openLean.evaluate(
-        (button) =>
-          getComputedStyle(button.closest('.linked-pdf-source-actions'))
-            .opacity === '1',
-      ),
-    'Lean action on PDF hover',
-  )
+  await sheet.getByText('Open in Lean', { exact: true }).waitFor()
   await openLean.click()
   await selectedTab('Main.lean').waitFor()
   await sourceLine(1).waitFor()
@@ -1210,7 +1204,7 @@ try {
   await highlight.waitFor({ state: 'hidden' })
   await panel.getByText('PDF may be out of date').waitFor()
   report.checks.push(
-    'A compiled PDF double-click focuses a saved LaTeX position, even over a linked statement. Hover offers a separate Lean jump only for existing paper links. Unsaved edits disable mappings.',
+    'A compiled PDF double-click focuses LaTeX, even over a linked statement. A visible Lean badge opens the declaration independently, with a preview on hover. Unsaved edits disable mappings.',
   )
 
   await page.screenshot({ path: path.join(output, 'tex-workspace.png') })
