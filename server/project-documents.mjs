@@ -887,20 +887,19 @@ export class ProjectDocuments {
 
   changed(event) {
     if (this.closed) return
-    this.workspaces.invalidateFileListing?.(event.projectId)
-    if (event.kind === 'access' || event.kind === 'project')
+    const type = ['access', 'project', 'editor-imports'].includes(event.kind)
+      ? event.kind
+      : 'files'
+    if (type !== 'editor-imports')
+      this.workspaces.invalidateFileListing?.(event.projectId)
+    if (type === 'access' || type === 'project')
       this.closeAccess(event.projectId)
     for (const client of this.clients)
       if (client.projectId === event.projectId) {
         try {
           this.workspaces.accessibleProject(event.projectId, client.actor)
           this.send(client, {
-            type:
-              event.kind === 'access'
-                ? 'access'
-                : event.kind === 'project'
-                  ? 'project'
-                  : 'files',
+            type,
             paths: event.paths,
             ...(event.removedPaths?.length
               ? { removedPaths: event.removedPaths }
@@ -913,7 +912,7 @@ export class ProjectDocuments {
           client.ws.close(1008, 'Project access changed.')
         }
       }
-    if (event.kind === 'access') return
+    if (type === 'access' || type === 'editor-imports') return
     for (const record of this.documents.values()) {
       if (
         record.projectId === event.projectId &&

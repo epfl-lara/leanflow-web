@@ -4,6 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { setImmediate } from 'node:timers/promises'
 import { WorkspaceStore } from '../workspaces.mjs'
 
 const toolchain = 'leanprover/lean4:v4.34.1'
@@ -192,6 +193,86 @@ test('saved assistant modules are rebuilt in the saved workspace without copying
   )
 })
 
+test('collaborators share one rebuild of the same saved revision and can stop independently', async (t) => {
+  const { store, project, runtime } = await fixture(t)
+  await store.setMember(project.id, 'alice', 'bob', 'editor')
+  const started = deferred(),
+    finish = deferred(),
+    bobRequested = deferred()
+  const controller = new AbortController()
+  const builds = []
+  const checkFingerprint = store.checkFingerprint.bind(store)
+  t.mock.method(store, 'checkFingerprint', async (id, owner, options) => {
+    const digest = await checkFingerprint(id, owner, options)
+    if (owner === 'bob') bobRequested.resolve()
+    return digest
+  })
+  runtime.build = async (_root, { signal }) => {
+    builds.push(signal)
+    started.resolve()
+    await finish.promise
+    signal?.throwIfAborted()
+  }
+  const alice = store.refreshEditorImports(project.id, 'alice', {
+    signal: controller.signal,
+  })
+  const cancelled = assert.rejects(alice, /Alice stopped/)
+  await started.promise
+  const bob = store.refreshEditorImports(project.id, 'bob')
+  try {
+    await bobRequested.promise
+    await setImmediate()
+    controller.abort(new Error('Alice stopped'))
+    assert.equal(builds[0].aborted, false)
+  } finally {
+    finish.resolve()
+    await cancelled
+    assert.equal((await bob).ready, true)
+  }
+  assert.equal(builds.length, 1)
+  assert.equal(store.get(project.id, 'bob').editorImportsVersion, 1)
+})
+
+test('a newer saved revision waits for the running rebuild and then compiles the latest sources', async (t) => {
+  const { store, project, runtime } = await fixture(t)
+  await store.setMember(project.id, 'alice', 'bob', 'editor')
+  const started = deferred(),
+    finish = deferred(),
+    bobRequested = deferred()
+  const revisions = []
+  const checkFingerprint = store.checkFingerprint.bind(store)
+  t.mock.method(store, 'checkFingerprint', async (id, owner, options) => {
+    const digest = await checkFingerprint(id, owner, options)
+    if (owner === 'bob') bobRequested.resolve()
+    return digest
+  })
+  runtime.build = async () => {
+    revisions.push(store.get(project.id, 'alice').editorImportsVersion)
+    if (revisions.length === 1) {
+      started.resolve()
+      await finish.promise
+    }
+  }
+  const alice = store.refreshEditorImports(project.id, 'alice')
+  await started.promise
+  const before = await store.readFile(project.id, 'bob', 'Main.lean')
+  await store.writeFile(
+    project.id,
+    'bob',
+    'Main.lean',
+    before.content + '-- collaborator save during a build\n',
+    before.hash,
+  )
+  const bob = store.refreshEditorImports(project.id, 'bob')
+  await bobRequested.promise
+  finish.resolve()
+  assert.equal((await alice).ready, false)
+  assert.equal((await bob).ready, true)
+  assert.deepEqual(revisions, [undefined, 1])
+  assert.equal(store.get(project.id, 'bob').editorImportsVersion, 2)
+  assert.equal(store.get(project.id, 'bob').setupBuildStatus, 'passed')
+})
+
 test('building imports leaves editing responsive and reports saved-source changes instead of claiming success', async (t) => {
   const { store, project, runtime } = await fixture(t)
   const started = deferred(),
@@ -226,7 +307,6 @@ test('cancelling an import build cancels its worker and does not publish readine
   const started = deferred(),
     controller = new AbortController()
   runtime.build = async (_root, { signal }) => {
-    assert.equal(signal, controller.signal)
     started.resolve()
     await new Promise((_resolve, reject) =>
       signal.addEventListener('abort', () => reject(signal.reason), {

@@ -1468,7 +1468,7 @@ export function Studio() {
       ])
     },
     onFilesMoved: handleFilesMoved,
-    onAccessChanged: async () => {
+    onProjectChanged: async () => {
       await loadProjects()
     },
   })

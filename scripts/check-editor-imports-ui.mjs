@@ -135,12 +135,8 @@ try {
   )
   const beforeRecovery = opened.length
   project.editorImportsVersion = 2
-  run.liveRevision++
-  await f.emit(run, 'files-updated', {
-    paths: ['Helper.lean'],
-    live: true,
-    reason: 'imports',
-  })
+  // A collaborator finishes a rebuild. This tab receives no private run event.
+  f.sendCollaboration({ type: 'editor-imports', paths: [] })
   await until(
     () =>
       opened.length > beforeRecovery &&
@@ -149,7 +145,7 @@ try {
   )
   assert.equal(f.report.sockets.length, sockets + 1)
   f.report.checks.push(
-    'A completed import build reconnects a stopped editor worker and reopens the current unsaved proof.',
+    'A collaborator’s completed import build reconnects a stopped editor worker and reopens the current unsaved proof.',
   )
 
   releaseSave()

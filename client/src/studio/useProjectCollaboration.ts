@@ -113,7 +113,7 @@ export function useProjectCollaboration({
   canEdit,
   onFilesChanged,
   onFilesMoved,
-  onAccessChanged,
+  onProjectChanged,
 }: {
   store: WorkspaceBuffers
   scope: WorkspaceScope
@@ -124,7 +124,7 @@ export function useProjectCollaboration({
     recheck: (path: string) => void,
   ) => void | Promise<void>
   onFilesMoved?: (move: PathMove) => void
-  onAccessChanged?: () => void | Promise<void>
+  onProjectChanged?: () => void | Promise<void>
 }) {
   const [connected, setConnected] = useState(false)
   const [issue, setIssue] = useState<string | null>(null)
@@ -157,10 +157,10 @@ export function useProjectCollaboration({
     paths: new Set<string>(),
     restPaths: new Set<string>(),
   })
-  const callbacks = useRef({ onFilesChanged, onFilesMoved, onAccessChanged })
+  const callbacks = useRef({ onFilesChanged, onFilesMoved, onProjectChanged })
   useEffect(() => {
-    callbacks.current = { onFilesChanged, onFilesMoved, onAccessChanged }
-  }, [onFilesChanged, onFilesMoved, onAccessChanged])
+    callbacks.current = { onFilesChanged, onFilesMoved, onProjectChanged }
+  }, [onFilesChanged, onFilesMoved, onProjectChanged])
   const flush = useCallback(
     (path?: string) => control.current?.flush(path) ?? Promise.resolve(false),
     [],
@@ -924,7 +924,7 @@ export function useProjectCollaboration({
         // Membership can change between a socket closing and reconnecting.
         // Refresh on admission as well as live access events so a promotion
         // in that interval cannot leave this tab with stale controls.
-        void Promise.resolve(callbacks.current.onAccessChanged?.()).catch(
+        void Promise.resolve(callbacks.current.onProjectChanged?.()).catch(
           () => {},
         )
         if (!store.dirty().length) {
@@ -958,9 +958,13 @@ export function useProjectCollaboration({
         filesChanged('paths' in message ? message.paths : undefined)
         return
       }
-      if (message.type === 'access' || message.type === 'project') {
+      if (
+        message.type === 'access' ||
+        message.type === 'project' ||
+        message.type === 'editor-imports'
+      ) {
         if (message.type === 'project') filesChanged()
-        void Promise.resolve(callbacks.current.onAccessChanged?.()).catch(
+        void Promise.resolve(callbacks.current.onProjectChanged?.()).catch(
           () => {},
         )
         return
@@ -1091,7 +1095,7 @@ export function useProjectCollaboration({
         )
         if (transient) socket?.close()
         if (status === 403 || (status === 404 && !path))
-          void Promise.resolve(callbacks.current.onAccessChanged?.()).catch(
+          void Promise.resolve(callbacks.current.onProjectChanged?.()).catch(
             () => {},
           )
         return
@@ -1380,7 +1384,7 @@ export function useProjectCollaboration({
           fail(
             'Project access changed. Your unsaved edits are kept in this tab.',
           )
-          void Promise.resolve(callbacks.current.onAccessChanged?.()).then(
+          void Promise.resolve(callbacks.current.onProjectChanged?.()).then(
             reconnect,
             reconnect,
           )

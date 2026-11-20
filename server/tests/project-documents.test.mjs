@@ -564,6 +564,30 @@ test('malformed or oversized hidden document state never reaches saved sources',
   assert.equal(value.files.get('Main.lean'), before)
 })
 
+test('rebuilt imports notify authorized peers without rereading shared documents', async (t) => {
+  const value = fixture(t)
+  const alice = await value.client('alice')
+  const bob = await value.client('bob')
+  const viewer = await value.client('viewer')
+  const reads = t.mock.method(value.store, 'readFile')
+  value.roles.delete('viewer')
+  const before = [alice.ws.packets.length, bob.ws.packets.length]
+  value.emit([], 'editor-imports')
+  for (const [index, actor] of [alice, bob].entries())
+    assert.deepEqual(actor.ws.packets.slice(before[index]), [
+      { type: 'editor-imports', paths: [] },
+    ])
+  assert.equal(viewer.ws.code, 1008)
+  assert.equal(
+    viewer.ws.packets.some((packet) => packet.type === 'editor-imports'),
+    false,
+  )
+  await Promise.all(
+    [...value.service.documents.values()].map((record) => record.refreshTask),
+  )
+  assert.equal(reads.mock.callCount(), 0)
+})
+
 test('external writes notify peers of the changed paths and refresh only affected documents', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-doc-watch-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))

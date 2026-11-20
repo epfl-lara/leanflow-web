@@ -194,7 +194,7 @@ function fixture(t, initial = 'base source\n', options = {}) {
       enabled,
       canEdit,
       onFilesChanged: options.onFilesChanged,
-      onAccessChanged: options.onAccessChanged,
+      onProjectChanged: options.onProjectChanged,
       onFilesMoved: options.onFilesMoved,
     })
   }
@@ -1037,7 +1037,7 @@ test('subscription capacity rejection falls back only that unopened file without
 test('a policy close refreshes membership then reconnects an account that still has access', async (t) => {
   let refreshes = 0
   const { store, socket, server, hook } = fixture(t, 'base source\n', {
-    onAccessChanged: async () => {
+    onProjectChanged: async () => {
       refreshes++
     },
   })
@@ -1062,7 +1062,7 @@ test('reconnection discovers a membership change that occurred while no live soc
   let role = 'admin'
   let displayedRole
   const { socket } = fixture(t, 'base source\n', {
-    onAccessChanged: async () => {
+    onProjectChanged: async () => {
       displayedRole = role
     },
   })
@@ -1083,7 +1083,7 @@ test('a temporary membership refresh failure allows a disconnected editor to rej
   t.mock.timers.enable({ apis: ['setTimeout'] })
   let refreshes = 0
   const { socket, store, server, hook } = fixture(t, undefined, {
-    onAccessChanged: async () => {
+    onProjectChanged: async () => {
       if (++refreshes === 2) throw new Error('Temporarily offline')
     },
   })
@@ -1814,7 +1814,7 @@ test('same-generation authoritative HTTP refreshes do not become duplicate local
 test('a missing file retires its subscription until explicitly restored and does not refresh project access', async (t) => {
   let accessRefreshes = 0
   const { store, socket, server, hook } = fixture(t, 'base source\n', {
-    onAccessChanged() {
+    onProjectChanged() {
       accessRefreshes++
     },
   })

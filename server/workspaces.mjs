@@ -818,6 +818,7 @@ export class WorkspaceStore {
     this.jobs = new Map()
     this.locks = new Map()
     this.fingerprintReads = new WeakMap()
+    this.editorImportBuilds = new Map()
     this.preparationControllers = new Map()
     this.preparationActors = new Map()
     this.preparationAllocations = new Map()
@@ -1449,15 +1450,19 @@ export class WorkspaceStore {
           moves,
           own: runId === originRunId,
         })
+    this.#notifyChanges({
+      projectId,
+      paths,
+      kind,
+      removedPaths,
+      ...(moves.length ? { moves } : {}),
+    })
+  }
+
+  #notifyChanges(event) {
     for (const listener of this.changeListeners) {
       try {
-        listener({
-          projectId,
-          paths,
-          kind,
-          removedPaths,
-          ...(moves.length ? { moves } : {}),
-        })
+        listener(event)
       } catch {
         /* A transport cannot fail a durable write. */
       }
@@ -3802,12 +3807,60 @@ export class WorkspaceStore {
   }
 
   async refreshEditorImports(id, owner, { signal, onOutput } = {}) {
-    const project = this.get(id, owner)
+    const project = this.requireEditor(id, owner)
     this.#ready(project)
     if (project.kind === 'single-file') return { ready: true, message: '' }
+    let fingerprint = await this.checkFingerprint(id, owner, { signal })
+    let pending = this.editorImportBuilds.get(id)
+    while (
+      pending &&
+      (!pending.build.active || pending.fingerprint !== fingerprint)
+    ) {
+      // Only one rebuild may write to a project's Lake cache at a time.
+      // After it releases the cache, fingerprint the latest saved files.
+      await (
+        pending.build.active ? pending.build.wait(signal) : pending.build.task
+      ).catch(() => {})
+      fingerprint = await this.checkFingerprint(id, owner, { signal })
+      pending = this.editorImportBuilds.get(id)
+    }
+    const current = this.requireEditor(id, owner, { details: false })
+    this.#ready(current)
     signal?.throwIfAborted()
-    const fingerprint = await this.checkFingerprint(id, owner, { signal })
-    const output = onOutput || (() => {})
+    if (!pending) {
+      const listeners = new Set()
+      const build = new SharedSourceRead((buildSignal) =>
+        this.#buildEditorImports(current, fingerprint, {
+          signal: buildSignal,
+          onOutput: (text) => {
+            for (const listener of listeners) listener(text)
+          },
+        }).finally(() => this.editorImportBuilds.delete(id)),
+      )
+      pending = { fingerprint, build, listeners }
+      this.editorImportBuilds.set(id, pending)
+    }
+    const listener = (text) => {
+      if (
+        onOutput &&
+        !signal?.aborted &&
+        ['editor', 'admin'].includes(this.memberships.role(id, owner))
+      )
+        onOutput(text)
+    }
+    pending.listeners.add(listener)
+    try {
+      const readiness = await pending.build.wait(signal)
+      signal?.throwIfAborted()
+      this.requireEditor(id, owner, { details: false })
+      return readiness
+    } finally {
+      pending.listeners.delete(listener)
+    }
+  }
+
+  async #buildEditorImports(project, fingerprint, { signal, onOutput }) {
+    const id = project.id
     // Build saved sources in their own cache. Candidate artifacts are untrusted
     // inputs and belong to a different workspace. Keep the source mount read only
     // and do not hold a workspace lock while waiting for a worker or compiler.
@@ -3822,7 +3875,7 @@ export class WorkspaceStore {
             signal,
             requiredImports,
             includeRoot: true,
-            onOutput: output,
+            onOutput,
           })
         : null
       const configuration = await this.#dependencyConfiguration(project)
@@ -3837,7 +3890,7 @@ export class WorkspaceStore {
           writeLakeCache: true,
           timeoutMs: Math.min(this.setupBuildTimeoutMs, 180000),
           signal,
-          onOutput: output,
+          onOutput,
         },
       )
       signal?.throwIfAborted()
@@ -3861,7 +3914,9 @@ export class WorkspaceStore {
     }
     signal?.throwIfAborted()
     return this.#locked(id, async () => {
-      const current = this.get(id, owner)
+      const current = this.#record(id)
+      if (current.archivedAt || project.root !== current.root)
+        fail('Project not found', 404)
       this.#ready(current)
       if (fingerprint !== (await sourceFingerprint(current.root, { signal })))
         readiness = {
@@ -3882,6 +3937,7 @@ export class WorkspaceStore {
           ? 'Saved project modules are ready for editor imports.\n'
           : readiness.message + '\n',
       )
+      this.#notifyChanges({ projectId: id, paths: [], kind: 'editor-imports' })
       return readiness
     })
   }
