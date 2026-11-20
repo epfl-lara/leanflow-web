@@ -235,31 +235,90 @@ export function agentConversationContext(
   )
 }
 
-export function informalizationSourcePaths(job, snapshot) {
-  if (job.proofTarget) return [job.proofTarget.path]
-  const isSource = (file) =>
+function isProjectLeanSource(file) {
+  return (
     typeof file === 'string' &&
     file.endsWith('.lean') &&
     !file.split('/').includes('.lake') &&
     file.split('/').at(-1) !== 'lakefile.lean'
-  const sources = snapshot.files.map((file) => file.path).filter(isSource)
-  const prompt = job.prompt || ''
-  const tokens = new Set(
-    prompt
-      .split(/[\s`'"()[\]{},:;!?]+/)
-      .map((token) => token.replace(/\.$/, '')),
   )
-  for (const [, quoted] of prompt.matchAll(/[`"']([^`"'\n]+\.lean)[`"']/g))
-    tokens.add(quoted)
-  const mentioned = sources.filter((file) => tokens.has(file))
-  if (mentioned.length) return mentioned
-  const attached = (job.files || []).filter(isSource)
+}
+
+export const projectLeanSourcePaths = (snapshot) =>
+  snapshot.files.map((file) => file.path).filter(isProjectLeanSource)
+
+// Quoted paths may contain spaces. Bare paths can have a trailing sentence
+// period, and a unique basename identifies a file anywhere in the project.
+const leanFileMention =
+  /`([^`\n]+?\.lean)`|"([^"\n]+?\.lean)"|'([^'\n]+?\.lean)'|(?<![\p{L}\p{N}_./-])([\p{L}\p{N}\p{M}._/-]+\.lean)(?![\p{L}\p{N}_/-])/gu
+
+export function mentionedLeanSources(prompt, sources) {
+  const paths = new Set()
+  const issues = []
+  for (const match of (prompt || '').matchAll(leanFileMention)) {
+    const before = prompt.slice(0, match.index)
+    const after = prompt.slice(match.index + match[0].length)
+    if (
+      /\b(?:https?|file):$/i.test(before) ||
+      /\b(?:ignore|skip|exclude|except|omit|avoid|without|instead of|rather than|do not|don't|not)\s+(?:(?:use|change|edit|include|read|the|file)\s+)*$/i.test(
+        before,
+      ) ||
+      /\b(?:style of|compare with|for context see|for reference see|for example|e\.g\.)\s*$/i.test(
+        before,
+      ) ||
+      /^\s+(?:as (?:a |an |the )?(?:reference|example|template|guide)|for (?:context|reference|notation))\b/i.test(
+        after,
+      )
+    )
+      continue
+    const raw = match.slice(1).find(Boolean)
+    const name = raw.replace(/^(?:\/workspace\/|\.\/)/, '')
+    if (sources.includes(name)) {
+      paths.add(name)
+      continue
+    }
+    const matches = name.includes('/')
+      ? []
+      : sources.filter((file) => file.endsWith('/' + name))
+    if (matches.length === 1) paths.add(matches[0])
+    else if (matches.length > 1)
+      issues.push(
+        `Several files are named ${name}: ${matches.join(', ')}. Use the project path to choose one.`,
+      )
+    else
+      issues.push(
+        `The project has no Lean source file named ${name}. Check the path and try again.`,
+      )
+  }
+  return { paths: [...paths], issue: [...new Set(issues)].join(' ') }
+}
+
+export function informalizationSourcePaths(job, snapshot, mentions) {
+  if (job.proofTarget) return [job.proofTarget.path]
+  const sources = projectLeanSourcePaths(snapshot)
+  const prompt = job.prompt || ''
+  const mentioned = mentions ?? mentionedLeanSources(prompt, sources)
+  if (mentioned.issue || mentioned.paths.length) return mentioned.paths
+  const attached = (job.files || []).filter(isProjectLeanSource)
   if (attached.length) return attached
-  const open = [job.file, job.currentFile].find(isSource)
+  if (
+    /\b(?:whole|entire|full|across the|in (?:this|the))\s+project\b/i.test(
+      prompt,
+    )
+  )
+    return sources
+  if (
+    hasNamedInformalizationRequest(prompt) &&
+    !(job.file && job.file !== job.currentFile)
+  )
+    return sources.length <= 12 ? sources : []
+  const open = [job.file, job.currentFile].find(isProjectLeanSource)
   if (open) return [open]
   if (
     sources.length === 1 ||
-    (sources.length <= 12 && hasNamedInformalizationRequest(prompt))
+    /\b(?:all|each|every)\s+(?:the\s+)?(?:theorems?|lemmas?|proofs?)\b/i.test(
+      prompt,
+    )
   )
     return sources
   return []

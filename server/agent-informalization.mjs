@@ -1,12 +1,56 @@
-import { hasNamedInformalizationRequest } from './informalization.mjs'
-import { informalizationSourcePaths } from './agent-context.mjs'
+import {
+  explicitTheoremNames,
+  hasNamedInformalizationRequest,
+} from './informalization.mjs'
+import {
+  mentionedLeanSources,
+  projectLeanSourcePaths,
+} from './agent-context.mjs'
 import {
   addedInformalizationReferences,
-  validateInformalizationOutputPath,
+  informalizationDocumentChanges,
+  informalizationDraftPath,
   verifyInformalizationDocument,
 } from './informalization-document.mjs'
 
 const sourceKey = ({ path, name }) => JSON.stringify([path, name])
+
+// A recovery checks each saved (path, name) pair in its original module.
+// Ordinary checks can load up to twelve source files in the same Lean worker.
+export async function checkInformalizationBatches(request, paths, check) {
+  const batches = []
+  if (request.priorEntries) {
+    for (const [path, entries] of Map.groupBy(
+      request.priorEntries,
+      (entry) => entry.path,
+    ))
+      batches.push({ paths: [path], names: entries.map((entry) => entry.name) })
+  } else {
+    for (let i = 0; i < paths.length; i += 12)
+      batches.push({ paths: paths.slice(i, i + 12), names: request.names })
+  }
+  if (batches.length === 1) return check(batches[0])
+  const entries = []
+  for (const batch of batches) {
+    const result = await check(batch)
+    entries.push(...result.entries)
+    if (entries.length > 200 || JSON.stringify(entries).length > 100000)
+      return {
+        status: 'incomplete',
+        entries: [],
+        detail:
+          'The project exceeds the theorem check limit. Name the section or theorems to write up.',
+      }
+    if (result.status !== 'checked') return { ...result, entries }
+  }
+  return {
+    status: 'checked',
+    entries,
+    detail: entries.length
+      ? 'Lean checked the project’s source proofs.'
+      : 'No theorems were found in the project.',
+  }
+}
 
 // The writer has exited. Only this review may make the private document
 // available for Apply. Reconstruct the candidate from saved, hashed sources.
@@ -25,92 +69,111 @@ export async function reviewInformalizationCandidate({
 }) {
   let draft
   try {
-    if (changes.length !== 1 || changes[0].after === null)
-      throw new Error(
-        'Informalize must create or update one TeX or Markdown document. Keep all other project files unchanged.',
-      )
-    const change = changes[0]
-    validateInformalizationOutputPath(change.path)
-    if (change.after?.trim()) draft = { path: change.path }
+    const paths = informalizationDocumentChanges(changes)
+    const primary = informalizationDraftPath(job, snapshot, changes, followups)
+    draft = {
+      path: primary,
+      ...(paths.length > 1 || primary !== paths[0] ? { paths } : {}),
+    }
     const clean = await workspaces.verificationCopy(snapshot, changes, {
       signal,
       allowProjectFiles: true,
       onCaptured,
     })
+    const requestedNames = new Set(
+      sources.entries.length ? [] : explicitTheoremNames(job.prompt),
+    )
+    const projectFiles = projectLeanSourcePaths(snapshot)
     const inventory = new Map(
       sources.entries.map((entry) => [sourceKey(entry), entry]),
     )
-    const extend = async (request) => {
-      const extra = await checkSources(request, clean.root)
+    const extend = async (request, paths) => {
+      const extra = await checkSources(request, clean.root, paths)
       signal.throwIfAborted()
-      if (extra.status !== 'checked' || !extra.entries.length) {
-        sources = extra
-        throw new Error(extra.detail)
-      }
       for (const entry of extra.entries) inventory.set(sourceKey(entry), entry)
       const entries = [...inventory.values()]
+      if (extra.status !== 'checked' || !extra.entries.length) {
+        sources = { ...extra, entries }
+        throw new Error(extra.detail)
+      }
       if (entries.length > 200 || JSON.stringify(entries).length > 100000)
         throw new Error(
           'There are too many declarations for one document check. Select a smaller set of theorems.',
         )
-      sources = { ...sources, entries }
+      sources = { status: 'checked', entries, detail: extra.detail }
     }
-    const originalPaths = new Set([
-      ...informalizationSourcePaths(job, snapshot),
-      ...(job.files || []),
-    ])
+    const seenAttachments = new Set(job.files || [])
     for (const message of followups.filter(
       (entry) => entry.status === 'accepted',
     )) {
-      const request = { ...message, prompt: message.text }
-      if (message.proofTarget) {
-        if (
-          JSON.stringify(message.proofTarget) !==
-          JSON.stringify(job.proofTarget)
-        )
-          await extend(request)
-      } else {
-        // The composer carries earlier attachments forward. Only an added
-        // source or an explicit named request extends the checked scope.
-        const paths = informalizationSourcePaths(request, snapshot)
-        const added = paths.filter((file) => !originalPaths.has(file))
-        if (added.length && message.files?.some((file) => added.includes(file)))
-          await extend({ ...request, files: added })
-        else if (hasNamedInformalizationRequest(message.text))
-          await extend({
-            ...request,
-            files: paths.length
-              ? paths
-              : [...new Set(sources.entries.map((entry) => entry.path))],
-          })
-        for (const file of added) originalPaths.add(file)
+      const prompt = message.text
+      const mentions = mentionedLeanSources(prompt, projectFiles)
+      if (mentions.issue) throw new Error(mentions.issue)
+      const added = (message.files || []).filter(
+        (file) => projectFiles.includes(file) && !seenAttachments.has(file),
+      )
+      for (const file of added) seenAttachments.add(file)
+      const changedFocus =
+        message.proofTarget &&
+        JSON.stringify(message.proofTarget) !== JSON.stringify(job.proofTarget)
+      if (changedFocus)
+        await extend({ proofTarget: message.proofTarget, prompt }, [
+          message.proofTarget.path,
+        ])
+      // Inherited attachments and a still-open editor are context for a
+      // follow-up. A newly named file is a request even without an attachment.
+      const paths = mentions.paths.length ? mentions.paths : added
+      if (paths.length) await extend({ prompt }, paths)
+      else if (!changedFocus && hasNamedInformalizationRequest(prompt)) {
+        if (projectFiles.length <= 12) await extend({ prompt }, projectFiles)
+        else
+          for (const name of explicitTheoremNames(prompt))
+            requestedNames.add(name)
       }
     }
     // A user can also name another theorem in a text follow-up. Check each
     // additional source reference introduced by the writer against Lean.
     const supplemental = new Map()
-    for (const ref of addedInformalizationReferences(change)) {
+    for (const ref of changes.flatMap(addedInformalizationReferences)) {
       if (inventory.has(sourceKey(ref))) continue
       if (!snapshot.files.some((file) => file.path === ref.path))
         throw new Error(
           `The source file for ${ref.name} is missing: ${ref.path}.`,
         )
-      if (!supplemental.has(ref.path)) supplemental.set(ref.path, [])
-      supplemental.get(ref.path).push(ref.name)
+      if (!supplemental.has(ref.path)) supplemental.set(ref.path, new Set())
+      supplemental.get(ref.path).add(ref.name)
     }
-    if (supplemental.size > 12)
-      throw new Error('Select up to 12 Lean files for one document check.')
+    if (
+      [...supplemental.values()].reduce((n, names) => n + names.size, 0) > 200
+    )
+      throw new Error(
+        'The draft cites more than 200 additional theorems. Select a smaller scope for this paper.',
+      )
     for (const [path, names] of supplemental) {
-      await extend({ files: [path], names })
+      await extend({ names: [...names] }, [path])
       for (const name of names)
         if (!inventory.has(sourceKey({ path, name })))
           throw new Error(
             `Lean could not confirm the source reference ${path}#${name}.`,
           )
     }
+    if (!sources.entries.length)
+      throw new Error(
+        'The draft identifies no Lean theorems. Add a source reference to each statement and proof, then check again.',
+      )
+    for (const name of requestedNames) {
+      const exact = sources.entries.filter((entry) => entry.name === name)
+      const matches = exact.length
+        ? exact
+        : sources.entries.filter((entry) => entry.name.endsWith('.' + name))
+      if (matches.length !== 1)
+        throw new Error(
+          `The draft must identify the requested theorem ${name} unambiguously.`,
+        )
+    }
     onProgress(
-      /\.tex$/i.test(change.path) ? 'Building document' : 'Checking document',
-      change.path,
+      /\.tex$/i.test(primary) ? 'Building document' : 'Checking document',
+      primary,
     )
     const document = await verifyInformalizationDocument({
       job,

@@ -506,15 +506,76 @@ try {
   await page
     .getByRole('button', { name: 'Write an informal proof', exact: true })
     .click()
+  const destination = page.getByLabel('Output document (optional)', {
+    exact: true,
+  })
+  await page
+    .getByText('Using the open file · Main.lean', { exact: true })
+    .waitFor()
+  const resize = page.getByRole('separator', { name: 'Resize assistant panel' })
+  const rail = await resize.boundingBox()
+  const from = rail.x + rail.width / 2
+  const middle = rail.y + rail.height / 2
+  const oldWidth = Number(await resize.getAttribute('aria-valuenow'))
+  await page.mouse.move(from, middle)
+  await page.mouse.down()
+  await page.mouse.move(from + oldWidth - 550, middle)
+  await page.mouse.up()
+  await until(
+    () => resize.getAttribute('aria-valuenow').then((value) => value === '550'),
+    '550px assistant panel',
+  )
+  for (const viewport of [
+    { width: 1600, height: 800 },
+    { width: 390, height: 550 },
+  ]) {
+    await page.setViewportSize(viewport)
+    await destination.fill('Problem1_16.tex')
+    await send.scrollIntoViewIfNeeded()
+    const gaps = await destination.evaluate((field) => {
+      const box = field.getBoundingClientRect()
+      const style = getComputedStyle(field)
+      const outline =
+        parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset)
+      const source = field.form
+        .querySelector('.composer-context')
+        .getBoundingClientRect()
+      const message = field.form
+        .querySelector('textarea')
+        .getBoundingClientRect()
+      return {
+        focused: document.activeElement === field,
+        above: box.top - outline - source.bottom,
+        below: message.top - box.bottom - outline,
+      }
+    })
+    assert.ok(gaps.focused)
+    assert.ok(
+      gaps.above >= 1 && gaps.below >= 1,
+      `Focused output field overlaps its neighbours at ${viewport.width}px: ${JSON.stringify(gaps)}`,
+    )
+    await composer.click({ trial: true })
+    await send.click({ trial: true })
+    if (viewport.width === 1600)
+      await page
+        .locator('.assistant-composer')
+        .screenshot({ path: path.join(resultDir, 'informalize-composer.png') })
+  }
+  report.checks.push(
+    'With a 550px chat panel and on a 390px phone, the focused output field clears the source line and message box, and the prompt and Send are reachable.',
+  )
+  await destination.fill('')
+  await page.setViewportSize({ width: 1600, height: 1000 })
   await send.click()
   await until(() => sendCount === 3, 'whole-file informalization')
   assert.equal(sent.mode, 'informalize')
   assert.equal(sent.file, 'Main.lean')
+  assert.equal(sent.currentFile, 'Main.lean')
+  assert.deepEqual(sent.files, [])
   assert.equal(sent.proofTarget, undefined)
   assert.equal(sent.outputFile, undefined)
   assert.equal(sent.liveEdits, false)
-  assert.match(sent.prompt, /theorems and lemmas/i)
-  assert.match(sent.prompt, /proof argument/i)
+  assert.match(sent.prompt, /each theorem and its proof/i)
   await until(
     () => composer.inputValue().then((value) => value === ''),
     'translation submitted',
@@ -524,8 +585,7 @@ try {
   )
   const texTurn = page.locator('[data-run-id="picker-sent-3"]')
   const checks = texTurn.getByRole('region', { name: 'Informalization checks' })
-  await checks.getByText('Source proofs checked with Lean.').waitFor()
-  await checks.getByText('2 source declarations').click()
+  await checks.getByText('Lean checked 2 proofs.').click()
   await checks.getByRole('button', { name: /first · Main\.lean:5–6/ }).waitFor()
   assert.match(await checks.innerText(), /Informalization.tex · PDF built/)
   const pdf = checks.getByRole('link', { name: 'Open PDF', exact: true })
@@ -550,7 +610,7 @@ try {
       .isEnabled(),
     true,
   )
-  await review.getByText('2 source declarations').click()
+  await review.getByText('Lean checked 2 proofs.').click()
   await review.getByRole('button', { name: /first · Main\.lean:5–6/ }).click()
   await review.waitFor({ state: 'hidden' })
   await openFocus()

@@ -9,6 +9,7 @@ import {
   agentMessageContext,
   currentEditorFile,
   informalizationSourcePaths,
+  mentionedLeanSources,
   readSelectedContextFile,
   selectedContextFiles,
   projectSetupContext,
@@ -149,6 +150,40 @@ test('informalization scopes file requests to attached Lean sources or the selec
       expected,
     )
   }
+})
+
+test('prose source references resolve project paths, identify ambiguous basenames, and skip non-source instructions', () => {
+  const files = [
+    'Folder/One.lean',
+    'A/Two.lean',
+    'B/Two.lean',
+    'A/Three words.lean',
+  ]
+  assert.deepEqual(
+    mentionedLeanSources(
+      'Explain One.lean and `A/Three words.lean`, with Unknown.lean for reference.',
+      files,
+    ),
+    { paths: ['Folder/One.lean', 'A/Three words.lean'], issue: '' },
+  )
+  assert.deepEqual(
+    mentionedLeanSources(
+      'Do not edit Other.lean. Explain ./Folder/One.lean instead.',
+      files,
+    ),
+    { paths: ['Folder/One.lean'], issue: '' },
+  )
+  assert.deepEqual(
+    mentionedLeanSources(
+      'See https://example.org/External.lean for notation.',
+      files,
+    ),
+    { paths: [], issue: '' },
+  )
+  assert.match(
+    mentionedLeanSources('Explain Two.lean.', files).issue,
+    /A\/Two\.lean.*B\/Two\.lean/,
+  )
 })
 
 test('continuing an informalization chat carries the prose without claiming a passed check', () => {

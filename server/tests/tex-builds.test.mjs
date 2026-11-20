@@ -651,7 +651,7 @@ test('a clean replay PDF belongs only to its original run and must render the re
     runId,
     verificationRunId: clean.runId,
     origin: 'agent',
-    requiredTexSource: 'section.tex',
+    requiredTexSources: ['section.tex'],
   }
   const compile = async (settings) =>
     f.texBuilds.wait('owner', (await f.start(undefined, settings)).id)
@@ -668,6 +668,12 @@ test('a clean replay PDF belongs only to its original run and must render the re
   assert.equal(omitted.status, 'failed')
   assert.match(omitted.error, /source map.*section\.tex/)
   assert.equal(omitted.pdf, undefined)
+  const partial = await compile({
+    ...options,
+    requiredTexSources: ['main.tex', 'section.tex'],
+  })
+  assert.match(partial.error, /source map.*section\.tex/)
+  assert.doesNotMatch(partial.error, /main\.tex/)
   index = 1
   const success = await compile(options)
   assert.equal(success.status, 'completed', success.error)

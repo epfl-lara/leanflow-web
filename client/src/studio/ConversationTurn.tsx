@@ -73,17 +73,22 @@ export const ConversationTurn = memo(function ConversationTurn({
   const [loading, setLoading] = useState(false)
   const [detailsError, setDetailsError] = useState('')
   const [linkError, setLinkError] = useState('')
-  const reviewDocument =
-    run.mode === 'informalize' && run.status === 'completed'
-      ? informalizationDocument(run.verification)?.path
-      : undefined
   const openLocalLink = useCallback(
     (href: string) => {
       const target = chatFileLink(href)
-      if (target && target.path === reviewDocument) {
-        setLinkError('')
-        onReview(run.id)
-        return
+      const reviewDocument =
+        run.mode === 'informalize' && run.status === 'completed'
+          ? informalizationDocument(run.verification)
+          : undefined
+      if (target && reviewDocument) {
+        const paths = runChangePaths(run)
+        if (
+          (paths.length ? paths : reviewDocument.paths).includes(target.path)
+        ) {
+          setLinkError('')
+          onReview(run.id)
+          return
+        }
       }
       if (!target || !onOpenTarget) {
         setLinkError('This link does not point to a project file.')
@@ -92,7 +97,7 @@ export const ConversationTurn = memo(function ConversationTurn({
       setLinkError('')
       onOpenTarget(target)
     },
-    [onOpenTarget, onReview, reviewDocument, run.id],
+    [onOpenTarget, onReview, run],
   )
   const inspectRun = useCallback(() => onInspect(run.id), [onInspect, run.id])
   const changeCount = runChangeCount(run, !!run.liveEdits)
@@ -258,12 +263,17 @@ export const ConversationTurn = memo(function ConversationTurn({
         </div>
       )}
       <div className="turn-footer">
-        <span
-          className={`turn-status ${run.status === 'failed' ? 'danger' : ''}`}
-        >
-          {active && <span className="spinner" />}
-          {status}
-        </span>
+        {!(
+          run.status === 'completed' &&
+          hasInformalizationChecks(run.verification)
+        ) && (
+          <span
+            className={`turn-status ${run.status === 'failed' ? 'danger' : ''}`}
+          >
+            {active && <span className="spinner" />}
+            {status}
+          </span>
+        )}
         {changeCount > 0 && (
           <button
             type="button"

@@ -10,8 +10,8 @@ const object = (value) =>
 
 // Accept only the compact map produced by the compiler worker and validate its
 // destinations against the immutable source snapshot before publishing it.
-export function validateTexSyncTex(content, files, pageCount, requiredSource) {
-  if (!positiveInteger(pageCount)) return false
+export function mappedTexSources(content, files, pageCount) {
+  if (!positiveInteger(pageCount)) return null
   try {
     const map = JSON.parse(content)
     if (
@@ -22,7 +22,7 @@ export function validateTexSyncTex(content, files, pageCount, requiredSource) {
       new Set(map.paths).size !== map.paths.length ||
       !object(map.pages)
     )
-      return false
+      return null
 
     const known = new Set(files.map(({ path }) => path))
     if (
@@ -30,10 +30,10 @@ export function validateTexSyncTex(content, files, pageCount, requiredSource) {
         (path) => isTexFile(safeTexPath(path)) && known.has(path),
       )
     )
-      return false
+      return null
 
     let total = 0
-    let sawRequired = requiredSource === undefined
+    const mapped = new Set()
     for (const [page, boxes] of Object.entries(map.pages)) {
       if (
         !/^[1-9]\d{0,6}$/u.test(page) ||
@@ -42,9 +42,9 @@ export function validateTexSyncTex(content, files, pageCount, requiredSource) {
         !boxes.length ||
         (total += boxes.length) > maxBoxes
       )
-        return false
+        return null
       for (const box of boxes) {
-        if (!Array.isArray(box) || box.length !== 6) return false
+        if (!Array.isArray(box) || box.length !== 6) return null
         const [index, line, x, y, width, height] = box
         if (
           !Number.isSafeInteger(index) ||
@@ -59,14 +59,21 @@ export function validateTexSyncTex(content, files, pageCount, requiredSource) {
           x + width > maxCoordinate ||
           y + height > maxCoordinate
         )
-          return false
-        if (map.paths[index] === requiredSource) sawRequired = true
+          return null
+        mapped.add(map.paths[index])
       }
     }
-    return total > 0 && sawRequired
+    return total > 0 ? mapped : null
   } catch {
-    return false
+    return null
   }
+}
+
+export function validateTexSyncTex(content, files, pageCount, requiredSource) {
+  const mapped = mappedTexSources(content, files, pageCount)
+  return (
+    !!mapped && (requiredSource === undefined || mapped.has(requiredSource))
+  )
 }
 
 // The manager checks the saved digest before decoding the validated map.

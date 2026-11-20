@@ -19,11 +19,20 @@ private def generatedInductiveTheorem (env : Environment) (name : Name) : Bool :
       (isBRecOnRecursor env parent && suffix == "eq")
   | _ => false
 
+-- Imported modules can contain realized equations (e.g. f.eq_1) without
+-- an entry in Meta.isEqnThm's current-session reverse lookup. Verify Lean's
+-- reserved name, its owning definition, and the left side of the equation.
+open Lean in
+private def generatedEquation (env : Environment) (info : TheoremVal) : Bool := Id.run do
+  let some (owner, suffix) := Meta.declFromEqLikeName env info.name | return false
+  let some (_, lhs, _) := info.type.getForallBody.eq? | return false
+  return info.name == Meta.mkEqLikeNameFor env owner suffix && lhs.getAppFn.isConstOf owner
+
 open Lean Elab Command in
 run_cmd do
   let env ← getEnv
   let mut rows := #[]
-  let mut missing := 0
+  let mut unlocated := #[]
   let mut omitted := 0
   let mut bytes := 0
   for modName in env.header.moduleNames, data in env.header.moduleData do
@@ -33,12 +42,18 @@ run_cmd do
       let userName := privateToUserName name
       if userName.isInternalOrNum || (← liftCoreM <| Meta.isEqnThm name) then continue
       let some ranges ← findDeclarationRanges? name |
-        unless generatedInductiveTheorem env name do missing := missing + 1
+        unless generatedInductiveTheorem env name || generatedEquation env info do
+          let row := Json.mkObj [("module", toJson modName.toString), ("name", toJson userName.toString)]
+          bytes := bytes + row.compress.utf8ByteSize
+          if rows.size + unlocated.size >= 1200 || bytes > 500000 then
+            omitted := omitted + 1
+          else
+            unlocated := unlocated.push row
         continue
       let startLine := ranges.range.pos.line
       let endLine := ranges.range.endPos.line
       if endLine < focusStart || startLine > focusEnd then continue
-      if rows.size >= 1200 || bytes >= 500000 then
+      if rows.size + unlocated.size >= 1200 || bytes >= 500000 then
         omitted := omitted + 1
         continue
       let st ← liftTermElabM <| Meta.ppExpr info.type
@@ -53,11 +68,11 @@ run_cmd do
         ("type", toJson rendered), ("axioms", toJson (axs.map fun a => a.toString))]
       bytes := bytes + row.compress.utf8ByteSize
       if bytes > 500000 then omitted := omitted + 1 else rows := rows.push row
-  logInfo <| (Json.mkObj [("entries", Json.arr rows), ("missing", toJson missing), ("omitted", toJson omitted)]).compress
+  logInfo <| (Json.mkObj [("entries", Json.arr rows), ("unlocated", Json.arr unlocated), ("omitted", toJson omitted)]).compress
 `
 
 const inspectTheorems = String.raw`
-    inventory={'entries':[], 'missing':0, 'omitted':0, 'failed':[p for p in paths if p not in selected.values()]}
+    inventory={'entries':[], 'unlocated':[], 'omitted':0, 'failed':[p for p in paths if p not in selected.values()]}
     if selected:
         # A legacy-mode import reads private proof bodies for both ordinary and
         # module-system files. Module names were validated before compilation.
@@ -77,10 +92,11 @@ const inspectTheorems = String.raw`
             if item.get('severity')=='information' and item.get('fileName')==str(script):
                 answers.append(json.loads(item['data']))
         if len(answers)!=1: sys.exit(1)
-        inventory.update({k:answers[0][k] for k in ['missing','omitted']})
-        for entry in answers[0]['entries']:
-            entry['path']=selected[entry.pop('module')]
-            inventory['entries'].append(entry)
+        inventory['omitted']=answers[0]['omitted']
+        for key in ['entries','unlocated']:
+            for entry in answers[0][key]:
+                entry['path']=selected[entry.pop('module')]
+                inventory[key].append(entry)
         inventory['entries'].sort(key=lambda row:(paths.index(row['path']),row['startLine'],row['endLine'],row['name']))
     print(json.dumps(inventory,ensure_ascii=False))
 `
@@ -112,7 +128,7 @@ const explicitRequest = new RegExp(
 
 // Only explicit theorem requests can turn an unknown word into a missing
 // declaration. Output filenames, citations and surrounding prose do not.
-function* explicitTheoremNames(prompt) {
+export function* explicitTheoremNames(prompt) {
   if (!prompt || wholeFile.test(prompt)) return
   for (const [
     ,
@@ -188,11 +204,17 @@ function selectDeclarations(entries, proofTarget, prompt, issues) {
 }
 
 function inventoryReport(inventory, sources, proofTarget, prompt, names) {
+  const validReference = (entry) =>
+    entry &&
+    sources.includes(entry.path) &&
+    typeof entry.name === 'string' &&
+    entry.name.length > 0
   if (
-    ![inventory.missing, inventory.omitted].every(
-      (n) => Number.isSafeInteger(n) && n >= 0,
-    ) ||
+    !Number.isSafeInteger(inventory.omitted) ||
+    inventory.omitted < 0 ||
     !Array.isArray(inventory.entries) ||
+    !Array.isArray(inventory.unlocated) ||
+    !inventory.unlocated.every(validReference) ||
     !Array.isArray(inventory.failed) ||
     !inventory.failed.every((path) => sources.includes(path))
   )
@@ -202,10 +224,7 @@ function inventoryReport(inventory, sources, proofTarget, prompt, names) {
   const issues = []
   for (const entry of inventory.entries) {
     if (
-      !entry ||
-      !sources.includes(entry.path) ||
-      typeof entry.name !== 'string' ||
-      !entry.name ||
+      !validReference(entry) ||
       typeof entry.type !== 'string' ||
       !entry.type ||
       !Number.isSafeInteger(entry.startLine) ||
@@ -220,7 +239,7 @@ function inventoryReport(inventory, sources, proofTarget, prompt, names) {
       )
   }
   let selected = selectDeclarations(
-    inventory.entries,
+    [...inventory.entries, ...inventory.unlocated],
     proofTarget,
     names ? undefined : prompt,
     issues,
@@ -243,13 +262,19 @@ function inventoryReport(inventory, sources, proofTarget, prompt, names) {
     )
   }
   const entries = []
+  const unlocated = []
+  const withoutRanges = new Set(inventory.unlocated)
   let size = 0
   let limited = inventory.omitted > 0
   for (const entry of selected) {
     size += JSON.stringify(entry).length
-    if (entries.length >= 200 || size > 100000) {
+    if (entries.length + unlocated.length >= 200 || size > 100000) {
       limited = true
       break
+    }
+    if (withoutRanges.has(entry)) {
+      unlocated.push({ path: entry.path, name: entry.name })
+      continue
     }
     entries.push({
       ...entry,
@@ -268,17 +293,19 @@ function inventoryReport(inventory, sources, proofTarget, prompt, names) {
         inventory.failed.join(', ') +
         '. Open the source to inspect its diagnostics.',
     )
-  if (inventory.missing)
+  if (unlocated.length)
     issues.push(
-      'Lean supplied no source location for ' +
-        inventory.missing +
-        ' theorem declaration(s).',
+      'Lean found ' +
+        (unlocated.length === 1 ? 'a theorem' : 'theorems') +
+        ' without source lines. Select a named theorem with source lines to continue.',
     )
   if (entries.some(({ status }) => status === 'incomplete'))
     issues.push('Some proofs use an admitted result or a nonstandard axiom.')
   return {
     status: issues.length ? 'incomplete' : 'checked',
     entries,
+    ...(unlocated.length && { unlocated }),
+    ...(inventory.failed.length && { failedPaths: inventory.failed }),
     detail:
       issues.join(' ').slice(0, 2500) ||
       (entries.length
@@ -305,7 +332,7 @@ export async function prepareInformalizationSources(
   const sources = [...new Set(proofTarget ? [proofTarget.path] : paths)]
   if (!sources.length)
     return unavailable(
-      'Select a theorem or attach a saved Lean file to check its declarations.',
+      'Lemex could not identify a Lean source file. Name the theorem or file you want to write up.',
     )
   try {
     if (

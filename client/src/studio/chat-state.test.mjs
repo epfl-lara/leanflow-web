@@ -189,43 +189,106 @@ test('informalization reports document readiness independently of the source pro
   )
 })
 
-test('document failures show the independent source result and withhold artifact actions', () => {
-  const render = (status, reason) =>
-    renderToStaticMarkup(
-      React.createElement(InformalizationResult, {
-        projectId: 'project',
-        value: {
-          kind: 'workspace',
-          complete: false,
-          reason,
-          informalization: {
-            sources: {
-              status,
-              detail: 'Audit detail.',
-              entries: [
-                {
-                  path: 'Source.lean',
-                  name: 'sample',
-                  type: 'True',
-                  status: 'checked',
-                  startLine: 1,
-                  endLine: 2,
-                  axioms: [],
-                },
-              ],
-            },
+function renderDocumentChecks({
+  status,
+  detail,
+  reason = detail,
+  unlocated,
+  failedPaths,
+  document,
+  draft,
+  entries,
+}) {
+  return renderToStaticMarkup(
+    React.createElement(InformalizationResult, {
+      projectId: 'project',
+      value: {
+        kind: 'workspace',
+        complete: !!document,
+        reason,
+        informalization: {
+          sources: {
+            status,
+            detail,
+            entries: entries ?? [
+              {
+                path: 'Source.lean',
+                name: 'sample',
+                type: 'True',
+                status: 'checked',
+                startLine: 1,
+                endLine: 2,
+                axioms: [],
+              },
+            ],
+            unlocated,
+            failedPaths,
           },
+          document,
+          draft,
         },
-      }),
-    )
-  const invalid = render('checked', 'The LaTeX build failed on line 7.')
-  assert.match(invalid, /Source proofs checked with Lean/)
+      },
+    }),
+  )
+}
+
+test('document build errors keep the independent checked proof count and withhold artifact actions', () => {
+  const invalid = renderDocumentChecks({
+    status: 'checked',
+    detail: 'Lean replayed the checked proofs.',
+    reason: 'The LaTeX build failed on line 7.',
+    draft: { path: 'Paper.tex' },
+  })
+  assert.match(invalid, /Lean checked 1 proof/)
+  assert.match(invalid, /Draft needs revision/)
   assert.match(invalid, /The LaTeX build failed on line 7/)
   assert.doesNotMatch(invalid, /Open PDF|Download PDF|PDF built|Open document/)
-  const incomplete = render('incomplete', 'Review the Lean source.')
-  assert.match(incomplete, /Source proof checks incomplete/)
-  assert.match(incomplete, /Audit detail/)
-  assert.doesNotMatch(incomplete, /Source proofs checked with Lean/)
+})
+
+test('source failures show the affected theorem names and files, retain actionable draft details, and explain older count-only reports', () => {
+  const detail = 'Lean could not match these theorems to lines in the source.'
+  const reason = detail + ' The draft is available in Review.'
+  const named = renderDocumentChecks({
+    status: 'incomplete',
+    detail,
+    reason,
+    unlocated: [{ name: 'Local.left', path: 'Left.lean' }],
+    failedPaths: ['Other.lean'],
+    draft: { path: 'Draft.md' },
+  })
+  assert.equal(named.split(detail).length, 2)
+  for (const text of [
+    'Lean checked 1 proof',
+    'Local.left',
+    'Left.lean',
+    'Other.lean',
+    'The draft is available in Review.',
+  ])
+    assert.ok(named.includes(text), text)
+
+  const old = renderDocumentChecks({
+    status: 'incomplete',
+    detail: 'Lean supplied no source location for 4 theorem declaration(s).',
+  })
+  assert.match(old, /No document to review/)
+  assert.equal(old.split('could not match 4 theorems').length, 2)
+  assert.match(old, /This run did not record their names/)
+  assert.doesNotMatch(
+    old,
+    /theorem declaration\(s\)|Source proof checks incomplete|Open PDF|Review the mathematical wording/,
+  )
+})
+
+test('a paper lists all changed files even when the primary document was already present', () => {
+  const html = renderDocumentChecks({
+    status: 'checked',
+    detail: '',
+    document: { path: 'Main.tex', paths: ['Introduction.tex', 'Results.tex'] },
+  })
+  assert.match(html, /Main.tex/)
+  assert.match(html, /2 files changed/)
+  assert.match(html, /Introduction.tex/)
+  assert.match(html, /Results.tex/)
 })
 
 test('usage shows current context first and keeps cumulative request totals collapsed', () => {

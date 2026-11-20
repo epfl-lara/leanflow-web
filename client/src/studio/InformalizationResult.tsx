@@ -17,9 +17,172 @@ export function informalizationDocument(value: unknown) {
   if (!record(document) || typeof document.path !== 'string') return null
   return {
     path: document.path,
+    paths: Array.isArray(document.paths)
+      ? document.paths.filter(
+          (path): path is string => typeof path === 'string',
+        )
+      : [document.path],
     buildId:
       typeof document.buildId === 'string' ? document.buildId : undefined,
   }
+}
+
+type SourceEntry = RunProofTarget & {
+  name: string
+  status: string
+  type?: string
+  axioms?: string[]
+}
+
+function sourceEntry(value: unknown): value is SourceEntry {
+  return (
+    record(value) &&
+    typeof value.path === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.status === 'string' &&
+    typeof value.startLine === 'number' &&
+    typeof value.endLine === 'number' &&
+    (value.type === undefined || typeof value.type === 'string') &&
+    (value.axioms === undefined ||
+      (Array.isArray(value.axioms) &&
+        value.axioms.every((name) => typeof name === 'string')))
+  )
+}
+
+type OpenTarget = (target: RunProofTarget) => void
+
+function TheoremList({
+  entries,
+  onOpenTarget,
+  checked,
+}: {
+  entries: SourceEntry[]
+  onOpenTarget?: OpenTarget
+  checked?: boolean
+}) {
+  return (
+    <ul>
+      {entries.map(({ path, name, startLine, endLine, type, axioms }) => (
+        <li key={JSON.stringify([path, name, startLine])}>
+          <button
+            type="button"
+            className="turn-action"
+            disabled={!onOpenTarget}
+            onClick={() => onOpenTarget?.({ path, name, startLine, endLine })}
+          >
+            {name} · {path}:{startLine}
+            {endLine !== startLine ? `–${endLine}` : ''}
+          </button>
+          {type && checked && <pre>{type}</pre>}
+          {!!axioms?.length && <p>Axioms used: {axioms.join(', ')}</p>}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function SourceFileLink({
+  path,
+  onOpenTarget,
+}: {
+  path: string
+  onOpenTarget?: OpenTarget
+}) {
+  return (
+    <button
+      className="turn-action"
+      type="button"
+      disabled={!onOpenTarget}
+      onClick={() => onOpenTarget?.({ path, startLine: 1, endLine: 1 })}
+    >
+      {path}
+    </button>
+  )
+}
+
+// Older saved runs stored only a count for theorems without source ranges.
+function sourceExplanation(detail: string) {
+  return detail.replace(
+    /Lean supplied no source location for (\d+) theorem declaration\(s\)\./g,
+    (_, count: string) =>
+      `Lean could not match ${count} ${count === '1' ? 'theorem' : 'theorems'} to lines in the source file. This run did not record ${count === '1' ? 'its name' : 'their names'}. Run Informalize again for details.`,
+  )
+}
+
+function SourceChecks({
+  sources,
+  onOpenTarget,
+}: {
+  sources: Record<string, unknown>
+  onOpenTarget?: OpenTarget
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const entries = Array.isArray(sources.entries)
+    ? sources.entries.filter(sourceEntry)
+    : []
+  const checked = entries.filter((entry) => entry.status === 'checked')
+  const incomplete = entries.filter((entry) => entry.status !== 'checked')
+  const unlocated = Array.isArray(sources.unlocated)
+    ? sources.unlocated.filter(
+        (item): item is { name: string; path: string } =>
+          record(item) &&
+          typeof item.name === 'string' &&
+          typeof item.path === 'string',
+      )
+    : []
+  const failedPaths = Array.isArray(sources.failedPaths)
+    ? sources.failedPaths.filter(
+        (file): file is string => typeof file === 'string',
+      )
+    : []
+  return (
+    <>
+      {(sources.status !== 'checked' || !entries.length) && (
+        <p>
+          {typeof sources.detail === 'string' && sources.detail
+            ? sourceExplanation(sources.detail)
+            : 'Lean could not finish checking the source proofs.'}
+        </p>
+      )}
+      {unlocated.length > 0 && (
+        <ul aria-label="Theorems without source lines">
+          {unlocated.map(({ name, path }) => (
+            <li key={JSON.stringify([name, path])}>
+              {name} ·{' '}
+              <SourceFileLink path={path} onOpenTarget={onOpenTarget} />
+            </li>
+          ))}
+        </ul>
+      )}
+      {failedPaths.length > 0 && (
+        <ul aria-label="Files Lean could not check">
+          {failedPaths.map((path) => (
+            <li key={path}>
+              <SourceFileLink path={path} onOpenTarget={onOpenTarget} />
+            </li>
+          ))}
+        </ul>
+      )}
+      {incomplete.length > 0 && (
+        <TheoremList entries={incomplete} onOpenTarget={onOpenTarget} />
+      )}
+      {checked.length > 0 && (
+        <details onToggle={(event) => setExpanded(event.currentTarget.open)}>
+          <summary>
+            Lean checked {checked.length}{' '}
+            {checked.length === 1 ? 'proof' : 'proofs'}.
+          </summary>
+          {expanded && (
+            <TheoremList
+              entries={checked}
+              onOpenTarget={onOpenTarget}
+              checked
+            />
+          )}
+        </details>
+      )}
+    </>
+  )
 }
 
 export function InformalizationResult({
@@ -34,15 +197,23 @@ export function InformalizationResult({
   onOpenTarget?: (target: RunProofTarget) => void
 }) {
   const [error, setError] = useState('')
-  const [showDeclarations, setShowDeclarations] = useState(false)
   if (!hasInformalizationChecks(value)) return null
   const result = value.informalization
   const sources = record(result.sources) ? result.sources : {}
-  const entries = Array.isArray(sources.entries)
-    ? sources.entries.filter(record)
-    : []
   const document = informalizationDocument(value)
   const path = document?.path ?? ''
+  const complete = value.complete === true
+  const multipleFiles =
+    document &&
+    (document.paths.length > 1 ||
+      (document.paths.length === 1 && document.paths[0] !== path))
+  // Source checking can stop a run before the writer starts. Saved runs used
+  // the same reason at both stages, sometimes with a separate draft recovery hint.
+  const reason = typeof value.reason === 'string' ? value.reason : ''
+  const documentIssue =
+    typeof sources.detail === 'string' && reason.startsWith(sources.detail)
+      ? reason.slice(sources.detail.length).trim()
+      : reason
   const pdfUrl =
     path && projectId && document?.buildId
       ? sessionBoundUrl(
@@ -54,72 +225,13 @@ export function InformalizationResult({
       className="informalization-result"
       aria-label="Informalization checks"
     >
-      <strong>Lean source proofs</strong>
-      <p>
-        {sources.status === 'checked'
-          ? entries.length
-            ? 'Source proofs checked with Lean.'
-            : 'Source inventory checked with Lean.'
-          : sources.status === 'incomplete'
-            ? 'Source proof checks incomplete.'
-            : 'Source proof checks unavailable.'}
-      </p>
-      {(sources.status !== 'checked' || !entries.length) &&
-        typeof sources.detail === 'string' &&
-        sources.detail && <p>{sources.detail}</p>}
-      {!!entries.length && (
-        <details
-          onToggle={(event) => setShowDeclarations(event.currentTarget.open)}
-        >
-          <summary>
-            {entries.length} source{' '}
-            {entries.length === 1 ? 'declaration' : 'declarations'}
-          </summary>
-          {showDeclarations && (
-            <ul>
-              {entries.map((entry, index) => {
-                const { name, path, startLine, endLine } = entry
-                if (
-                  typeof path !== 'string' ||
-                  typeof name !== 'string' ||
-                  typeof startLine !== 'number' ||
-                  typeof endLine !== 'number'
-                )
-                  return null
-                return (
-                  <li key={`${path}:${startLine}:${name}:${index}`}>
-                    <button
-                      type="button"
-                      className="turn-action"
-                      disabled={!onOpenTarget}
-                      onClick={() =>
-                        onOpenTarget?.({ path, name, startLine, endLine })
-                      }
-                    >
-                      {name} · {path}:{startLine}
-                      {endLine !== startLine ? `–${endLine}` : ''}
-                    </button>
-                    <span>
-                      {' '}
-                      · {entry.status === 'checked' ? 'Checked' : 'Incomplete'}
-                    </span>
-                    {typeof entry.type === 'string' && <pre>{entry.type}</pre>}
-                    {Array.isArray(entry.axioms) && entry.axioms.length > 0 && (
-                      <p>
-                        Axioms:{' '}
-                        {entry.axioms
-                          .filter((name) => typeof name === 'string')
-                          .join(', ')}
-                      </p>
-                    )}
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </details>
-      )}
-      <strong>Document</strong>
+      <strong>
+        {path
+          ? complete
+            ? 'Document'
+            : 'Draft needs revision'
+          : 'No document to review'}
+      </strong>
       {path && (
         <p>
           {path}
@@ -130,12 +242,24 @@ export function InformalizationResult({
               : ''}
         </p>
       )}
-      {value.complete === true
-        ? !applied && (
-            <p>Review the mathematical wording before applying the document.</p>
-          )
-        : typeof value.reason === 'string' &&
-          value.reason && <p>{value.reason}</p>}
+      {multipleFiles && (
+        <details>
+          <summary>
+            {document.paths.length}{' '}
+            {document.paths.length === 1 ? 'file changed' : 'files changed'}
+          </summary>
+          <ul>
+            {document.paths.map((file) => (
+              <li key={file}>{file}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {!complete && documentIssue && <p>{documentIssue}</p>}
+      <SourceChecks sources={sources} onOpenTarget={onOpenTarget} />
+      {complete && !applied && (
+        <p>Review the mathematical wording before applying the document.</p>
+      )}
       {(pdfUrl || (applied && path)) && (
         <div className="turn-footer">
           {pdfUrl && (
@@ -184,7 +308,9 @@ export function InformalizationResult({
                     )
                   }}
                 >
-                  Download project file
+                  {multipleFiles
+                    ? 'Download main file'
+                    : 'Download project file'}
                 </button>
               )}
             </>

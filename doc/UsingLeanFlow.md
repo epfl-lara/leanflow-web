@@ -194,9 +194,11 @@ Targets belong to their chat. **Ask Lemex** uses the current proof or selection;
 
 Your requests and follow-ups guide the work in each mode. In **Ask & Search**, **Proofs**, **Formalize**, and **Optimize**, you can also request document edits, source renames, statement or import changes, and setup repairs.
 
-To write up one theorem, open a Lean file, choose its declaration in **Outline**, choose **Informalize**, and send the prepared message. To write up a whole file, clear the focused declaration and attach the Lean file. For example, ask “Add the statements and proofs from this file to the Results section of `paper.tex`.” Choose **Output document** to set the destination explicitly, or request Markdown notes. Use **Write statements only** for a list of results. Lemex still checks each Lean proof before writing the list.
+Open a Lean file, choose **Informalize**, and send the message to write up its theorems. The open file is included automatically. To write up one theorem, choose it in **Outline**. You can also name a theorem or file in chat, attach several sources, or let Lemex find the relevant proofs in the project.
 
-Lemex checks the selected declarations with the project’s Lean version, then writes the statements and mathematical arguments into your chosen document. With no destination it suggests a new LaTeX article. The run reports missing or uncheckable proofs in chat. For LaTeX, it builds a PDF before offering the edit for review. Compare the prose with the linked Lean declarations, review the document change, and choose **Apply changes** to save it. If a document check fails, open **Review document** to inspect the draft and continue in the same chat to request a correction.
+Leave **Output document** empty to let Lemex choose where to write. To use an existing paper, ask “Add the proofs to the Results section of `paper.tex`.” Lemex can write a single article, split a larger paper into a main TeX file and chapters, or create linked Markdown notes. For a list of results, ask for statements only. Lemex still checks the Lean proofs.
+
+Lemex checks each source proof with the project’s Lean version. If a proof needs attention, the result points to its theorem or file. For LaTeX, it builds a PDF before offering the edit for review. Compare the prose with the linked Lean declarations, review the document change, and choose **Apply changes** to save it. If a document check fails, open **Review document** to inspect the draft and continue in the same chat to request a correction.
 
 Compare optimization's token and heartbeat measurements: a shorter proof can take more elaboration work. Repair invalid proofs first.
 

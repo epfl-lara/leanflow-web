@@ -33,7 +33,7 @@ function mockInventory(
         code: 0,
         stdout: JSON.stringify({
           entries,
-          missing: 0,
+          unlocated: [],
           omitted: 0,
           failed: [],
           ...fields,
@@ -137,7 +137,7 @@ test('ambiguous, missing, failed and limited coverage stays visible for named so
   )
   const partial = mockInventory([entry('A.ok')], {
     failed: ['Broken.lean'],
-    missing: 1,
+    unlocated: [{ path: file, name: 'Hidden.result' }],
     omitted: 5,
   })
   const report = await check(partial, {
@@ -150,8 +150,46 @@ test('ambiguous, missing, failed and limited coverage stays visible for named so
   )
   assert.equal(report.status, 'incomplete')
   assert.match(report.detail, /Broken\.lean/)
-  assert.match(report.detail, /no source location/)
+  assert.deepEqual(report.failedPaths, ['Broken.lean'])
+  assert.equal(report.unlocated, undefined)
   assert.match(report.detail, /limit/)
+})
+test('a theorem without lines is identified by name and file and only blocks a request that could include it', async () => {
+  const unlocated = [{ path: file, name: 'Hidden.result' }]
+  const runtime = mockInventory([entry('Review.result')], { unlocated })
+  for (const request of [
+    {},
+    { names: ['Hidden.result'] },
+    { prompt: 'Explain Hidden.result.' },
+  ]) {
+    const report = await check(runtime, request)
+    assert.equal(report.status, 'incomplete', report.detail)
+    assert.deepEqual(report.unlocated, unlocated)
+    assert.match(report.detail, /without source lines/)
+  }
+  for (const request of [
+    {
+      proofTarget: {
+        path: file,
+        name: 'Review.result',
+        startLine: 3,
+        endLine: 3,
+      },
+    },
+    { names: ['Review.result'] },
+    { prompt: 'Explain Review.result.' },
+  ]) {
+    const report = await check(runtime, request)
+    assert.equal(report.status, 'checked', report.detail)
+    assert.equal(report.unlocated, undefined)
+    assert.deepEqual(
+      report.entries.map(({ name }) => name),
+      ['Review.result'],
+    )
+  }
+  const ambiguous = await check(runtime, { prompt: 'Explain result.' })
+  assert.equal(ambiguous.status, 'incomplete')
+  assert.match(ambiguous.detail, /multiple declarations/)
 })
 test('document references require an exact unique qualified theorem for each supplied name', async () => {
   const runtime = mockInventory([
@@ -275,6 +313,9 @@ test(
       '  | leaf',
       '  | branch : Tree → Tree → Tree',
       'theorem Box.mk.user_spec : True := by trivial',
+      'def square (n : Nat) : Nat := n * n',
+      '#check square.eq_1',
+      'theorem Written.eq_1 : True := by trivial',
       '',
     ].join('\n')
     await Promise.all([
@@ -292,6 +333,9 @@ test(
         path.join(project, 'Unlocated.lean'),
         [
           'import Lean',
+          'def Owned : Nat := 0',
+          'open Lean Elab Command in',
+          'run_cmd liftCoreM <| addDecl <| .thmDecl { name := `Owned.eq_98, levelParams := [], type := mkConst ``True, value := mkConst ``True.intro }',
           'open Lean Elab Command in',
           'run_cmd liftCoreM <| addDecl <| .thmDecl { name := `User.injEq, levelParams := [], type := mkConst ``True, value := mkConst ``True.intro }',
           '',
@@ -311,7 +355,12 @@ test(
     const report = await run({ paths: [file, 'Broken.lean', 'Unlocated.lean'] })
     assert.equal(report.status, 'incomplete', report.detail)
     assert.match(report.detail, /Broken\.lean/)
-    assert.match(report.detail, /no source location for 1 theorem/)
+    assert.deepEqual(report.failedPaths, ['Broken.lean'])
+    assert.deepEqual(report.unlocated.map(({ name }) => name).sort(), [
+      'Owned.eq_98',
+      'User.injEq',
+    ])
+    assert.ok(report.unlocated.every(({ path }) => path === 'Unlocated.lean'))
     assert.deepEqual(
       report.entries.map((e) => e.name),
       [
@@ -323,6 +372,7 @@ test(
         'Review.fromHelper',
         'Review.custom',
         'Box.mk.user_spec',
+        'Written.eq_1',
       ],
     )
     assert.deepEqual(
@@ -343,6 +393,7 @@ test(
         'incomplete',
         'incomplete',
         'incomplete',
+        'checked',
         'checked',
       ],
     )

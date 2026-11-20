@@ -26,12 +26,18 @@ import path from 'node:path'
 import { AgentRpc } from './rpc.mjs'
 import { TERMINAL } from './events.mjs'
 import { verifyCandidate } from './verification.mjs'
-import { prepareInformalizationSources } from './informalization.mjs'
+import {
+  hasNamedInformalizationRequest,
+  prepareInformalizationSources,
+} from './informalization.mjs'
 import {
   informalizationDocumentPath,
   validateInformalizationOutputPath,
 } from './informalization-document.mjs'
-import { reviewInformalizationCandidate } from './agent-informalization.mjs'
+import {
+  checkInformalizationBatches,
+  reviewInformalizationCandidate,
+} from './agent-informalization.mjs'
 import { createAgentOutputHandler } from './agent-output.mjs'
 import { createAgentActivityHandler } from './agent-activity.mjs'
 import { createNativeDiagnosticHandler } from './native-diagnostics.mjs'
@@ -57,6 +63,8 @@ import {
   agentConversationContext,
   currentEditorFile,
   informalizationSourcePaths,
+  mentionedLeanSources,
+  projectLeanSourcePaths,
   readSelectedContextFile,
   selectedContextFiles,
   projectSetupContext,
@@ -912,38 +920,74 @@ export class AgentManager {
         informalizing && priorRuns.filter((run) => run.id !== id).at(-1)
       const priorDraft = previous?.verification?.informalization?.draft
       if (priorDraft) job.previousDocument = priorDraft.path
-      const checkSources = async (request, root) =>
-        this.informalizationSources(this.runtime, root, {
-          paths: informalizationSourcePaths(request, snapshot),
-          proofTarget: request.proofTarget,
-          prompt: request.prompt,
-          names: request.names,
-          signal: active.controller.signal,
-          onOutput: (text) => this.#log(id, text),
-        })
+      const checkSources = (request, root, paths) =>
+        checkInformalizationBatches(request, paths, (batch) =>
+          this.informalizationSources(this.runtime, root, {
+            ...batch,
+            proofTarget: request.proofTarget,
+            prompt: request.prompt,
+            signal: active.controller.signal,
+            onOutput: (text) => this.#log(id, text),
+          }),
+        )
       if (informalizing) {
         this.#progress(
           id,
           'Checking source proofs',
           'Finding declarations and checking their proofs with the project’s Lean version.',
         )
+        const projectFiles = projectLeanSourcePaths(snapshot)
+        const mentions = mentionedLeanSources(job.prompt, projectFiles)
+        const scopeIssue =
+          mentions.issue ||
+          (!projectFiles.length &&
+            'This project has no saved Lean source files. Add a .lean file with the proof, then run Informalize again.')
+        if (scopeIssue) {
+          this.#finishInformalization(id, {
+            sources: { status: 'unavailable', entries: [], detail: scopeIssue },
+            reason: scopeIssue,
+          })
+          return
+        }
         let request = job
+        let paths = informalizationSourcePaths(job, snapshot, mentions)
         if (
           priorDraft &&
           !job.proofTarget &&
           !job.files?.some((file) => file.endsWith('.lean')) &&
-          !informalizationSourcePaths(job, snapshot).length
+          !paths.length
         ) {
           const entries = previous.verification.informalization.sources.entries
-          request = {
-            ...job,
-            files: [...new Set(entries.map((entry) => entry.path))],
-            names: entries.map((entry) => entry.name),
+          if (entries.length && !hasNamedInformalizationRequest(job.prompt)) {
+            paths = [...new Set(entries.map((entry) => entry.path))]
+            request = { ...job, priorEntries: entries }
           }
         }
-        informalSources = await checkSources(request, snapshot.root)
-        active.controller.signal.throwIfAborted()
-        if (
+        const automaticScope = !paths.length && projectFiles.length > 0
+        if (!automaticScope) {
+          informalSources = await checkSources(request, snapshot.root, paths)
+          active.controller.signal.throwIfAborted()
+        }
+        const discover =
+          automaticScope ||
+          (informalSources.status === 'checked' &&
+            !informalSources.entries.length &&
+            !job.proofTarget &&
+            !job.files?.length &&
+            !mentions.paths.length &&
+            projectFiles.length > 1)
+        if (discover) {
+          informalSources = {
+            status: 'unavailable',
+            entries: [],
+            detail: 'The draft has no checked Lean source references yet.',
+          }
+          this.#progress(
+            id,
+            'Finding source proofs',
+            'Looking through the project for the theorems in your request.',
+          )
+        } else if (
           informalSources.status !== 'checked' ||
           !informalSources.entries.length
         ) {
@@ -958,6 +1002,7 @@ export class AgentManager {
           suggestedPath: informalizationDocumentPath(job, snapshot),
           ...(job.outputFile ? { requestedPath: job.outputFile } : {}),
           declarations: informalSources.entries,
+          ...(discover ? { discoverSources: true } : {}),
         })
       }
       const supportsImages = modelSupportsImages(
@@ -1017,16 +1062,23 @@ export class AgentManager {
       if (priorDraft) {
         // The previous edit is reference material only. Any revised text must
         // still be applied to the freshly captured document and checked again.
-        const draft = this.events
-          .get(previous.id, job.owner)
-          .changes?.find((change) => change.path === priorDraft.path)
-        if (typeof draft?.after === 'string') {
+        const paths = new Set(priorDraft.paths || [priorDraft.path])
+        const drafts =
+          this.events
+            .get(previous.id, job.owner)
+            .changes?.filter(
+              (change) =>
+                paths.has(change.path) && typeof change.after === 'string',
+            ) || []
+        active.priorDraftFiles = []
+        for (const draft of drafts) {
           const filename = `previous-draft-${randomUUID()}${path.extname(draft.path)}`
-          active.priorDraftFile = path.join(home, filename)
-          await fs.writeFile(active.priorDraftFile, draft.after, {
+          const reference = path.join(home, filename)
+          await fs.writeFile(reference, draft.after, {
             flag: 'wx',
             mode: 0o600,
           })
+          active.priorDraftFiles.push(reference)
           contextSections.push({
             kind: 'previous-informalization-draft',
             path: draft.path,
@@ -1447,7 +1499,7 @@ export class AgentManager {
             ? 'This is scoped setup help. Propose only root Lean/Lake configuration changes for review. Preserve every existing valid Lean pin, dependency source/revision and all source files. If fixing a source proof or changing a pin is necessary, explain it and ask the user to start an ordinary chat for that work.\n'
             : '') +
           (informalizing
-            ? 'Deliver the checked statements and mathematical proofs in one project document. Write the document to the private working copy. Report its project path in chat. The server checks coverage and builds TeX after you finish. The user reviews and applies the edit.\n'
+            ? 'Write the requested paper in the private working copy. Organize it into linked chapters or included TeX files when helpful. If no source scope was provided, find the relevant Lean declarations in the project and cite each one. Link the main document in chat. The server checks coverage and builds TeX after you finish. The user reviews and applies the edit.\n'
             : job.liveEdits
               ? 'Editing mode: live source updates. Requested project text edits are mirrored to the saved project while you work. Project configuration edits are saved together at completion. Independent Lean checks report whether the result is verified; failed checks do not revoke the user’s requested edits. The user can stop the run and undo these edits. Keep changes focused on the requested task.\n'
               : 'Editing mode: review first. Your workspace edits remain a separate candidate until independent verification and user acceptance.\n') +
@@ -1819,8 +1871,8 @@ export class AgentManager {
         } catch (error) {
           cleanupError = error
         }
-        if (active.priorDraftFile)
-          await fs.rm(active.priorDraftFile, { force: true })
+        for (const file of active.priorDraftFiles || [])
+          await fs.rm(file, { force: true })
         active.output?.flush()
         await active.mirror?.stop()
         await this.followups.finish(

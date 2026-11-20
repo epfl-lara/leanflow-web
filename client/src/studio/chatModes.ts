@@ -78,18 +78,17 @@ export const chatModes: {
   {
     id: 'informalize',
     name: 'Informalize',
-    hint: 'Write a LaTeX or Markdown document from a Lean declaration or the theorems in a file. Review the statements, proof arguments, and source checks before applying the document.',
-    placeholder: 'Choose a Lean source and describe the document you want…',
+    hint: 'Turn Lean theorems and their proofs into a LaTeX or Markdown document. Lemex uses the open Lean file or looks in your project.',
+    placeholder: 'Describe the proof or document you want…',
     suggestions: [
       {
         label: 'Write an informal proof',
-        prompt:
-          'Write the selected declaration and its proof argument in mathematical English, with its assumptions and source. If no declaration is selected, cover the theorems and lemmas in the attached Lean files, or in the current Lean file if none are attached.',
+        prompt: 'Write up each theorem and its proof in mathematical English.',
       },
       {
         label: 'Write statements only',
         prompt:
-          'Write a document of statements only. Give each declaration’s assumptions, conclusion, and Lean source. Use the selected declaration or the theorems and lemmas in the attached Lean files, or in the current Lean file if none are attached.',
+          'Write up each theorem in mathematical English. Include statements only.',
       },
     ],
   },

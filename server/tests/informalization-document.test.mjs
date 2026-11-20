@@ -208,7 +208,7 @@ test('extracts only added or revised document references for independent Lean re
   )
 })
 
-test('accepts exactly one requested document, ignores suggestions as a restriction, and skips compilation for Markdown', async () => {
+test('accepts a requested document, ignores suggestions as a restriction, and skips compilation for Markdown', async () => {
   const existing = {
     path: 'chapter-notes.md',
     before: 'Existing introduction.',
@@ -481,6 +481,7 @@ test('compiles the final clean snapshot once, associates the PDF with the origin
         waitForProject: true,
         runId: 'run',
         verificationRunId: 'clean-id',
+        requiredTexSources: [],
         sourceRoot: snapshot.root,
         signal,
       },
@@ -532,7 +533,7 @@ test('resolves fragment roots and requires confirmation that the chosen fragment
     verify([{ path: edited, after }], { texBuilds, ...opts })
   await verifyFragment(chapter)
   assert.deepEqual(calls[0][2], { rootFile: 'paper/main.tex' })
-  assert.equal(calls[0][3].requiredTexSource, edited)
+  assert.deepEqual(calls[0][3].requiredTexSources, [edited])
   const ambiguous = {
     ...snapshot,
     files: ['paper/book.tex', 'paper/paper.tex', edited].map((path) => ({
@@ -585,7 +586,7 @@ test('finds a document root among macros and unrelated compilable documents usin
   const texBuilds = {
     async start(_owner, _project, args, options) {
       assert.equal(args.rootFile, 'paper/article.tex')
-      assert.equal(options.requiredTexSource, 'paper/sections/intro.tex')
+      assert.deepEqual(options.requiredTexSources, ['paper/sections/intro.tex'])
       return { id: 'pdf' }
     },
     async wait() {
@@ -601,4 +602,147 @@ test('finds a document root among macros and unrelated compilable documents usin
     { path: 'paper/sections/intro.tex', buildId: 'pdf' },
   )
   assert.deepEqual(reads, [...sources.keys()])
+})
+
+test('one paper covers the checked proofs across linked Markdown files', async () => {
+  const [right, left] = md
+    .slice(md.indexOf('<!-- Lean:'))
+    .split(/(?=<!-- Lean: Main\.lean#zero_add)/)
+  const changes = [
+    { path: 'notes/left.md', after: left },
+    { path: 'notes/right.md', after: right },
+    {
+      path: 'notes/index.md',
+      after: '# Results\n[First](right.md#proof) · [Second](left.md)',
+    },
+  ]
+  const options = { job: { ...job, outputFile: 'notes/index.md' } }
+  const paths = changes.map((change) => change.path)
+  assert.deepEqual(await verify(changes, options), {
+    path: 'notes/index.md',
+    paths,
+  })
+  await assert.rejects(
+    verify(
+      changes.map((change) =>
+        change.path.endsWith('index.md')
+          ? {
+              ...change,
+              after: '[First](right.md)\n<!-- [Second](left.md) -->',
+            }
+          : change,
+      ),
+      options,
+    ),
+    /must link.*left\.md/,
+  )
+  await assert.rejects(
+    verify(
+      changes.map((change) =>
+        change.path.endsWith('left.md')
+          ? { ...change, after: '# Left' }
+          : change,
+      ),
+      options,
+    ),
+    /statement and proof for Main\.lean#zero_add/,
+  )
+  for (const mention of ['![figure](left.md)', '[unused]: left.md']) {
+    const suggested = changes.map((change) =>
+      change.path.endsWith('index.md')
+        ? { ...change, after: '[First](right.md)\n\n' + mention }
+        : change,
+    )
+    await assert.rejects(verify(suggested, options), /must link.*left\.md/)
+  }
+  const referenced = changes.map((change) =>
+    change.path.endsWith('index.md')
+      ? {
+          ...change,
+          after:
+            '[First](right.md) and [the left proof][second].\n\n[second]: left.md',
+        }
+      : change,
+  )
+  assert.equal((await verify(referenced, options)).path, 'notes/index.md')
+  const saved = new Map([
+    ['index.md', '[Chapters](chapters/list.md)'],
+    ['chapters/list.md', '[Results](../notes/left.md)'],
+  ])
+  assert.deepEqual(
+    await verify([{ path: 'notes/left.md', after: md }], {
+      job: { ...job, outputFile: 'index.md' },
+      snapshot: { files: [...saved.keys()].map((path) => ({ path })) },
+      workspaces: {
+        readSnapshotFile: async (_snapshot, name) => ({
+          content: saved.get(name),
+        }),
+      },
+    }),
+    { path: 'index.md', paths: ['notes/left.md'] },
+  )
+})
+
+test('counts an existing translation only when the unchanged chapter belongs to the paper', async () => {
+  const [right, left] = md
+    .slice(md.indexOf('<!-- Lean:'))
+    .split(/(?=<!-- Lean: Main\.lean#zero_add)/)
+  const changed = [{ path: 'notes/left.md', after: left }]
+  const saved = new Map([
+    ['notes/index.md', '[Left](left.md) and [Right](right.md)'],
+    ['notes/right.md', right],
+  ])
+  const options = {
+    job: { ...job, outputFile: 'notes/index.md' },
+    snapshot: { files: [...saved.keys()].map((path) => ({ path })) },
+    workspaces: {
+      readSnapshotFile: async (_snapshot, name) => ({
+        content: saved.get(name),
+      }),
+    },
+  }
+  assert.equal((await verify(changed, options)).path, 'notes/index.md')
+  saved.set('notes/index.md', '[Left](left.md)')
+  await assert.rejects(
+    verify(changed, options),
+    /statement and proof for Main\.lean#add_zero/,
+  )
+})
+
+test('compiles a new TeX master and confirms all translated chapters in the same PDF', async () => {
+  const [one, two] = chapter.split(/(?=% Lean: Main\.lean#zero_add)/)
+  const changes = [
+    { path: 'paper/first.tex', after: one },
+    { path: 'paper/second.tex', after: two },
+    { path: 'paper/setup.tex', after: '\\newcommand{\\Z}{Z}' },
+    {
+      path: 'paper/main.tex',
+      after:
+        '\\documentclass{article}\n\\input{setup}\n\\begin{document}\n\\input{first}\n\\input{second}\n\\end{document}',
+    },
+  ]
+  const texBuilds = {
+    async start(_owner, _project, input, options) {
+      assert.deepEqual(input, { rootFile: 'paper/main.tex' })
+      assert.deepEqual(options.requiredTexSources, [
+        'paper/first.tex',
+        'paper/second.tex',
+      ])
+      return { id: 'pdf' }
+    },
+    async wait() {
+      return { status: 'completed', id: 'pdf', pdf: {} }
+    },
+  }
+  assert.deepEqual(await verify(changes, { texBuilds }), {
+    path: 'paper/main.tex',
+    paths: changes.map((change) => change.path),
+    buildId: 'pdf',
+  })
+  await assert.rejects(
+    verify([...changes, { path: 'unrelated.tex', after: 'Unrelated prose' }], {
+      texBuilds,
+    }),
+    /must link or include.*unrelated/,
+  )
 })

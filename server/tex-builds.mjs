@@ -9,7 +9,7 @@ import { isTexFile, safeTexPath, TEX_ENGINES } from '../shared/tex.mjs'
 import {
   TEX_SYNCTEX_MAX_BYTES,
   texSyncTexPage,
-  validateTexSyncTex,
+  mappedTexSources,
 } from './tex-synctex.mjs'
 
 const fail = (message, status = 400) => {
@@ -300,7 +300,7 @@ export class TexBuildManager {
       runId,
       origin,
       parentWorker,
-      requiredTexSource,
+      requiredTexSources = [],
       waitForProject = false,
     } = {},
   ) {
@@ -523,15 +523,13 @@ export class TexBuildManager {
           )
           const synced =
             syncTex &&
-            validateTexSyncTex(
-              syncTex,
-              source.files,
-              record?.pageCount,
-              requiredTexSource,
-            )
-          if (requiredTexSource && !synced)
+            mappedTexSources(syncTex, source.files, record?.pageCount)
+          const missing = requiredTexSources.filter(
+            (file) => !synced?.has(file),
+          )
+          if (missing.length)
             fail(
-              `The PDF source map could not confirm that ${requiredTexSource} appears in the compiled document. Check the TeX root, its includes, and the fragment's visible content.`,
+              `The PDF source map could not confirm these chapters: ${missing.join(', ')}. Check that the main TeX file includes them and their text appears in the PDF.`,
               409,
             )
           controller.signal.throwIfAborted()

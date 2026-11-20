@@ -296,6 +296,14 @@ export function AssistantPanel({
     (currentFile && documentPath(currentFile)
       ? currentFile
       : 'New LaTeX document')
+  const leanSources =
+    proofTarget?.path ||
+    contextFiles.filter((path) => path.endsWith('.lean')).join(', ')
+  const sourceCaption = leanSources
+    ? `Using ${leanSources}`
+    : currentFile?.endsWith('.lean')
+      ? `Using the open file · ${currentFile}`
+      : 'Find theorems in this project'
   const explicitOutput = draft.value.outputFile?.trim()
   useEffect(() => {
     if (
@@ -1377,19 +1385,23 @@ export function AssistantPanel({
             <Icon name="file" size={13} />
             <span
               title={
-                currentFile
-                  ? `${currentFile} is included automatically. You can add other files below.`
-                  : undefined
+                informalizing
+                  ? sourceCaption
+                  : currentFile
+                    ? `${currentFile} is included automatically. You can add other files below.`
+                    : undefined
               }
               aria-label={
-                currentFile
+                !informalizing && currentFile
                   ? `Current file included automatically: ${currentFile}`
                   : undefined
               }
             >
-              {currentFile
-                ? `Current file: ${currentFile} (included automatically)`
-                : target || 'Project context'}
+              {informalizing
+                ? sourceCaption
+                : currentFile
+                  ? `Current file: ${currentFile} (included automatically)`
+                  : target || 'Project context'}
             </span>
             {dirty && !hasChatActive && (
               <span className="tag">Saves before sending</span>
@@ -1408,7 +1420,7 @@ export function AssistantPanel({
           )}
           {informalizing && !hasChatActive && (
             <label className="informalization-destination">
-              <span>Output document</span>
+              <span>Output document (optional)</span>
               <input
                 type="text"
                 value={draft.value.outputFile || ''}

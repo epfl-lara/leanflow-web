@@ -171,15 +171,17 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 10px;
+  margin-block: 9px;
   font-size: 0.8rem;
 }
 .informalization-destination input {
-  flex: 1;
+  flex: 1 1 140px;
   min-width: 0;
 }
 .informalization-result {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   padding: 12px;
   border: 1px solid var(--border);
@@ -189,6 +191,15 @@
 .informalization-result p,
 .informalization-result ul {
   margin: 0;
+}
+.informalization-result .turn-action {
+  max-width: 100%;
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.informalization-result summary {
+  cursor: pointer;
 }
 .informalization-result pre {
   white-space: pre-wrap;

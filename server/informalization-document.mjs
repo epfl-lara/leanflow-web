@@ -1,5 +1,9 @@
 import path from 'node:path'
 import { isTexFile, safeTexPath } from '../shared/tex.mjs'
+import {
+  markdownChapterLinks,
+  texChapterLinks,
+} from './workspace-references.mjs'
 import { fail, relativeFile } from './workspace-paths.mjs'
 
 const isDocument = (file) =>
@@ -151,7 +155,15 @@ export function informalizationDocumentPath(job, snapshot) {
   return file
 }
 
-async function texRoot(file, content, snapshot, job, workspaces, signal) {
+async function texRoot(
+  file,
+  content,
+  snapshot,
+  job,
+  workspaces,
+  signal,
+  known,
+) {
   const dir = path.posix.dirname(file)
   const magic = /^\s*%\s*!TeX\s+root\s*=\s*(.+?)\s*$/im.exec(content)?.[1]
   const code = content.replace(/(^|[^\\])%[^\n]*/g, '$1')
@@ -160,17 +172,15 @@ async function texRoot(file, content, snapshot, job, workspaces, signal) {
   // The TeX worker captures the root's subtree. Its validated source map
   // confirms a fragment contributed to the PDF even for conditional includes.
   const candidates = new Set(
-    snapshot.files
-      .map(({ path }) => path)
-      .filter((entry) => {
-        const folder = entry.slice(0, entry.lastIndexOf('/') + 1)
-        return (
-          entry !== file &&
-          isTexFile(entry) &&
-          file.startsWith(folder) &&
-          !entry.split('/').some((part) => part.startsWith('.'))
-        )
-      }),
+    [...known].filter((entry) => {
+      const folder = entry.slice(0, entry.lastIndexOf('/') + 1)
+      return (
+        entry !== file &&
+        isTexFile(entry) &&
+        file.startsWith(folder) &&
+        !entry.split('/').some((part) => part.startsWith('.'))
+      )
+    }),
   )
   if (magic) {
     if (!path.posix.isAbsolute(magic)) {
@@ -380,30 +390,141 @@ export function addedInformalizationReferences(change) {
   return references
 }
 
-function assertSourceAnchors(file, before, after, entries, proofs) {
-  const tex = isTexFile(file)
-  const original = translations(before, tex)
-  const updated = translations(after, tex)
-  const keys = entries.map(({ path, name }) => `${path}#${name}`)
-  const missing = keys.filter(
-    (key) =>
-      !updated.get(key)?.statement.length ||
-      (proofs && !updated.get(key)?.proof.length),
-  )
-  if (missing.length)
+export function informalizationDocumentChanges(changes) {
+  if (!changes.length)
     fail(
-      `${file} needs a source reference and a substantive ${proofs ? 'statement and proof' : 'statement'} for ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ` and ${missing.length - 5} more` : ''}. Place the source reference before the statement.${proofs ? ' Use a proof heading or a Lean proof comment before the proof.' : ''}`,
+      'No paper was written. Ask Lemex to create or update the document.',
       409,
     )
-  if (
-    keys.length &&
-    keys.every(
-      (key) =>
-        JSON.stringify(updated.get(key)) === JSON.stringify(original.get(key)),
-    )
-  )
+  for (const change of changes) {
+    if (!isDocument(change.path))
+      fail(
+        `The paper includes an unrelated edit to ${change.path}. Keep edits in the paper’s TeX or Markdown files.`,
+        409,
+      )
+    validateInformalizationOutputPath(change.path)
+    if (typeof change.after !== 'string' || !change.after.trim())
+      fail(`The paper has no document content in ${change.path}.`, 409)
+  }
+  return changes.map(({ path }) => path)
+}
+
+async function assertSourceAnchors(changes, entries, proofs, chapters) {
+  const keys = new Set(entries.map(({ path, name }) => `${path}#${name}`))
+  const covered = new Set()
+  const translatedFiles = new Set()
+  let revised = false
+  for (const { path: file, before, after } of changes) {
+    const tex = isTexFile(file)
+    const original = translations(before, tex)
+    for (const [key, lines] of translations(after, tex)) {
+      if (
+        !keys.has(key) ||
+        !lines.statement.length ||
+        (proofs && !lines.proof.length)
+      )
+        continue
+      covered.add(key)
+      translatedFiles.add(file)
+      if (JSON.stringify(lines) !== JSON.stringify(original.get(key)))
+        revised = true
+    }
+  }
+  // Existing chapters may already cover part of the request. Count them only
+  // when they are reachable from this paper; TeX coverage also needs PDF evidence.
+  if (revised && covered.size < keys.size) {
+    const edited = new Set(changes.map((change) => change.path))
+    for await (const { file, content } of chapters) {
+      if (edited.has(file)) continue
+      for (const [key, lines] of translations(content, isTexFile(file))) {
+        if (
+          !keys.has(key) ||
+          covered.has(key) ||
+          !lines.statement.length ||
+          (proofs && !lines.proof.length)
+        )
+          continue
+        covered.add(key)
+        translatedFiles.add(file)
+      }
+      if (covered.size === keys.size) break
+    }
+  }
+  const missing = [...keys].filter((key) => !covered.has(key))
+  if (missing.length)
     fail(
-      `Revise or add the requested translation in ${file}. The text following its source references has not changed.`,
+      `The paper needs a source reference and a substantive ${proofs ? 'statement and proof' : 'statement'} for ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ` and ${missing.length - 5} more` : ''}.`,
+      409,
+    )
+  if (!revised)
+    fail(
+      'Revise or add the requested translation in the paper. Its checked statements and proofs have not changed.',
+      409,
+    )
+  return translatedFiles
+}
+
+const standaloneTex = (content) =>
+  /\\(?:documentclass\b|begin\s*\{document\})/.test(
+    content.replace(/(^|[^\\])%[^\n]*/g, '$1'),
+  )
+
+export function informalizationDraftPath(job, snapshot, changes, followups) {
+  const { exact, suggested } = outputRequest(job, snapshot, followups)
+  const paths = new Set(changes.map((change) => change.path))
+  if (
+    exact &&
+    (paths.has(exact) || snapshot.files.some((file) => file.path === exact))
+  )
+    return exact
+  if (paths.size === 1) return changes[0].path
+  if (paths.has(suggested)) return suggested
+  const root = changes.find(
+    (change) => isTexFile(change.path) && standaloneTex(change.after),
+  )
+  if (root) return root.path
+  const targets = new Set()
+  for (const change of changes) {
+    if (isTexFile(change.path)) continue
+    for (const link of markdownChapterLinks(change.after, change.path, paths))
+      targets.add(link)
+  }
+  return (
+    changes.find((change) => !targets.has(change.path))?.path || changes[0].path
+  )
+}
+
+async function* paperChapters(root, known, read, signal) {
+  const links = isTexFile(root) ? texChapterLinks : markdownChapterLinks
+  const reached = new Set([root])
+  let bytes = 0
+  for (const file of reached) {
+    signal?.throwIfAborted()
+    const content = await read(file)
+    bytes += Buffer.byteLength(content)
+    if (bytes > 16 * 1024 * 1024)
+      fail(
+        'This paper exceeds the chapter scan limit. Select a smaller part of the paper.',
+        409,
+      )
+    yield { file, content }
+    for (const linked of links(content, file, known, root)) {
+      if (formatOf(linked) === formatOf(root)) reached.add(linked)
+    }
+  }
+}
+
+async function checkPaperLinks(root, required, chapters) {
+  const missing = new Set(required)
+  missing.delete(root)
+  if (!missing.size) return
+  for await (const { file } of chapters) {
+    missing.delete(file)
+    if (!missing.size) return
+  }
+  if (missing.size)
+    fail(
+      `The paper at ${root} must link or include the edited files: ${[...missing].join(', ')}.`,
       409,
     )
 }
@@ -419,34 +540,85 @@ export async function verifyInformalizationDocument({
   followups,
 }) {
   signal?.throwIfAborted()
-  if (changes.length !== 1 || !isDocument(changes[0].path))
-    fail(
-      'Informalize must create or update one TeX or Markdown document. Keep all other project files unchanged.',
-      409,
-    )
-  const { path: file, before, after } = changes[0]
-  validateInformalizationOutputPath(file)
-  if (typeof after !== 'string' || !after.trim())
-    fail(`The informalization has no document content in ${file}.`, 409)
+  const paths = informalizationDocumentChanges(changes)
   const { exact, allowed } = outputRequest(job, snapshot, followups)
-  if (exact && exact !== file)
-    fail(
-      `The requested document is ${exact}, but the draft changes ${file}.`,
-      409,
-    )
-  if (!allowed.includes(formatOf(file)))
-    fail(
-      `This informalization requires a ${allowed.includes('tex') ? 'TeX' : 'Markdown'} document. The draft changes ${file}.`,
-      409,
-    )
-  assertSourceAnchors(
-    file,
-    before,
-    after,
-    entries,
-    requiresProofs(job, followups),
+  const changed = new Map(changes.map((change) => [change.path, change.after]))
+  const known = new Set(
+    [...snapshot.files.map((entry) => entry.path), ...paths].filter(
+      (name) =>
+        isDocument(name) &&
+        !name.split('/').some((part) => part.startsWith('.')),
+    ),
   )
-  if (!isTexFile(file)) return { path: file }
+  const requestedError = () =>
+    fail(
+      `The requested document is ${exact}, but the draft changes ${paths.join(', ')}.`,
+      409,
+    )
+  if (exact && (!known.has(exact) || (!changed.has(exact) && !workspaces)))
+    requestedError()
+  if (
+    paths.some((file) => !allowed.includes(formatOf(file))) ||
+    new Set(paths.map(formatOf)).size !== 1
+  )
+    fail(
+      `This informalization requires a ${allowed.includes('tex') ? 'TeX' : 'Markdown'} document. The draft changes ${paths.join(', ')}.`,
+      409,
+    )
+  const read = async (name) =>
+    changed.get(name) ??
+    (await workspaces.readSnapshotFile(snapshot, name)).content
+  const chapters = (root) => paperChapters(root, known, read, signal)
+  const checkCoverage = (root) =>
+    assertSourceAnchors(
+      changes,
+      entries,
+      requiresProofs(job, followups),
+      chapters(root),
+    )
+  const report = (file) => ({
+    path: file,
+    ...(paths.length > 1 || file !== paths[0] ? { paths } : {}),
+  })
+  let file = informalizationDraftPath(job, snapshot, changes, followups)
+  if (!isTexFile(file)) {
+    await checkCoverage(file)
+    await checkPaperLinks(file, paths, chapters(file))
+    return report(file)
+  }
+  const roots = changes.filter((change) => standaloneTex(change.after))
+  if (roots.length > 1)
+    fail(
+      'Choose one main TeX file for this paper and include its chapters from there.',
+      409,
+    )
+  const rootFile =
+    roots.length && !exact
+      ? roots[0].path
+      : await texRoot(
+          file,
+          await read(file),
+          snapshot,
+          job,
+          workspaces,
+          signal,
+          known,
+        )
+  if (roots.length && roots[0].path !== rootFile)
+    fail(
+      `The paper’s main file must include the requested document ${file}.`,
+      409,
+    )
+  if (!exact && paths.length > 1) file = rootFile
+  // A named root may receive new text through included chapters. A named
+  // fragment must actually receive an edit.
+  if (exact && !changed.has(exact) && exact !== rootFile) requestedError()
+  const translatedFiles = await checkCoverage(rootFile)
+  await checkPaperLinks(
+    rootFile,
+    paths.filter((name) => !translatedFiles.has(name)),
+    chapters(rootFile),
+  )
   if (!texBuilds)
     fail(
       'A TeX worker is required to compile this document. Configure the TeX worker or choose a Markdown output.',
@@ -457,7 +629,6 @@ export async function verifyInformalizationDocument({
       'The final document copy is unavailable. Retry the informalization.',
       409,
     )
-  const rootFile = await texRoot(file, after, snapshot, job, workspaces, signal)
   const build = await texBuilds.start(
     job.owner,
     job.projectId,
@@ -471,7 +642,9 @@ export async function verifyInformalizationDocument({
       ...(snapshot.purpose === 'verification'
         ? { verificationRunId: snapshot.runId }
         : {}),
-      ...(rootFile === file ? {} : { requiredTexSource: file }),
+      requiredTexSources: [...translatedFiles].filter(
+        (name) => name !== rootFile,
+      ),
     },
   )
   const result = await texBuilds.wait(job.owner, build.id)
@@ -488,5 +661,5 @@ export async function verifyInformalizationDocument({
       409,
     )
   }
-  return { path: file, buildId: result.id }
+  return { ...report(file), buildId: result.id }
 }

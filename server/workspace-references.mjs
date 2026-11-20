@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { fromMarkdown } from 'mdast-util-from-markdown'
 
 const markdownExtension =
   /\.(?:md|mkd|mdwn|mdown|markdown|markdn|mdtxt|mdtext|workbook)$/i
@@ -344,6 +345,41 @@ function leanModule(filename) {
     .join('.')
 }
 
+// Only clickable links connect chapters. Code examples, unused reference
+// definitions and images can mention a Markdown file without opening it.
+export function markdownChapterLinks(content, filename, known) {
+  const definitions = new Map()
+  const references = new Set()
+  const urls = new Set()
+  const nodes = [fromMarkdown(content)]
+  while (nodes.length) {
+    const node = nodes.pop()
+    if (node.type === 'definition' && !definitions.has(node.identifier))
+      definitions.set(node.identifier, node.url)
+    else if (node.type === 'linkReference') references.add(node.identifier)
+    else if (node.type === 'link') urls.add(node.url)
+    if (node.children)
+      for (let i = node.children.length - 1; i >= 0; i--)
+        nodes.push(node.children[i])
+  }
+  for (const id of references)
+    if (definitions.has(id)) urls.add(definitions.get(id))
+  const links = new Set()
+  for (const value of urls) {
+    if (/^(?:[a-z][a-z\d+.-]*:|\/|#)/i.test(value)) continue
+    try {
+      const target = normalized(
+        path.posix.dirname(filename),
+        decodeURIComponent(value.split(/[?#]/, 1)[0]),
+      )
+      if (target && known.has(target)) links.add(target)
+    } catch (error) {
+      if (!(error instanceof URIError)) throw error
+    }
+  }
+  return links
+}
+
 function texReferences(source, add) {
   const supported = new Set([
     'includegraphics',
@@ -450,6 +486,32 @@ function texReferences(source, add) {
       offset += value.length + 1
     }
   }
+}
+
+// Verify non-typesetting inputs such as a preamble. The compiler's source map
+// separately proves that translated theorem chapters contributed to the PDF.
+export function texChapterLinks(content, filename, known, root) {
+  const links = new Set()
+  try {
+    texReferences(content, (_start, _end, value, extensions) => {
+      if (!extensions.includes('.tex')) return
+      for (const dir of [
+        path.posix.dirname(root),
+        path.posix.dirname(filename),
+      ]) {
+        const target = normalized(dir, value)
+        if (!target) continue
+        const file = known.has(target) ? target : target + '.tex'
+        if (known.has(file)) {
+          links.add(file)
+          break
+        }
+      }
+    })
+  } catch (error) {
+    if (!(error instanceof ReferenceScanSkipped)) throw error
+  }
+  return links
 }
 
 /**
