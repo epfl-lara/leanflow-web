@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { manualEntryProps } from '../inputBehavior'
 import { Dialog } from './Dialog'
 import {
   ProjectEnvironmentFields,
@@ -193,6 +194,7 @@ export function ProjectModal({
               Repository or GitHub / GitLab folder link
             </label>
             <input
+              {...manualEntryProps}
               id="repository-url"
               autoFocus
               placeholder="https://github.com/owner/project"
@@ -203,7 +205,6 @@ export function ProjectModal({
               }}
               required
               disabled={pending}
-              autoComplete="off"
             />
             <p className="field-help">
               HTTPS repositories on GitHub, GitLab and other Git hosts work.

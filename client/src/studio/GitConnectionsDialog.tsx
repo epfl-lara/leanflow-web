@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { manualEntryProps, secretEntryProps } from '../inputBehavior'
 import { api, errorText, type GitConnections, type GitProvider } from './api'
 import { Dialog } from './Dialog'
 import { gitConnectionsChanged, useGitConnections } from './gitConnections'
@@ -238,11 +239,11 @@ export function GitConnectionsDialog({
             Git host
           </label>
           <input
+            {...manualEntryProps}
             id="connection-host"
             value={host}
             required
             disabled={!!busy}
-            autoComplete="off"
             placeholder="gitlab.example.org"
             onChange={(event) => {
               setHost(event.target.value)
@@ -254,11 +255,10 @@ export function GitConnectionsDialog({
             Access token
           </label>
           <input
+            {...secretEntryProps}
             id="connection-token"
             type="password"
             name="git-connection-access-token"
-            autoComplete="new-password"
-            spellCheck={false}
             required
             value={token}
             disabled={!!busy}
@@ -268,9 +268,9 @@ export function GitConnectionsDialog({
             Username <span>optional</span>
           </label>
           <input
+            {...manualEntryProps}
             id="connection-username"
             value={username}
-            autoComplete="off"
             disabled={!!busy}
             placeholder="Needed for deploy tokens"
             onChange={(event) => setUsername(event.target.value)}

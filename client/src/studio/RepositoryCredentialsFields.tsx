@@ -1,3 +1,5 @@
+import { manualEntryProps, secretEntryProps } from '../inputBehavior'
+
 export type RepositoryCredentials = {
   repositoryToken?: string
   repositoryUsername?: string
@@ -64,13 +66,12 @@ export function RepositoryCredentialsFields({
         Repository token {!required && <span>optional</span>}
       </label>
       <input
+        {...secretEntryProps}
         id={tokenId}
         name={`${idPrefix}-access-token`}
         type="password"
         value={token}
         onChange={(event) => onTokenChange(event.target.value)}
-        autoComplete="new-password"
-        spellCheck={false}
         autoFocus={autoFocus}
         disabled={disabled}
         required={required}
@@ -80,12 +81,11 @@ export function RepositoryCredentialsFields({
         Repository username <span>optional</span>
       </label>
       <input
+        {...manualEntryProps}
         id={usernameId}
         value={username}
         onChange={(event) => onUsernameChange(event.target.value)}
         placeholder="Usually unnecessary; required for deploy tokens"
-        autoComplete="off"
-        spellCheck={false}
         disabled={disabled}
         aria-describedby={helpId}
       />

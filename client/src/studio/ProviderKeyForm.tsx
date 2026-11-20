@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { manualEntryProps, secretEntryProps } from '../inputBehavior'
 import { api, errorText, type ProviderStatus } from './api'
 
 export function ProviderKeyForm({
@@ -52,7 +53,7 @@ export function ProviderKeyForm({
     }
   }
   return (
-    <form onSubmit={submit}>
+    <form onSubmit={submit} autoComplete="off">
       <label className="field-label" htmlFor="lemex-provider">
         Provider
       </label>
@@ -76,6 +77,7 @@ export function ProviderKeyForm({
             API base URL
           </label>
           <input
+            {...manualEntryProps}
             id="lemex-base-url"
             type="url"
             value={baseUrl}
@@ -88,7 +90,6 @@ export function ProviderKeyForm({
             placeholder="https://api.example.com/v1"
             required
             maxLength={2048}
-            autoComplete="off"
           />
           <p className="field-help">
             Use a public HTTPS endpoint that supports the Responses API and
@@ -128,10 +129,10 @@ export function ProviderKeyForm({
         </>
       )}
       <input
+        {...secretEntryProps}
         id="lemex-api-key"
+        name="provider-api-key"
         type="password"
-        autoComplete="off"
-        spellCheck={false}
         value={key}
         onChange={(event) => setKey(event.target.value)}
         disabled={locked}

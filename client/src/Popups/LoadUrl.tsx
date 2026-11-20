@@ -1,5 +1,6 @@
 import { useAtom } from 'jotai'
 import { FormEvent, useRef, useState } from 'react'
+import { manualEntryProps } from '../inputBehavior'
 
 import { Popup } from '../navigation/Popup'
 import { setImportUrlAndProjectAtom } from '../store/import-atoms'
@@ -35,6 +36,7 @@ function LoadUrlPopup({
       {error ? <p className="form-error">{error}</p> : null}
       <form onSubmit={handleLoad}>
         <input
+          {...manualEntryProps}
           name="import URL"
           type="text"
           placeholder="Paste URL here"

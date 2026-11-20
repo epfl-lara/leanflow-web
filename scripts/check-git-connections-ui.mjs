@@ -6,6 +6,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import express from 'express'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
+import { assertManualEntry } from './lib/form-entry-checks.mjs'
 import { repositoryConnectionKey } from '../shared/git-connections.mjs'
 
 const output = path.resolve('.runtime/git-connections-ui')
@@ -277,6 +278,14 @@ try {
     .first()
     .click()
   await connections().waitFor()
+  await assertManualEntry(connections().getByLabel('Git host', { exact: true }))
+  await assertManualEntry(
+    connections().getByLabel('Access token', { exact: true }),
+    { secret: true },
+  )
+  await assertManualEntry(
+    connections().getByLabel('Username', { exact: false }),
+  )
   await connections()
     .getByText('Commit author · Fixture owner', { exact: true })
     .click()
@@ -370,6 +379,9 @@ try {
   await importDialog()
     .getByLabel('Repository or GitHub / GitLab folder link')
     .fill('https://github.com/fixture/private.git')
+  await assertManualEntry(
+    importDialog().getByLabel('Repository or GitHub / GitLab folder link'),
+  )
   await importDialog()
     .getByText('Uses your saved connection to github.com.', { exact: false })
     .waitFor()
@@ -411,6 +423,7 @@ try {
     'pulled file refreshed in the editor',
   )
   assert.equal(pulls.length, 1)
+  await assertManualEntry(source().getByLabel('Pull from', { exact: true }))
   assert.equal(pulls[0].branch, 'main')
   assert.equal(
     await source()
@@ -460,6 +473,9 @@ try {
   )
 
   await editDestination()
+  await assertManualEntry(
+    source().getByLabel('Repository URL', { exact: true }),
+  )
   await source()
     .getByLabel('Repository URL', { exact: true })
     .fill('https://gitlab.com/fixture/common.git')
@@ -468,6 +484,11 @@ try {
     .getByRole('heading', { name: 'Review before publishing' })
     .waitFor()
   assert.equal(await publish().isDisabled(), true)
+  await assertManualEntry(
+    source().getByLabel('Repository token', { exact: true }),
+    { secret: true },
+  )
+  await assertManualEntry(source().getByLabel('Username', { exact: false }))
   await source().getByLabel('Repository token', { exact: true }).fill(oneUse)
   await source()
     .getByLabel('Save for this repository', { exact: true })
@@ -568,6 +589,13 @@ try {
   const tokenField = importDialog().getByLabel('Repository token', {
     exact: false,
   })
+  await assertManualEntry(tokenField, { secret: true })
+  await assertManualEntry(
+    importDialog().getByLabel('Repository username', { exact: false }),
+  )
+  report.checks.push(
+    'Git connections, imports, pulls and publishing expose autofill opt-out hints; tokens stay masked and allow explicit entry',
+  )
   await tokenField.fill(repositoryToken)
   assert.equal(
     await importDialog()

@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
+import { assertManualEntry } from './lib/form-entry-checks.mjs'
 import { DEFAULT_MODEL } from '../server/model-catalog.mjs'
 import { RCP_BASE_URL } from '../server/provider-endpoint.mjs'
 
@@ -130,6 +131,9 @@ try {
     'rcp',
   )
   assert.equal(await dialog.getByLabel('API base URL').count(), 0)
+  await assertManualEntry(dialog.getByLabel('Your Lemex API key'), {
+    secret: true,
+  })
   assert(
     await dialog.getByRole('link', { name: /EPFL RCP portal/ }).isVisible(),
   )
@@ -149,6 +153,7 @@ try {
     await dialog.getByRole('link', { name: /EPFL RCP portal/ }).count(),
     0,
   )
+  await assertManualEntry(dialog.getByLabel('API base URL'))
   await dialog.getByLabel('API base URL').fill('https://custom.example.com/v1')
   await dialog.getByLabel('Your Lemex API key').fill('fixture-custom-key')
   await dialog
@@ -203,6 +208,10 @@ try {
     'rcp',
   )
   await page.getByLabel('Provider', { exact: true }).selectOption('custom')
+  await assertManualEntry(page.getByLabel('API base URL'))
+  await assertManualEntry(page.getByLabel('Your Lemex API key'), {
+    secret: true,
+  })
   await page.getByLabel('API base URL').fill('https://custom.example.com/v1')
   await page.getByLabel('Your Lemex API key').fill('fixture-onboarding-key')
   await page
@@ -223,6 +232,9 @@ try {
     'Switching back restores the RCP default; first-login setup also supports another provider',
   )
   report.inferenceRequests = 0
+  report.checks.push(
+    'Settings and onboarding expose autofill opt-out hints for provider URLs and masked API keys while allowing explicit entry and saving',
+  )
   fixture.assertClean()
   report.passed = true
 } catch (error) {

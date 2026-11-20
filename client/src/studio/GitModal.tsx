@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { manualEntryProps, secretEntryProps } from '../inputBehavior'
 import {
   api,
   errorText,
@@ -556,6 +557,7 @@ export function GitModal({
             <div className="git-pull-source">
               <label htmlFor="git-pull-repository">Pull from</label>
               <input
+                {...manualEntryProps}
                 id="git-pull-repository"
                 type="url"
                 value={pullRemoteUrl}
@@ -1048,6 +1050,7 @@ export function GitModal({
                   Repository URL
                 </label>
                 <input
+                  {...manualEntryProps}
                   id="git-remote-url"
                   type="url"
                   value={remoteUrl}
@@ -1225,12 +1228,11 @@ export function GitModal({
                       Repository token
                     </label>
                     <input
+                      {...secretEntryProps}
                       id="git-repository-token"
                       name="repository-publish-token"
                       type="password"
                       value={token}
-                      autoComplete="new-password"
-                      spellCheck={false}
                       disabled={locked}
                       onChange={(event) => setToken(event.target.value)}
                     />
@@ -1241,9 +1243,9 @@ export function GitModal({
                       Username <span className="git-optional">optional</span>
                     </label>
                     <input
+                      {...manualEntryProps}
                       id="git-publish-username"
                       value={username}
-                      autoComplete="off"
                       disabled={locked}
                       onChange={(event) => setUsername(event.target.value)}
                       placeholder="Repository account username"
