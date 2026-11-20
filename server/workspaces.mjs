@@ -7303,7 +7303,14 @@ export class WorkspaceStore {
     id,
     owner,
     changes,
-    { snapshot, agentRunId, setupRepair = false } = {},
+    {
+      snapshot,
+      agentRunId,
+      setupRepair = false,
+      liveEdits = false,
+      signal,
+      onTransactionPrepared,
+    } = {},
   ) {
     this.requireEditor(id, owner)
     if (!Array.isArray(changes) || changes.length > 1000)
@@ -7315,7 +7322,7 @@ export class WorkspaceStore {
         this.assertConfigurationIdle?.(id, owner, { agentRunId })
       if (snapshot) {
         const { manifest } = await this.#manifest(snapshot)
-        await this.#assertCurrent(manifest, project)
+        await this.#assertCurrent(manifest, project, [], { signal })
       }
       if (setupRepair && changes.length) {
         const configuration = await this.#dependencyConfiguration(project)
@@ -7338,11 +7345,18 @@ export class WorkspaceStore {
       return this.#applyLocked(
         project,
         changes,
-        'applied',
-        () => this.requireEditor(id, owner),
-        { detectMoves: true },
+        liveEdits ? 'live' : 'applied',
+        () => {
+          signal?.throwIfAborted()
+          this.requireEditor(id, owner)
+        },
+        { detectMoves: true, onTransactionPrepared },
       )
     })
+  }
+
+  paperSaveState(projectId, receipt) {
+    return this.transactions.publicationState(validateId(projectId), receipt)
   }
 
   async #applyLocked(
@@ -7355,6 +7369,7 @@ export class WorkspaceStore {
       moves,
       originRunId,
       allowExactSaveRetries = false,
+      onTransactionPrepared,
     } = {},
   ) {
     authorize?.()
@@ -7489,6 +7504,7 @@ export class WorkspaceStore {
     try {
       transaction = await this.transactions.apply(project, prepared, {
         authorize,
+        onPrepared: onTransactionPrepared,
         onCommitted: (current, committed) => {
           for (const change of committed)
             committedHashes.set(change.path, change.afterHash)

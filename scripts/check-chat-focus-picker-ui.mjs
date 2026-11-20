@@ -160,15 +160,30 @@ state.onCreateRun = ({ chat, body, respond }) => {
             ].join('\n'),
       },
     ]
+    if (body.liveEdits) {
+      run.liveChanges = run.changes
+      run.liveRevision = 1
+      state.files[projectId][path] = run.changes[0].after
+    }
     state.runs.push(run)
   }
   return respond(run, 202)
 }
 state.onApply = ({ run, respond }) => {
   assert.equal(run.status, 'completed')
+  assert.equal(run.liveEdits, false)
   for (const change of run.changes)
     state.files[projectId][change.path] = change.after
   run.status = 'applied'
+  return respond(run)
+}
+state.onUndo = ({ run, respond }) => {
+  for (const change of run.liveChanges) {
+    if (change.before === null) delete state.files[projectId][change.path]
+    else state.files[projectId][change.path] = change.before
+  }
+  run.liveUndone = true
+  run.liveRevision++
   return respond(run)
 }
 try {
@@ -502,7 +517,7 @@ try {
     name: 'Edit files live',
     exact: true,
   })
-  assert.equal(await liveEdits.count(), 0)
+  assert.equal(await liveEdits.isChecked(), true)
   await page
     .getByRole('button', { name: 'Write an informal proof', exact: true })
     .click()
@@ -574,7 +589,7 @@ try {
   assert.deepEqual(sent.files, [])
   assert.equal(sent.proofTarget, undefined)
   assert.equal(sent.outputFile, undefined)
-  assert.equal(sent.liveEdits, false)
+  assert.equal(sent.liveEdits, true)
   assert.match(sent.prompt, /each theorem and its proof/i)
   await until(
     () => composer.inputValue().then((value) => value === ''),
@@ -601,25 +616,59 @@ try {
       .getAttribute('download'),
     'Informalization.pdf',
   )
-  await texTurn.getByRole('link', { name: 'the document', exact: true }).click()
-  const review = page.getByRole('dialog', { name: 'Review document' })
-  await review.getByText(/documentclass/).waitFor()
-  assert.equal(
-    await review
-      .getByRole('button', { name: 'Apply changes', exact: true })
-      .isEnabled(),
-    true,
+  await checks.getByText('Document saved', { exact: true }).waitFor()
+  assert.equal(await checks.getByText(/before applying/).count(), 0)
+  await page.route(
+    (url) => url.pathname === `/api/projects/${projectId}/tex`,
+    (route) =>
+      route.fulfill({
+        json: {
+          available: true,
+          engines: ['pdflatex'],
+          workspaceRevision: null,
+          build: null,
+          lastSuccessful: null,
+        },
+      }),
   )
-  await review.getByText('Lean checked 2 proofs.').click()
-  await review.getByRole('button', { name: /first · Main\.lean:5–6/ }).click()
-  await review.waitFor({ state: 'hidden' })
+  await texTurn.getByRole('link', { name: 'the document', exact: true }).click()
+  await page
+    .getByRole('tab', {
+      name: 'Informalization.tex',
+      selected: true,
+      exact: true,
+    })
+    .waitFor()
+  assert.equal(await page.getByRole('dialog').count(), 0)
+  await texTurn.getByRole('button', { name: /View edits/ }).click()
+  const savedReview = page.getByRole('dialog', { name: 'Review saved edits' })
+  await savedReview.getByText(/documentclass/).waitFor()
+  assert.equal(
+    await savedReview
+      .getByRole('button', { name: 'Apply changes', exact: true })
+      .count(),
+    0,
+  )
+  await savedReview.getByText('Lean checked 2 proofs.').click()
+  await savedReview
+    .getByRole('button', { name: /first · Main\.lean:5–6/ })
+    .click()
+  await savedReview.waitFor({ state: 'hidden' })
   await openFocus()
   await menu
     .getByRole('button', { name: /Use selected lines.*lines 5–6/ })
     .waitFor()
   await menu.getByLabel('Filter context', { exact: true }).press('Escape')
+  await texTurn.getByRole('button', { name: 'Undo agent edits' }).click()
+  await texTurn.getByText('Edits undone', { exact: true }).waitFor()
+  assert.equal(state.files[projectId]['Informalization.tex'], undefined)
+  assert.equal(
+    await checks.getByRole('button', { name: 'Open document' }).count(),
+    0,
+  )
+  assert.equal(await checks.getByText(/before applying/).count(), 0)
   report.checks.push(
-    'The reply’s link to a new TeX file opens the candidate diff before Apply. Selecting a source declaration in review opens its exact Lean lines.',
+    'The checked paper saves automatically. Its chat link opens the saved file, View edits shows its diff and source lines, and Undo removes the new file.',
   )
 
   await modes.getByRole('button', { name: 'Proofs', exact: true }).click()
@@ -641,6 +690,8 @@ try {
   )
   assert.match(await target.innerText(), /second/)
   assert.match(await composer.inputValue(), /mathematical English/i)
+  if ((await options.getAttribute('open')) === null) await optionsToggle.click()
+  await liveEdits.uncheck()
   await page.getByLabel('Output document').fill('Notes.md')
   await send.click()
   await until(() => sendCount === 4, 'focused informalization')
@@ -668,6 +719,7 @@ try {
     exact: true,
   })
   await markdownLink.click()
+  const review = page.getByRole('dialog', { name: 'Review document' })
   await review.getByText(/The proposition is true by introduction/).waitFor()
   await review
     .getByRole('button', { name: 'Apply changes', exact: true })

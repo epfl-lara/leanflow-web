@@ -89,6 +89,7 @@ const publicJob = (job) => {
   const {
     snapshot: _snapshot,
     verificationRoot: _verificationRoot,
+    pendingPaperSave: _pendingPaperSave,
     followupContexts: _followupContexts,
     owner: _owner,
     ...rest
@@ -407,6 +408,7 @@ export async function createStudio({
     maxQueue: capacity.agentQueue,
     maxQueuePerUser: capacity.agentQueuePerUser ?? 4,
   })
+  await agents.recoverInformalizationSaves()
   workspaces.setupRepair = async (args) =>
     agents.runSetupRepair(
       (signal, providerReservation) =>
@@ -970,6 +972,7 @@ export async function createStudio({
     const project = await workspaces.retryFileRecovery(id, actor, {
       assertIdle,
     })
+    await agents.recoverInformalizationSaves(id)
     res.json(publicProject(project))
   })
   installLegacyRecoveryRoutes(app, {

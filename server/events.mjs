@@ -275,6 +275,17 @@ export class EventStore extends EventEmitter {
       .all(owner, projectId, ...terminal, ...(kind ? [kind] : []))
       .map((row) => this.#metadata(JSON.parse(row.payload)))
   }
+
+  pendingPaperSaveIds(projectId) {
+    return this.db
+      .prepare(
+        `SELECT id FROM jobs WHERE json_type(payload,'$.pendingPaperSave')='object'
+        AND json_extract(payload,'$.mode')='informalize'
+        AND (? IS NULL OR json_extract(payload,'$.projectId')=?)`,
+      )
+      .all(projectId ?? null, projectId ?? null)
+      .map((row) => row.id)
+  }
   deleteRuns(owner, ids) {
     const jobs = [...new Set(ids)].map((id) => this.getMetadata(id, owner))
     if (jobs.some((job) => !TERMINAL.has(job.status)))

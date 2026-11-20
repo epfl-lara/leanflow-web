@@ -422,7 +422,7 @@ export class AgentManager {
           : {}),
         effort,
         maxSeconds,
-        liveEdits: input.mode !== 'informalize' && input.liveEdits !== false,
+        liveEdits: input.liveEdits !== false,
         liveRevision: 0,
         followups: [],
         progress: { label: 'Queued', updatedAt: new Date().toISOString() },
@@ -468,10 +468,12 @@ export class AgentManager {
     this.#emit(id, 'progress', progress)
   }
   #finishInformalization(
-    id,
-    { sources, reason, document, draft },
+    job,
+    { sources, reason, document, draft, savePending },
     changes = [],
   ) {
+    const { id } = job
+    const saved = job.liveEdits && Boolean(document)
     const verification = {
       kind: 'workspace',
       complete: Boolean(document),
@@ -487,15 +489,88 @@ export class AgentManager {
     this.events.updateMetadata(id, {
       changes,
       verification,
-      status: 'completed',
+      ...(saved ? { liveChanges: changes, liveRevision: 1 } : {}),
     })
     this.#emit(id, 'changes', { changes })
+    if (saved)
+      this.#emit(id, 'files-updated', {
+        paths: changes.map(({ path }) => path),
+        live: true,
+      })
     this.#emit(id, 'verification', verification)
     this.#progress(
       id,
-      document ? 'Ready for review' : 'Checks did not pass',
+      saved
+        ? 'Document saved'
+        : document
+          ? 'Ready for review'
+          : 'Checks did not pass',
       reason,
     )
+    this.events.updateMetadata(id, {
+      status: 'completed',
+      error: undefined,
+      ...(savePending ? {} : { pendingPaperSave: undefined }),
+    })
+  }
+  async #savePaper(job, snapshot, changes, report, signal) {
+    this.events.updateMetadata(job.id, { changes, pendingPaperSave: report })
+    try {
+      await this.workspaces.applyChanges(job.projectId, job.owner, changes, {
+        snapshot,
+        agentRunId: job.id,
+        liveEdits: true,
+        signal,
+        onTransactionPrepared: (receipt) =>
+          this.events.updateMetadata(job.id, {
+            pendingPaperSave: { ...report, receipt },
+          }),
+      })
+    } catch (error) {
+      if (signal.aborted && !error.projectRecovery)
+        this.events.updateMetadata(job.id, { pendingPaperSave: undefined })
+      throw error
+    }
+  }
+
+  async recoverInformalizationSaves(projectId) {
+    for (const id of this.events.pendingPaperSaveIds(projectId)) {
+      if (this.active.has(id)) continue
+      const job = this.events.get(id)
+      const { receipt, document, sources, reason } = job.pendingPaperSave
+      // A transaction without a prepared receipt could not begin mutating
+      // the project. Identical bytes from a later manual save confer no Undo.
+      const state = receipt
+        ? await this.workspaces
+            .paperSaveState(job.projectId, receipt)
+            .catch(() => 'pending')
+        : 'unapplied'
+      const awaiting = state === 'pending'
+      const detail = awaiting
+        ? 'File recovery must finish before Lemex can confirm whether the paper was saved. Retry file recovery in project settings.'
+        : 'The paper save was interrupted. The draft is available in Review. Continue in this chat to save it.'
+      if (awaiting && job.verification?.reason === detail) continue
+      this.#finishInformalization(
+        job,
+        state === 'committed'
+          ? { sources, document, reason }
+          : {
+              sources,
+              draft: {
+                path: document.path,
+                ...(document.paths ? { paths: document.paths } : {}),
+              },
+              reason: detail,
+              savePending: awaiting,
+            },
+        job.changes,
+      )
+      this.chats?.finishRun?.(id)
+      if (job.verificationRoot)
+        await this.#cleanupVerification(id).catch(() => {
+          this.events.updateMetadata(id, { verificationCleanupPending: true })
+        })
+    }
   }
   async #refreshEditorImports(job, signal) {
     const paths = (job.liveEdits ? job.liveChanges : job.changes)
@@ -943,7 +1018,7 @@ export class AgentManager {
           (!projectFiles.length &&
             'This project has no saved Lean source files. Add a .lean file with the proof, then run Informalize again.')
         if (scopeIssue) {
-          this.#finishInformalization(id, {
+          this.#finishInformalization(job, {
             sources: { status: 'unavailable', entries: [], detail: scopeIssue },
             reason: scopeIssue,
           })
@@ -991,7 +1066,7 @@ export class AgentManager {
           informalSources.status !== 'checked' ||
           !informalSources.entries.length
         ) {
-          this.#finishInformalization(id, {
+          this.#finishInformalization(job, {
             sources: informalSources,
             reason: informalSources.detail,
           })
@@ -1499,7 +1574,10 @@ export class AgentManager {
             ? 'This is scoped setup help. Propose only root Lean/Lake configuration changes for review. Preserve every existing valid Lean pin, dependency source/revision and all source files. If fixing a source proof or changing a pin is necessary, explain it and ask the user to start an ordinary chat for that work.\n'
             : '') +
           (informalizing
-            ? 'Write the requested paper in the private working copy. Organize it into linked chapters or included TeX files when helpful. If no source scope was provided, find the relevant Lean declarations in the project and cite each one. Link the main document in chat. The server checks coverage and builds TeX after you finish. The user reviews and applies the edit.\n'
+            ? 'Write the requested paper in the private working copy. Organize it into linked chapters or included TeX files when helpful. If no source scope was provided, find the relevant Lean declarations in the project and cite each one. Link the main document in chat. The server checks coverage and builds TeX after you finish. ' +
+              (job.liveEdits
+                ? 'When the checks pass, the paper is saved automatically.\n'
+                : 'The user reviews and applies the edit.\n')
             : job.liveEdits
               ? 'Editing mode: live source updates. Requested project text edits are mirrored to the saved project while you work. Project configuration edits are saved together at completion. Independent Lean checks report whether the result is verified; failed checks do not revoke the user’s requested edits. The user can stop the run and undo these edits. Keep changes focused on the requested task.\n'
               : 'Editing mode: review first. Your workspace edits remain a separate candidate until independent verification and user acceptance.\n') +
@@ -1509,7 +1587,7 @@ export class AgentManager {
       active.threadId = thread.thread.id
       this.events.updateMetadata(id, { threadId: active.threadId })
       this.#log(id, `Lemex is working in ${job.mode} mode.\n`)
-      if (job.liveEdits) {
+      if (job.liveEdits && !informalizing) {
         active.mirror = new LiveMirror({
           snapshot,
           allowProjectFiles: true,
@@ -1679,10 +1757,21 @@ export class AgentManager {
             this.events.updateMetadata(id, { verificationRoot: copy.root })
           },
           onProgress: (label, detail) => this.#progress(id, label, detail),
+          savePaper: (report) =>
+            this.#savePaper(
+              job,
+              snapshot,
+              changes,
+              report,
+              active.controller.signal,
+            ),
         })
-        active.controller.signal.throwIfAborted()
+        // A stop can arrive after the atomic save commits. Record its changes
+        // and undo history even in that case.
+        if (!job.liveEdits || !report.document)
+          active.controller.signal.throwIfAborted()
         this.#finishInformalization(
-          id,
+          job,
           { ...report, reason: this.config.redact(report.reason) },
           report.document || report.draft ? changes : [],
         )
@@ -1998,8 +2087,18 @@ export class AgentManager {
         id,
         'The run stopped before this message was accepted.',
       )
-      this.events.updateMetadata(id, { status: 'cancelled' })
-      this.#progress(id, 'Stopped', reason)
+      // If a checked paper was already committed, the save won the race
+      // with Stop. Its published result and Undo remain available.
+      if (
+        !(
+          job.mode === 'informalize' &&
+          job.liveEdits &&
+          this.events.getMetadata(id).status === 'completed'
+        )
+      ) {
+        this.events.updateMetadata(id, { status: 'cancelled' })
+        this.#progress(id, 'Stopped', reason)
+      }
       this.chats?.finishRun?.(id)
       return this.events.get(id, owner)
     })()

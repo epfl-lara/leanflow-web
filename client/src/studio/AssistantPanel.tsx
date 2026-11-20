@@ -35,6 +35,8 @@ import {
   liveEditStatus,
   runChangePaths,
   runChangeCount,
+  runFilesSaved,
+  reviewLiveChanges,
   finalVerificationIssue,
   canApplyRequestedEdits,
 } from './chatTimeline'
@@ -222,12 +224,11 @@ export function AssistantPanel({
   const setupHelp = draft.value.purpose === 'setup'
   const currentMode = chatModes.find((item) => item.id === mode)!
   const informalizing = mode === 'informalize'
-  const currentLiveEdits =
-    setupHelp || informalizing
-      ? false
-      : mode === 'search'
-        ? searchLiveEdits
-        : liveEdits
+  const currentLiveEdits = setupHelp
+    ? false
+    : mode === 'search'
+      ? searchLiveEdits
+      : liveEdits
   const chatSelectionKey = `lemex-chat:${session.user.id}:${projectId}`
   const preferenceKey = `lemex-chat-options:${session.user.id}:${projectId}`
   const [preferencesLoaded, setPreferencesLoaded] = useState<string | null>(
@@ -438,6 +439,10 @@ export function AssistantPanel({
   const dialogRun = [...runs, ...projectRuns].find(
     (item) => item.id === dialogId,
   )
+  const dialogLiveChanges = !!dialogRun && reviewLiveChanges(dialogRun)
+  const dialogChanges = dialogLiveChanges
+    ? dialogRun?.liveChanges
+    : dialogRun?.changes
   const dialogIssue =
     dialogRun && !dialogRun.liveUndone ? finalVerificationIssue(dialogRun) : ''
   const error =
@@ -1126,7 +1131,7 @@ export function AssistantPanel({
         }
         liveEdits={setupScope ? false : currentLiveEdits}
         reviewOnly={setupScope}
-        reviewDocument={informalizing}
+        documentMode={informalizing}
         onLiveEdits={mode === 'search' ? setSearchLiveEdits : setLiveEdits}
         active={hasChatActive}
       />
@@ -1176,7 +1181,7 @@ export function AssistantPanel({
                 className="chat-edit-status"
                 title={
                   statusRun.liveEditConflict ||
-                  (statusRun.liveEdits
+                  (statusRun.liveEdits && statusRun.mode !== 'informalize'
                     ? 'Only changes written to project files appear in the editor. Scratch checks do not change those files. Final Lean verification runs at completion.'
                     : liveEditStatus(statusRun))
                 }
@@ -1524,22 +1529,24 @@ export function AssistantPanel({
       {dialogRun && (
         <Dialog
           title={
-            dialogRun.mode === 'informalize'
-              ? 'Review document'
-              : dialogRun.liveUndone
-                ? 'Review undone edits'
-                : dialogRun.liveEdits
-                  ? 'Review saved edits'
+            dialogRun.liveUndone
+              ? 'Review undone edits'
+              : dialogLiveChanges
+                ? 'Review saved edits'
+                : dialogRun.mode === 'informalize'
+                  ? 'Review document'
                   : 'Review candidate changes'
           }
           subtitle={
             dialogRun.liveUndone
               ? 'These edits were undone. The check results below describe the earlier candidate.'
-              : dialogRun.liveEdits
+              : dialogLiveChanges
                 ? 'These edits are already saved in your project. You can undo them from the chat.'
                 : dialogRun.status === 'applied'
                   ? 'These edits have been applied to your project.'
-                  : 'Review the proposed edits before applying them.'
+                  : dialogRun.liveEdits
+                    ? 'This draft has not been saved to the project.'
+                    : 'Review the proposed edits before applying them.'
           }
           onClose={() => setDialogId(null)}
           busy={applying || discarding}
@@ -1550,17 +1557,20 @@ export function AssistantPanel({
                 {runUnavailableReason}
               </p>
             )}
-            {dialogRun.liveEdits && runIsActive(dialogRun) && (
-              <p className="field-help">
-                These edits are saved in the project. Final Lean verification is
-                still pending.
-              </p>
-            )}
+            {dialogLiveChanges &&
+              dialogRun.mode !== 'informalize' &&
+              runIsActive(dialogRun) && (
+                <p className="field-help">
+                  These edits are saved in the project. Final Lean verification
+                  is still pending.
+                </p>
+              )}
             {hasInformalizationChecks(dialogRun.verification) ? (
               <InformalizationResult
                 value={dialogRun.verification}
                 projectId={projectId}
-                applied={dialogRun.status === 'applied'}
+                saved={runFilesSaved(dialogRun)}
+                reviewFirst={!dialogRun.liveEdits}
                 onOpenTarget={
                   onOpenTarget && !applying && !discarding
                     ? (target) => {
@@ -1576,9 +1586,7 @@ export function AssistantPanel({
             {!!dialogIssue && (
               <p className="review-note">
                 {dialogRun.mode === 'informalize'
-                  ? canApplyRequestedEdits(dialogRun)
-                    ? 'Review the reported checks before applying the proposed document.'
-                    : 'Ask Lemex to correct the reported issue before applying the document.'
+                  ? 'Continue in chat to ask Lemex to correct the document.'
                   : dialogRun.liveEdits
                     ? 'Lemex has finished this run. The edits are saved, but the final Lean check did not pass. Continue in chat to request a correction, or undo the edits from the chat.'
                     : canApplyRequestedEdits(dialogRun)
@@ -1639,10 +1647,8 @@ export function AssistantPanel({
                   )}
                 </div>
               )}
-            {(dialogRun.liveEdits
-              ? dialogRun.liveChanges
-              : dialogRun.changes) === undefined &&
-              runChangeCount(dialogRun, !!dialogRun.liveEdits) > 0 && (
+            {dialogChanges === undefined &&
+              runChangeCount(dialogRun, dialogLiveChanges) > 0 && (
                 <p className="field-help">
                   The edits changed.{' '}
                   <button
@@ -1653,10 +1659,7 @@ export function AssistantPanel({
                   </button>
                 </p>
               )}
-            {(dialogRun.liveEdits
-              ? dialogRun.liveChanges
-              : dialogRun.changes
-            )?.map((change) => (
+            {dialogChanges?.map((change) => (
               <ChangeDiff key={change.path} change={change} />
             ))}
             {actionError && (

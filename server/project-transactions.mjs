@@ -405,7 +405,7 @@ export class ProjectTransactions {
     }
   }
 
-  async #committed(intent, payload) {
+  async #committed(intent, intentHash) {
     const directory = this.#directory(intent)
     // Opening the directory first rejects replaced or linked history paths.
     const parent = await openDirectory(directory)
@@ -429,13 +429,36 @@ export class ProjectTransactions {
         marker.id !== intent.id ||
         marker.projectId !== intent.projectId ||
         marker.owner !== intent.owner ||
-        marker.intentHash !== digest(payload)
+        marker.intentHash !== intentHash
       )
         throw new Error('Transaction commit marker failed verification.')
       return true
     } finally {
       await handle?.close()
       await parent.close()
+    }
+  }
+
+  // The startup recovery pass resolves file mutations before assistant runs
+  // reconcile their receipts. A still-pending transaction needs admin recovery.
+  async publicationState(projectId, { id, owner, intentHash }) {
+    if (!transactionPattern.test(id) || !hashPattern.test(intentHash))
+      throw new Error('Invalid file transaction receipt.')
+    if (
+      this.db
+        .prepare(
+          'SELECT 1 FROM pending_project_transactions WHERE project=? AND id=?',
+        )
+        .get(projectId, id)
+    )
+      return 'pending'
+    try {
+      return (await this.#committed({ projectId, owner, id }, intentHash))
+        ? 'committed'
+        : 'unapplied'
+    } catch (error) {
+      if (error.code === 'ENOENT') return 'unapplied'
+      throw error
     }
   }
 
@@ -526,7 +549,7 @@ export class ProjectTransactions {
   async #recover(row, project, onCommitted) {
     const intent = await this.#validate(row, project)
     await this.#checkOriginals(intent)
-    const committed = await this.#committed(intent, row.payload)
+    const committed = await this.#committed(intent, digest(row.payload))
     if (committed) {
       await onCommitted?.(project, intent.changes)
     } else {
@@ -708,7 +731,7 @@ export class ProjectTransactions {
     }
   }
 
-  async apply(project, prepared, { authorize, onCommitted } = {}) {
+  async apply(project, prepared, { authorize, onCommitted, onPrepared } = {}) {
     this.assertWritable(project.id)
     const id = `${Date.now()}-${randomUUID()}`
     // Recovery bytes live in private, fsynced files rather than a base64 JSON
@@ -760,6 +783,13 @@ export class ProjectTransactions {
     await history.close()
     await fs.mkdir(directory, { mode: 0o700 })
     try {
+      // Bind the caller's durable intent to this exact transaction before
+      // recording or mutating any project files.
+      onPrepared?.({
+        id,
+        owner: project.owner,
+        intentHash: digest(row.payload),
+      })
       await fs.mkdir(path.join(directory, 'staged'), { mode: 0o700 })
       await fs.mkdir(path.join(directory, 'before'), { mode: 0o700 })
       await fs.mkdir(path.join(directory, 'originals'), { mode: 0o700 })

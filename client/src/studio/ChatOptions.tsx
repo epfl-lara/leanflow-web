@@ -15,7 +15,7 @@ export function ChatOptions({
   onLiveEdits,
   active,
   reviewOnly = false,
-  reviewDocument = false,
+  documentMode = false,
 }: {
   models: Session['models']
   savedModels?: string[]
@@ -28,7 +28,7 @@ export function ChatOptions({
   onLiveEdits: (value: boolean) => void
   active: boolean
   reviewOnly?: boolean
-  reviewDocument?: boolean
+  documentMode?: boolean
 }) {
   const selected = models.find((item) => item.id === model)
   const levels = selected?.reasoningEfforts || []
@@ -132,32 +132,32 @@ export function ChatOptions({
           onClose={() => setLibraryOpen(false)}
         />
       )}
-      {!reviewDocument && (
-        <div className="chat-live-choice">
-          <label className="help-label">
-            <input
-              type="checkbox"
-              checked={liveEdits}
-              disabled={reviewOnly}
-              onChange={(event) => onLiveEdits(event.target.checked)}
-            />
-            <span>Edit files live</span>
-          </label>
-          <HelpTip label="Edit files live">
-            {reviewOnly
-              ? 'Setup help keeps configuration changes separate until you review and apply them.'
+      <div className="chat-live-choice">
+        <label className="help-label">
+          <input
+            type="checkbox"
+            checked={liveEdits}
+            disabled={reviewOnly}
+            onChange={(event) => onLiveEdits(event.target.checked)}
+          />
+          <span>Edit files live</span>
+        </label>
+        <HelpTip label="Edit files live">
+          {reviewOnly
+            ? 'Setup help keeps configuration changes separate until you review and apply them.'
+            : documentMode
+              ? 'When on, Lemex saves the paper after checking the proofs and the document. Turn this off to review it before saving.'
               : 'When on, Lemex saves requested edits as it works. Turn this off to review changes before applying them. This choice applies to the next run.'}
-          </HelpTip>
-        </div>
-      )}
+        </HelpTip>
+      </div>
       <p className="field-help">
         {active
           ? 'Options apply to the next run. Updates guide the current run.'
-          : reviewDocument
-            ? 'Review the proposed document before applying it to your project.'
-            : liveEdits
-              ? 'Edits are saved as Lemex works; you can undo them after stopping.'
-              : 'Keep edits separate until you review and apply them.'}{' '}
+          : liveEdits
+            ? documentMode
+              ? 'The paper is saved automatically after its checks pass.'
+              : 'Edits are saved as Lemex works; you can undo them after stopping.'
+            : 'Keep edits separate until you review and apply them.'}{' '}
         Runs continue until done or stopped.
       </p>
     </details>

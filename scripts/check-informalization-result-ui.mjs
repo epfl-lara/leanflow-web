@@ -80,6 +80,27 @@ const paper = run(
     },
   },
 )
+const failedDraft = run(
+  'automatic-draft',
+  {},
+  {
+    liveEdits: true,
+    message: 'The [paper](draft.tex) needs a correction.',
+    changes: [
+      { path: 'draft.tex', before: null, after: 'Candidate text to revise' },
+    ],
+    verification: {
+      kind: 'workspace',
+      complete: false,
+      editsAllowed: false,
+      reason: 'A chapter is missing from the PDF.',
+      informalization: {
+        sources: { status: 'checked', entries: checked },
+        draft: { path: 'draft.tex' },
+      },
+    },
+  },
+)
 const fixture = await chatBrowserFixture({
   session: {
     user: { id: 'fixture-owner', name: 'Fixture' },
@@ -100,7 +121,7 @@ const fixture = await chatBrowserFixture({
       'paper.tex': '\\documentclass{article}\n',
     },
   },
-  runs: [history, paper, incomplete],
+  runs: [history, paper, failedDraft, incomplete],
 })
 const { page, browser } = fixture
 const turn = (run) => page.locator(`[data-run-id="${run.id}"]`)
@@ -199,6 +220,31 @@ try {
         .getAttribute('aria-label')
         .then((s) => s?.includes('paper.tex')),
     'open unchanged paper root',
+  )
+  await turn(failedDraft)
+    .getByRole('button', { name: /Review document/ })
+    .click()
+  await dialog
+    .getByText('This draft has not been saved to the project.')
+    .waitFor()
+  await dialog.getByText(/Candidate text to revise/).waitFor()
+  await dialog.getByRole('button', { name: 'Continue in chat' }).waitFor()
+  assert.equal(
+    await dialog.getByRole('button', { name: 'Apply changes' }).count(),
+    0,
+  )
+  assert.equal(
+    await dialog.getByRole('button', { name: 'Open document' }).count(),
+    0,
+  )
+  await dialog
+    .getByRole('button', { name: 'Close dialog', exact: true })
+    .click()
+  assert.equal(
+    await turn(failedDraft)
+      .getByRole('button', { name: 'Undo agent edits' })
+      .count(),
+    0,
   )
   fixture.assertClean()
   console.log(

@@ -52,8 +52,8 @@ export async function checkInformalizationBatches(request, paths, check) {
   }
 }
 
-// The writer has exited. Only this review may make the private document
-// available for Apply. Reconstruct the candidate from saved, hashed sources.
+// The writer has exited. Reconstruct the paper from saved, hashed sources
+// before publishing it or offering the candidate for review.
 export async function reviewInformalizationCandidate({
   job,
   snapshot,
@@ -66,6 +66,7 @@ export async function reviewInformalizationCandidate({
   followups,
   onCaptured,
   onProgress,
+  savePaper,
 }) {
   let draft
   try {
@@ -187,13 +188,19 @@ export async function reviewInformalizationCandidate({
     })
     signal.throwIfAborted()
     const count = sources.entries.length
-    const reason = `Lean checked ${count} source ${count === 1 ? 'proof' : 'proofs'}. ${document.buildId ? 'The PDF is ready.' : 'The Markdown document is ready.'} Review the mathematical wording and apply the document change.`
-    return { sources, reason, document }
+    const reason = `Lean checked ${count} source ${count === 1 ? 'proof' : 'proofs'}. ${document.buildId ? 'The PDF is ready.' : 'The Markdown document is ready.'} ${job.liveEdits ? 'Saved the paper in the project.' : 'Review the mathematical wording and apply the document change.'}`
+    const report = { sources, reason, document }
+    if (job.liveEdits) {
+      onProgress('Saving document', document.path)
+      await savePaper(report)
+    }
+    return report
   } catch (error) {
     signal.throwIfAborted()
     return {
       sources,
       draft,
+      ...(error.projectRecovery ? { savePending: true } : {}),
       reason:
         error.message +
         (draft

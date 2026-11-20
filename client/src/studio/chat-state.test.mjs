@@ -189,6 +189,40 @@ test('informalization reports document readiness independently of the source pro
   )
 })
 
+test('compact history distinguishes a saved paper, review-first work, an unfinished draft and undo', () => {
+  const saved = run({
+    mode: 'informalize',
+    liveEdits: true,
+    liveChangeCount: 2,
+    liveRevision: 1,
+    verification: { kind: 'workspace', complete: true },
+  })
+  assert.equal(runStatusLabel(saved), 'Document saved')
+  assert.equal(liveEditStatus(saved), 'Live edits on · 2 files updated')
+  assert.equal(runStatusLabel({ ...saved, liveUndone: true }), 'Finished')
+  assert.equal(
+    runStatusLabel({ ...saved, liveEdits: false, liveChangeCount: 0 }),
+    'Ready to review',
+  )
+  assert.equal(
+    liveEditStatus({
+      ...saved,
+      status: 'verifying',
+      liveChangeCount: 0,
+      liveRevision: 0,
+    }),
+    'Save automatically after document checks',
+  )
+  assert.equal(
+    runStatusLabel({
+      ...saved,
+      verification: { kind: 'workspace', complete: false },
+      liveChangeCount: 0,
+    }),
+    'Document checks need attention',
+  )
+})
+
 function renderDocumentChecks({
   status,
   detail,

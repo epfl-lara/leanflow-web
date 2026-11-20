@@ -8,6 +8,8 @@ import {
   conversationSegments,
   runChangeCount,
   runChangePaths,
+  runFilesSaved,
+  reviewLiveChanges,
   runStatusLabel,
 } from './chatTimeline'
 import { modeName } from './chatModes'
@@ -73,11 +75,15 @@ export const ConversationTurn = memo(function ConversationTurn({
   const [loading, setLoading] = useState(false)
   const [detailsError, setDetailsError] = useState('')
   const [linkError, setLinkError] = useState('')
+  const saved = runFilesSaved(run)
+  const useLiveChanges = reviewLiveChanges(run)
   const openLocalLink = useCallback(
     (href: string) => {
       const target = chatFileLink(href)
       const reviewDocument =
-        run.mode === 'informalize' && run.status === 'completed'
+        run.mode === 'informalize' &&
+        !saved &&
+        (run.status === 'completed' || run.liveUndone)
           ? informalizationDocument(run.verification)
           : undefined
       if (target && reviewDocument) {
@@ -97,10 +103,10 @@ export const ConversationTurn = memo(function ConversationTurn({
       setLinkError('')
       onOpenTarget(target)
     },
-    [onOpenTarget, onReview, run],
+    [onOpenTarget, onReview, run, saved],
   )
   const inspectRun = useCallback(() => onInspect(run.id), [onInspect, run.id])
-  const changeCount = runChangeCount(run, !!run.liveEdits)
+  const changeCount = runChangeCount(run, useLiveChanges)
   const liveCount = runChangeCount(run, true)
   const [activityOpen, setActivityOpen] = useState(false)
   const detailsRef = useRef<HTMLDetailsElement>(null)
@@ -219,7 +225,8 @@ export const ConversationTurn = memo(function ConversationTurn({
           <InformalizationResult
             value={run.verification}
             projectId={projectId || run.projectId}
-            applied={run.status === 'applied'}
+            saved={saved}
+            reviewFirst={!run.liveEdits}
             onOpenTarget={onOpenTarget}
           />
         ) : (
@@ -239,8 +246,9 @@ export const ConversationTurn = memo(function ConversationTurn({
         !run.liveRevision &&
         !run.liveEditConflict && (
           <p className="field-help">
-            No project files changed yet. Scratch checks do not update the
-            editor.
+            {run.mode === 'informalize'
+              ? 'The paper will be saved after its proofs and document pass their checks.'
+              : 'No project files changed yet. Scratch checks do not update the editor.'}
           </p>
         )}
       {run.liveEdits && !run.liveUndone && liveCount > 0 && (
@@ -257,7 +265,7 @@ export const ConversationTurn = memo(function ConversationTurn({
               {path}
             </button>
           ))}
-          {active && (
+          {active && run.mode !== 'informalize' && (
             <span className="turn-status">Final Lean check pending</span>
           )}
         </div>
@@ -280,7 +288,7 @@ export const ConversationTurn = memo(function ConversationTurn({
             className="turn-action"
             onClick={() => onReview(run.id)}
           >
-            {run.liveEdits
+            {useLiveChanges
               ? 'View edits'
               : run.mode === 'informalize'
                 ? 'Review document'

@@ -1,7 +1,7 @@
 import type { Run } from './api'
 import {
   finalVerificationIssue,
-  runChangeCount,
+  runFilesSaved,
   canApplyRequestedEdits,
 } from './chatTimeline'
 import { Icon } from './Icons'
@@ -21,9 +21,7 @@ export function TurnOutcome({
   const lean = kind !== 'workspace'
   const passed = lean && value.complete === true
   const issue = finalVerificationIssue(run)
-  const saved =
-    run.status === 'applied' ||
-    (run.liveEdits && !run.liveUndone && runChangeCount(run, true) > 0)
+  const saved = runFilesSaved(run)
   return (
     <div
       className={`turn-outcome ${passed ? 'passed' : issue ? 'attention' : ''}`}

@@ -118,6 +118,20 @@ export function currentEditorContext(file) {
 
 // Chat history is server-owned conversation text, never native HOME state or
 // privileged protocol roles. A new worker checks the current saved sources.
+function previousVerification(run) {
+  const verification = run.verification
+  if (!verification || verification.kind === 'chat') return 'not checked'
+  if (verification.complete !== true) return 'did not pass'
+  if (!verification.informalization) return 'passed'
+  const destination = verification.informalization.document?.path || 'unknown'
+  const outcome = run.liveUndone
+    ? 'Document edits undone'
+    : run.status === 'applied' || (run.liveEdits && run.liveChanges?.length)
+      ? 'Document saved'
+      : 'Document prepared for review'
+  return `Source proofs checked. ${outcome}: ${destination}.`
+}
+
 export function agentConversationContext(
   job,
   runs = [],
@@ -145,14 +159,7 @@ export function agentConversationContext(
       ...(run.proofTarget
         ? { proofTarget: proofTargetReference(run.proofTarget) }
         : {}),
-      verificationAtThatTime:
-        !run.verification || run.verification.kind === 'chat'
-          ? 'not checked'
-          : run.verification.complete === true
-            ? run.verification.informalization
-              ? `Source proofs checked. Document prepared for review: ${run.verification.informalization.document?.path || 'unknown'}.`
-              : 'passed'
-            : 'did not pass',
+      verificationAtThatTime: previousVerification(run),
       ...(run.verification?.complete === false
         ? {
             finalCheckIssues: [

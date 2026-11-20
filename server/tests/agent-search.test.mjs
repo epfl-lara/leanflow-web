@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -285,7 +287,7 @@ async function fixture(
     const job = await manager.start('alice', project.id, {
       mode: 'search',
       prompt,
-      liveEdits: false,
+      ...(selected.mode === 'informalize' ? {} : { liveEdits: false }),
       ...selected,
     })
     await new Promise((resolve) =>
@@ -747,7 +749,7 @@ test('Informalize inserts the checked proof into an existing document for review
   )
   const result = await f.execute('Insert the selected proof in Notes.md.', {
     mode: 'informalize',
-    liveEdits: true,
+    liveEdits: false,
     outputFile: 'Notes.md',
     proofTarget: target,
   })
@@ -842,6 +844,12 @@ test('Informalize withholds incomplete or unrelated edits and reports failed che
         (await f.workspaces.readFile(f.project.id, 'alice', sourceEntry.path))
           .content,
         leanSource,
+      )
+      assert.equal(result.liveEdits, true)
+      assert.equal(result.liveChanges?.length || 0, 0)
+      await assert.rejects(
+        f.workspaces.readFile(f.project.id, 'alice', 'Notes.md'),
+        { status: 404 },
       )
       await assert.rejects(f.manager.apply('alice', result.id), { status: 409 })
     })
@@ -1035,7 +1043,7 @@ test('a paper draft interrupted by a concurrent save is reviewable and can be co
   )
   for (const reference of recovered)
     await assert.rejects(fs.stat(reference), { code: 'ENOENT' })
-  await f.manager.apply('alice', fixed.id)
+  assert.equal(fixed.liveEdits, true)
   assert.equal(
     (await f.workspaces.readFile(f.project.id, 'alice', 'Another.md')).content,
     'Concurrent collaborator edit.\n',
@@ -1129,6 +1137,12 @@ test('Informalize delivers a follow-up once and checks the new source and destin
   )
   assert.deepEqual(verified, [['Relations.lean'], ['Extra.lean']])
   assert.equal(run.verification.informalization.document.path, 'Revised.md')
+  const saved = await f.workspaces.readFile(f.project.id, 'alice', 'Revised.md')
+  assert.match(saved.content, /Extra\.lean#second/)
+  await assert.rejects(
+    f.workspaces.readFile(f.project.id, 'alice', 'Notes.md'),
+    { status: 404 },
+  )
   const steers = f.requests.filter((request) => request.method === 'turn/steer')
   assert.equal(steers.length, 1)
   assert.equal(
@@ -1136,6 +1150,389 @@ test('Informalize delivers a follow-up once and checks the new source and destin
     update.text,
   )
   assert.equal(run.followups[0].status, 'accepted')
+})
+
+test('automatic Informalize keeps the working draft private through the PDF build and saves nothing on a conflict, failed build or stop', async (t) => {
+  for (const outcome of [
+    'source changed',
+    'destination changed',
+    'PDF failed',
+    'stopped',
+  ])
+    await t.test(outcome, async (t) => {
+      const building = Promise.withResolvers()
+      const finish = Promise.withResolvers()
+      const original = '% Existing paper\n'
+      const master =
+        '\\documentclass{article}\n\\begin{document}\n\\input{chapter}\n\\end{document}\n'
+      const chapter =
+        '% Lean: Relations.lean#Example.keep\nEvery proposition implies itself.\n% Lean proof\nAssume the proposition and use the hypothesis.\n'
+      const f = await fixture(t, async (root) => {
+        await fs.writeFile(path.join(root, 'Paper.tex'), master)
+        await fs.writeFile(path.join(root, 'chapter.tex'), chapter)
+      })
+      f.manager.informalizationSources = async () => ({
+        status: 'checked',
+        entries: [sourceEntry],
+        detail: 'Lean checked the proof.',
+      })
+      f.manager.texBuilds = {
+        async start(_owner, _project, { rootFile }, options) {
+          assert.equal(rootFile, 'Paper.tex')
+          assert.equal(
+            await fs.readFile(
+              path.join(options.sourceRoot, 'chapter.tex'),
+              'utf8',
+            ),
+            chapter,
+          )
+          options.signal.addEventListener('abort', () => finish.resolve(), {
+            once: true,
+          })
+          return { id: 'pdf' }
+        },
+        async wait() {
+          building.resolve()
+          await finish.promise
+          if (outcome === 'PDF failed')
+            return {
+              id: 'pdf',
+              status: 'failed',
+              error: 'Missing TeX package.',
+            }
+          return { id: 'pdf', status: 'completed', pdf: {} }
+        },
+      }
+      const read = (path) => f.workspaces.readFile(f.project.id, 'alice', path)
+      await f.workspaces.writeFile(
+        f.project.id,
+        'alice',
+        'Paper.tex',
+        original,
+        null,
+      )
+      await f.workspaces.writeFile(
+        f.project.id,
+        'alice',
+        sourceEntry.path,
+        leanSource,
+        null,
+      )
+      const run = await f.manager.start('alice', f.project.id, {
+        mode: 'informalize',
+        prompt: 'Write the proof into Paper.tex.',
+        files: [sourceEntry.path],
+      })
+      const done = Promise.all([...f.manager.tasks])
+      await Promise.race([
+        building.promise,
+        done.then(() =>
+          assert.fail(
+            'Run ended before building the PDF: ' +
+              JSON.stringify(f.events.get(run.id).verification),
+          ),
+        ),
+      ])
+      let stopped
+      try {
+        assert.equal((await read('Paper.tex')).content, original)
+        await assert.rejects(read('chapter.tex'), { status: 404 })
+        if (outcome === 'source changed' || outcome === 'destination changed') {
+          const filename =
+            outcome === 'source changed' ? sourceEntry.path : 'Paper.tex'
+          const saved = await read(filename)
+          await f.workspaces.writeFile(
+            f.project.id,
+            'alice',
+            filename,
+            saved.content + '-- Collaborator edit.\n',
+            saved.hash,
+          )
+        }
+        if (outcome === 'stopped') stopped = f.manager.stop('alice', run.id)
+      } finally {
+        finish.resolve()
+      }
+      if (stopped) assert.equal((await stopped).status, 'cancelled')
+      await done
+      const result = f.events.get(run.id)
+      assert.equal(result.liveEdits, true)
+      assert.equal(result.liveChanges?.length || 0, 0)
+      assert.equal(
+        f.events.events(run.id).some((event) => event.type === 'files-updated'),
+        false,
+      )
+      if (outcome !== 'stopped') {
+        assert.equal(result.verification?.complete, false, result.error)
+        assert.deepEqual(
+          [...result.verification.informalization.draft.paths].sort(),
+          ['Paper.tex', 'chapter.tex'],
+        )
+        assert.match(
+          result.verification.reason,
+          outcome === 'PDF failed' ? /Missing TeX package/ : /changed/i,
+        )
+      }
+      await assert.rejects(f.manager.apply('alice', run.id), { status: 409 })
+      assert.equal(
+        (await read(sourceEntry.path)).content,
+        leanSource +
+          (outcome === 'source changed' ? '-- Collaborator edit.\n' : ''),
+      )
+      assert.equal(
+        (await read('Paper.tex')).content,
+        original +
+          (outcome === 'destination changed' ? '-- Collaborator edit.\n' : ''),
+      )
+      await assert.rejects(read('chapter.tex'), { status: 404 })
+    })
+})
+
+test('a stop racing with a committed Informalize save preserves the saved result and Undo', async (t) => {
+  const committed = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const f = await fixture(t, async (root) =>
+    fs.writeFile(path.join(root, 'Paper.md'), markdown),
+  )
+  f.manager.informalizationSources = async () => ({
+    status: 'checked',
+    entries: [sourceEntry],
+    detail: 'Lean checked the source.',
+  })
+  await f.workspaces.writeFile(
+    f.project.id,
+    'alice',
+    sourceEntry.path,
+    leanSource,
+    null,
+  )
+  // Hold the server acknowledgement after the actual transaction is visible.
+  const apply = f.workspaces.applyChanges.bind(f.workspaces)
+  t.mock.method(f.workspaces, 'applyChanges', async (...args) => {
+    const result = await apply(...args)
+    committed.resolve()
+    await release.promise
+    return result
+  })
+  const run = await f.manager.start('alice', f.project.id, {
+    mode: 'informalize',
+    prompt: 'Write into Paper.md.',
+    files: [sourceEntry.path],
+  })
+  const done = Promise.all([...f.manager.tasks])
+  await Promise.race([
+    committed.promise,
+    done.then(() =>
+      assert.fail(
+        'The checked paper was not saved: ' +
+          JSON.stringify(f.events.get(run.id).verification),
+      ),
+    ),
+  ])
+  const stopping = f.manager.stop('alice', run.id)
+  release.resolve()
+  const final = await stopping
+  assert.equal(final.status, 'completed', final.error)
+  assert.ok(!final.error, final.error)
+  assert.equal(final.verification.complete, true)
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, 'alice', 'Paper.md')).content,
+    markdown,
+  )
+  await f.manager.undo('alice', run.id)
+  await assert.rejects(
+    f.workspaces.readFile(f.project.id, 'alice', 'Paper.md'),
+    { status: 404 },
+  )
+})
+
+const paperRestartTest =
+  'recovering a checked paper after the assistant process exits'
+const paperRestartPoints = [
+  'before commit with identical collaborator text',
+  'transaction prepared',
+  'committed',
+  'committed then edited',
+]
+
+test(paperRestartTest, async (t) => {
+  const checkpoint = process.env.STUDIO_TEST_PAPER_RESTART_POINT
+  const paper = '# Paper\n\n[Proof](chapter.md)\n'
+  if (paperRestartPoints.includes(checkpoint)) {
+    const f = await fixture(t, async (root) => {
+      await fs.writeFile(path.join(root, 'Paper.md'), paper)
+      await fs.writeFile(path.join(root, 'chapter.md'), markdown)
+    })
+    await f.workspaces.writeFile(
+      f.project.id,
+      'alice',
+      sourceEntry.path,
+      leanSource,
+      null,
+    )
+    f.manager.informalizationSources = async () => ({
+      status: 'checked',
+      entries: [sourceEntry],
+      detail: 'Lean checked the source.',
+    })
+    const apply = f.workspaces.applyChanges.bind(f.workspaces)
+    t.mock.method(
+      f.workspaces,
+      'applyChanges',
+      async (projectId, actor, changes, options) => {
+        await fs.writeFile(
+          path.join(f.root, 'restart-test.json'),
+          JSON.stringify({ projectId, runId: options.agentRunId }),
+        )
+        if (checkpoint === 'before commit with identical collaborator text') {
+          // The collaborator independently saved the same bytes. A byte
+          // comparison cannot establish that this assistant run published them.
+          for (const change of changes)
+            await f.workspaces.writeFile(
+              projectId,
+              actor,
+              change.path,
+              change.after,
+              change.beforeHash,
+            )
+          process.exit(23)
+        }
+        if (checkpoint === 'transaction prepared') {
+          const bind = options.onTransactionPrepared
+          return apply(projectId, actor, changes, {
+            ...options,
+            async onTransactionPrepared(...args) {
+              await bind(...args)
+              process.exit(23)
+            },
+          })
+        }
+        await apply(projectId, actor, changes, options)
+        if (checkpoint === 'committed then edited') {
+          const saved = await f.workspaces.readFile(
+            projectId,
+            actor,
+            'chapter.md',
+          )
+          await f.workspaces.writeFile(
+            projectId,
+            actor,
+            'chapter.md',
+            'Collaborator revision.\n',
+            saved.hash,
+          )
+        }
+        // Exit before the agent can announce success or record its Undo history.
+        process.exit(23)
+      },
+    )
+    await f.execute('Write the proof into Paper.md.', {
+      mode: 'informalize',
+      files: [sourceEntry.path],
+    })
+    assert.fail(
+      'The process did not reach the expected publication checkpoint.',
+    )
+  }
+  for (const point of paperRestartPoints)
+    await t.test(point, async (t) => {
+      const temp = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'lemex-paper-restart-'),
+      )
+      t.after(() => fs.rm(temp, { recursive: true, force: true }))
+      const env = {
+        ...process.env,
+        TMPDIR: temp,
+        STUDIO_TEST_PAPER_RESTART_POINT: point,
+      }
+      delete env.NODE_TEST_CONTEXT
+      await assert.rejects(
+        promisify(execFile)(
+          process.execPath,
+          ['--test-name-pattern', paperRestartTest, import.meta.filename],
+          { env, timeout: 15000 },
+        ),
+        (err) => {
+          assert.equal(err.code, 23, err.stdout || err.stderr || err.message)
+          return true
+        },
+      )
+      const roots = (await fs.readdir(temp)).filter((name) =>
+        name.startsWith('leanflow-ask-search-'),
+      )
+      assert.equal(roots.length, 1)
+      const dataDir = path.join(temp, roots[0])
+      const { runId, projectId } = JSON.parse(
+        await fs.readFile(path.join(dataDir, 'restart-test.json'), 'utf8'),
+      )
+      const workspaces = await new WorkspaceStore({
+        dataDir,
+        runtime: {},
+      }).init()
+      const events = new EventStore(dataDir)
+      const manager = new AgentManager({
+        workspaces,
+        events,
+        runtime: {},
+        config: { redact: String },
+      })
+      try {
+        await manager.recoverInformalizationSaves()
+        await manager.recoverInformalizationSaves()
+        const result = events.get(runId, 'alice')
+        const read = (file) => workspaces.readFile(projectId, 'alice', file)
+        if (point.startsWith('committed')) {
+          assert.equal(result.status, 'completed', result.error)
+          assert.equal(result.verification?.complete, true)
+          assert.equal(
+            result.verification.informalization.document.path,
+            'Paper.md',
+          )
+          assert.deepEqual(
+            result.liveChanges.map((change) => change.path).sort(),
+            ['Paper.md', 'chapter.md'],
+          )
+          assert.equal((await read('Paper.md')).content, paper)
+          if (point === 'committed then edited') {
+            await assert.rejects(manager.undo('alice', runId), { status: 409 })
+            assert.equal((await read('Paper.md')).content, paper)
+            assert.equal(
+              (await read('chapter.md')).content,
+              'Collaborator revision.\n',
+            )
+          } else {
+            assert.equal((await read('chapter.md')).content, markdown)
+            await manager.undo('alice', runId)
+            assert.equal(events.get(runId).liveUndone, true)
+            for (const file of ['Paper.md', 'chapter.md'])
+              await assert.rejects(read(file), { status: 404 })
+          }
+        } else {
+          assert.equal(result.liveChanges?.length || 0, 0)
+          assert.equal(
+            result.verification.informalization.draft.path,
+            'Paper.md',
+          )
+          assert.deepEqual(result.changes.map((change) => change.path).sort(), [
+            'Paper.md',
+            'chapter.md',
+          ])
+          await assert.rejects(manager.undo('alice', runId), { status: 409 })
+          if (point === 'transaction prepared') {
+            for (const file of ['Paper.md', 'chapter.md'])
+              await assert.rejects(read(file), { status: 404 })
+          } else {
+            assert.equal((await read('chapter.md')).content, markdown)
+            assert.equal((await read('Paper.md')).content, paper)
+          }
+        }
+        assert.equal((await read(sourceEntry.path)).content, leanSource)
+      } finally {
+        await manager.shutdown()
+        events.close()
+        workspaces.close()
+      }
+    })
 })
 
 test('stopping Informalize during source checks cancels the worker and offers no edit', async (t) => {
@@ -1162,7 +1559,7 @@ test('stopping Informalize during source checks cancels the worker and offers no
 })
 
 test(
-  'real Lean and TeX workers check the source, build the review PDF and apply the paper',
+  'real Lean and TeX workers check the source, build the PDF and automatically save the paper',
   {
     skip: !process.env.STUDIO_INFORMALIZATION_TEST_TOOLCHAINS,
   },
@@ -1298,16 +1695,32 @@ test(
     ).content.replace(/\s+/g, ' ')
     assert.match(pdfText, /The hypothesis gives the conclusion/)
     assert.match(pdfText, /Read the second factor first/)
-    for (const file of Object.keys(files))
-      await assert.rejects(f.workspaces.readFile(f.project.id, 'alice', file), {
-        status: 404,
-      })
-    await f.manager.apply('alice', run.id)
+    assert.equal(run.liveEdits, true)
+    assert.equal(run.status, 'completed')
+    assert.deepEqual(
+      run.liveChanges.map((change) => change.path).sort(),
+      Object.keys(files).sort(),
+    )
+    const saves = f.events
+      .events(run.id)
+      .filter((event) => event.type === 'files-updated')
+    assert.equal(saves.length, 1)
+    assert.deepEqual([...saves[0].data.paths].sort(), Object.keys(files).sort())
     for (const [file, content] of Object.entries(files))
       assert.equal(
         (await f.workspaces.readFile(f.project.id, 'alice', file)).content,
         content,
       )
+    await f.manager.undo('alice', run.id)
+    for (const file of Object.keys(files))
+      await assert.rejects(f.workspaces.readFile(f.project.id, 'alice', file), {
+        status: 404,
+      })
+    assert.equal(
+      (await f.workspaces.readFile(f.project.id, 'alice', 'Relations.lean'))
+        .content,
+      leanSource,
+    )
   },
 )
 
@@ -3279,7 +3692,7 @@ test('a large paper recovery rechecks each named theorem in its original source 
     recovered.error || recovered.verification?.reason,
   )
   assert.deepEqual(replayed.sort(), entries.map((entry) => entry.path).sort())
-  await f.manager.apply('alice', recovered.id)
+  assert.equal(recovered.liveEdits, true)
   assert.equal(
     (await f.workspaces.readFile(f.project.id, 'alice', 'Paper.md')).content,
     paper,

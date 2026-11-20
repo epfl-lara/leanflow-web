@@ -198,7 +198,7 @@ Open a Lean file, choose **Informalize**, and send the message to write up its t
 
 Leave **Output document** empty to let Lemex choose where to write. To use an existing paper, ask “Add the proofs to the Results section of `paper.tex`.” Lemex can write a single article, split a larger paper into a main TeX file and chapters, or create linked Markdown notes. For a list of results, ask for statements only. Lemex still checks the Lean proofs.
 
-Lemex checks each source proof with the project’s Lean version. If a proof needs attention, the result points to its theorem or file. For LaTeX, it builds a PDF before offering the edit for review. Compare the prose with the linked Lean declarations, review the document change, and choose **Apply changes** to save it. If a document check fails, open **Review document** to inspect the draft and continue in the same chat to request a correction.
+Lemex checks each source proof with the project’s Lean version and builds a PDF for LaTeX. By default, it saves the paper and its chapters together when the checks pass. Open the paper from chat to read it alongside the linked Lean declarations. To review the changes before saving, turn off **Options → Edit files live** before sending. If a check fails, the chat identifies the issue. You can inspect any available draft and request a correction in the same chat.
 
 Compare optimization's token and heartbeat measurements: a shorter proof can take more elaboration work. Repair invalid proofs first.
 
@@ -271,7 +271,7 @@ Use **View edits** to inspect saved changes during a run. If **Final checks need
 
 **Edit files live** shows saved changes as Lemex works and preserves unsaved editor text. **View edits** shows the diff and Lean verification; intermediate edits may still contain errors.
 
-After stopping, **Undo agent edits** restores changes without overwriting conflicting saved work. For review before saving, disable live edits, inspect the candidate, then **Apply changes**. You can apply requested edits even when their checks fail, including unfinished proof skeletons. Failed or unavailable checks stay visible; applying an edit does not make its proof verified. Save your editor changes before applying or undoing.
+After stopping, **Undo agent edits** restores changes without overwriting conflicting saved work. For review before saving, disable live edits, inspect the candidate, then **Apply changes**. You can apply requested Lean edits even when their checks fail, including unfinished proof skeletons. Failed or unavailable checks stay visible. Informalize saves its paper after the source and document checks pass. Save your editor changes before applying or undoing.
 
 ## Search and publish
 

@@ -188,12 +188,14 @@ function SourceChecks({
 export function InformalizationResult({
   value,
   projectId,
-  applied,
+  saved = false,
+  reviewFirst = true,
   onOpenTarget,
 }: {
   value: unknown
   projectId?: string
-  applied?: boolean
+  saved?: boolean
+  reviewFirst?: boolean
   onOpenTarget?: (target: RunProofTarget) => void
 }) {
   const [error, setError] = useState('')
@@ -228,7 +230,9 @@ export function InformalizationResult({
       <strong>
         {path
           ? complete
-            ? 'Document'
+            ? saved
+              ? 'Document saved'
+              : 'Document'
             : 'Draft needs revision'
           : 'No document to review'}
       </strong>
@@ -257,10 +261,10 @@ export function InformalizationResult({
       )}
       {!complete && documentIssue && <p>{documentIssue}</p>}
       <SourceChecks sources={sources} onOpenTarget={onOpenTarget} />
-      {complete && !applied && (
+      {complete && reviewFirst && !saved && (
         <p>Review the mathematical wording before applying the document.</p>
       )}
-      {(pdfUrl || (applied && path)) && (
+      {(pdfUrl || (saved && path)) && (
         <div className="turn-footer">
           {pdfUrl && (
             <>
@@ -284,7 +288,7 @@ export function InformalizationResult({
               </a>
             </>
           )}
-          {applied && path && (
+          {saved && path && (
             <>
               {onOpenTarget && (
                 <button

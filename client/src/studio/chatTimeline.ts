@@ -109,7 +109,9 @@ export function runStatusLabel(run: Run) {
     if (run.mode === 'informalize')
       return verification?.kind === 'workspace'
         ? verification.complete
-          ? 'Ready to review'
+          ? runFilesSaved(run)
+            ? 'Document saved'
+            : 'Ready to review'
           : 'Document checks need attention'
         : 'Finished'
     if (verification?.complete === false)
@@ -188,6 +190,22 @@ export function runChangeCount(run: Run, live = false): number {
         runChangePaths(run, live).length)
 }
 
+export function runFilesSaved(run: Run): boolean {
+  return (
+    !run.liveUndone &&
+    (run.status === 'applied' ||
+      (!!run.liveEdits && runChangeCount(run, true) > 0))
+  )
+}
+
+// A failed document check leaves a reviewable candidate even with automatic saving on.
+export function reviewLiveChanges(run: Run): boolean {
+  return (
+    !!run.liveEdits &&
+    (run.mode !== 'informalize' || runChangeCount(run, true) > 0)
+  )
+}
+
 export function runChangePaths(run: Run, live = false): string[] {
   const paths = live ? run.liveChangePaths : run.changePaths
   if (Array.isArray(paths)) return paths
@@ -197,7 +215,7 @@ export function runChangePaths(run: Run, live = false): string[] {
 }
 
 export function liveEditStatus(run: Run): string {
-  if (run.mode === 'informalize')
+  if (run.mode === 'informalize' && !run.liveEdits)
     return 'Review first · Document updates after you apply it'
   if (run.mode === 'search' && !run.liveEdits)
     return 'Review first · Requested edits need your approval'
@@ -206,7 +224,10 @@ export function liveEditStatus(run: Run): string {
   if (!run.liveEdits) return ''
   if (run.liveEditConflict) return 'Live edits paused · Saved files changed'
   if (run.liveUndone) return 'Live edits undone'
-  if (!run.liveRevision) return 'Live edits on · No saved edits yet'
+  if (!run.liveRevision)
+    return run.mode === 'informalize'
+      ? 'Save automatically after document checks'
+      : 'Live edits on · No saved edits yet'
   if (
     !Array.isArray(run.liveChanges) &&
     !Array.isArray(run.liveChangePaths) &&
