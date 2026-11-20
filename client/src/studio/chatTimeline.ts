@@ -106,6 +106,12 @@ export function runStatusLabel(run: Run) {
     const verification = run.verification as
       | { complete?: boolean; kind?: string }
       | undefined
+    if (run.mode === 'informalize')
+      return verification?.kind === 'workspace'
+        ? verification.complete
+          ? 'Ready to review'
+          : 'Document checks need attention'
+        : 'Finished'
     if (verification?.complete === false)
       return 'Finished · Lean check did not pass'
     if (['chat', 'search'].includes(verification?.kind || '')) return 'Finished'
@@ -126,7 +132,10 @@ export function runStatusLabel(run: Run) {
         starting: 'Preparing',
         preparing: 'Preparing',
         running: 'Working',
-        verifying: 'Checking with Lean',
+        verifying:
+          run.mode === 'informalize'
+            ? 'Checking document'
+            : 'Checking with Lean',
         stopping: 'Stopping…',
         cancelled: 'Stopped',
         failed: 'Failed',
@@ -188,6 +197,8 @@ export function runChangePaths(run: Run, live = false): string[] {
 }
 
 export function liveEditStatus(run: Run): string {
+  if (run.mode === 'informalize')
+    return 'Review first · Document updates after you apply it'
   if (run.mode === 'search' && !run.liveEdits)
     return 'Review first · Requested edits need your approval'
   if (run.liveEdits === false)

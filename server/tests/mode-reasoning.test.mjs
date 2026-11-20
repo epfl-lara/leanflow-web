@@ -17,10 +17,11 @@ const reasoningModel = {
   defaultReasoningEffort: 'medium',
 }
 
-test('Ask and Search prefer high; all proof workflows prefer max', () => {
+test('Ask, Search and Informalize prefer high and proof workflows prefer max', () => {
   for (const [mode, expected] of [
     ['ask', 'high'],
     ['search', 'high'],
+    ['informalize', 'high'],
     ['proofs', 'max'],
     ['formalize', 'max'],
     ['optimize', 'max'],
@@ -35,7 +36,13 @@ test('missing mode levels use only an advertised default, otherwise no override'
     ...reasoningModel,
     reasoningEfforts: [{ id: 'low' }, { id: 'medium' }],
   }
-  for (const mode of ['search', 'proofs', 'formalize', 'optimize']) {
+  for (const mode of [
+    'search',
+    'proofs',
+    'formalize',
+    'informalize',
+    'optimize',
+  ]) {
     assert.equal(modeReasoningEffort(mode, limited), 'medium')
     assert.equal(
       modeReasoningEffort(mode, { ...limited, defaultReasoningEffort: 'max' }),
@@ -60,6 +67,7 @@ test('deliberate choices remain independent across workflows, models, and provid
   preferences[reasoningPreferenceKey('rcp', reasoningModel.id, 'search')] =
     'low'
   assert.equal(selected('search'), 'low')
+  assert.equal(selected('informalize'), 'high')
   for (const mode of ['proofs', 'formalize', 'optimize'])
     assert.equal(selected(mode), 'max')
   preferences[reasoningPreferenceKey('rcp', reasoningModel.id, 'proofs')] = null
@@ -151,11 +159,13 @@ test('agent API omitted effort follows workflow defaults and preserves explicit 
     'search',
     'proofs',
     'formalize',
+    'informalize',
     'optimize',
     'repair',
     'prove',
   ]) {
-    assert.equal((await start(mode)).effort, mode === 'search' ? 'high' : 'max')
+    const expected = ['search', 'informalize'].includes(mode) ? 'high' : 'max'
+    assert.equal((await start(mode)).effort, expected)
     assert.equal((await start(mode, { effort: 'low' })).effort, 'low')
     assert.equal((await start(mode, { effort: null })).effort, null)
     await assert.rejects(() => start(mode, { effort: 'ultra' }), {
@@ -163,7 +173,13 @@ test('agent API omitted effort follows workflow defaults and preserves explicit 
     })
   }
   config.models = [{ ...reasoningModel, reasoningEfforts: [{ id: 'medium' }] }]
-  for (const mode of ['search', 'proofs', 'formalize', 'optimize']) {
+  for (const mode of [
+    'search',
+    'proofs',
+    'formalize',
+    'informalize',
+    'optimize',
+  ]) {
     assert.equal((await start(mode)).effort, 'medium')
     await assert.rejects(() => start(mode, { effort: 'high' }), { status: 400 })
   }

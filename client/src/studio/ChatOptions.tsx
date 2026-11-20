@@ -15,6 +15,7 @@ export function ChatOptions({
   onLiveEdits,
   active,
   reviewOnly = false,
+  reviewDocument = false,
 }: {
   models: Session['models']
   savedModels?: string[]
@@ -27,6 +28,7 @@ export function ChatOptions({
   onLiveEdits: (value: boolean) => void
   active: boolean
   reviewOnly?: boolean
+  reviewDocument?: boolean
 }) {
   const selected = models.find((item) => item.id === model)
   const levels = selected?.reasoningEfforts || []
@@ -81,11 +83,11 @@ export function ChatOptions({
             <label htmlFor={effortId}>Reasoning effort</label>
             <HelpTip label="Reasoning effort">
               Choose how much reasoning the model uses for the next run. Higher
-              levels can take longer. Ask &amp; Search starts at high; Proofs,
-              Formalize, and Optimize start at max when supported. Otherwise,
-              the model’s default is used. Your choice is remembered separately
-              for each mode and model while this assistant is open. Default lets
-              the provider choose.
+              levels can take longer. Ask &amp; Search and Informalize start at
+              high. Proofs, Formalize, and Optimize start at max when supported.
+              Otherwise, the model’s default is used. Your choice is remembered
+              separately for each mode and model while this assistant is open.
+              Default lets the provider choose.
             </HelpTip>
           </div>
           <select
@@ -130,28 +132,32 @@ export function ChatOptions({
           onClose={() => setLibraryOpen(false)}
         />
       )}
-      <div className="chat-live-choice">
-        <label className="help-label">
-          <input
-            type="checkbox"
-            checked={liveEdits}
-            disabled={reviewOnly}
-            onChange={(event) => onLiveEdits(event.target.checked)}
-          />
-          <span>Edit files live</span>
-        </label>
-        <HelpTip label="Edit files live">
-          {reviewOnly
-            ? 'Setup help keeps configuration changes separate until you review and apply them.'
-            : 'When on, Lemex saves requested edits as it works; stop the run to undo its edits. Turn this off to review changes before applying them. Live edits start on in every mode. This choice applies to the next run.'}
-        </HelpTip>
-      </div>
+      {!reviewDocument && (
+        <div className="chat-live-choice">
+          <label className="help-label">
+            <input
+              type="checkbox"
+              checked={liveEdits}
+              disabled={reviewOnly}
+              onChange={(event) => onLiveEdits(event.target.checked)}
+            />
+            <span>Edit files live</span>
+          </label>
+          <HelpTip label="Edit files live">
+            {reviewOnly
+              ? 'Setup help keeps configuration changes separate until you review and apply them.'
+              : 'When on, Lemex saves requested edits as it works. Turn this off to review changes before applying them. This choice applies to the next run.'}
+          </HelpTip>
+        </div>
+      )}
       <p className="field-help">
         {active
           ? 'Options apply to the next run. Updates guide the current run.'
-          : liveEdits
-            ? 'Edits are saved as Lemex works; you can undo them after stopping.'
-            : 'Keep edits separate until you review and apply them.'}{' '}
+          : reviewDocument
+            ? 'Review the proposed document before applying it to your project.'
+            : liveEdits
+              ? 'Edits are saved as Lemex works; you can undo them after stopping.'
+              : 'Keep edits separate until you review and apply them.'}{' '}
         Runs continue until done or stopped.
       </p>
     </details>

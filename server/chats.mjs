@@ -77,6 +77,7 @@ function titleTaskContext(run, redact) {
       'repair',
       'prove',
       'formalize',
+      'informalize',
       'optimize',
     ].includes(run.mode)
   )

@@ -5,6 +5,8 @@ import {
   isBinaryAssetFile,
 } from '../shared/file-previews.mjs'
 
+import { hasNamedInformalizationRequest } from './informalization.mjs'
+
 const MAX_HISTORY = 60_000
 
 // Setup diagnostics are app reference data, separate from the user's request.
@@ -144,11 +146,13 @@ export function agentConversationContext(
         ? { proofTarget: proofTargetReference(run.proofTarget) }
         : {}),
       verificationAtThatTime:
-        run.verification?.complete === true
-          ? 'passed'
-          : run.verification
-            ? 'did not pass'
-            : 'not checked',
+        !run.verification || run.verification.kind === 'chat'
+          ? 'not checked'
+          : run.verification.complete === true
+            ? run.verification.informalization
+              ? `Source proofs checked. Document prepared for review: ${run.verification.informalization.document?.path || 'unknown'}.`
+              : 'passed'
+            : 'did not pass',
       ...(run.verification?.complete === false
         ? {
             finalCheckIssues: [
@@ -229,6 +233,36 @@ export function agentConversationContext(
     [...sections, ...additionalSections],
     savedUserGuidance,
   )
+}
+
+export function informalizationSourcePaths(job, snapshot) {
+  if (job.proofTarget) return [job.proofTarget.path]
+  const isSource = (file) =>
+    typeof file === 'string' &&
+    file.endsWith('.lean') &&
+    !file.split('/').includes('.lake') &&
+    file.split('/').at(-1) !== 'lakefile.lean'
+  const sources = snapshot.files.map((file) => file.path).filter(isSource)
+  const prompt = job.prompt || ''
+  const tokens = new Set(
+    prompt
+      .split(/[\s`'"()[\]{},:;!?]+/)
+      .map((token) => token.replace(/\.$/, '')),
+  )
+  for (const [, quoted] of prompt.matchAll(/[`"']([^`"'\n]+\.lean)[`"']/g))
+    tokens.add(quoted)
+  const mentioned = sources.filter((file) => tokens.has(file))
+  if (mentioned.length) return mentioned
+  const attached = (job.files || []).filter(isSource)
+  if (attached.length) return attached
+  const open = [job.file, job.currentFile].find(isSource)
+  if (open) return [open]
+  if (
+    sources.length === 1 ||
+    (sources.length <= 12 && hasNamedInformalizationRequest(prompt))
+  )
+    return sources
+  return []
 }
 
 export function selectedContextFiles(input, validatePath) {

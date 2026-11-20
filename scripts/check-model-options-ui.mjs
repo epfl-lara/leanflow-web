@@ -128,6 +128,7 @@ try {
     ['Ask & Search', 'high'],
     ['Proofs', 'max'],
     ['Formalize', 'max'],
+    ['Informalize', 'high'],
     ['Optimize', 'max'],
   ]) {
     await page
@@ -175,7 +176,7 @@ try {
     .getByRole('button', { name: 'Proofs', exact: true })
     .click()
   report.checks.push(
-    'Ask & Search starts high and the other three modes start max; deliberate per-mode choices and provider-default null are preserved',
+    'Ask & Search and Informalize start high, proof workflows start max, and each mode keeps its selected effort or provider default',
   )
 
   assert.equal(

@@ -3,7 +3,9 @@
 // override so the provider can choose its own default.
 export function modeReasoningEffort(mode, model) {
   const supported = model?.reasoningEfforts || []
-  const preferred = mode === 'search' || mode === 'ask' ? 'high' : 'max'
+  const preferred = ['search', 'ask', 'informalize'].includes(mode)
+    ? 'high'
+    : 'max'
   if (supported.some((level) => level.id === preferred)) return preferred
   const fallback = model?.defaultReasoningEffort
   return fallback && supported.some((level) => level.id === fallback)

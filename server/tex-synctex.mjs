@@ -10,7 +10,7 @@ const object = (value) =>
 
 // Accept only the compact map produced by the compiler worker and validate its
 // destinations against the immutable source snapshot before publishing it.
-export function validateTexSyncTex(content, files, pageCount) {
+export function validateTexSyncTex(content, files, pageCount, requiredSource) {
   if (!positiveInteger(pageCount)) return false
   try {
     const map = JSON.parse(content)
@@ -33,6 +33,7 @@ export function validateTexSyncTex(content, files, pageCount) {
       return false
 
     let total = 0
+    let sawRequired = requiredSource === undefined
     for (const [page, boxes] of Object.entries(map.pages)) {
       if (
         !/^[1-9]\d{0,6}$/u.test(page) ||
@@ -59,9 +60,10 @@ export function validateTexSyncTex(content, files, pageCount) {
           y + height > maxCoordinate
         )
           return false
+        if (map.paths[index] === requiredSource) sawRequired = true
       }
     }
-    return total > 0
+    return total > 0 && sawRequired
   } catch {
     return false
   }

@@ -189,9 +189,14 @@ Targets belong to their chat. **Ask Lemex** uses the current proof or selection;
 | **Ask & Search** | Ask questions, find lemmas, or work on project text files. |
 | **Proofs**       | Complete or repair a proof while keeping its statement.    |
 | **Formalize**    | Turn mathematical prose into Lean statements and proofs.   |
+| **Informalize**  | Write Lean statements and proofs into a paper or notes.    |
 | **Optimize**     | Shorten a valid proof or reduce its elaboration work.      |
 
-Modes choose a default workflow. Your explicit requests and follow-ups take precedence over those defaults and project instructions. You can ask for document edits, source renames or deletions, statement and import changes, or setup repairs in any mode. A selected Lean proof is optional.
+Your requests and follow-ups guide the work in each mode. In **Ask & Search**, **Proofs**, **Formalize**, and **Optimize**, you can also request document edits, source renames, statement or import changes, and setup repairs.
+
+To write up one theorem, open a Lean file, choose its declaration in **Outline**, choose **Informalize**, and send the prepared message. To write up a whole file, clear the focused declaration and attach the Lean file. For example, ask “Add the statements and proofs from this file to the Results section of `paper.tex`.” Choose **Output document** to set the destination explicitly, or request Markdown notes. Use **Write statements only** for a list of results. Lemex still checks each Lean proof before writing the list.
+
+Lemex checks the selected declarations with the project’s Lean version, then writes the statements and mathematical arguments into your chosen document. With no destination it suggests a new LaTeX article. The run reports missing or uncheckable proofs in chat. For LaTeX, it builds a PDF before offering the edit for review. Compare the prose with the linked Lean declarations, review the document change, and choose **Apply changes** to save it. If a document check fails, open **Review document** to inspect the draft and continue in the same chat to request a correction.
 
 Compare optimization's token and heartbeat measurements: a shorter proof can take more elaboration work. Repair invalid proofs first.
 
@@ -203,7 +208,7 @@ Hover a linked passage or declaration to see its counterpart and click to jump t
 
 **Ask & Search** primarily helps with Lean, but also welcomes general questions, writing, planning, and open-ended tasks. Ask it to create or edit project text files and organize, rename, or delete non-Lean notes and documents. Ask Lemex to rename or delete Lean sources when needed, or use the file browser. Questions and explanations leave files unchanged. Live edits are on by default: Lemex saves requested edits as it works. To inspect the diff before saving, turn off **Options → Edit files live** before sending, then choose **Apply changes** after reviewing. This choice is saved separately from the other modes. Stop the run before undoing its edits. Lemex can use the workspace shell, Python, and other installed command-line tools in either editing mode. Lean source edits still receive independent Lean verification; ordinary conversation and non-Lean file tasks do not.
 
-Ask Lemex to fix project configuration when needed, including registering a new Lean module in `lakefile.toml`. Requested configuration edits are allowed in every mode and receive build checks. Existing Lean versions and dependency revisions are preserved unless you ask to change them. Installed dependency sources and credentials stay protected.
+Ask Lemex to fix project configuration when needed, including registering a new Lean module in `lakefile.toml`. Requested configuration edits receive build checks. Existing Lean versions and dependency revisions are preserved unless you ask to change them. Installed dependency sources and credentials stay protected.
 
 In live editing, configuration edits save together after checks finish; in review-first mode, choose **Apply changes**. After saving configuration changes, use **Retry setup** to prepare the updated environment.
 
@@ -236,7 +241,7 @@ Type **@** or use **Select context** to attach extra files. The same menu includ
 
 Press **Enter** to send a message or a follow-up during a run. Use **Shift+Enter** to add a new line. While the **@** file picker is open, **Enter** attaches the selected file first.
 
-Reasoning defaults to **high** for **Ask & Search**, and **max** for **Proofs**,
+Reasoning defaults to **high** for **Ask & Search** and **Informalize**, and **max** for **Proofs**,
 **Formalize**, and **Optimize**. If the model does not advertise that level, its
 advertised default is used; a model with fixed reasoning keeps its provider
 default. A level you select in Options applies to that model and task mode,

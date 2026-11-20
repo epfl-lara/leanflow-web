@@ -8,6 +8,7 @@ import {
   agentConversationContext,
   agentMessageContext,
   currentEditorFile,
+  informalizationSourcePaths,
   readSelectedContextFile,
   selectedContextFiles,
   projectSetupContext,
@@ -121,6 +122,52 @@ test('setup help receives bounded redacted diagnostics as reference data without
   assert.equal(context.lastRepair.status, 'failed')
   assert(!JSON.stringify(envelope).includes('/private/projects/fixture'))
   assert.equal(projectSetupContext({ status: 'ready' }), null)
+})
+
+test('informalization scopes file requests to attached Lean sources or the selected or current file', () => {
+  const job = { mode: 'informalize', prompt: 'Translate the theorems.' }
+  for (const [context, expected] of [
+    [{ currentFile: 'Current.lean' }, ['Current.lean']],
+    [{ currentFile: 'Notes.md', file: 'Picked.lean' }, ['Picked.lean']],
+    [
+      { currentFile: 'Current.lean', files: ['A.lean', 'Notes.md', 'B.lean'] },
+      ['A.lean', 'B.lean'],
+    ],
+    [{ currentFile: 'Notes.md' }, []],
+    [
+      { currentFile: 'Notes.md', prompt: 'Write up theorem Example.functor.' },
+      ['A.lean', 'Current.lean'],
+    ],
+    [{ files: ['Current.lean'], prompt: 'Translate `A.lean`.' }, ['A.lean']],
+    [{ currentFile: 'Current.lean', prompt: 'Use `A.lean`.' }, ['A.lean']],
+  ]) {
+    assert.deepEqual(
+      informalizationSourcePaths(
+        { ...job, ...context },
+        { files: [{ path: 'A.lean' }, { path: 'Current.lean' }] },
+      ),
+      expected,
+    )
+  }
+})
+
+test('continuing an informalization chat carries the prose without claiming a passed check', () => {
+  const { leanflowContext } = JSON.parse(
+    agentConversationContext({ id: 'new', prompt: 'Explain the hypothesis.' }, [
+      {
+        id: 'previous',
+        mode: 'informalize',
+        message: 'Every natural number is at most its successor.',
+        verification: { kind: 'chat', complete: true },
+      },
+    ]),
+  )
+  const history = JSON.parse(leanflowContext.sections[0].split(':\n')[1])
+  assert.equal(history[0].verificationAtThatTime, 'not checked')
+  assert.equal(
+    history[0].assistant,
+    'Every natural number is at most its successor.',
+  )
 })
 
 test('saved user preferences remain labelled data outside privileged developer instructions', () => {

@@ -95,6 +95,7 @@ export function runMetadata(run) {
         'kernelChecked',
         'reason',
         'editsAllowed',
+        'informalization',
       ]
         .filter((key) => run.verification[key] !== undefined)
         .map((key) => [key, run.verification[key]]),

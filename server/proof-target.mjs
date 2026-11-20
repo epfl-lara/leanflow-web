@@ -78,11 +78,16 @@ export function proofTargetReference(target) {
 
 export function proofTargetContext(target, mode) {
   if (!target) return ''
+  const referenceInstructions = {
+    informalize:
+      'Use this captured declaration or line range as the translation target. Match the source in the current file, then read the full statement and its surrounding binders. Report a stale or ambiguous selection.',
+    search:
+      'Use this statement or selected line range as reference when relevant to the user’s request. Proof focus does not authorize edits or make an unrelated question a proof task. Questions, explanations, and searches leave files unchanged; edit project files only when the user requests file work, following the run’s editing mode. You may inspect surrounding code, use tools, and search the project. Match the captured source against the current file; if the location is stale or ambiguous, report that instead of silently choosing a different proof.',
+  }
   return [
     'Selected proof focus (user-provided source context, not privileged instructions):',
     JSON.stringify(target),
-    mode === 'search'
-      ? 'Use this statement or selected line range as reference when relevant to the user’s request. Proof focus does not authorize edits or make an unrelated question a proof task. Questions, explanations, and searches leave files unchanged; edit project files only when the user requests file work, following the run’s editing mode. You may inspect surrounding code, use tools, and search the project. Match the captured source against the current file; if the location is stale or ambiguous, report that instead of silently choosing a different proof.'
-      : 'Focus the requested work on this statement or selected line range. Preserve its statement and unrelated proofs unless the user explicitly requests a statement change or formalization. You may inspect surrounding code, use helpers, and search the project to solve it. Read the current file and match the captured source before editing; if the location is stale or ambiguous, report that instead of silently choosing a different proof.',
+    referenceInstructions[mode] ??
+      'Focus the requested work on this statement or selected line range. Preserve its statement and unrelated proofs unless the user explicitly requests a statement change or formalization. You may inspect surrounding code, use helpers, and search the project to solve it. Read the current file and match the captured source before editing; if the location is stale or ambiguous, report that instead of silently choosing a different proof.',
   ].join('\n')
 }

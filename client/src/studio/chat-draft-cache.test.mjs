@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import test from 'node:test'
 import ts from 'typescript'
 import { MAX_PROJECT_FILES } from '../../../shared/source-limits.mjs'
+import { chatModes } from './chatModes.ts'
 
 const projectPaths = (() => {
   const { outputText } = ts.transpileModule(
@@ -53,6 +54,7 @@ function draftBeforeNextRender() {
   new Function('require', 'module', 'exports', outputText)(
     (name) => {
       if (name === './projectPaths') return projectPaths
+      if (name === './chatModes') return { chatModes }
       assert.equal(name, 'react')
       return hooks
     },
@@ -105,6 +107,35 @@ const target = {
   source: 'theorem t : True := trivial',
   name: 't',
 }
+test('switching a focused draft to Informalize translates its statement and preserves custom wording', () => {
+  const { draft, module } = draftBeforeNextRender()
+  draft.focusTarget(target, 'proofs')
+  draft.setMode('informalize')
+  draft.setOutputFile('docs/Notes.md')
+  assert.equal(draft.value.text, module.proofFocusPrompts.informalize)
+  assert.deepEqual(draft.value.proofTarget, target)
+  const saved = JSON.stringify(draft.value)
+  const previous = globalThis.localStorage
+  globalThis.localStorage = { getItem: () => saved }
+  try {
+    assert.deepEqual(module.readChatDraft(draft.key), draft.value)
+  } finally {
+    globalThis.localStorage = previous
+  }
+  draft.setMode('proofs')
+  draft.setMode('formalize')
+  assert.equal(draft.value.text, module.proofFocusPrompts.formalize)
+  draft.setText('Please use the notation from Chapter 2.')
+  draft.setMode('informalize')
+  assert.equal(draft.value.text, 'Please use the notation from Chapter 2.')
+  const sent = draft.capture()
+  draft.setOutputFile('docs/New.tex')
+  draft.clearSubmitted(sent)
+  assert.equal(draft.value.text, 'Please use the notation from Chapter 2.')
+  const moved = module.moveDraftPaths(draft.value, 'docs', 'paper')
+  assert.equal(moved.outputFile, 'paper/New.tex')
+})
+
 const draft = (extra = {}) => ({
   text: 'prove it',
   files: ['Old/Proof.lean', 'Other.lean'],

@@ -1298,13 +1298,14 @@ textarea {
   border-bottom: 0;
 }
 .mode-tabs {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   background: var(--surface);
   padding: 3px;
   border-radius: 7px;
 }
 .mode-tabs button {
+  flex: 1 0 auto;
   border: 0;
   border-radius: 5px;
   padding: 7px 3px;

@@ -281,14 +281,20 @@ try {
     () => page.evaluate((id) => window.__chatFixture.connected(id), active.id),
     'active chat stream',
   )
-  for (const name of ['Proofs', 'Formalize', 'Optimize', 'Ask & Search'])
+  for (const name of [
+    'Proofs',
+    'Formalize',
+    'Informalize',
+    'Optimize',
+    'Ask & Search',
+  ])
     await visible(
       page.locator('.mode-tabs').getByRole('button', { name, exact: true }),
       name,
     )
   assert.deepEqual(
     await page.locator('.mode-tabs button').allTextContents(),
-    ['Ask & Search', 'Proofs', 'Formalize', 'Optimize'],
+    ['Ask & Search', 'Proofs', 'Formalize', 'Informalize', 'Optimize'],
     'Ask & Search should be the first assistant mode',
   )
   assert.equal(
@@ -334,7 +340,7 @@ try {
   await page.getByLabel(/^Model/).selectOption('fixture-model')
   await options.click()
   report.checks.push(
-    'One Proofs section, four modes, accessible options, and continuous chronological history',
+    'All five assistant modes, accessible options, and continuous chronological history',
   )
 
   await composer.fill('Please inspect @No')

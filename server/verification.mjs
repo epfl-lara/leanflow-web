@@ -1,3 +1,8 @@
+import {
+  pinnedAuditEnvironment,
+  replayLeanSources,
+  standardLeanAxioms,
+} from './lean-source-replay.mjs'
 import { sourceFingerprint } from './source-fingerprint.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
 
@@ -360,73 +365,6 @@ function theoremHeaderEntries(source) {
 }
 
 const auditScript = String.raw`
-import json, os, pathlib, subprocess, sys, tempfile
-paths=json.load(sys.stdin)
-result={'compiled':True,'complete':True,'kernelChecked':True,'files':[],'errors':[],'warnings':[],'axioms':[]}
-workspace=pathlib.Path('/workspace')
-sysroot=pathlib.Path(os.environ['LEAN_SYSROOT'])
-lean=str(sysroot/'bin/lean'); checker=str(sysroot/'bin/leanchecker')
-source_roots=[pathlib.Path(p) for p in os.environ.get('LEAN_SRC_PATH','').split(':') if p and pathlib.Path(p).is_relative_to(workspace) and not pathlib.Path(p).is_relative_to(workspace/'.lake')]
-source_roots=sorted(set(source_roots+[workspace]),key=lambda p:len(p.parts),reverse=True)
-local_paths=[pathlib.Path(p) for p in os.environ.get('LEAN_PATH','').split(':') if p and pathlib.Path(p).is_relative_to(workspace) and not pathlib.Path(p).is_relative_to(workspace/'.lake/packages')]
-trusted_paths=[p for p in os.environ.get('LEAN_PATH','').split(':') if p and pathlib.Path(p) not in local_paths]
-sources={}
-for source_root in source_roots:
-    for directory, children, files in os.walk(source_root,followlinks=False):
-        children[:]=[c for c in children if not c.startswith('.') and not pathlib.Path(directory,c).is_symlink()]
-        for name in files:
-            file=pathlib.Path(directory,name)
-            if not name.endswith('.lean') or name=='lakefile.lean' or file.is_symlink(): continue
-            module='.'.join(file.relative_to(source_root).with_suffix('').parts)
-            sources.setdefault(module,file)
-with tempfile.TemporaryDirectory(prefix='lean-web-audit-') as temp:
-    env=dict(os.environ); env['LEAN_PATH']=temp+':'+':'.join(trusted_paths)
-    compiled=set(); visiting=set(); imports=[]
-    def compile_module(module,file):
-        if module in compiled: return True
-        if module in visiting:
-            result['errors'].append('Circular local module imports: '+module); return False
-        if any(not part.replace('_','a').isalnum() for part in module.split('.')):
-            result['errors'].append('Module name cannot be audited automatically: '+module); return False
-        visiting.add(module)
-        # --deps reads import headers; it does not execute the source body.
-        deps=subprocess.run([lean,'--deps',str(file)],text=True,capture_output=True)
-        if deps.returncode:
-            result['errors'].append('Import inspection failed: '+deps.stdout[-5000:]+deps.stderr[-5000:]); return False
-        for line in deps.stdout.splitlines():
-            imported=pathlib.Path(line)
-            for prefix in local_paths:
-                if imported.is_relative_to(prefix):
-                    dependency='.'.join(imported.relative_to(prefix).with_suffix('').parts)
-                    source=sources.get(dependency)
-                    if not source:
-                        result['errors'].append('Cannot replay local import from source: '+dependency); return False
-                    if not compile_module(dependency,source): return False
-                    break
-        output=pathlib.Path(temp)/pathlib.Path(*module.split('.')).with_suffix('.olean')
-        output.parent.mkdir(parents=True,exist_ok=True)
-        source_root=next(prefix for prefix in source_roots if file.is_relative_to(prefix))
-        proc=subprocess.run([lean,'--root='+str(source_root),'--json','-Dwarn.sorry=true','-o',str(output),str(file)],text=True,capture_output=True,env=env)
-        diagnostics=[]
-        for line in proc.stdout.splitlines():
-            try: item=json.loads(line)
-            except json.JSONDecodeError: continue
-            diagnostics.append(item)
-            message=item.get('data',item.get('message',''))
-            if item.get('severity')=='error': result['errors'].append(message)
-            if item.get('severity')=='warning': result['warnings'].append(message)
-            if 'declaration uses' in str(message) and 'sorry' in str(message): result['complete']=False
-        result['files'].append({'path':str(file.relative_to(workspace)),'module':module,'code':proc.returncode,'diagnostics':diagnostics})
-        if proc.returncode:
-            result['errors'].append(proc.stderr or proc.stdout[-5000:]); return False
-        kernel=subprocess.run([checker,'-v',module],text=True,capture_output=True,env=env)
-        if kernel.returncode:
-            result['kernelChecked']=False; result['errors'].append('Kernel replay failed: '+kernel.stdout[-5000:]+kernel.stderr[-5000:]); return False
-        visiting.remove(module); compiled.add(module); imports.append(module); return True
-    for relative in paths:
-        file=workspace/relative
-        module=next(('.'.join(file.relative_to(prefix).with_suffix('').parts) for prefix in source_roots if file.is_relative_to(prefix)),None)
-        if not module or not compile_module(module,file): result['compiled']=False; result['complete']=False
     if result['compiled'] and imports:
         script=pathlib.Path(temp)/'WebProofAudit.lean'
         # Enumerate rebuilt modules directly, without scanning all Mathlib constants.
@@ -450,7 +388,7 @@ with tempfile.TemporaryDirectory(prefix='lean-web-audit-') as temp:
                 result['axioms'].append(text)
                 if 'sorryAx' in text: result['complete']=False
                 if 'depends on axioms' in text:
-                    allowed={'propext','Classical.choice','Quot.sound'}
+                    allowed=${JSON.stringify(standardLeanAxioms)}
                     actual=text.partition('[')[2].partition(']')[0]
                     unexpected=[name.strip() for name in actual.split(',') if name.strip() and name.strip() not in allowed]
                     if unexpected: result['complete']=False; result['errors'].append('Nonstandard axioms: '+', '.join(unexpected))
@@ -527,48 +465,15 @@ export async function verifyCandidate(
   // Configuration edits are part of the candidate. Loading Lake must not
   // silently change the sources that the independent check will certify.
   const fingerprint = await sourceFingerprint(root, { signal: options.signal })
-  const environment = await runtime.run(
-    root,
-    [
-      'lake',
-      'env',
-      'python3',
-      '-I',
-      '-c',
-      'import os,json; print(json.dumps({k:os.environ.get(k,"") for k in ["LEAN_PATH","LEAN_SRC_PATH","LEAN_SYSROOT"]}))',
-    ],
-    { ...options, freshHome: true, network: 'none', timeoutMs: 180_000 },
-  )
-  let auditEnv
-  try {
-    if (environment.code !== 0)
-      throw new Error('Cannot resolve Lake environment')
-    auditEnv = JSON.parse(environment.stdout.trim().split('\n').at(-1))
-    if (
-      !/^\/opt\/lean-toolchains\/[^/]+$/.test(auditEnv.LEAN_SYSROOT) ||
-      ['LEAN_PATH', 'LEAN_SRC_PATH'].some(
-        (key) =>
-          typeof auditEnv[key] !== 'string' ||
-          auditEnv[key]
-            .split(':')
-            .some(
-              (value) =>
-                value &&
-                !value.startsWith('/workspace') &&
-                !value.startsWith('/opt/lean-toolchains/'),
-            ),
-      )
-    )
-      throw new Error('Untrusted Lean environment')
-  } catch {
+  const environment = await pinnedAuditEnvironment(runtime, root, options)
+  if (!environment.env)
     return {
       compiled: false,
       complete: false,
       files: [],
-      errors: [environment.stdout, environment.stderr],
+      errors: environment.errors,
       reason: 'Could not resolve the pinned Lean verification environment.',
     }
-  }
   const build = await runtime.run(root, ['lake', 'build'], {
     ...options,
     network: 'none',
@@ -604,19 +509,14 @@ export async function verifyCandidate(
         ? 'Project configuration builds successfully. No Lean source changes to check.'
         : 'The project builds after the requested file changes. No remaining Lean source edits to check.',
     }
-  const audit = await runtime.run(root, ['python3', '-I', '-c', auditScript], {
-    ...options,
-    // The compiler enumerates declarations from rebuilt modules. A project
-    // file list can exceed the OS limit for one command argument.
-    input: JSON.stringify(paths),
-    env: auditEnv,
-    readOnlyWorkspace: true,
-    freshHome: true,
-    readOnlyHome: true,
-    network: 'none',
-    timeoutMs: 180_000,
-    onOutput,
-  })
+  const audit = await replayLeanSources(
+    runtime,
+    root,
+    environment.env,
+    paths,
+    auditScript,
+    { ...options, onOutput },
+  )
   const last = audit.stdout.trim().split('\n').at(-1)
   try {
     if (audit.code !== 0) throw new Error('Audit subprocess failed.')

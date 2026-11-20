@@ -5287,7 +5287,13 @@ export class WorkspaceStore {
     id,
     owner,
     destination,
-    { sourceRoot, runId, signal, rootFile = 'main.tex' } = {},
+    {
+      sourceRoot,
+      verificationRunId,
+      runId,
+      signal,
+      rootFile = 'main.tex',
+    } = {},
   ) {
     const project = this.get(id, owner)
     this.assertRecoveryReady(id)
@@ -5299,12 +5305,20 @@ export class WorkspaceStore {
     )
       fail('Invalid TeX build directory.', 403)
     let root = project.root
-    if (sourceRoot !== undefined) {
-      const { manifest } = await this.#manifest({ root: sourceRoot, runId })
+    if (sourceRoot !== undefined || verificationRunId !== undefined) {
+      const snapshotId = verificationRunId ?? runId
+      const { manifest } = await this.#manifest({
+        root: sourceRoot,
+        runId: snapshotId,
+      })
       if (
         manifest.projectId !== id ||
         (manifest.actor || manifest.owner) !== owner ||
-        manifest.runId !== runId
+        manifest.runId !== snapshotId ||
+        (verificationRunId !== undefined &&
+          (!runId ||
+            manifest.purpose !== 'verification' ||
+            manifest.sourceRunId !== runId))
       )
         fail('Invalid TeX candidate workspace.', 403)
       root = manifest.root

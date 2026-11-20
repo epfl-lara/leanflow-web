@@ -46,7 +46,14 @@ const fixture = await chatBrowserFixture({
       toolchain: 'fixture',
     },
   ],
-  files: { [projectId]: { 'Main.lean': source, 'Notes.txt': 'Helper notes.' } },
+  files: {
+    [projectId]: {
+      'Main.lean': source,
+      'Other.lean': 'theorem other : True := by trivial\n',
+      'Notes.txt': 'Helper notes.',
+      'Notes.md': '# Proof notes\n',
+    },
+  },
   chats: [
     { id: 'alpha', projectId, title: 'Alpha' },
     { id: 'beta', projectId, title: 'Beta' },
@@ -88,21 +95,81 @@ let sendCount = 0
 state.onCreateRun = ({ chat, body, respond }) => {
   sent = structuredClone(body)
   sendCount++
-  return respond(
-    {
-      id: `picker-sent-${sendCount}`,
-      chatId: chat.id,
-      projectId,
-      mode: body.mode,
-      prompt: body.prompt,
-      proofTarget: body.proofTarget,
-      contextFiles: body.contextFiles,
-      status: 'completed',
-      message: 'Fixture only.',
-      createdAt: '2026-10-13T12:00:00Z',
-    },
-    202,
-  )
+  const run = {
+    id: `picker-sent-${sendCount}`,
+    chatId: chat.id,
+    projectId,
+    mode: body.mode,
+    prompt: body.prompt,
+    proofTarget: body.proofTarget,
+    files: body.files,
+    liveEdits: body.liveEdits,
+    status: 'completed',
+    message: 'Fixture only.',
+    createdAt: '2026-10-13T12:00:00Z',
+  }
+  if (body.mode === 'informalize') {
+    const path = body.outputFile || 'Informalization.tex'
+    run.message = `Review [the document](./${encodeURI(path)}#L3) and its source.`
+    const markdown = path.endsWith('.md')
+    const entries = (body.proofTarget ? [symbols[2]] : symbols.slice(1)).map(
+      ({ name, range }) => ({
+        name,
+        path: 'Main.lean',
+        startLine: range.start.line + 1,
+        endLine: range.end.line + 1,
+        type: 'True',
+        axioms: [],
+        status: 'checked',
+      }),
+    )
+    run.verification = {
+      kind: 'workspace',
+      complete: true,
+      reason: 'Review the mathematical wording before applying the document.',
+      informalization: {
+        sources: {
+          status: 'checked',
+          detail: 'Lean checked the selected declarations.',
+          entries,
+        },
+        document: { path, ...(markdown ? {} : { buildId: 'fixture-build' }) },
+      },
+    }
+    const prose = entries
+      .map(({ name, path }) =>
+        [
+          markdown
+            ? `<!-- Lean: ${path}#${name} -->`
+            : `% Lean: ${path}#${name}`,
+          'The proposition is true by introduction.',
+        ].join('\n'),
+      )
+      .join('\n\n')
+    run.changes = [
+      {
+        path,
+        before: state.files[projectId][path] ?? null,
+        after: markdown
+          ? `# Proof notes\n\n${prose}\n`
+          : [
+              '\\documentclass{article}',
+              '\\begin{document}',
+              prose,
+              '\\end{document}',
+            ].join('\n'),
+      },
+    ]
+    state.runs.push(run)
+  }
+  return respond(run, 202)
+}
+state.onApply = ({ run, respond }) => {
+  assert.equal(run.status, 'completed')
+  for (const change of run.changes)
+    state.files[projectId][change.path] = change.after
+  run.status = 'applied'
+  return respond(run)
 }
 try {
   await fixture.ready()
@@ -422,6 +489,220 @@ try {
     path: path.join(resultDir, 'focused-composer.png'),
     fullPage: true,
   })
+
+  await page.getByRole('button', { name: 'New chat', exact: true }).click()
+  const modes = page.getByLabel('Assistant mode', { exact: true })
+  const informalize = modes.getByRole('button', {
+    name: 'Informalize',
+    exact: true,
+  })
+  const send = page.getByRole('button', { name: 'Send', exact: true })
+  await informalize.click()
+  const liveEdits = options.getByRole('checkbox', {
+    name: 'Edit files live',
+    exact: true,
+  })
+  assert.equal(await liveEdits.count(), 0)
+  await page
+    .getByRole('button', { name: 'Write an informal proof', exact: true })
+    .click()
+  await send.click()
+  await until(() => sendCount === 3, 'whole-file informalization')
+  assert.equal(sent.mode, 'informalize')
+  assert.equal(sent.file, 'Main.lean')
+  assert.equal(sent.proofTarget, undefined)
+  assert.equal(sent.outputFile, undefined)
+  assert.equal(sent.liveEdits, false)
+  assert.match(sent.prompt, /theorems and lemmas/i)
+  assert.match(sent.prompt, /proof argument/i)
+  await until(
+    () => composer.inputValue().then((value) => value === ''),
+    'translation submitted',
+  )
+  report.checks.push(
+    'The default document request includes the current Lean file and proof arguments, and leaves the destination open to the user’s prompt.',
+  )
+  const texTurn = page.locator('[data-run-id="picker-sent-3"]')
+  const checks = texTurn.getByRole('region', { name: 'Informalization checks' })
+  await checks.getByText('Source proofs checked with Lean.').waitFor()
+  await checks.getByText('2 source declarations').click()
+  await checks.getByRole('button', { name: /first · Main\.lean:5–6/ }).waitFor()
+  assert.match(await checks.innerText(), /Informalization.tex · PDF built/)
+  const pdf = checks.getByRole('link', { name: 'Open PDF', exact: true })
+  const pdfURL = new URL(await pdf.getAttribute('href'), page.url())
+  assert.equal(
+    pdfURL.pathname,
+    `/api/projects/${projectId}/tex/builds/fixture-build/pdf`,
+  )
+  assert.equal(pdfURL.searchParams.get('expectedUserId'), 'focus-picker-owner')
+  assert.equal(
+    await checks
+      .getByRole('link', { name: 'Download PDF', exact: true })
+      .getAttribute('download'),
+    'Informalization.pdf',
+  )
+  await texTurn.getByRole('link', { name: 'the document', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Review document' })
+  await review.getByText(/documentclass/).waitFor()
+  assert.equal(
+    await review
+      .getByRole('button', { name: 'Apply changes', exact: true })
+      .isEnabled(),
+    true,
+  )
+  await review.getByText('2 source declarations').click()
+  await review.getByRole('button', { name: /first · Main\.lean:5–6/ }).click()
+  await review.waitFor({ state: 'hidden' })
+  await openFocus()
+  await menu
+    .getByRole('button', { name: /Use selected lines.*lines 5–6/ })
+    .waitFor()
+  await menu.getByLabel('Filter context', { exact: true }).press('Escape')
+  report.checks.push(
+    'The reply’s link to a new TeX file opens the candidate diff before Apply. Selecting a source declaration in review opens its exact Lean lines.',
+  )
+
+  await modes.getByRole('button', { name: 'Proofs', exact: true }).click()
+  assert.equal(await liveEdits.isEnabled(), true)
+  const outline = page.getByRole('region', { name: 'File outline' })
+  await outline
+    .locator('.proof-outline-entry')
+    .filter({ hasText: 'second' })
+    .click()
+  await outline
+    .getByRole('button', { name: 'Informalize', exact: true })
+    .click()
+  await until(
+    () =>
+      informalize
+        .getAttribute('aria-pressed')
+        .then((value) => value === 'true'),
+    'outline selected Informalize',
+  )
+  assert.match(await target.innerText(), /second/)
+  assert.match(await composer.inputValue(), /mathematical English/i)
+  await page.getByLabel('Output document').fill('Notes.md')
+  await send.click()
+  await until(() => sendCount === 4, 'focused informalization')
+  assert.equal(sent.mode, 'informalize')
+  assert.equal(sent.liveEdits, false)
+  assert.equal(sent.outputFile, 'Notes.md')
+  assert.deepEqual(sent.proofTarget, {
+    path: 'Main.lean',
+    name: 'second',
+    startLine: 8,
+    endLine: 9,
+    source: source.split('\n').slice(7, 9).join('\n'),
+  })
+  report.checks.push(
+    'Informalize in Outline switches the chat mode and sends the named theorem with its exact Lean source.',
+  )
+  const markdownTurn = page.locator('[data-run-id="picker-sent-4"]')
+  await markdownTurn.getByText('Notes.md · Markdown').waitFor()
+  assert.equal(
+    await markdownTurn.getByRole('link', { name: 'Open PDF' }).count(),
+    0,
+  )
+  const markdownLink = markdownTurn.getByRole('link', {
+    name: 'the document',
+    exact: true,
+  })
+  await markdownLink.click()
+  await review.getByText(/The proposition is true by introduction/).waitFor()
+  await review
+    .getByRole('button', { name: 'Apply changes', exact: true })
+    .click()
+  await markdownTurn.getByRole('button', { name: 'Open document' }).waitFor()
+  assert.match(state.files[projectId]['Notes.md'], /The proposition is true/)
+  assert.equal(
+    await markdownTurn
+      .getByRole('button', { name: 'Download project file' })
+      .count(),
+    1,
+  )
+  await markdownLink.click()
+  await page
+    .getByRole('tab', { name: 'Notes.md', selected: true, exact: true })
+    .waitFor()
+  assert.equal(await review.count(), 0)
+  const markdownEditor = page.locator('.monaco-editor .view-lines')
+  await until(
+    async () =>
+      (await markdownEditor.innerText())
+        .replace(/\u00a0/g, ' ')
+        .includes('The proposition is true by introduction.'),
+    'saved document opened from the assistant reply',
+  )
+  await page.getByRole('tab', { name: 'Main.lean', exact: true }).click()
+  report.checks.push(
+    'The same chat link opens the proposed Markdown diff before Apply and the saved, updated Markdown text after Apply and history reload.',
+  )
+  await page.getByRole('button', { name: 'New chat', exact: true }).click()
+  await informalize.click()
+  await openFocus()
+  await menu.getByRole('checkbox', { name: 'Other.lean', exact: true }).check()
+  await menu.getByLabel('Filter context', { exact: true }).press('Escape')
+  await page.getByLabel('Output document').fill('First draft.tex')
+  await composer.fill('Document the attached theorem.')
+  let running
+  state.onCreateRun = ({ chat, body, respond }) => {
+    assert.equal(body.file, 'Other.lean')
+    assert.deepEqual(body.files, ['Other.lean'])
+    assert.equal(body.currentFile, 'Main.lean')
+    assert.equal(body.outputFile, 'First draft.tex')
+    running = {
+      id: 'running-document',
+      chatId: chat.id,
+      projectId,
+      mode: body.mode,
+      liveEdits: false,
+      status: 'running',
+      prompt: body.prompt,
+      message: '',
+      createdAt: new Date().toISOString(),
+    }
+    state.runs.push(running)
+    return respond(running, 202)
+  }
+  state.onMessage = async ({ run, body, respond }) => {
+    assert.equal(body.outputFile, undefined)
+    const receipt = {
+      id: body.id,
+      text: body.text,
+      status: 'accepted',
+      createdAt: new Date().toISOString(),
+      messageOffset: run.message.length,
+    }
+    await fixture.emit(run, 'followup', receipt)
+    return respond(run)
+  }
+  state.onStop = async ({ run, respond }) => {
+    await fixture.emit(run, 'status', { status: 'cancelled' })
+    return respond(run)
+  }
+  await send.click()
+  const runningTurn = page.locator('[data-run-id="running-document"]')
+  const sendUpdate = page.getByRole('button', {
+    name: 'Send update',
+    exact: true,
+  })
+  await sendUpdate.waitFor()
+  await fixture.emit(running, 'message', 'Preparing the document.')
+  await runningTurn
+    .getByText('Preparing the document.', { exact: true })
+    .waitFor()
+  await composer.fill('Call the quantity the total.')
+  await sendUpdate.click()
+  await runningTurn.getByText('Update accepted', { exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Stop', exact: true }).click()
+  await runningTurn.getByText('Stopped', { exact: true }).waitFor()
+  assert.equal(
+    await runningTurn.getByRole('button', { name: /Review document/ }).count(),
+    0,
+  )
+  report.checks.push(
+    'An explicit Lean attachment takes precedence over the open tab. The same document run streams replies, accepts a follow-up without a new output target, and stops without applying files.',
+  )
   fixture.assertClean()
   report.passed = true
   console.log(

@@ -168,6 +168,14 @@ export function ProofOutline({
               <button
                 type="button"
                 disabled={disabled || readOnly || !target}
+                title="Translate the current declaration or selected lines into mathematical English"
+                onClick={() => onFocus('informalize')}
+              >
+                Informalize
+              </button>
+              <button
+                type="button"
+                disabled={disabled || readOnly || !target}
                 title="Focus proof optimization on the current proof or selected lines"
                 onClick={() => onFocus('optimize')}
               >

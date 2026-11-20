@@ -180,3 +180,65 @@ test('canceled macro requests cannot reintroduce declarations from an older edit
   pending.resolve({ range: range(3, 0, 3, 36) })
   await run
 })
+
+test('Lean namespaces qualify native theorems and macro lemmas across named sections', async () => {
+  const lines = [
+    'namespace Review',
+    'section Family',
+    'theorem default_eq : True := by trivial',
+    'lemma sibling : True := by trivial',
+    'end Family',
+    'end Review',
+  ]
+  const text = lines.join('\n')
+  // Lean 4.35 returns kind 3 for both commands, with each range starting at
+  // its keyword. Its Mathlib macro lemma is present only on keyword hover.
+  const tree = [
+    {
+      kind: 3,
+      name: 'Review',
+      range: range(0, 0, 5, 10),
+      selectionRange: range(0, 10, 0, 16),
+      children: [
+        {
+          kind: 3,
+          name: 'Family',
+          range: range(1, 0, 4, 10),
+          selectionRange: range(1, 8, 1, 14),
+          children: [
+            {
+              kind: 6,
+              name: 'default_eq',
+              range: range(2, 0, 2, lines[2].length),
+            },
+          ],
+        },
+      ],
+    },
+  ]
+  const known = proofDeclarations(tree, uri, lines.length, text)
+  assert.deepEqual(
+    known.map(({ name }) => name),
+    ['Review.default_eq'],
+  )
+  let result
+  await new MacroProofDeclarations().collect(
+    text,
+    outlineCode(text),
+    {},
+    tree,
+    known,
+    async (point) => {
+      assert.equal(point.line, 3)
+      return { range: range(3, 0, 3, lines[3].length) }
+    },
+    () => false,
+    (declarations) => {
+      result = declarations
+    },
+  )
+  assert.deepEqual(
+    result.map(({ name }) => name),
+    ['Review.default_eq', 'Review.sibling'],
+  )
+})

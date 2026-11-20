@@ -72,6 +72,7 @@ const {
   proofFocusPrompts,
 } = load('./chatDrafts.ts')
 const { OutputText } = load('./AssistantText.tsx')
+const { InformalizationResult } = load('./InformalizationResult.tsx')
 const { hydrateReasoningHistory } = load('./reasoningHistory.ts')
 const {
   retainedReasoningBlocks,
@@ -162,6 +163,69 @@ test('formalization status distinguishes Lean checks from source fidelity and ex
     ),
     reason,
   )
+})
+
+test('informalization reports document readiness independently of the source proofs and preserves older chat results', () => {
+  const translation = run({ mode: 'informalize', liveEdits: false })
+  assert.equal(runStatusLabel(translation), 'Finished')
+  assert.match(liveEditStatus(translation), /Review first/)
+  assert.equal(
+    runStatusLabel({
+      ...translation,
+      verification: { kind: 'workspace', complete: true },
+    }),
+    'Ready to review',
+  )
+  assert.equal(
+    runStatusLabel({
+      ...translation,
+      verification: { kind: 'workspace', complete: false },
+    }),
+    'Document checks need attention',
+  )
+  assert.equal(
+    runStatusLabel({ ...translation, status: 'verifying' }),
+    'Checking document',
+  )
+})
+
+test('document failures show the independent source result and withhold artifact actions', () => {
+  const render = (status, reason) =>
+    renderToStaticMarkup(
+      React.createElement(InformalizationResult, {
+        projectId: 'project',
+        value: {
+          kind: 'workspace',
+          complete: false,
+          reason,
+          informalization: {
+            sources: {
+              status,
+              detail: 'Audit detail.',
+              entries: [
+                {
+                  path: 'Source.lean',
+                  name: 'sample',
+                  type: 'True',
+                  status: 'checked',
+                  startLine: 1,
+                  endLine: 2,
+                  axioms: [],
+                },
+              ],
+            },
+          },
+        },
+      }),
+    )
+  const invalid = render('checked', 'The LaTeX build failed on line 7.')
+  assert.match(invalid, /Source proofs checked with Lean/)
+  assert.match(invalid, /The LaTeX build failed on line 7/)
+  assert.doesNotMatch(invalid, /Open PDF|Download PDF|PDF built|Open document/)
+  const incomplete = render('incomplete', 'Review the Lean source.')
+  assert.match(incomplete, /Source proof checks incomplete/)
+  assert.match(incomplete, /Audit detail/)
+  assert.doesNotMatch(incomplete, /Source proofs checked with Lean/)
 })
 
 test('usage shows current context first and keeps cumulative request totals collapsed', () => {

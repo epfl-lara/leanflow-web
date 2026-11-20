@@ -20,6 +20,10 @@ import { FileMentionTextarea } from './FileMentionTextarea'
 import { ChatOptions } from './ChatOptions'
 import { ConversationTurn } from './ConversationTurn'
 import { ChangeDiff, Verification } from './RunReview'
+import {
+  hasInformalizationChecks,
+  InformalizationResult,
+} from './InformalizationResult'
 import { mergeRunSnapshot } from './runStream'
 import { hydrateReasoningHistory } from './reasoningHistory'
 import { useConversationScroll } from './useConversationScroll'
@@ -76,6 +80,10 @@ export interface ChatDraftRequest {
 
 const setupHelpPrompt =
   'Help me get this project ready. Diagnose its Lean setup and propose configuration fixes while preserving the pinned Lean version, dependency revisions, and my source files. Explain what you change and test the environment. I will review the changes before applying them.'
+
+const documentPath = (path: string) =>
+  /\.(?:tex|md|markdown)$/i.test(path) &&
+  !path.split('/').some((part) => part.startsWith('.'))
 
 function RunElapsedTime({ createdAt }: { createdAt?: string }) {
   const started = Date.parse(createdAt || '')
@@ -213,11 +221,13 @@ export function AssistantPanel({
     proofTarget = draft.value.proofTarget
   const setupHelp = draft.value.purpose === 'setup'
   const currentMode = chatModes.find((item) => item.id === mode)!
-  const currentLiveEdits = setupHelp
-    ? false
-    : mode === 'search'
-      ? searchLiveEdits
-      : liveEdits
+  const informalizing = mode === 'informalize'
+  const currentLiveEdits =
+    setupHelp || informalizing
+      ? false
+      : mode === 'search'
+        ? searchLiveEdits
+        : liveEdits
   const chatSelectionKey = `lemex-chat:${session.user.id}:${projectId}`
   const preferenceKey = `lemex-chat-options:${session.user.id}:${projectId}`
   const [preferencesLoaded, setPreferencesLoaded] = useState<string | null>(
@@ -242,8 +252,11 @@ export function AssistantPanel({
   const activeSetup = activeHere && activeRun?.purpose === 'setup'
   const setupScope = setupHelp || activeSetup
   const setupWaitingForOrdinaryRun = setupHelp && hasChatActive && !activeSetup
+  const waitingForModeChange =
+    hasChatActive && informalizing !== (activeRun?.mode === 'informalize')
   const acceptingUpdate =
     activeHere &&
+    !waitingForModeChange &&
     ['queued', 'starting', 'preparing', 'running'].includes(
       activeRun!.status,
     ) &&
@@ -259,6 +272,7 @@ export function AssistantPanel({
     selectedModel?.reasoningEfforts?.some((level) => level.id === effort)
   const target =
     proofTarget?.path ||
+    (informalizing && contextFiles.find((path) => path.endsWith('.lean'))) ||
     (!readOnly && file?.endsWith('.lean')
       ? file
       : contextFiles.find(
@@ -277,6 +291,12 @@ export function AssistantPanel({
     [currentFile, ...contextFiles].some(
       (path) => isPdfFile(path) || isTexFile(path),
     )
+  const suggestedDocument =
+    contextFiles.find(documentPath) ||
+    (currentFile && documentPath(currentFile)
+      ? currentFile
+      : 'New LaTeX document')
+  const explicitOutput = draft.value.outputFile?.trim()
   useEffect(() => {
     if (
       !focusRequest ||
@@ -797,6 +817,9 @@ export function AssistantPanel({
       liveEdits: captured.purpose === 'setup' ? false : currentLiveEdits,
       ...(captured.purpose ? { purpose: captured.purpose } : {}),
       file: mode === 'search' ? file : target,
+      ...(informalizing && explicitOutput
+        ? { outputFile: explicitOutput }
+        : {}),
       currentFile: currentFile || null,
       mode,
       files: [...captured.files],
@@ -1071,7 +1094,7 @@ export function AssistantPanel({
           ))}
         </HelpTip>
       </div>
-      {(texLanguage(currentFile) || formalizingDocument) && (
+      {!informalizing && (texLanguage(currentFile) || formalizingDocument) && (
         <div className="assistant-tex-note">
           {formalizingDocument
             ? formalizingPaper
@@ -1095,6 +1118,7 @@ export function AssistantPanel({
         }
         liveEdits={setupScope ? false : currentLiveEdits}
         reviewOnly={setupScope}
+        reviewDocument={informalizing}
         onLiveEdits={mode === 'search' ? setSearchLiveEdits : setLiveEdits}
         active={hasChatActive}
       />
@@ -1382,6 +1406,26 @@ export function AssistantPanel({
               </span>
             </div>
           )}
+          {informalizing && !hasChatActive && (
+            <label className="informalization-destination">
+              <span>Output document</span>
+              <input
+                type="text"
+                value={draft.value.outputFile || ''}
+                placeholder={suggestedDocument}
+                onChange={(event) => draft.setOutputFile(event.target.value)}
+                list="informalization-documents"
+                autoComplete="off"
+              />
+              <datalist id="informalization-documents">
+                {files
+                  .filter((item) => documentPath(item.path) && !item.readOnly)
+                  .map((item) => (
+                    <option key={item.path} value={item.path} />
+                  ))}
+              </datalist>
+            </label>
+          )}
           <label className="sr-only" htmlFor="assistant-prompt">
             Message Lemex
           </label>
@@ -1405,7 +1449,9 @@ export function AssistantPanel({
             placeholder={
               acceptingUpdate
                 ? 'Share an observation or change of direction…'
-                : texLanguage(currentFile) && mode !== 'formalize'
+                : texLanguage(currentFile) &&
+                    mode !== 'formalize' &&
+                    !informalizing
                   ? 'Ask about this document, edit LaTeX, or compile and check its PDF…'
                   : currentMode.placeholder
             }
@@ -1429,11 +1475,13 @@ export function AssistantPanel({
           )}
           <div className="composer-footer">
             <span>
-              {hasChatActive
-                ? acceptingUpdate
-                  ? 'Your update will be picked up after the current step.'
-                  : 'Checking or stopping; your next draft is kept.'
-                : 'Enter to send · Shift+Enter for a new line'}
+              {waitingForModeChange
+                ? `To use ${currentMode.name}, start a new chat or wait for this run to finish.`
+                : hasChatActive
+                  ? acceptingUpdate
+                    ? 'Your update will be picked up after the current step.'
+                    : 'Checking or stopping; your next draft is kept.'
+                  : 'Enter to send · Shift+Enter for a new line'}
             </span>
             <button
               type="submit"
@@ -1464,11 +1512,13 @@ export function AssistantPanel({
       {dialogRun && (
         <Dialog
           title={
-            dialogRun.liveUndone
-              ? 'Review undone edits'
-              : dialogRun.liveEdits
-                ? 'Review saved edits'
-                : 'Review candidate changes'
+            dialogRun.mode === 'informalize'
+              ? 'Review document'
+              : dialogRun.liveUndone
+                ? 'Review undone edits'
+                : dialogRun.liveEdits
+                  ? 'Review saved edits'
+                  : 'Review candidate changes'
           }
           subtitle={
             dialogRun.liveUndone
@@ -1494,14 +1544,34 @@ export function AssistantPanel({
                 still pending.
               </p>
             )}
-            <Verification value={dialogRun.verification} />
+            {hasInformalizationChecks(dialogRun.verification) ? (
+              <InformalizationResult
+                value={dialogRun.verification}
+                projectId={projectId}
+                applied={dialogRun.status === 'applied'}
+                onOpenTarget={
+                  onOpenTarget && !applying && !discarding
+                    ? (target) => {
+                        setDialogId(null)
+                        onOpenTarget(target)
+                      }
+                    : undefined
+                }
+              />
+            ) : (
+              <Verification value={dialogRun.verification} />
+            )}
             {!!dialogIssue && (
               <p className="review-note">
-                {dialogRun.liveEdits
-                  ? 'Lemex has finished this run. The edits are saved, but the final Lean check did not pass. Continue in chat to request a correction, or undo the edits from the chat.'
-                  : canApplyRequestedEdits(dialogRun)
-                    ? 'The Lean check did not pass. You can apply the requested edits as they are or continue in chat to request a correction.'
-                    : 'Lemex has finished this run. These edits cannot be applied because the final Lean check did not pass. Continue in chat to request a correction.'}
+                {dialogRun.mode === 'informalize'
+                  ? canApplyRequestedEdits(dialogRun)
+                    ? 'Review the reported checks before applying the proposed document.'
+                    : 'Ask Lemex to correct the reported issue before applying the document.'
+                  : dialogRun.liveEdits
+                    ? 'Lemex has finished this run. The edits are saved, but the final Lean check did not pass. Continue in chat to request a correction, or undo the edits from the chat.'
+                    : canApplyRequestedEdits(dialogRun)
+                      ? 'The Lean check did not pass. You can apply the requested edits as they are or continue in chat to request a correction.'
+                      : 'Lemex has finished this run. These edits cannot be applied because the final Lean check did not pass. Continue in chat to request a correction.'}
               </p>
             )}
             {hasChatActive && !dialogRun.liveEdits && (

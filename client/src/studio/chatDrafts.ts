@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ChatMode } from './chatModes'
+import { chatModes, type ChatMode } from './chatModes'
 import type { ProofTarget } from './proofTarget'
 import {
   FILES_MOVED_EVENT,
@@ -10,6 +10,7 @@ import {
 export interface ChatDraft {
   text: string
   files: string[]
+  outputFile?: string
   revision: number
   mode: ChatMode
   purpose?: 'setup'
@@ -20,12 +21,17 @@ export interface DraftSubmission {
   revision: number
   text: string
   files: string[]
+  outputFile?: string
   purpose?: 'setup'
   proofTarget?: ProofTarget
 }
 
 export const proofFocusPrompts = {
   proofs: 'Complete or repair this proof while preserving its statement.',
+  formalize:
+    'Formalize the mathematical statement and argument from my source in the selected Lean context.',
+  informalize:
+    'Write this Lean declaration in mathematical English. Give its assumptions, conclusion, and the argument in its Lean proof, with a source reference.',
   optimize: 'Optimize this proof while preserving its statement.',
   search:
     'Explain this proof or definition and find relevant lemmas. Do not edit files.',
@@ -50,7 +56,7 @@ export function focusDraft(
     text:
       !current.text.trim() ||
       Object.values(proofFocusPrompts).includes(current.text)
-        ? proofFocusPrompts[nextMode === 'formalize' ? 'proofs' : nextMode]
+        ? proofFocusPrompts[nextMode]
         : current.text,
     revision: current.revision + 1,
   }
@@ -78,6 +84,7 @@ export function clearDraftSubmission(
     current.revision !== submission.revision ||
     current.text !== submission.text ||
     current.purpose !== submission.purpose ||
+    current.outputFile !== submission.outputFile ||
     !sameFiles(current.files, submission.files) ||
     !sameTarget(current.proofTarget, submission.proofTarget)
   )
@@ -100,6 +107,7 @@ export function restoreDraftSubmission(
     current.text !== '' ||
     current.files.length !== 0 ||
     current.purpose !== submission.purpose ||
+    current.outputFile !== submission.outputFile ||
     !!current.proofTarget
   )
     return null
@@ -133,10 +141,15 @@ export function moveDraftPaths(
   const target = draft.proofTarget
     ? remapMovedPath(draft.proofTarget.path, from, to)
     : null
-  if (sameFiles(files, draft.files) && target === null) return null
+  const outputFile = draft.outputFile
+    ? remapMovedPath(draft.outputFile, from, to)
+    : null
+  if (sameFiles(files, draft.files) && target === null && outputFile === null)
+    return null
   return {
     ...draft,
     files,
+    ...(outputFile === null ? {} : { outputFile }),
     ...(draft.proofTarget && target !== null
       ? { proofTarget: { ...draft.proofTarget, path: target } }
       : {}),
@@ -192,9 +205,10 @@ export function readChatDraft(key: string): ChatDraft {
           ),
         ].slice(0, 12),
         revision: Number.isSafeInteger(value.revision) ? value.revision : 0,
-        mode: ['proofs', 'formalize', 'optimize', 'search'].includes(value.mode)
-          ? value.mode
-          : 'proofs',
+        ...(typeof value.outputFile === 'string'
+          ? { outputFile: value.outputFile }
+          : {}),
+        mode: chatModes.find((item) => item.id === value.mode)?.id ?? 'proofs',
         ...(value.purpose === 'setup' && value.mode === 'search'
           ? { purpose: 'setup' }
           : {}),
@@ -275,12 +289,21 @@ export function useChatDraft(
       write(key, { ...get(key), text, revision: get(key).revision + 1 }),
     setFiles: (files: string[]) =>
       write(key, { ...get(key), files, revision: get(key).revision + 1 }),
-    setMode: (mode: ChatMode) =>
-      write(key, {
-        ...withoutPurpose(get(key)),
-        mode,
-        revision: get(key).revision + 1,
-      }),
+    setOutputFile: (outputFile: string) =>
+      write(key, { ...get(key), outputFile, revision: get(key).revision + 1 }),
+    setMode: (mode: ChatMode) => {
+      const current = get(key)
+      write(
+        key,
+        current.proofTarget
+          ? focusDraft(current, current.proofTarget, mode)
+          : {
+              ...withoutPurpose(current),
+              mode,
+              revision: current.revision + 1,
+            },
+      )
+    },
     setPurpose: (purpose?: 'setup') =>
       write(key, {
         ...withoutPurpose(get(key)),
@@ -310,6 +333,7 @@ export function useChatDraft(
         stored.revision > submission.revision ||
         (stored.revision === submission.revision &&
           (stored.text !== submission.text ||
+            stored.outputFile !== submission.outputFile ||
             stored.purpose !== submission.purpose ||
             !sameFiles(stored.files, submission.files) ||
             !sameTarget(stored.proofTarget, submission.proofTarget)))
@@ -325,6 +349,7 @@ export function useChatDraft(
       if (
         stored.revision === submission.revision + 1 &&
         (stored.text !== '' ||
+          stored.outputFile !== submission.outputFile ||
           stored.purpose !== submission.purpose ||
           stored.files.length !== 0 ||
           !!stored.proofTarget)

@@ -1,4 +1,9 @@
-export type ChatMode = 'proofs' | 'formalize' | 'optimize' | 'search'
+export type ChatMode =
+  | 'proofs'
+  | 'formalize'
+  | 'informalize'
+  | 'optimize'
+  | 'search'
 
 export const chatModes: {
   id: ChatMode
@@ -67,6 +72,24 @@ export const chatModes: {
         label: 'Formalize an argument',
         prompt:
           'Formalize this statement and proof outline in Lean:\n\nStatement:\n\nProof outline:\n',
+      },
+    ],
+  },
+  {
+    id: 'informalize',
+    name: 'Informalize',
+    hint: 'Write a LaTeX or Markdown document from a Lean declaration or the theorems in a file. Review the statements, proof arguments, and source checks before applying the document.',
+    placeholder: 'Choose a Lean source and describe the document you want…',
+    suggestions: [
+      {
+        label: 'Write an informal proof',
+        prompt:
+          'Write the selected declaration and its proof argument in mathematical English, with its assumptions and source. If no declaration is selected, cover the theorems and lemmas in the attached Lean files, or in the current Lean file if none are attached.',
+      },
+      {
+        label: 'Write statements only',
+        prompt:
+          'Write a document of statements only. Give each declaration’s assumptions, conclusion, and Lean source. Use the selected declaration or the theorems and lemmas in the attached Lean files, or in the current Lean file if none are attached.',
       },
     ],
   },

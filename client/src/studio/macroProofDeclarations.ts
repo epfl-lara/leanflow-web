@@ -1,4 +1,5 @@
 import {
+  containerNamespace,
   declarationKeyword,
   placeholderWarning,
   type ProofDeclaration,
@@ -90,7 +91,13 @@ function missingKeywords(
   return result
 }
 
-function namespace(symbols: unknown, point: Position, depth = 0): string {
+function namespace(
+  symbols: unknown,
+  point: Position,
+  code: string,
+  starts: number[],
+  depth = 0,
+): string {
   if (!Array.isArray(symbols) || depth > 64) return ''
   for (const item of symbols) {
     if (!item || ![2, 3, 4].includes(item.kind) || !range(item.range)) continue
@@ -102,11 +109,15 @@ function namespace(symbols: unknown, point: Position, depth = 0): string {
       (end.line === point.line && end.character < point.character)
     )
       continue
+    const opening = code.slice(
+      starts[start.line] + start.character,
+      starts[start.line + 1],
+    )
     const prefix =
-      typeof item.name === 'string' && item.name !== '<section>'
-        ? item.name
+      typeof item.name === 'string'
+        ? containerNamespace(item.name, opening)
         : ''
-    return [prefix, namespace(item.children, point, depth + 1)]
+    return [prefix, namespace(item.children, point, code, starts, depth + 1)]
       .filter(Boolean)
       .join('.')
   }
@@ -145,7 +156,7 @@ function parsedMacro(
   )
     return
   return {
-    name: [namespace(symbols, keyword.position), keyword.name]
+    name: [namespace(symbols, keyword.position, code, starts), keyword.name]
       .filter(Boolean)
       .join('.'),
     kind: keyword.kind,

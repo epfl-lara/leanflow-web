@@ -11,6 +11,8 @@ import { RcpKeyLimits } from '../provider-limits.mjs'
 import { EventStore } from '../events.mjs'
 import { WorkspaceStore } from '../workspaces.mjs'
 import { Runtime } from '../runtime.mjs'
+import { TexBuildManager } from '../tex-builds.mjs'
+import { prepareInformalizationSources } from '../informalization.mjs'
 import net from 'node:net'
 
 const toolchain = 'leanprover/lean4:v4.34.1'
@@ -189,7 +191,9 @@ async function fixture(
                     ? { thread: { id: 'thread' } }
                     : request.method === 'turn/start'
                       ? { turn: { id: turnId } }
-                      : {},
+                      : request.method === 'turn/steer'
+                        ? { turnId: request.params.expectedTurnId }
+                        : {},
               })
               if (request.method === 'turn/start' && paperLinkTurn)
                 send({
@@ -297,6 +301,7 @@ async function fixture(
     return events.get(job.id)
   }
   return {
+    root,
     manager,
     workspaces,
     project,
@@ -676,6 +681,465 @@ test('Formalize without Lean output never certifies an unchanged project as a co
       await assert.rejects(manager.apply('alice', result.id), { status: 409 })
     })
 })
+
+const sourceEntry = {
+  path: 'Relations.lean',
+  name: 'Example.keep',
+  type: '∀ {p : Prop}, p → p',
+  startLine: 2,
+  endLine: 2,
+  status: 'checked',
+  axioms: [],
+}
+const sourceProof = 'theorem keep {p : Prop} (h : p) : p := h'
+const leanSource = 'namespace Example\n' + sourceProof + '\nend Example\n'
+const markdown =
+  '<!-- Lean: Relations.lean#Example.keep -->\n**Theorem.** Every proposition implies itself.\n\n**Proof.** Assume the proposition. The hypothesis gives the conclusion.\n'
+
+test('Informalize inserts the checked proof into an existing document for review and applies only that edit', async (t) => {
+  const target = {
+    path: sourceEntry.path,
+    startLine: 2,
+    endLine: 2,
+    name: 'keep',
+    source: sourceProof,
+  }
+  const reply = 'Added the statement and proof to [Notes.md](Notes.md).'
+  const f = await fixture(
+    t,
+    async (root, turn) => {
+      const { leanflowContext } = JSON.parse(turn.input[0].text)
+      const plan = leanflowContext.sections.find(
+        (section) => section.kind === 'informalization-document',
+      )
+      assert.deepEqual(plan.declarations, [sourceEntry])
+      assert.equal(plan.requestedPath, 'Notes.md')
+      const notes = await fs.readFile(path.join(root, 'Notes.md'), 'utf8')
+      await fs.writeFile(path.join(root, 'Notes.md'), notes + markdown)
+    },
+    { reply },
+  )
+  f.manager.informalizationSources = async (_runtime, root, options) => {
+    assert.equal(
+      await fs.readFile(path.join(root, target.path), 'utf8'),
+      leanSource,
+    )
+    assert.deepEqual(options.proofTarget, target)
+    return {
+      status: 'checked',
+      entries: [sourceEntry],
+      detail: 'Source proofs checked.',
+    }
+  }
+  await f.workspaces.writeFile(
+    f.project.id,
+    'alice',
+    target.path,
+    leanSource,
+    null,
+  )
+  await f.workspaces.writeFile(
+    f.project.id,
+    'alice',
+    'Notes.md',
+    '# Results\n',
+    null,
+  )
+  const result = await f.execute('Insert the selected proof in Notes.md.', {
+    mode: 'informalize',
+    liveEdits: true,
+    outputFile: 'Notes.md',
+    proofTarget: target,
+  })
+  assert.equal(result.status, 'completed', result.error)
+  assert.equal(result.message, reply)
+  assert.equal(result.liveEdits, false)
+  assert.equal(result.verification.complete, true, result.verification.reason)
+  assert.equal(result.verification.kernelChecked, undefined)
+  assert.deepEqual(result.verification.informalization.document, {
+    path: 'Notes.md',
+  })
+  assert.deepEqual(
+    result.changes.map((item) => item.path),
+    ['Notes.md'],
+  )
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, 'alice', 'Notes.md')).content,
+    '# Results\n',
+  )
+  assert.equal((await f.manager.apply('alice', result.id)).status, 'applied')
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, 'alice', 'Notes.md')).content,
+    '# Results\n' + markdown,
+  )
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, 'alice', target.path)).content,
+    leanSource,
+  )
+})
+
+test('Informalize withholds incomplete or unrelated edits and reports failed checks in chat', async (t) => {
+  for (const scenario of [
+    'unchecked proof',
+    'no document',
+    'source edit',
+    'omitted theorem',
+    'wrong destination',
+  ])
+    await t.test(scenario, async (t) => {
+      const f = await fixture(t, async (root) => {
+        if (scenario === 'unchecked proof')
+          assert.fail('An unchecked proof reached the writer')
+        if (scenario === 'no document') return
+        if (scenario === 'source edit')
+          await fs.writeFile(path.join(root, 'Relations.lean'), '')
+        await fs.writeFile(
+          path.join(root, 'Notes.md'),
+          scenario === 'omitted theorem' ? '# Results' : markdown,
+        )
+      })
+      f.manager.informalizationSources = async () =>
+        scenario === 'unchecked proof'
+          ? {
+              status: 'incomplete',
+              entries: [
+                { ...sourceEntry, status: 'incomplete', axioms: ['sorryAx'] },
+              ],
+              detail: 'The source proof uses sorryAx.',
+            }
+          : {
+              status: 'checked',
+              entries: [sourceEntry],
+              detail: 'Source proofs checked.',
+            }
+      await f.workspaces.writeFile(
+        f.project.id,
+        'alice',
+        sourceEntry.path,
+        leanSource,
+        null,
+      )
+      const result = await f.execute('Write up this proof.', {
+        mode: 'informalize',
+        file: sourceEntry.path,
+        outputFile: scenario === 'wrong destination' ? 'Other.md' : 'Notes.md',
+      })
+      assert.equal(result.status, 'completed', result.error)
+      assert.equal(result.verification.complete, false)
+      assert.equal(result.verification.editsAllowed, false)
+      const reviewable = ['omitted theorem', 'wrong destination'].includes(
+        scenario,
+      )
+      assert.deepEqual(
+        result.changes.map((entry) => entry.path),
+        reviewable ? ['Notes.md'] : [],
+      )
+      assert.equal(
+        result.verification.informalization.draft?.path,
+        reviewable ? 'Notes.md' : undefined,
+      )
+      assert.equal(
+        (await f.workspaces.readFile(f.project.id, 'alice', sourceEntry.path))
+          .content,
+        leanSource,
+      )
+      await assert.rejects(f.manager.apply('alice', result.id), { status: 409 })
+    })
+})
+
+test('a paper draft interrupted by a concurrent save is reviewable and can be corrected in the same chat', async (t) => {
+  let retry = false
+  let recovered
+  const f = await fixture(t, async (root, turn) => {
+    const { leanflowContext } = JSON.parse(turn.input[0].text)
+    if (retry) {
+      const prior = leanflowContext.sections.find(
+        (item) => item.kind === 'previous-informalization-draft',
+      )
+      assert.equal(prior.path, 'Paper.md')
+      assert.match(prior.checkIssue, /changed/)
+      recovered = path.join(
+        await f.runtime.home(),
+        path.basename(prior.referenceFile),
+      )
+      assert.equal(await fs.readFile(recovered, 'utf8'), markdown)
+      const next = leanflowContext.sections.find(
+        (item) => item.kind === 'informalization-document',
+      )
+      assert.equal(next.suggestedPath, 'Paper.md')
+    } else {
+      await f.workspaces.writeFile(
+        f.project.id,
+        'alice',
+        'Another.md',
+        'Concurrent collaborator edit.\n',
+        null,
+      )
+    }
+    await fs.writeFile(path.join(root, 'Paper.md'), markdown)
+  })
+  const chats = new ChatStore({
+    dataDir: f.root,
+    workspaces: f.workspaces,
+    events: f.events,
+  })
+  chats.init()
+  t.after(() => chats.close())
+  f.manager.chats = chats
+  const chatId = chats.create('alice', f.project.id, { title: 'Writing' }).id
+  f.manager.informalizationSources = async () => ({
+    status: 'checked',
+    entries: [sourceEntry],
+    detail: 'Source proofs checked.',
+  })
+  await f.workspaces.writeFile(
+    f.project.id,
+    'alice',
+    'Relations.lean',
+    leanSource,
+    null,
+  )
+  const options = { mode: 'informalize', file: 'Relations.lean', chatId }
+  const failed = await f.execute('Write into Paper.md.', options)
+  assert.equal(failed.verification.complete, false)
+  assert.match(failed.verification.reason, /changed/)
+  assert.equal(failed.changes[0].after, markdown)
+  await assert.rejects(f.manager.apply('alice', failed.id), { status: 409 })
+  await assert.rejects(
+    f.workspaces.readFile(f.project.id, 'alice', 'Paper.md'),
+    { status: 404 },
+  )
+  retry = true
+  const fixed = await f.execute('Fix the draft and check again.', options)
+  assert.equal(
+    fixed.verification?.complete,
+    true,
+    fixed.error || fixed.verification?.reason,
+  )
+  await assert.rejects(fs.stat(recovered), { code: 'ENOENT' })
+  await f.manager.apply('alice', fixed.id)
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, 'alice', 'Another.md')).content,
+    'Concurrent collaborator edit.\n',
+  )
+  assert.equal(
+    (await f.workspaces.readFile(f.project.id, 'alice', 'Paper.md')).content,
+    markdown,
+  )
+})
+
+test('Informalize delivers a follow-up once and checks the new source and destination for the document', async (t) => {
+  const writing = Promise.withResolvers()
+  const finish = Promise.withResolvers()
+  const extra = {
+    ...sourceEntry,
+    path: 'Extra.lean',
+    name: 'second',
+    startLine: 1,
+    endLine: 1,
+  }
+  const f = await fixture(t, async (root) => {
+    writing.resolve()
+    await finish.promise
+    await fs.writeFile(
+      path.join(root, 'Revised.md'),
+      markdown +
+        '<!-- Lean: Extra.lean#second -->\nTheorem. The truth proposition holds.\nProof. This follows by its constructor.\n',
+    )
+  })
+  t.after(() => finish.resolve())
+  const verified = []
+  f.manager.informalizationSources = async (_runtime, _root, { paths }) => {
+    verified.push(paths)
+    return {
+      status: 'checked',
+      detail: 'Source proofs checked.',
+      entries: [paths.includes('Extra.lean') ? extra : sourceEntry],
+    }
+  }
+  await f.workspaces.writeFile(
+    f.project.id,
+    'alice',
+    'Relations.lean',
+    leanSource,
+    null,
+  )
+  await f.workspaces.writeFile(
+    f.project.id,
+    'alice',
+    'Extra.lean',
+    'theorem second : True := by trivial\n',
+    null,
+  )
+  const job = await f.manager.start('alice', f.project.id, {
+    mode: 'informalize',
+    files: ['Relations.lean'],
+    prompt: 'Write up the selected file.',
+    outputFile: 'Notes.md',
+  })
+  await writing.promise
+  const update = {
+    id: '211e4567-e89b-12d3-a456-426614174000',
+    text: 'Also include the attached theorem. Put it in Revised.md.',
+    files: ['Extra.lean'],
+  }
+  const ack = new Promise((resolve) =>
+    f.events.on(job.id, (event) => {
+      if (event.type === 'followup' && event.data.status === 'accepted')
+        resolve()
+    }),
+  )
+  await f.manager.message('alice', job.id, update)
+  await ack
+  await f.manager.message('alice', job.id, update)
+  finish.resolve()
+  await Promise.all([...f.manager.tasks])
+  const run = f.events.get(job.id)
+  assert.equal(
+    run.verification?.complete,
+    true,
+    run.verification?.reason || run.error,
+  )
+  assert.deepEqual(
+    run.verification.informalization.sources.entries.map((entry) => entry.name),
+    ['Example.keep', 'second'],
+  )
+  assert.deepEqual(verified, [['Relations.lean'], ['Extra.lean']])
+  assert.equal(run.verification.informalization.document.path, 'Revised.md')
+  const steers = f.requests.filter((request) => request.method === 'turn/steer')
+  assert.equal(steers.length, 1)
+  assert.equal(
+    JSON.parse(steers[0].params.input[0].text).userMessage,
+    update.text,
+  )
+  assert.equal(run.followups[0].status, 'accepted')
+})
+
+test('stopping Informalize during source checks cancels the worker and offers no edit', async (t) => {
+  const started = Promise.withResolvers()
+  const f = await fixture(t)
+  f.manager.informalizationSources = async (_runtime, _root, { signal }) => {
+    started.resolve()
+    await new Promise((resolve) =>
+      signal.addEventListener('abort', resolve, { once: true }),
+    )
+    signal.throwIfAborted()
+  }
+  const job = await f.manager.start('alice', f.project.id, {
+    mode: 'informalize',
+    prompt: 'Write a paper.',
+    file: 'Main.lean',
+  })
+  await started.promise
+  const stopped = await f.manager.stop('alice', job.id)
+  assert.equal(stopped.status, 'cancelled')
+  assert.equal(stopped.changes?.length || 0, 0)
+  assert.equal(f.requests.length, 0)
+  await assert.rejects(f.manager.apply('alice', job.id), { status: 409 })
+})
+
+test(
+  'real Lean and TeX workers check the source, build the review PDF and apply the paper',
+  {
+    skip: !process.env.STUDIO_INFORMALIZATION_TEST_TOOLCHAINS,
+  },
+  async (t) => {
+    const document = [
+      '\\documentclass{article}',
+      '\\newtheorem{theorem}{Theorem}',
+      '\\begin{document}',
+      '\\section{Results}',
+      '% Lean: Relations.lean#Example.keep',
+      '\\begin{theorem}Every proposition implies itself.\\end{theorem}',
+      '\\paragraph{Proof.} Assume the proposition. The hypothesis gives the conclusion.',
+      '\\end{document}',
+      '',
+    ].join('\n')
+    const f = await fixture(t, async (workspace, turn) => {
+      const { leanflowContext } = JSON.parse(turn.input[0].text)
+      const plan = leanflowContext.sections.find(
+        (section) => section.kind === 'informalization-document',
+      )
+      assert.deepEqual(
+        plan.declarations.map((d) => [d.path, d.name, d.status]),
+        [['Relations.lean', 'Example.keep', 'checked']],
+      )
+      assert.equal(plan.suggestedPath, 'Informalization.tex')
+      await fs.writeFile(path.join(workspace, plan.suggestedPath), document)
+    })
+    const real = new Runtime({
+      dataDir: f.root,
+      scope: 'informalize-test',
+      cpus: 1,
+      memory: '2g',
+      hostToolchainDir: process.env.STUDIO_INFORMALIZATION_TEST_TOOLCHAINS,
+    })
+    await real.init()
+    t.after(() => real.shutdown())
+    assert.equal(real.info().ready, true, real.info().error)
+    await real.prepareToolchain(toolchain)
+    // The fake setup worker used by the shared fixture writes a placeholder
+    // manifest. Produce the actual Lake manifest before capturing the project.
+    await fs.rm(path.join(f.project.root, 'lake-manifest.json'), {
+      force: true,
+    })
+    const setup = await real.run(f.project.root, ['lake', 'update'], {
+      network: 'none',
+      freshHome: true,
+    })
+    assert.equal(setup.code, 0, setup.stderr || setup.stdout)
+    f.manager.informalizationSources = (_runtime, ...args) =>
+      prepareInformalizationSources(real, ...args)
+    const tex = await new TexBuildManager({
+      dataDir: f.root,
+      events: f.events,
+      runtime: real,
+      workspaces: f.workspaces,
+    }).init()
+    f.manager.texBuilds = tex
+    await f.workspaces.writeFile(
+      f.project.id,
+      'alice',
+      'Relations.lean',
+      leanSource,
+      null,
+    )
+    const run = await f.execute('Write up the selected file.', {
+      mode: 'informalize',
+      files: ['Relations.lean'],
+    })
+    assert.equal(
+      run.verification?.complete,
+      true,
+      run.error || run.verification?.reason,
+    )
+    const { sources, document: output } = run.verification.informalization
+    assert.deepEqual(
+      sources.entries.map(({ name, startLine, endLine, axioms }) => ({
+        name,
+        startLine,
+        endLine,
+        axioms,
+      })),
+      [{ name: 'Example.keep', startLine: 2, endLine: 2, axioms: [] }],
+    )
+    const pdf = await tex.readPdf('alice', output.buildId)
+    assert.equal(pdf.content.subarray(0, 5).toString(), '%PDF-')
+    assert.match(
+      (await tex.readText('alice', output.buildId)).content,
+      /The hypothesis gives the conclusion/,
+    )
+    await assert.rejects(
+      f.workspaces.readFile(f.project.id, 'alice', output.path),
+      { status: 404 },
+    )
+    await f.manager.apply('alice', run.id)
+    assert.equal(
+      (await f.workspaces.readFile(f.project.id, 'alice', output.path)).content,
+      document,
+    )
+  },
+)
 
 test('explicit user requests override Formalize document-editing defaults', async (t) => {
   const { manager, calls, execute } = await fixture(t, async (workspace) => {

@@ -564,6 +564,124 @@ test('agent TeX builds only accept an owned managed snapshot and do not replace 
   )
 })
 
+test('the final informalization build waits without interrupting the active build and a queued request can cancel', async (t) => {
+  const f = await fixture(t)
+  const snapshot = await f.workspaces.snapshot(
+    f.project.id,
+    'owner',
+    'queue-test',
+  )
+  const entered = Promise.withResolvers(),
+    release = Promise.withResolvers()
+  const runTex = f.runtime.runTex
+  let runs = 0
+  f.runtime.runTex = async (source, output, options) => {
+    if (++runs === 1) {
+      options.onSpawn()
+      entered.resolve()
+      await release.promise
+    }
+    return runTex(source, output, options)
+  }
+  const first = await f.start()
+  await entered.promise
+  const options = {
+    origin: 'agent',
+    runId: snapshot.runId,
+    sourceRoot: snapshot.root,
+    waitForProject: true,
+  }
+  const controller = new AbortController()
+  const queued = f.start(undefined, { ...options, signal: controller.signal })
+  const cancelled = assert.rejects(queued, /cancel only the queued request/)
+  const next = f.start(undefined, options)
+  try {
+    await assert.rejects(f.start(), /already running/)
+    assert.equal(runs, 1)
+    controller.abort(new Error('cancel only the queued request'))
+    await cancelled
+    assert.equal(f.texBuilds.get('owner', first.id).status, 'running')
+  } finally {
+    release.resolve()
+  }
+  assert.equal((await f.texBuilds.wait('owner', first.id)).status, 'completed')
+  assert.equal(
+    (await f.texBuilds.wait('owner', (await next).id)).status,
+    'completed',
+  )
+  assert.equal(runs, 2)
+})
+
+test('a clean replay PDF belongs only to its original run and must render the requested fragment', async (t) => {
+  const f = await fixture(t)
+  const runId = 'informalization'
+  const snapshot = await f.workspaces.snapshot(f.project.id, 'owner', runId)
+  await fs.writeFile(
+    path.join(snapshot.root, 'section.tex'),
+    'Reviewed candidate prose.',
+  )
+  const changes = await f.workspaces.changes(snapshot)
+  const clean = await f.workspaces.verificationCopy(snapshot, changes, {
+    allowProjectFiles: true,
+  })
+  const runTex = f.runtime.runTex
+  let index = 0
+  f.runtime.runTex = async (source, output, options) => {
+    assert.equal(
+      await fs.readFile(path.join(source, 'section.tex'), 'utf8'),
+      changes[0].after,
+    )
+    const result = await runTex(source, output, options)
+    await fs.writeFile(
+      path.join(output, 'result.json'),
+      JSON.stringify({ success: true, pageCount: 1 }),
+    )
+    await fs.writeFile(
+      path.join(output, 'synctex.json'),
+      JSON.stringify({
+        schema: 1,
+        paths: ['main.tex', 'section.tex'],
+        pages: { 1: [[index, 1, 140, 125, 48, 8]] },
+      }),
+    )
+    return result
+  }
+  const options = {
+    sourceRoot: clean.root,
+    runId,
+    verificationRunId: clean.runId,
+    origin: 'agent',
+    requiredTexSource: 'section.tex',
+  }
+  const compile = async (settings) =>
+    f.texBuilds.wait('owner', (await f.start(undefined, settings)).id)
+  for (const overridden of [
+    { runId: 'another-run' },
+    { verificationRunId: snapshot.runId },
+    { sourceRoot: snapshot.root, verificationRunId: snapshot.runId },
+  ]) {
+    const rejected = await compile({ ...options, ...overridden })
+    assert.equal(rejected.status, 'failed')
+    assert.match(rejected.error, /candidate workspace/i)
+  }
+  const omitted = await compile(options)
+  assert.equal(omitted.status, 'failed')
+  assert.match(omitted.error, /source map.*section\.tex/)
+  assert.equal(omitted.pdf, undefined)
+  index = 1
+  const success = await compile(options)
+  assert.equal(success.status, 'completed', success.error)
+  assert.equal(f.events.getMetadata(success.id).originRunId, runId)
+  const response = await f.request(success.pdf.url)
+  assert.equal(response.status, 200)
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), pdf)
+  assert.equal((await f.request(success.pdf.url, {}, f.otherToken)).status, 404)
+  assert.equal(
+    await fs.readFile(path.join(f.project.root, 'section.tex'), 'utf8'),
+    'Hello',
+  )
+})
+
 test('TeX rejects missing or symlinked roots, oversized inputs, and source captures above the file-count limit', async (t) => {
   const f = await fixture(t)
   await fs.symlink(

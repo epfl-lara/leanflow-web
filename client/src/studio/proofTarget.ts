@@ -73,6 +73,17 @@ export const MAX_PROOF_SOURCE_LENGTH = 64_000
 
 export { outlineCode, declarationKeyword }
 
+// Lean reports both namespaces and named sections as LSP Namespace symbols.
+// Only a namespace changes the qualified name of the declarations inside it.
+export function containerNamespace(name: string, opening?: string) {
+  return name === '<section>' ||
+    /^\s*(?:(?:public|private|noncomputable|meta)\s+)*section\b/u.test(
+      opening ?? '',
+    )
+    ? ''
+    : name
+}
+
 export function placeholderWarning(command: string) {
   // Lean can suppress its warning for an explicit proof placeholder.
   return /(?<![\p{L}\p{N}_'])(?:sorry|admit|sorryAx)(?![\p{L}\p{N}_'])/u.test(
@@ -200,8 +211,9 @@ export function proofDeclarationsFromCode(
           endColumn: end.character + 1,
         })
       }
+      const opening = start && lines?.[start.line]?.slice(start.character)
       const childPrefix =
-        container && name && name !== '<section>' ? displayName : prefix
+        container && containerNamespace(name, opening) ? displayName : prefix
       visit(symbol.children, childPrefix, depth + 1)
     }
   }

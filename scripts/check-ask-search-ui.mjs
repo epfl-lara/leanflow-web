@@ -99,6 +99,7 @@ try {
     'Ask & Search',
     'Proofs',
     'Formalize',
+    'Informalize',
     'Optimize',
   ])
   await page.getByRole('button', { name: 'Ask & Search', exact: true }).click()

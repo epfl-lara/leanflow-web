@@ -293,7 +293,16 @@ export class TexBuildManager {
     owner,
     projectId,
     input,
-    { sourceRoot, signal, runId, origin, parentWorker } = {},
+    {
+      sourceRoot,
+      verificationRunId,
+      signal,
+      runId,
+      origin,
+      parentWorker,
+      requiredTexSource,
+      waitForProject = false,
+    } = {},
   ) {
     if (this.stopping)
       fail('The server is shutting down. Compile after it restarts.', 503)
@@ -334,6 +343,30 @@ export class TexBuildManager {
     if (this.stopping)
       fail('The server is shutting down. Compile after it restarts.', 503)
     const key = this.#key(owner, projectId)
+    while (waitForProject && this.projectBuilds.has(key)) {
+      signal?.throwIfAborted()
+      const active = this.active.get(this.projectBuilds.get(key))
+      let abort
+      try {
+        if (!signal) await active
+        else
+          await Promise.race([
+            active,
+            new Promise((_, reject) => {
+              abort = () => reject(signal.reason)
+              signal.addEventListener('abort', abort, { once: true })
+            }),
+          ])
+      } finally {
+        if (abort) signal.removeEventListener('abort', abort)
+      }
+      signal?.throwIfAborted()
+      this.workspaces.get(projectId, owner)
+      this.workspaces.assertRecoveryReady?.(projectId)
+      this.assertCanStart(owner, projectId)
+      if (this.stopping)
+        fail('The server is shutting down. Compile after it restarts.', 503)
+    }
     if (
       this.projectBuilds.has(key) ||
       this.#rows(owner, projectId).some((entry) => entry.cleanupFailed)
@@ -394,7 +427,13 @@ export class TexBuildManager {
           projectId,
           owner,
           path.join(directory, 'source'),
-          { sourceRoot, runId, rootFile, signal: controller.signal },
+          {
+            sourceRoot,
+            verificationRunId,
+            runId,
+            rootFile,
+            signal: controller.signal,
+          },
         )
         if (!source.files.some((file) => file.path === rootFile))
           fail(
@@ -484,7 +523,17 @@ export class TexBuildManager {
           )
           const synced =
             syncTex &&
-            validateTexSyncTex(syncTex, source.files, record?.pageCount)
+            validateTexSyncTex(
+              syncTex,
+              source.files,
+              record?.pageCount,
+              requiredTexSource,
+            )
+          if (requiredTexSource && !synced)
+            fail(
+              `The PDF source map could not confirm that ${requiredTexSource} appears in the compiled document. Check the TeX root, its includes, and the fragment's visible content.`,
+              409,
+            )
           controller.signal.throwIfAborted()
           this.events.updateMetadata(job.id, {
             status: 'completed',

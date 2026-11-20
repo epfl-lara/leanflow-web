@@ -116,6 +116,7 @@ const runMetadata = (job) => {
     'chatId',
     'file',
     'currentFile',
+    'outputFile',
     'files',
     'mode',
     'purpose',
@@ -182,6 +183,7 @@ const chatTranscript = (job, eventCursor, reasoningBlocks) => ({
             'kernelChecked',
             'reason',
             'editsAllowed',
+            'informalization',
           ]
             .filter((key) => job.verification[key] !== undefined)
             .map((key) => [key, job.verification[key]]),

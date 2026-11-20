@@ -15,6 +15,11 @@ import { ReasoningTrace } from './ReasoningTrace'
 import { UsageSummary } from './UsageSummary'
 import { ToolActivity } from './ToolActivity'
 import { TurnOutcome } from './TurnOutcome'
+import {
+  hasInformalizationChecks,
+  informalizationDocument,
+  InformalizationResult,
+} from './InformalizationResult'
 import { CopyButton } from './CopyButton'
 import { chatFileLink } from './chatFileLink'
 
@@ -68,9 +73,18 @@ export const ConversationTurn = memo(function ConversationTurn({
   const [loading, setLoading] = useState(false)
   const [detailsError, setDetailsError] = useState('')
   const [linkError, setLinkError] = useState('')
+  const reviewDocument =
+    run.mode === 'informalize' && run.status === 'completed'
+      ? informalizationDocument(run.verification)?.path
+      : undefined
   const openLocalLink = useCallback(
     (href: string) => {
       const target = chatFileLink(href)
+      if (target && target.path === reviewDocument) {
+        setLinkError('')
+        onReview(run.id)
+        return
+      }
       if (!target || !onOpenTarget) {
         setLinkError('This link does not point to a project file.')
         return
@@ -78,7 +92,7 @@ export const ConversationTurn = memo(function ConversationTurn({
       setLinkError('')
       onOpenTarget(target)
     },
-    [onOpenTarget],
+    [onOpenTarget, onReview, reviewDocument, run.id],
   )
   const inspectRun = useCallback(() => onInspect(run.id), [onInspect, run.id])
   const changeCount = runChangeCount(run, !!run.liveEdits)
@@ -195,15 +209,23 @@ export const ConversationTurn = memo(function ConversationTurn({
       {run.liveEditConflict && (
         <p className="error-message">{run.liveEditConflict}</p>
       )}
-      {!active && (
-        <TurnOutcome
-          run={run}
-          onDetails={() => {
-            setExpanded(true)
-            detailsRef.current?.querySelector('summary')?.focus()
-          }}
-        />
-      )}
+      {!active &&
+        (hasInformalizationChecks(run.verification) ? (
+          <InformalizationResult
+            value={run.verification}
+            projectId={projectId || run.projectId}
+            applied={run.status === 'applied'}
+            onOpenTarget={onOpenTarget}
+          />
+        ) : (
+          <TurnOutcome
+            run={run}
+            onDetails={() => {
+              setExpanded(true)
+              detailsRef.current?.querySelector('summary')?.focus()
+            }}
+          />
+        ))}
       {!active && (
         <OptimizationSummary value={run.optimization} active={false} />
       )}
@@ -248,7 +270,11 @@ export const ConversationTurn = memo(function ConversationTurn({
             className="turn-action"
             onClick={() => onReview(run.id)}
           >
-            {run.liveEdits ? 'View edits' : 'Review changes'}{' '}
+            {run.liveEdits
+              ? 'View edits'
+              : run.mode === 'informalize'
+                ? 'Review document'
+                : 'Review changes'}{' '}
             <span>{changeCount}</span>
           </button>
         )}
@@ -289,7 +315,9 @@ export const ConversationTurn = memo(function ConversationTurn({
           <>
             {loading && <p className="field-help">Loading details…</p>}
             {detailsError && <p className="error-message">{detailsError}</p>}
-            <Verification value={run.verification} />
+            {!hasInformalizationChecks(run.verification) && (
+              <Verification value={run.verification} />
+            )}
             {active && <OptimizationSummary value={run.optimization} active />}
             {!!run.log && (
               <details
