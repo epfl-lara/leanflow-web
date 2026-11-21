@@ -8,7 +8,10 @@ import express from 'express'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
 
 const root = path.resolve(new URL('../', import.meta.url).pathname)
-const output = path.join(root, '.runtime/lean-cache-ui')
+const output = path.resolve(
+  process.env.STUDIO_TEST_REPORT_DIR ||
+    path.join(root, '.runtime/lean-cache-ui'),
+)
 await fs.mkdir(output, { recursive: true })
 const app = express()
 app.use(
@@ -49,6 +52,7 @@ try {
         'Third.lean': 'def cachedC : Nat := 3\n',
         'Fourth.lean': 'def cachedD : Nat := 4\n',
         'Notes.md': '# Notes\n',
+        '.lake/packages/library/Basic.lean': 'def externalValue := 5\n',
       },
       [otherId]: {
         'Main.lean': '-- OTHER_PROJECT_SOURCE\nexample : True := by trivial\n',
@@ -92,12 +96,17 @@ try {
   await page.route('**/api/projects/*/files', (route) => {
     if (route.request().method() !== 'GET') return route.fallback()
     const id = new URL(route.request().url()).pathname.split('/')[3]
+    const files = Object.entries(state.files[id]).map(([path, content]) => ({
+      path,
+      size: content.length,
+      revision: hash(content),
+      ...(path.startsWith('.lake/') && { readOnly: true }),
+    }))
     return route.fulfill({
-      json: Object.entries(state.files[id]).map(([path, content]) => ({
-        path,
-        size: content.length,
-        revision: hash(content),
-      })),
+      json:
+        route.request().headers()['x-leanflow-file-listing'] === 'project'
+          ? { files: files.filter(({ path }) => !path.startsWith('.lake/')) }
+          : files,
     })
   })
   await page.route('**/api/projects/*/file?*', (route) => {
@@ -189,11 +198,25 @@ try {
     await response
     await page.waitForTimeout(300)
   }
+  async function changedProjectFile(path) {
+    const response = page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/api/projects/${projectId}/files`) &&
+        response.request().headers()['x-leanflow-file-listing'] === 'project',
+    )
+    fixture.sendCollaboration({ type: 'files', paths: [path] })
+    assert((await response).ok())
+  }
   await refreshListing()
   assert.equal(protocolCount(), beforeRefresh)
   state.files[projectId]['Notes.md'] += 'Changed notes.\n'
-  await refreshListing()
+  await changedProjectFile('Notes.md')
+  await page.getByRole('button', { name: /^Dependencies/ }).click()
+  await page
+    .locator('.file-item[title=".lake/packages/library/Basic.lean"]')
+    .waitFor()
   assert.equal(protocolCount(), beforeRefresh)
+  assert.equal(await page.locator('.lean-import-notice').count(), 0)
   report.checks.push(
     'Unchanged listings and documentation-only edits preserve Lean workers; revisions, not source sizes, drive invalidation.',
   )
@@ -252,7 +275,7 @@ try {
   const openedSecond = notifications('didOpen', 'Second.lean').length
   const thirdOpens = notifications('didOpen', 'Third.lean').length
   state.files[projectId]['Main.lean'] += '-- EXTERNAL_IMPORT_CHANGE\n'
-  await page.getByRole('button', { name: 'Refresh files', exact: true }).click()
+  await changedProjectFile('Main.lean')
   await until(
     () => notifications('didClose', 'Second.lean').length > closedSecond,
     'external import invalidation',
@@ -311,13 +334,27 @@ try {
     'explicit import refresh',
   )
   await refreshImports.waitFor({ state: 'hidden' })
+  state.files[projectId]['Main.lean'] += '-- CHANGED_BEFORE_IMPORT_BUILD\n'
+  await changedProjectFile('Main.lean')
+  await refreshImports.waitFor()
+  const beforeBuildRefresh = notifications('didOpen', 'Third.lean').length
+  state.projects.find(
+    (project) => project.id === projectId,
+  ).editorImportsVersion = 1
+  fixture.sendCollaboration({ type: 'editor-imports', paths: [] })
+  await until(
+    () =>
+      notifications('didOpen', 'Third.lean').length === beforeBuildRefresh + 1,
+    'automatic refresh after imports rebuild',
+  )
+  await refreshImports.waitFor({ state: 'hidden' })
   await visit('Second.lean', 'cachedB')
   assert.equal(
     notifications('didOpen', 'Second.lean').length,
     secondBeforeRefresh + 1,
   )
   report.checks.push(
-    'Foreign changes mark current goals stale without restarting them; unchanged reloads keep the notice and cannot re-cache stale imports. Revisiting reopens fresh, and Refresh imports rechecks exactly once.',
+    'Foreign changes mark current goals stale without restarting them. An unchanged reload keeps the notice. An actual reopen, including after an automatic import rebuild, clears it.',
   )
 
   const thirdCloses = notifications('didClose', 'Third.lean').length

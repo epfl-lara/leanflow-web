@@ -23,10 +23,10 @@ export class VisibleLeanDocuments {
   ) {
     this.previous = client.clientOptions.middleware
     this.middleware = {
-      didOpen: (document) =>
-        this.visible() === document.uri.toString()
-          ? this.show(document)
-          : Promise.resolve(),
+      didOpen: async (document) => {
+        if (this.visible() === document.uri.toString())
+          await this.show(document)
+      },
       didClose: (document) =>
         this.enqueue(async () => {
           if (this.opened.get(document.uri.toString())?.document === document)
@@ -70,9 +70,12 @@ export class VisibleLeanDocuments {
       )
     })
   }
-  private enqueue(action: () => Promise<void>) {
+  private enqueue<T>(action: () => Promise<T>) {
     const task = this.pending.then(action)
-    this.pending = task.catch(() => {})
+    this.pending = task.then(
+      () => {},
+      () => {},
+    )
     return task
   }
   private async close(document: LeanTextDocument) {
@@ -93,13 +96,17 @@ export class VisibleLeanDocuments {
       for (const [other, record] of this.opened)
         if (other !== uri && !this.retained(other))
           await this.close(record.document)
-      if (!uri?.startsWith('file:///workspace/') || !this.client.isRunning())
-        return
+      if (
+        !uri?.startsWith('file:///workspace/') ||
+        !uri.endsWith('.lean') ||
+        !this.client.isRunning()
+      )
+        return false
       const current =
         document?.uri.toString() === uri
           ? document
           : this.documents().find((doc) => doc.uri.toString() === uri)
-      if (!current || current.isClosed) return
+      if (!current || current.isClosed) return false
       const record = this.opened.get(uri)
       if (
         !force &&
@@ -107,7 +114,7 @@ export class VisibleLeanDocuments {
         record.document === current &&
         record.version === current.version
       )
-        return
+        return false
       if (record) await this.close(record.document)
       else if (this.previous?.didClose) {
         // Reset upstream's bookkeeping if its initial registration preceded
@@ -131,6 +138,9 @@ export class VisibleLeanDocuments {
       await (this.previous?.didOpen
         ? this.previous.didOpen(current, send)
         : send(current))
+      return (
+        this.client.isRunning() && this.opened.get(uri)?.document === current
+      )
     })
   }
   closeHidden() {

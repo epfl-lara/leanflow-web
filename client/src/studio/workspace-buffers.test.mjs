@@ -470,6 +470,21 @@ test('shared saved changes keep a preview temporary but pending local edits pin 
   assert.deepEqual(store.getSnapshot().openPaths, ['B.lean', 'C.lean'])
 })
 
+test('optimistic collaboration edits publish the draft without reporting a saved file change', () => {
+  const store = new WorkspaceBuffers()
+  store.setFile(file('Main.lean', 'saved'))
+  const { saveVersion } = store.getSnapshot()
+  store.collaborated('Main.lean', 'edited draft', 'saved', hashA)
+  assert.equal(store.getSnapshot().file.content, 'edited draft')
+  assert.equal(store.getSnapshot().saveVersion, saveVersion)
+  assert.deepEqual(store.getSnapshot().savedPaths, [])
+  store.collaborated('Main.lean', 'edited draft', 'edited draft', hashB)
+  assert.equal(store.getSnapshot().file.hash, hashB)
+  assert.deepEqual(store.dirty(), [])
+  assert.equal(store.getSnapshot().saveVersion, saveVersion + 1)
+  assert.deepEqual(store.getSnapshot().savedPaths, ['Main.lean'])
+})
+
 test('read-only previews are replaceable and rename sources are pinned', () => {
   const store = new WorkspaceBuffers()
   store.openFile({ ...file('A.lean'), readOnly: true })

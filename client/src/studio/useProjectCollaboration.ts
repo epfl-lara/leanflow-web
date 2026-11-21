@@ -123,6 +123,7 @@ export function useProjectCollaboration({
   onFilesChanged?: (
     affected: (path: string) => boolean,
     recheck: (path: string) => void,
+    projectFilesOnly: boolean,
   ) => void | Promise<void>
   onFilesMoved?: (move: PathMove) => void
   onProjectChanged?: () => void | Promise<void>
@@ -331,6 +332,8 @@ export function useProjectCollaboration({
                 paths.has(path) ||
                 parentFolders(path).some((parent) => paths.has(parent)),
               (path) => filesChanged([path]),
+              !!paths?.size &&
+                [...paths].every((path) => path !== '.lake' && liveFile(path)),
             )
           } catch {
             // A subsequent change or reconnect will refresh the listing again.

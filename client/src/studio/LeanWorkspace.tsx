@@ -86,8 +86,8 @@ class BrowserLeanMonaco extends LeanMonaco {
   }
 
   closeHiddenDocuments: () => Promise<void> = async () => {}
-  showVisibleDocument: () => Promise<void> = async () => {}
-  refreshVisibleDocument: () => Promise<void> = async () => {}
+  showVisibleDocument: () => Promise<boolean> = async () => false
+  refreshVisibleDocument: () => Promise<boolean> = async () => false
   constructor(
     private readonly onConnectionIssue: (message: string) => void,
     private readonly onProcessingNotice: (
@@ -415,6 +415,30 @@ export function LeanWorkspace({
   }, [])
   const [refreshingImports, setRefreshingImports] = useState(false)
   const importsRevision = useRef(0)
+  const refreshVisibleImports = useCallback(
+    async (active: Runtime) => {
+      const file = fileRef.current
+      if (
+        !file?.path.endsWith('.lean') ||
+        active.visibleReadyPath !== file.path
+      )
+        return
+      const revision = importsRevision.current
+      if (
+        (await active.lean.refreshVisibleDocument()) &&
+        runtime.current === active &&
+        fileRef.current?.path === file.path &&
+        fileRef.current.generation === file.generation &&
+        importsRevision.current === revision
+      ) {
+        setImportsStale(null)
+        await active.modelCache.retain(
+          new FileUri('/workspace/' + file.path).toString(),
+        )
+      }
+    },
+    [setImportsStale],
+  )
   const [requestIssue, setRequestIssue] = useState('')
   const [renameIssue, setRenameIssue] = useState('')
   const [loading, setLoading] = useState(true)
@@ -906,7 +930,7 @@ export function LeanWorkspace({
       active.modelCache.invalidate()
       try {
         await active.lean.closeHiddenDocuments()
-        await active.lean.refreshVisibleDocument()
+        await refreshVisibleImports(active)
       } finally {
         if (!cancelled) recoverVisibleConnection(active)
       }
@@ -919,7 +943,12 @@ export function LeanWorkspace({
     return () => {
       cancelled = true
     }
-  }, [editorImportsVersion, projectId, recoverVisibleConnection])
+  }, [
+    editorImportsVersion,
+    projectId,
+    recoverVisibleConnection,
+    refreshVisibleImports,
+  ])
 
   useEffect(() => {
     runtime.current?.modelCache.removePaths(removedPaths)
@@ -1779,21 +1808,14 @@ export function LeanWorkspace({
 
   async function refreshImports() {
     const active = runtime.current
-    const revision = importsRevision.current
     const path = fileRef.current?.path
     if (!active || refreshingImports || !path) return
     setRefreshingImports(true)
     try {
       await serialize(async () => {
         if (runtime.current !== active || fileRef.current?.path !== path) return
-        await active.lean.refreshVisibleDocument()
-        if (importsRevision.current === revision)
-          await active.modelCache.retain(
-            new FileUri('/workspace/' + path).toString(),
-          )
+        await refreshVisibleImports(active)
       })
-      if (runtime.current === active && importsRevision.current === revision)
-        setImportsStale(null)
     } catch {
       if (runtime.current === active)
         setRestartIssue(
@@ -1986,7 +2008,7 @@ export function LeanWorkspace({
         </div>
         {importsStale === file?.path && file?.path.endsWith('.lean') && (
           <output className="lean-import-notice">
-            Project files changed. These goals may use older imports.
+            These goals may use out-of-date imports.
             <button
               className="button small secondary"
               disabled={refreshingImports || loading || sleeping}

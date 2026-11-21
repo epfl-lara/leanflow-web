@@ -312,6 +312,28 @@ async function exists(filename) {
   }
 }
 
+// Dependency packages sometimes contain links to documentation or tools.
+// Only recognize a target that can be matched to a regular file in the same
+// package's listing. The walker never follows a link to determine its type.
+function dependencyLinkTarget(relative, link, prefix) {
+  const docs = relative.endsWith('.md')
+  const script = relative.endsWith('.py')
+  const tail = link.replace(/^(?:\.\.\/)*/, '')
+  if (
+    (!docs && !script) ||
+    tail.split('/').some((part) => !part || part === '.' || part === '..')
+  )
+    return null
+  const target = path.posix.join(path.posix.dirname(relative), link)
+  return target.startsWith(prefix + '/') &&
+    ((docs && target.endsWith('.md')) ||
+      (script &&
+        target === relative.slice(0, -3) &&
+        !CONFIGURATION_FILES.has(path.posix.basename(target))))
+    ? target
+    : null
+}
+
 async function guarded(root, relative, options = {}) {
   const normalized = relativeFile(relative, options)
   const realRoot = await fs.realpath(root)
@@ -1415,6 +1437,7 @@ export class WorkspaceStore {
 
   invalidateFileListing(projectId) {
     this.fileListings.delete(projectId)
+    this.fileListings.delete(`${projectId}:project`)
   }
 
   // `moves` ([{from, to}]) tells live editors that a path was renamed rather
@@ -4431,7 +4454,9 @@ export class WorkspaceStore {
   ) {
     const result = []
     let revisionsReliable = true
-    const visit = async (directory, prefix = '', depth = 0) => {
+    // Keep the optional checks for dependency links bounded per listing.
+    let remainingLinkChecks = 64
+    const visit = async (directory, prefix = '', depth = 0, dependency) => {
       signal?.throwIfAborted()
       if (depth > 64) fail('Project directory nesting exceeds 64 levels', 413)
       let handle
@@ -4468,12 +4493,28 @@ export class WorkspaceStore {
           const full = path.join(directory, entry.name)
           const anchored = `${anchor}/${entry.name}`
           if (entry.isSymbolicLink()) {
-            revisionsReliable = false
+            const trackTarget =
+              revisions &&
+              revisionsReliable &&
+              dependency &&
+              remainingLinkChecks > 0
+            if (trackTarget) remainingLinkChecks--
+            const link = includeLinks
+              ? await fs.readlink(anchored)
+              : trackTarget
+                ? await fs.readlink(anchored).catch(() => null)
+                : null
+            const target =
+              trackTarget &&
+              link &&
+              dependencyLinkTarget(relative, link, dependency.prefix)
+            if (target) dependency.targets.add(target)
+            else revisionsReliable = false
             if (includeLinks)
               result.push({
                 path: relative,
                 size: 0,
-                link: await fs.readlink(anchored),
+                link,
               })
           } else if (entry.isDirectory()) {
             if (foldersOnly) {
@@ -4485,7 +4526,7 @@ export class WorkspaceStore {
               }
               result.push({ path: relative })
             }
-            await visit(full, relative, depth + 1)
+            await visit(full, relative, depth + 1, dependency)
           } else if (
             !foldersOnly &&
             entry.isFile() &&
@@ -4536,15 +4577,19 @@ export class WorkspaceStore {
           )
             continue
           const start = result.length
-          await visit(
-            path.join(deps, project.name),
-            `.lake/packages/${project.name}`,
-          )
+          const prefix = `.lake/packages/${project.name}`
+          const dependency = { prefix, targets: new Set() }
+          await visit(path.join(deps, project.name), prefix, 0, dependency)
+          // Check the unfiltered listing. Reaching the bound before removing
+          // unrelated entries can also hide Lean inputs.
+          if (result.length >= limit) revisionsReliable = false
           // Dependency navigation intentionally includes Lean source and documentation.
           for (let i = result.length - 1; i >= start; i--) {
+            dependency.targets.delete(result[i].path)
             if (!/\.(lean|md|toml)$/.test(result[i].path)) result.splice(i, 1)
             else result[i].readOnly = true
           }
+          if (dependency.targets.size) revisionsReliable = false
         }
       }
     }
@@ -4555,17 +4600,20 @@ export class WorkspaceStore {
     return result
   }
 
-  async files(id, owner) {
+  async files(id, owner, { projectOnly = false } = {}) {
     const project = this.get(id, owner)
-    let listing = this.fileListings.get(id)
+    const key = projectOnly ? `${id}:project` : id
+    let listing = this.fileListings.get(key)
     if (!listing || listing.root !== project.root) {
       listing = {
         root: project.root,
         task: (async () => {
-          const dependencyRoot =
-            (await this.runtime.dependencyRoot?.(project.root)) || project.root
+          const dependencyRoot = projectOnly
+            ? project.root
+            : (await this.runtime.dependencyRoot?.(project.root)) ||
+              project.root
           return this.#walk(project.root, {
-            dependencies: true,
+            dependencies: !projectOnly,
             revisions: true,
             dependencyRoot,
           })
@@ -4573,14 +4621,14 @@ export class WorkspaceStore {
       }
       // Coalesce concurrent tabs without retaining stale filesystem metadata.
       // A busy server may track only a bounded number of scans at once.
-      if (this.fileListings.size < 128 || this.fileListings.has(id))
-        this.fileListings.set(id, listing)
+      if (this.fileListings.size < 128 || this.fileListings.has(key))
+        this.fileListings.set(key, listing)
     }
     let files
     try {
       files = await listing.task
     } finally {
-      if (this.fileListings.get(id) === listing) this.fileListings.delete(id)
+      if (this.fileListings.get(key) === listing) this.fileListings.delete(key)
     }
     const current = this.get(id, owner)
     if (current.root !== listing.root)

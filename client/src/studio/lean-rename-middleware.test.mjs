@@ -298,6 +298,26 @@ test('typing during an import refresh is included once in the new document, with
   )
 })
 
+test('refresh reports an actual Lean document open and skips offline or non-Lean documents', async () => {
+  const f = fixture(async () => ({}))
+  await f.controller.showVisible()
+  const before = f.notifications.length
+  f.client.isRunning = () => false
+  assert.equal(await f.controller.refreshVisible(), false)
+  assert.equal(f.notifications.length, before)
+  f.client.isRunning = () => true
+  assert.equal(await f.controller.refreshVisible(), true)
+  assert.equal(f.notifications.at(-1).method, 'textDocument/didOpen')
+  f.foreign.uri.toString = () => 'file:///workspace/Notes.md'
+  f.context.uri = f.foreign.uri.toString()
+  assert.equal(await f.controller.refreshVisible(), false)
+  assert(
+    !f.notifications.some((entry) =>
+      entry.params.textDocument.uri.endsWith('.md'),
+    ),
+  )
+})
+
 test('returning to a retained document reuses its worker and protocol version', async () => {
   const f = fixture(async () => ({}))
   const retained = new Set([f.main.uri.toString()])

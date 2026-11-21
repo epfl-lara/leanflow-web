@@ -143,6 +143,83 @@ test('completed file listings retain no metadata cache and refresh dependency re
   assert(after.size > before.size)
 })
 
+test('a project-only listing leaves a full dependency scan in flight and still enforces access', async (t) => {
+  const f = await fixture(t)
+  let release
+  f.runtime.dependencyRoot = () =>
+    new Promise((resolve) => {
+      release = resolve
+    })
+  const full = f.store.files(f.project.id, 'alice')
+  try {
+    const files = await f.store.files(f.project.id, 'bob', {
+      projectOnly: true,
+    })
+    assert.deepEqual(
+      files.map(({ path }) => path),
+      ['Main.lean'],
+    )
+    assert(files[0].revision)
+    await assert.rejects(
+      f.store.files(f.project.id, 'outsider', { projectOnly: true }),
+      { status: 404 },
+    )
+  } finally {
+    release(f.project.root)
+    await full
+  }
+})
+
+test('dependency links to regular auxiliary files preserve Lean source revisions', async (t) => {
+  const f = await fixture(t)
+  const dependencyRoot = path.join(path.dirname(f.project.root), 'dependencies')
+  const library = path.join(dependencyRoot, '.lake/packages/library')
+  await fs.mkdir(path.join(library, 'docs'), { recursive: true })
+  await fs.writeFile(path.join(library, 'README.md'), '# Docs\n')
+  await fs.writeFile(path.join(library, 'Basic.lean'), 'def value := 1\n')
+  await fs.writeFile(path.join(library, 'script'), 'auxiliary file\n')
+  await fs.symlink('../README.md', path.join(library, 'docs', 'README.md'))
+  await fs.symlink('script', path.join(library, 'script.py'))
+  f.runtime.dependencyRoot = () => dependencyRoot
+  const first = await f.store.files(f.project.id, 'alice')
+  assert(first.every(({ revision }) => revision))
+  assert(!first.some(({ path }) => path.endsWith('/docs/README.md')))
+  await fs.writeFile(path.join(library, 'Basic.lean'), 'def value := 2\n')
+  const after = await f.store.files(f.project.id, 'alice')
+  const module = '.lake/packages/library/Basic.lean'
+  assert.notEqual(
+    after.find(({ path }) => path === module)?.revision,
+    first.find(({ path }) => path === module)?.revision,
+  )
+})
+
+test('a link that could hide a Lean input leaves the file revisions uncertain', async (t) => {
+  const f = await fixture(t)
+  const dependencyRoot = path.join(path.dirname(f.project.root), 'dependencies')
+  const library = path.join(dependencyRoot, '.lake/packages/library')
+  await fs.mkdir(path.join(library, 'src'), { recursive: true })
+  await fs.writeFile(path.join(library, 'src/Basic.lean'), 'def value := 1\n')
+  await fs.writeFile(path.join(library, 'README.md'), '# Docs\n')
+  f.runtime.dependencyRoot = () => dependencyRoot
+  for (const [target, name, root] of [
+    ['src', 'Alias.md', library],
+    ['README.md', 'Alias.lean', library],
+    ['README.md', 'Alias.so', library],
+    ['../README.md', 'OutOfPackage.md', library],
+    ['Main.lean', 'Alias.lean', f.project.root],
+  ]) {
+    const link = path.join(root, name)
+    await fs.symlink(target, link)
+    assert(
+      (await f.store.files(f.project.id, 'alice')).every(
+        ({ revision }) => revision === undefined,
+      ),
+      link,
+    )
+    await fs.unlink(link)
+  }
+})
+
 test('failed file scans release their entry so a later request can retry', async (t) => {
   const f = await fixture(t)
   let calls = 0

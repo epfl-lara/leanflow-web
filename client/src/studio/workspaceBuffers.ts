@@ -317,11 +317,14 @@ export class WorkspaceBuffers {
     const file = { ...current, content, savedContent, hash }
     const buffers = new Map(this.state.buffers)
     buffers.set(path, file)
-    this.state = {
-      ...this.state,
-      saveVersion: this.state.saveVersion + 1,
-      savedPaths: [path],
-    }
+    // Optimistic live edits (including undo) can change the editor text
+    // before the server acknowledges a different saved file.
+    if (current.hash !== hash || current.savedContent !== savedContent)
+      this.state = {
+        ...this.state,
+        saveVersion: this.state.saveVersion + 1,
+        savedPaths: [path],
+      }
     this.publish(
       this.state.file?.path === path ? file : this.state.file,
       buffers,

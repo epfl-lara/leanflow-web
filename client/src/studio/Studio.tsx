@@ -543,6 +543,10 @@ export function Studio() {
     path: string
   } | null>(null)
   const filesRequest = useRef(0)
+  const dependencyListing = useRef<{
+    scope: WorkspaceScope
+    files: FileEntry[]
+  } | null>(null)
   const navigationRequest = useRef(0)
   const generation = useRef(0)
   const savePromise = useRef<{
@@ -791,6 +795,7 @@ export function Studio() {
       projectIdRef.current = id
       fileRef.current = null
       filesRef.current = []
+      dependencyListing.current = null
       ++openRequest.current
       pendingFileOpen.current = null
       pendingReload.current = null
@@ -1116,19 +1121,56 @@ export function Studio() {
   }, [sessionUser, preparing, loadProjects])
 
   const loadFiles = useCallback(
-    async (id: string, onFiles?: (entries: FileEntry[]) => void) => {
+    async (
+      id: string,
+      onFiles?: (entries: FileEntry[]) => void,
+      projectFilesOnly = false,
+    ) => {
       const expected = bufferStore.getSnapshot().scope
       const request = ++filesRequest.current
       const base = `/api/projects/${encodeURIComponent(id)}`
+      const previous = dependencyListing.current
+      const dependencies =
+        projectFilesOnly &&
+        previous?.scope === expected &&
+        expected.projectId === id
+          ? previous.files
+          : null
+      // A source-only refresh cannot replace a full refresh in progress.
+      if (!dependencies && expected.projectId === id)
+        dependencyListing.current = null
       const current = () =>
         request === filesRequest.current &&
         bufferStore.isCurrent(expected) &&
         expected.projectId === id
       const [value, directories] = await Promise.all([
-        api<FileEntry[]>(`${base}/files`).then((entries) => {
+        api<FileEntry[] | { files: FileEntry[] }>(
+          `${base}/files`,
+          dependencies
+            ? { headers: { 'X-LeanFlow-File-Listing': 'project' } }
+            : {},
+        ).then((listing) => {
+          // An older server can still return the full array.
+          const full = Array.isArray(listing)
+          const entries = full
+            ? listing
+            : [...listing.files, ...(dependencies ?? [])]
           // Folder discovery can retry independently while the tree and
           // editor already have the file list they need.
-          if (current()) setFiles(entries)
+          if (current()) {
+            if (full)
+              dependencyListing.current = entries.every((file) => file.revision)
+                ? {
+                    scope: expected,
+                    files: entries.filter((file) =>
+                      file.path.startsWith('.lake/'),
+                    ),
+                  }
+                : null
+            else if (listing.files.some((file) => !file.revision))
+              dependencyListing.current = null
+            setFiles(entries)
+          }
           onFiles?.(entries)
           return entries
         }),
@@ -1465,7 +1507,11 @@ export function Studio() {
     scope,
     enabled: !!session && !authRequired && workspaceEditable,
     canEdit: projectCanEdit,
-    onFilesChanged: async (affected, recheck): Promise<void> => {
+    onFilesChanged: async (
+      affected,
+      recheck,
+      projectFilesOnly,
+    ): Promise<void> => {
       const id = scope.projectId
       if (!id) return
       // A navigation GET may already contain the previous saved bytes. Queue
@@ -1481,7 +1527,7 @@ export function Studio() {
           `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
         )
       await Promise.allSettled([
-        loadFiles(id).then((listing) =>
+        loadFiles(id, undefined, projectFilesOnly).then((listing) =>
           reconcileMissingBuffers(
             bufferStore,
             scope,

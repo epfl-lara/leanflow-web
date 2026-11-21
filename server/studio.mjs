@@ -1061,9 +1061,13 @@ export async function createStudio({
       res.json(result)
     }),
   )
-  app.get('/api/projects/:id/files', async (req, res) =>
-    res.json(await workspaces.files(req.params.id, req.user.id)),
-  )
+  app.get('/api/projects/:id/files', async (req, res) => {
+    const projectOnly = req.get('X-LeanFlow-File-Listing') === 'project'
+    const files = await workspaces.files(req.params.id, req.user.id, {
+      projectOnly,
+    })
+    res.json(projectOnly ? { files } : files)
+  })
   app.put(
     '/api/projects/:id/files',
     sourceRequestHandler(async (req, res) => {
