@@ -13,12 +13,16 @@ LeanFlow code; this is not a third-party cluster orchestrator or a highly
 available coordinator.
 
 Remote placement is **off by default** for new installations. Enable a worker's
-editor slots after its reviewed upgrade and acceptance. Current installation,
-enabled machines and measured capacity are tracked in the
-[current four-machine rollout](releases/2026-11-17-primary-workers.md). The
-installation exposes 32 managed editor slots: nine on the VM, nine each on
-PC05/06 and five on PC2. The preceding
+editor slots after its reviewed upgrade and acceptance. The
+[17 November four-machine rollout](releases/2026-11-17-primary-workers.md)
+records the earlier 32-slot configuration and concurrency tests. The preceding
 [PC06 rollout](releases/2026-11-16-remote-editors.md) records the initial integration.
+
+The installation now configures 27 editor slots across four machines. The VM
+and PC06 have nine each, PC2 has five, and PC05 has four. PC05 uses 6.75 GiB per
+editor and reserves 18 GiB for proof checks within its 45 GiB memory budget.
+On 20 November, an isolated cold Mathlib editor check on PC05 timed out after
+110 seconds at 3 GiB and completed in 32 seconds at 6.75 GiB.
 
 See [cache reuse](Caching.md) for shared Lean artifacts, incremental editor
 sessions, coordinator improvements and measured limits.
