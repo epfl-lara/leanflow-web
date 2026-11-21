@@ -149,7 +149,8 @@ function LinkedPdfPage({
       !loaded ||
       !mapping ||
       !sourceNavigation?.enabled ||
-      (event.target instanceof Element && event.target.closest('button'))
+      (event.target instanceof Element &&
+        event.target.closest('button, .linked-pdf-mark-details'))
     )
       return
     const rect = event.currentTarget.getBoundingClientRect()

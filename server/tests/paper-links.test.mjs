@@ -71,8 +71,8 @@ The trace exists.
     target,
     pdfSource,
     texSource,
-    make: (source, destination = target) =>
-      makePaperLink({ source, target: destination }, readers),
+    make: (source, destination = target, difference) =>
+      makePaperLink({ source, target: destination, difference }, readers),
     list: (content, path) => listPaperLinks(content, { path, ...readers }),
     readers,
   }
@@ -143,7 +143,66 @@ test('TeX label moves are resolved and duplicate live labels or Lean declaration
   assert.equal((await f.list(manifest, texPath))[0].status, 'stale')
 })
 
-test('an informalized theorem in a multi-file TeX paper links from its statement and printed PDF lines without a manifest', async () => {
+test('a definition correction is visible from both ends until its source or Lean definition changes', async () => {
+  const f = fixture()
+  const definition = 'def traceSize (n : Nat) : Nat :=\n  n + 1\n'
+  const target = { path: leanPath, line: 1, declaration: 'traceSize' }
+  const difference =
+    'The paper uses n. Lean uses n + 1 to count the initial state, so an empty trace has size one.'
+  f.files.set(leanPath, definition)
+  const link = await f.make(f.pdfSource, target, ' ' + difference + ' ')
+  const manifest = upsertPaperLink(null, link)
+  assert.equal(
+    upsertPaperLink(manifest, await f.make(f.pdfSource, target)),
+    manifest,
+  )
+  for (const path of [pdfPath, leanPath]) {
+    const [saved] = await f.list(manifest, path)
+    assert.equal(saved.difference, difference)
+    assert.equal(saved.status, 'current')
+  }
+
+  f.files.set(leanPath, '\n' + definition)
+  const [moved] = await f.list(manifest, pdfPath)
+  assert.equal(moved.status, 'current')
+  assert.equal(moved.target.line, 2)
+  f.files.set(leanPath, definition.replace('n + 1', 'n + 2'))
+  const [stale] = await f.list(manifest, pdfPath)
+  assert.equal(stale.status, 'stale')
+  assert.equal(stale.difference, difference)
+  const relink = await f.make(f.pdfSource, target)
+  assert.throws(() => upsertPaperLink(manifest, relink), {
+    status: 409,
+    message: /Review the difference again/u,
+  })
+  const resolved = upsertPaperLink(manifest, { ...relink, difference: null })
+  const [updated] = await f.list(resolved, leanPath)
+  assert.equal(updated.id, link.id)
+  assert.equal(updated.status, 'current')
+  assert.equal('difference' in updated, false)
+})
+
+test('a note on a labeled TeX passage follows a move and flags changed prose', async () => {
+  const f = fixture()
+  const link = await f.make(
+    f.texSource,
+    f.target,
+    'Lean assumes the trace is nonempty to select its first state.',
+  )
+  const manifest = upsertPaperLink(null, link)
+  const paper = 'Preface\n' + f.files.get(texPath)
+  f.files.set(texPath, paper)
+  const [moved] = await f.list(manifest, leanPath)
+  assert.equal(moved.status, 'current')
+  assert.equal(moved.source.line, 3)
+  f.files.set(
+    texPath,
+    paper.replace('The trace exists.', 'The trace is nonempty.'),
+  )
+  assert.equal((await f.list(manifest, texPath))[0].status, 'stale')
+})
+
+test('an informalized theorem links between Lean and the TeX statement and appears on printed PDF lines without a manifest', async () => {
   const f = fixture()
   const chapter = 'chapters/results.tex'
   const theorem = '% Lean: ' + leanPath + '#Trace.existsTrace'
@@ -175,6 +234,7 @@ test('an informalized theorem in a multi-file TeX paper links from its statement
   const reads = []
   const store = {
     accessibleProject() {},
+    texSourcePaths: () => [chapter],
     readFile(_project, _actor, path) {
       reads.push(path)
       assert([PAPER_LINKS_FILE, chapter, leanPath].includes(path), path)
@@ -192,6 +252,12 @@ test('an informalized theorem in a multi-file TeX paper links from its statement
     line: 2,
     declaration: 'Trace.existsTrace',
   })
+  assert.deepEqual(reads, [PAPER_LINKS_FILE, chapter, leanPath])
+  reads.length = 0
+  assert.deepEqual(
+    await projectPaperLinks(store, 'project', 'reader', leanPath),
+    { links },
+  )
   assert.deepEqual(reads, [PAPER_LINKS_FILE, chapter, leanPath])
   assert.deepEqual(
     await projectTexPaperLinks(store, 'project', 'reader', [chapter]),
@@ -244,6 +310,22 @@ test('editing an inline Lean proof keeps the link while changing its statement m
     'theorem existsTrace (n : Nat := 1) : False := by sorry\n',
   )
   assert.equal((await f.list(manifest, texPath))[0].status, 'stale')
+})
+
+test('a theorem note follows proof edits but flags a changed hypothesis on a later line', async () => {
+  const f = fixture()
+  const lean = 'theorem traceExists\n    (h : n > 0) : n > 0 := by\n  exact h\n'
+  f.files.set(leanPath, lean)
+  const link = await f.make(
+    f.pdfSource,
+    { path: leanPath, line: 1, declaration: 'traceExists' },
+    'Lean requires n to be positive to use the original argument.',
+  )
+  const manifest = upsertPaperLink(null, link)
+  f.files.set(leanPath, lean.replace('by\n  exact h', 'h'))
+  assert.equal((await f.list(manifest, pdfPath))[0].status, 'current')
+  f.files.set(leanPath, lean.replace('h : n > 0', 'h : n ≥ 0'))
+  assert.equal((await f.list(manifest, pdfPath))[0].status, 'stale')
 })
 
 test('a compiled page only gets links for its mapped TeX files, including a standalone theorem label', async () => {
@@ -313,6 +395,10 @@ test('tool input checks path containment, declaration spelling, TeX comments and
     { ...f.target, line: 1 },
   ])
     await assert.rejects(f.make(f.texSource, target), { status: 400 })
+  for (const difference of ['   ', 'x'.repeat(1001), { note: 'wrong shape' }])
+    await assert.rejects(f.make(f.texSource, f.target, difference), {
+      status: 400,
+    })
   await assert.rejects(
     makePaperLink(
       { source: f.texSource, target: f.target, projectId: 'another' },

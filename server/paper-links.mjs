@@ -13,6 +13,7 @@ export { PAPER_LINKS_FILE }
 const MAX_LINKS = 200
 const MAX_MANIFEST_BYTES = 512 * 1024
 const MAX_DECLARATION_LENGTH = 300
+export const MAX_PAPER_DIFFERENCE_LENGTH = 1000
 const sha256 = (content) => createHash('sha256').update(content).digest('hex')
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status })
@@ -53,7 +54,7 @@ function normalize(input) {
     !record(input) ||
     !record(input.source) ||
     !record(input.target) ||
-    !onlyKeys(input, ['source', 'target']) ||
+    !onlyKeys(input, ['source', 'target', 'difference']) ||
     !onlyKeys(input.source, ['path', 'page', 'quote', 'line', 'label']) ||
     !onlyKeys(input.target, ['path', 'line', 'declaration'])
   )
@@ -101,7 +102,22 @@ function normalize(input) {
     fail(
       'Choose a .lean file, declaration line starting at 1, and exact declaration name.',
     )
-  return { source, target }
+  const { difference } = input
+  if (
+    difference !== undefined &&
+    difference !== null &&
+    !plainText(difference, MAX_PAPER_DIFFERENCE_LENGTH)
+  )
+    fail(
+      `Describe the mathematical difference in up to ${MAX_PAPER_DIFFERENCE_LENGTH} characters, or use null to clear the note.`,
+    )
+  return {
+    source,
+    target,
+    ...(difference === undefined
+      ? {}
+      : { difference: difference?.trim() ?? null }),
+  }
 }
 
 function linkId({ source, target }) {
@@ -148,16 +164,22 @@ function parseManifest(content, strict = false) {
           'id',
           'source',
           'target',
+          'difference',
           'sourceRevision',
           'targetRevision',
         ]))
     )
       invalid()
-    const link = normalize({ source: entry.source, target: entry.target })
+    const link = normalize({
+      source: entry.source,
+      target: entry.target,
+      difference: entry.difference,
+    })
     const id = linkId(link)
     if (
       entry.id !== id ||
       ids.has(id) ||
+      link.difference === null ||
       !revision(entry.sourceRevision) ||
       !revision(entry.targetRevision)
     )
@@ -227,6 +249,13 @@ function texLine(lines, labels, { line, label }, expectedRevision) {
     : null
 }
 
+function labeledTexRevision(lines, range) {
+  const passage = range
+    ? lines.slice(range.startLine - 1, range.endLine)
+    : lines
+  return sha256(passage.join('\n'))
+}
+
 function inlineProofStart(code) {
   let depth = 0
   let quoted = false
@@ -248,7 +277,7 @@ function inlineProofStart(code) {
 
 // The lexer checks source spelling and ordinary namespaces. These anchors
 // identify navigation locations and carry no Lean proof-verification result.
-function declarationsIn(content, wantedNames, commandLines) {
+function declarationsIn(content, wantedNames) {
   const normalized = content.replace(/\r\n?/g, '\n')
   const original = normalized.split('\n')
   const code = outlineCode(normalized, {
@@ -257,12 +286,13 @@ function declarationsIn(content, wantedNames, commandLines) {
   const scopes = ['']
   const declarations = []
   const counts = new Map()
+  const commandLines = []
   for (let index = 0; index < code.length; index++) {
     const command = code[index].trim()
     const namespace = namespaceCommand.exec(command)?.[1]
     const prefix = scopes.at(-1)
     if (namespace) {
-      commandLines?.push(index + 1)
+      commandLines.push(index + 1)
       scopes.push(
         prefix === null ||
           prefix.length + namespace.length >= MAX_DECLARATION_LENGTH
@@ -276,22 +306,21 @@ function declarationsIn(content, wantedNames, commandLines) {
         command,
       )
     ) {
-      commandLines?.push(index + 1)
+      commandLines.push(index + 1)
       scopes.push(prefix)
       continue
     }
     if (/^end(?:\s|$)/u.test(command)) {
-      commandLines?.push(index + 1)
+      commandLines.push(index + 1)
       if (scopes.length > 1) scopes.pop()
       continue
     }
     const keyword = declarationKeyword(code[index])
     if (
-      commandLines &&
-      (keyword ||
-        /^(?:#|(?:attribute|axiom|import|open|set_option|variable|universe)\b)/u.test(
-          code[index],
-        ))
+      keyword ||
+      /^(?:#|(?:attribute|axiom|import|open|set_option|variable|universe)\b)/u.test(
+        code[index],
+      )
     )
       commandLines.push(index + 1)
     if (!keyword || keyword.kind === 'example') continue
@@ -323,33 +352,39 @@ function declarationsIn(content, wantedNames, commandLines) {
     if (proofStart >= 0)
       header[header.length - 1] = header.at(-1).slice(0, proofStart)
     declarations.push({
+      kind: keyword.kind,
       name,
       localName,
       line: index + 1,
       nameLine: nameIndex + 1,
-      revision:
+      headerRevision:
         proofStart < 0 ? legacyRevision : sha256(header.join('\n').trim()),
       legacyRevision,
     })
+  }
+  let command = 0
+  for (const entry of declarations) {
+    while (commandLines[command] <= entry.nameLine) command++
+    const end = (commandLines[command] ?? code.length + 1) - 1
+    const start = entry.line - 1
+    const content = original.slice(start, end).join('\n').trimEnd()
+    const proofStart =
+      entry.kind === 'theorem' || entry.kind === 'lemma'
+        ? inlineProofStart(code.slice(start, end).join('\n'))
+        : -1
+    entry.content = content
+    // A definition's body is part of its meaning. For a theorem, keep the
+    // full statement while allowing its proof to change independently.
+    const statement = proofStart < 0 ? content : content.slice(0, proofStart)
+    entry.revision = sha256('declaration\0' + statement.trim())
   }
   return declarations
 }
 
 function declarationSources(source) {
-  const lines = linesOf(source)
-  const commandLines = []
-  const entries = declarationsIn(source, undefined, commandLines)
   const result = new Map()
-  let command = 0
-  for (const { name, line, nameLine } of entries) {
-    while (commandLines[command] <= nameLine) command++
-    const end = commandLines[command] ?? lines.length + 1
-    const content = lines
-      .slice(line - 1, end - 1)
-      .join('\n')
-      .trimEnd()
+  for (const { name, line, content } of declarationsIn(source))
     result.set(name, result.has(name) ? null : { line, content })
-  }
   return result
 }
 
@@ -375,7 +410,8 @@ export function changedPaperDeclarations(changes, signal) {
 }
 
 export async function makePaperLink(input, { readText, readPdf, signal }) {
-  const { source, target } = normalize(input)
+  const link = normalize(input)
+  const { source, target } = link
   let sourceRevision
   signal?.throwIfAborted()
   if ('page' in source) {
@@ -394,7 +430,14 @@ export async function makePaperLink(input, { readText, readPdf, signal }) {
       fail(
         'The TeX anchor does not match that line. Check the saved line and label.',
       )
-    sourceRevision = sha256(lines[source.line - 1])
+    sourceRevision = source.label
+      ? labeledTexRevision(
+          lines,
+          labeledTexEnvironments(lines, new Set([source.line])).get(
+            source.line,
+          ),
+        )
+      : sha256(lines[source.line - 1])
   }
   signal?.throwIfAborted()
   const { content } = await readText(target.path)
@@ -417,7 +460,6 @@ export async function makePaperLink(input, { readText, readPdf, signal }) {
   signal?.throwIfAborted()
   target.line = declaration.line
   target.declaration = declaration.name
-  const link = { source, target }
   return {
     id: linkId(link),
     ...link,
@@ -426,9 +468,33 @@ export async function makePaperLink(input, { readText, readPdf, signal }) {
   }
 }
 
-export function upsertPaperLink(content, link) {
+export function upsertPaperLink(
+  content,
+  { id, source, target, difference, sourceRevision, targetRevision },
+) {
   const links = parseManifest(content)
-  const index = links.findIndex(({ id }) => id === link.id)
+  const index = links.findIndex((entry) => entry.id === id)
+  const previous = links[index]
+  if (
+    previous?.difference &&
+    difference === undefined &&
+    (previous.sourceRevision !== sourceRevision ||
+      previous.targetRevision !== targetRevision ||
+      previous.source.quote !== source.quote)
+  )
+    fail(
+      'This link has a formalization note and its source or declaration changed. Review the difference again and provide an updated note or null if it was resolved.',
+      409,
+    )
+  const note = difference === undefined ? previous?.difference : difference
+  const link = {
+    id,
+    source,
+    target,
+    ...(note ? { difference: note } : {}),
+    sourceRevision,
+    targetRevision,
+  }
   if (index >= 0) links[index] = link
   else links.push(link)
   return writeManifest(links)
@@ -516,15 +582,24 @@ function currentTexLines(content, anchors, includeRenderRanges) {
   )
   const labeledLines = new Set([...labels.values()].filter(Boolean))
   const ranges =
-    includeRenderRanges && labeledLines.size
+    (includeRenderRanges || anchors.some(({ difference }) => difference)) &&
+    labeledLines.size
       ? labeledTexEnvironments(lines, labeledLines)
       : new Map()
   const resolved = new Map(
-    anchors.map(({ id, source, sourceRevision }) => {
+    anchors.map(({ id, source, sourceRevision, difference }) => {
       const line = texLine(lines, labels, source, sourceRevision)
+      const range = source.label ? ranges.get(line) : undefined
       return [
         id,
-        { line, renderRange: source.label ? ranges.get(line) : undefined },
+        {
+          line,
+          renderRange: includeRenderRanges ? range : undefined,
+          noteCurrent:
+            !source.label ||
+            !difference ||
+            (!!line && labeledTexRevision(lines, range) === sourceRevision),
+        },
       ]
     }),
   )
@@ -549,7 +624,8 @@ function currentTexLines(content, anchors, includeRenderRanges) {
   return resolved
 }
 
-function markedTexLinks(content, path, limit) {
+function markedTexLinks(content, path, limit, leanTarget) {
+  if (leanTarget && !content.includes(`% Lean: ${leanTarget}#`)) return []
   const links = []
   for (const { key, line, startLine, endLine } of informalizationTexPassages(
     content,
@@ -569,6 +645,7 @@ function markedTexLinks(content, path, limit) {
       if (error.status === 400) continue
       throw error
     }
+    if (leanTarget && targetPath !== leanTarget) continue
     const source = { path, line }
     const target = {
       path: targetPath,
@@ -590,6 +667,7 @@ async function resolveTexPassages(
   readText,
   includeRanges,
   signal,
+  leanTarget,
 ) {
   const sources = new Map()
   const marked = []
@@ -620,6 +698,7 @@ async function resolveTexPassages(
           content,
           file,
           MAX_LINKS - marked.length,
+          leanTarget,
         )) {
           // A formalization may already have recorded this theorem. Keep that
           // reviewed link and use the printed range supplied by the marker.
@@ -654,9 +733,10 @@ async function resolveTexPassages(
 
 export async function listPaperLinks(
   content,
-  { path, sourcePaths, readText, readPdf, signal },
+  { path, sourcePaths, texPaths = [], readText, readPdf, signal },
 ) {
   const selected = path === undefined ? undefined : projectFile(path)
+  const leanTarget = selected && isLeanFile(selected) ? selected : undefined
   const stored = parseManifest(content).filter(({ source, target }) =>
     sourcePaths
       ? sourcePaths.has(source.path)
@@ -665,13 +745,14 @@ export async function listPaperLinks(
         target.path === selected,
   )
   const papers =
-    sourcePaths ?? (isTexFile(selected) ? new Set([selected]) : new Set())
+    sourcePaths ?? new Set(isTexFile(selected) ? [selected] : texPaths)
   const { sources, marked } = await resolveTexPassages(
     stored,
     papers,
     readText,
     !!sourcePaths,
     signal,
+    leanTarget,
   )
   const links = [...stored, ...marked]
   const pdfCache = new Map()
@@ -682,7 +763,14 @@ export async function listPaperLinks(
     names.get(target.path).add(target.declaration)
   }
   const result = []
-  for (const { id, source, target, sourceRevision, targetRevision } of links) {
+  for (const {
+    id,
+    source,
+    target,
+    difference,
+    sourceRevision,
+    targetRevision,
+  } of links) {
     signal?.throwIfAborted()
     const anchor = sources.get(source.path)?.get(id)
     const sourceLine = anchor?.line
@@ -691,7 +779,7 @@ export async function listPaperLinks(
         ? (await readAnchor(pdfCache, source.path, async (filename) =>
             sha256((await readPdf(filename)).content),
           )) === sourceRevision
-        : !!sourceLine
+        : !!sourceLine && anchor.noteCurrent !== false
     const candidates = await readAnchor(
       targetCache,
       target.path,
@@ -705,6 +793,7 @@ export async function listPaperLinks(
       matching.length === 1 &&
       (!targetRevision ||
         matching[0].revision === targetRevision ||
+        matching[0].headerRevision === targetRevision ||
         matching[0].legacyRevision === targetRevision)
         ? matching[0]
         : null
@@ -716,6 +805,7 @@ export async function listPaperLinks(
       source: sourceLine ? { ...source, line: sourceLine } : source,
       target: destination ? { ...target, line: destination.line } : target,
       status: sourceCurrent && destination ? 'current' : 'stale',
+      ...(difference ? { difference } : {}),
       ...(anchor?.renderRange ? { renderRange: anchor.renderRange } : {}),
     })
   }
@@ -759,11 +849,14 @@ export async function projectPaperLinks(
   const selected = projectFile(path)
   if (!isPdfFile(selected) && !isTexFile(selected) && !isLeanFile(selected))
     return { links: [] }
+  const texPaths = isLeanFile(selected)
+    ? await workspaces.texSourcePaths(projectId, actor, { signal })
+    : []
   const links = await readProjectPaperLinks(
     workspaces,
     projectId,
     actor,
-    { path: selected },
+    { path: selected, texPaths },
     signal,
   )
   return { links }

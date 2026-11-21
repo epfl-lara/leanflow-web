@@ -16,6 +16,7 @@ import {
 } from './agent-images.mjs'
 import { modeReasoningEffort } from '../shared/mode-reasoning.mjs'
 import { PROJECT_CONFIGURATION_FILES } from '../shared/project-configuration.mjs'
+import { PAPER_LINKS_FILE } from '../shared/paper-links.mjs'
 import {
   setupRequestPurpose,
   assertSetupRequestChanges,
@@ -1152,6 +1153,9 @@ export class AgentManager {
           suggestedPath: informalizationDocumentPath(job, snapshot),
           ...(job.outputFile ? { requestedPath: job.outputFile } : {}),
           declarations: informalSources.entries,
+          ...(snapshot.files.some(({ path }) => path === PAPER_LINKS_FILE)
+            ? { paperLinksFile: PAPER_LINKS_FILE }
+            : {}),
           ...(discover ? { discoverSources: true } : {}),
         })
       }

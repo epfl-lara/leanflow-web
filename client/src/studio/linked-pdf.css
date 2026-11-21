@@ -80,67 +80,6 @@
   display: block;
 }
 
-.linked-pdf-source-mark,
-.linked-pdf-source-hit,
-.linked-pdf-source-actions {
-  position: absolute;
-}
-
-.linked-pdf-source-mark {
-  pointer-events: none;
-  z-index: 1;
-}
-
-.linked-pdf-source-hit {
-  pointer-events: auto;
-  border-radius: 2px;
-  background: rgb(15 130 135 / 22%);
-  box-shadow: inset 0 -2px rgb(14 113 119 / 80%);
-}
-
-.linked-pdf-source-actions {
-  z-index: 1;
-  pointer-events: auto;
-}
-
-.linked-pdf-source-actions .linked-pdf-lean-badge {
-  position: relative;
-}
-
-.linked-pdf-source-mark:is(:hover, :focus-within, [data-tapped]) {
-  z-index: 3;
-}
-
-.linked-pdf-source-mark:is(:hover, :focus-within, [data-tapped])
-  .linked-pdf-source-hit {
-  background: rgb(15 130 135 / 32%);
-}
-
-.linked-pdf-source-choices .linked-pdf-source-lean {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  padding: 5px 6px;
-  border: 0;
-  border-radius: 4px;
-  color: var(--text);
-  background: transparent;
-  font-size: 11px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.linked-pdf-source-choices .linked-pdf-source-lean:is(:hover, :focus-visible) {
-  background: color-mix(in srgb, var(--accent) 12%, var(--canvas));
-}
-
-.linked-pdf-source-choices .linked-pdf-source-lean > span {
-  display: grid;
-  min-width: 0;
-}
-
 /* These positioning properties accompany PDF.js TextLayer's per-span metrics. */
 .linked-pdf-text {
   position: absolute;
@@ -185,154 +124,143 @@
   color: transparent;
 }
 
-.linked-pdf-passage,
-.linked-pdf-passage-part {
+.linked-pdf-mark {
   position: absolute;
   z-index: 1;
+  pointer-events: none;
+  --pdf-mark-ink: #586978;
+}
+
+.linked-pdf-mark[data-annotated] {
+  --pdf-mark-ink: #895817;
+}
+
+.linked-pdf-mark:is(:hover, :focus-within, [data-expanded]) {
+  z-index: 3;
+}
+
+.linked-pdf-mark-part {
+  position: absolute;
+  box-sizing: border-box;
+  border-bottom: 1px dotted
+    color-mix(in srgb, var(--pdf-mark-ink) 42%, transparent);
+  pointer-events: none;
+}
+
+.linked-pdf-mark:is(:hover, :focus-within, [data-expanded])
+  .linked-pdf-mark-part {
+  background: color-mix(in srgb, var(--pdf-mark-ink) 7%, transparent);
+  border-color: var(--pdf-mark-ink);
+}
+
+.linked-pdf-mark-button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 2px;
-  background: rgb(15 130 135 / 22%);
-  box-shadow: inset 0 -2px rgb(14 113 119 / 80%);
+  border-radius: 4px;
+  color: var(--pdf-mark-ink);
+  background: transparent;
+  pointer-events: auto;
   cursor: pointer;
 }
 
-.linked-pdf-passage:is(:hover, :focus-visible) {
-  z-index: 3;
+.linked-pdf-mark-button:not([aria-expanded]) svg {
+  rotate: -40deg;
 }
 
-.linked-pdf-passage:is(:hover, :focus-visible),
-.linked-pdf-passage:is(:hover, :focus-visible) .linked-pdf-passage-part {
-  background: rgb(15 130 135 / 32%);
+.linked-pdf-mark-button:is(:hover, :focus-visible, [aria-expanded='true']) {
+  background: color-mix(in srgb, var(--pdf-mark-ink) 10%, white);
 }
 
-.linked-pdf-lean-badge {
+.linked-pdf-mark-button:focus-visible {
+  outline: 2px solid var(--pdf-mark-ink);
+  outline-offset: 1px;
+}
+
+.linked-pdf-mark-preview,
+.linked-pdf-mark-details {
   position: absolute;
-  z-index: 2;
-  display: inline-flex;
-  width: 52px;
-  height: 22px;
-  box-sizing: border-box;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  padding: 2px 5px;
-  border: 1px solid #0c4248;
-  border-radius: 6px;
-  background: #11636a;
-  color: #fff;
-  box-shadow: 0 1px 3px rgb(0 0 0 / 20%);
-  white-space: nowrap;
-  font:
-    700 10px/1.2 system-ui,
-    sans-serif;
-  cursor: pointer;
-  user-select: none;
-}
-
-.linked-pdf-lean-badge[aria-expanded] {
-  width: 72px;
-}
-
-.linked-pdf-lean-badge[data-lean-badge-side]::before {
-  position: absolute;
-  inset-block: -1px;
-  width: 5px;
-  content: '';
-}
-
-.linked-pdf-lean-badge[data-lean-badge-side='after']::before {
-  right: 100%;
-}
-
-.linked-pdf-lean-badge[data-lean-badge-side='before']::before {
-  left: 100%;
-}
-
-.linked-pdf-lean-badge:hover,
-.linked-pdf-source-mark:has(.linked-pdf-source-hit:hover)
-  .linked-pdf-lean-badge,
-.linked-pdf-passage:is(:hover, :focus-visible) .linked-pdf-lean-badge {
-  background: #094a51;
-}
-
-.linked-pdf-lean-badge:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.linked-pdf-lean-preview {
-  display: none;
-  position: absolute;
-  z-index: 3;
-  bottom: calc(100% + var(--lean-preview-gap));
+  bottom: calc(100% + 4px);
   left: 0;
-  width: max-content;
-  max-width: var(--lean-preview-width);
+  max-width: min(280px, var(--pdf-note-width));
   box-sizing: border-box;
-  gap: 3px;
-  padding: 7px 8px;
+  padding: 7px 9px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--canvas);
   color: var(--text);
-  box-shadow: 0 3px 10px rgb(0 0 0 / 20%);
-  white-space: normal;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 12%);
   font:
-    400 12px/1.4 system-ui,
+    12px/1.45 system-ui,
     sans-serif;
   overflow-wrap: anywhere;
-  text-align: left;
 }
 
-.linked-pdf-lean-preview small {
-  color: var(--muted);
-}
-
-.linked-pdf-lean-preview-name,
-.linked-pdf-lean-preview-action {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.linked-pdf-lean-preview-name svg,
-.linked-pdf-lean-preview-action svg {
-  flex-shrink: 0;
-}
-
-.linked-pdf-lean-preview-action {
-  margin-top: 3px;
-  color: var(--accent);
-  font-weight: 700;
-}
-
-[data-preview-below] .linked-pdf-lean-preview {
-  top: calc(100% + var(--lean-preview-gap));
+.linked-pdf-mark[data-preview-below]
+  :is(.linked-pdf-mark-preview, .linked-pdf-mark-details) {
+  top: calc(100% + 4px);
   bottom: auto;
 }
 
-[data-preview-align-end] .linked-pdf-lean-preview {
+.linked-pdf-mark[data-align-end]
+  :is(.linked-pdf-mark-preview, .linked-pdf-mark-details) {
   right: 0;
   left: auto;
 }
 
-.linked-pdf-lean-preview::before {
-  position: absolute;
-  top: 100%;
-  inset-inline: 0;
-  height: var(--lean-preview-gap);
-  content: '';
+.linked-pdf-mark-preview {
+  display: none;
+  width: max-content;
 }
 
-[data-preview-below] .linked-pdf-lean-preview::before {
-  top: auto;
-  bottom: 100%;
-}
-
-.linked-pdf-passage:is(:hover, :focus-visible) .linked-pdf-lean-preview,
-.linked-pdf-source-mark:is(:hover, :focus-within, [data-tapped])
-  .linked-pdf-lean-preview,
-.linked-pdf-source-choices {
+.linked-pdf-mark-button:is(:hover, :focus-visible) + .linked-pdf-mark-preview {
   display: grid;
+  gap: 2px;
+}
+
+.linked-pdf-mark-details {
+  display: grid;
+  width: 280px;
+  max-height: min(var(--pdf-note-height), 240px, 40vh);
+  gap: 6px;
+  padding: 5px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  pointer-events: auto;
+}
+
+.linked-pdf-mark-destination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.linked-pdf-mark-destination:is(:hover, :focus-visible) {
+  background: color-mix(in srgb, var(--accent) 12%, var(--canvas));
+}
+
+.linked-pdf-mark-destination > span {
+  display: grid;
+  min-width: 0;
+}
+
+.linked-pdf-mark-destination > svg {
+  flex-shrink: 0;
+}
+
+.linked-pdf-mark small {
+  color: var(--muted);
 }

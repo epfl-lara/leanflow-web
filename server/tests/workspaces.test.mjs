@@ -806,6 +806,7 @@ test('concurrent live paper links verify and undo independently', async (t) => {
   const { store, project } = await fixture(t)
   const owner = 'alice'
   const paper = 'paper.tex'
+  const difference = 'The revised statement covers only the base case.'
   const options = { allowProjectFiles: true }
   await store.writeFile(
     project.id,
@@ -833,6 +834,7 @@ test('concurrent live paper links verify and undo independently', async (t) => {
         {
           source: { path: paper, line: index + 1 },
           target: { path: lean, line: 1, declaration: name },
+          ...(name === 'second' ? { difference } : {}),
         },
       )
       return { snapshot, lean, link, changes: await store.changes(snapshot) }
@@ -844,10 +846,9 @@ test('concurrent live paper links verify and undo independently', async (t) => {
     ),
   )
   const ids = runs.map(({ link }) => link.id).sort()
-  const savedIds = async () =>
+  const savedLinks = async () =>
     (await projectPaperLinks(store, project.id, owner, paper)).links
-      .map(({ id }) => id)
-      .sort()
+  const savedIds = async () => (await savedLinks()).map(({ id }) => id).sort()
   assert.deepEqual(await savedIds(), ids)
   for (const [index, { snapshot, changes }] of runs.entries()) {
     await store.assertLive(snapshot, live[index], options)
@@ -859,6 +860,10 @@ test('concurrent live paper links verify and undo independently', async (t) => {
       await fs.readFile(path.join(verification.root, PAPER_LINKS_FILE), 'utf8'),
     )
     assert.deepEqual(saved.links.map(({ id }) => id).sort(), ids)
+    assert.equal(
+      saved.links.find(({ id }) => id === runs[1].link.id).difference,
+      difference,
+    )
     for (const { lean } of runs)
       assert.match(
         await fs.readFile(path.join(verification.root, lean), 'utf8'),
@@ -869,6 +874,7 @@ test('concurrent live paper links verify and undo independently', async (t) => {
 
   await store.undoLive(runs[0].snapshot, live[0], options)
   assert.deepEqual(await savedIds(), [runs[1].link.id])
+  assert.equal((await savedLinks())[0].difference, difference)
   await assert.rejects(store.readFile(project.id, owner, runs[0].lean), {
     status: 404,
   })

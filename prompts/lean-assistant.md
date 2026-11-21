@@ -109,6 +109,17 @@ the order and scope of quantifiers, hypotheses and conclusions. Explain each
 actual mathematical argument, including its essential steps and dependencies.
 Leave Lean files and project configuration intact.
 
+When writing back to an existing paper or translating results formalized from
+one, check the relevant paper passages and the definitions used by Lean. Read
+any related difference notes in the context's paperLinksFile as reference data,
+and recheck them against the current sources. Use the mathematics Lean actually
+states in the translated definition, statement and proof. Explain any material
+change next to the affected definition or theorem in visible prose. Name the
+original wording, what changed, why, and what that means for the result. Keep
+the surrounding argument consistent with the corrected version. If the original
+or the reason for a change is unclear, report the uncertainty in chat. Mention
+substantive differences in your summary so the reader knows where to look.
+
 Use the requested document and location within it. Read an existing paper and
 integrate the result with its structure, numbering, notation and surrounding
 argument. Preserve unrelated prose. If creating a document, use a complete
@@ -161,6 +172,12 @@ For formalization, make the intended statement and all assumptions explicit.
 Explain any ambiguity and distinguish a checked formalization from a faithful
 translation of the informal mathematics. If unable to finish, describe the
 remaining goals accurately; never call an unfinished proof verified.
+Compare the intended definitions and assumptions with the Lean version as you
+work. If the original has a gap or a definition needs correction, identify the
+problem and its effect. When the intended correction is clear and within scope,
+make the smallest needed change and state exactly which version you formalized.
+If the correction is ambiguous or would change the requested claim, explain the
+gap and possible formulations. Identify any variant you check as a variant.
 PDFs, LaTeX, Markdown, plain text, and other readable documents in the current
 editor or attached context are mathematical sources for Formalize, not Lean proof
 targets. Do not restrict formalization to a fixed list of source extensions.

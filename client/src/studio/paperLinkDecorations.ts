@@ -5,7 +5,7 @@ import type { PaperLink } from './api'
 import './paperLinkDecorations.css'
 
 type PaperLocation = PaperLink['source'] | PaperLink['target']
-type Destination = { id: string; location: PaperLocation }
+type Destination = { id: string; location: PaperLocation; difference?: string }
 
 let nextCommand = 0
 
@@ -59,7 +59,7 @@ export function decoratePaperLinks(
     { label?: string; destinations: Destination[] }
   >()
   const destinations = new Map<string, PaperLocation>()
-  for (const { id, source, target, status } of links) {
+  for (const { id, source, target, status, difference } of links) {
     if (status !== 'current') continue
     const fromPaper = source.path === path && 'line' in source
     if (!fromPaper && target.path !== path) continue
@@ -70,7 +70,7 @@ export function decoratePaperLinks(
       destinations: [],
     }
     const location = fromPaper ? target : source
-    group.destinations.push({ id, location })
+    group.destinations.push({ id, location, difference })
     groups.set(line, group)
     destinations.set(id, location)
   }
@@ -84,7 +84,11 @@ export function decoratePaperLinks(
   const follow = (line: number) => {
     if (!current()) return
     const group = groups.get(line)
-    if (group?.destinations.length === 1) open(group.destinations[0].location)
+    if (
+      group?.destinations.length === 1 &&
+      (!group.destinations[0].difference || !showLinks)
+    )
+      open(group.destinations[0].location)
     else if (group) showLinks?.()
   }
   const command = monaco.addCommand({
@@ -101,17 +105,24 @@ export function decoratePaperLinks(
         label,
       )
       if (!startColumn || endColumn <= startColumn) return []
+      const annotated = destinations.some(({ difference }) => !!difference)
+      const variation = annotated ? ' paper-editor-difference' : ''
       const hoverMessage: IMarkdownString[] = destinations.map(
-        ({ id, location }) =>
-          new MarkdownString('', {
+        ({ id, location, difference }) => {
+          const message = new MarkdownString('', {
             isTrusted: { enabledCommands: [commandId] },
           })
-            .appendText(linkTitle(location))
-            .appendMarkdown('  \n')
-            .appendLink(
-              `command:${commandId}?${encodeURIComponent(JSON.stringify([id]))}`,
-              actionTitle(location),
-            ),
+          message.appendText(linkTitle(location)).appendMarkdown('  \n')
+          if (difference)
+            message
+              .appendMarkdown('**Formalization note**  \n')
+              .appendText(difference)
+              .appendMarkdown('  \n')
+          return message.appendLink(
+            `command:${commandId}?${encodeURIComponent(JSON.stringify([id]))}`,
+            actionTitle(location),
+          )
+        },
       )
       return [
         {
@@ -122,13 +133,13 @@ export function decoratePaperLinks(
             endColumn,
           },
           options: {
-            inlineClassName: 'paper-editor-anchor',
+            inlineClassName: `paper-editor-anchor${variation}`,
             hoverMessage,
             stickiness:
               monaco.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
             after: {
-              content: '\u00a0↗\u00a0',
-              inlineClassName: `paper-editor-jump paper-editor-jump-${line}`,
+              content: annotated ? '\u00a0ⓘ\u00a0' : '\u00a0↗\u00a0',
+              inlineClassName: `paper-editor-jump paper-editor-jump-${line}${variation}`,
               inlineClassNameAffectsLetterSpacing: true,
               cursorStops: monaco.InjectedTextCursorStops.None,
             },

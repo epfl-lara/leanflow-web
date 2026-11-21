@@ -284,6 +284,12 @@ test('native assistant advertises and executes document tools in every mode', as
             }
           : { path: 'main.tex', line: 6, label: 'thm:main' },
         target: { path: 'Main.lean', line: 3, declaration: 'mainTheorem' },
+        ...(retry === 'link'
+          ? {
+              difference:
+                'Lean states the result for positive inputs. The argument divides by the input, so zero is excluded.',
+            }
+          : {}),
       }
       const leanChange = {
         path: 'Main.lean',
@@ -654,6 +660,13 @@ test('native assistant advertises and executes document tools in every mode', as
           { root: candidate, projectId: 'p', owner: 'alice', input: paperLink },
         ])
         if (retry === 'link') {
+          assert.equal(
+            JSON.parse(
+              requests.find(({ id }) => id === 1006).result.contentItems[0]
+                .text,
+            ).difference,
+            paperLink.difference,
+          )
           assert.equal(
             requests.find(({ id }) => id === 1004).result.success,
             false,

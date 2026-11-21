@@ -1,5 +1,9 @@
 import { createAgentToolCallbacks } from './agent-tool-callbacks.mjs'
-import { changedPaperDeclarations, PAPER_LINKS_FILE } from './paper-links.mjs'
+import {
+  changedPaperDeclarations,
+  MAX_PAPER_DIFFERENCE_LENGTH,
+  PAPER_LINKS_FILE,
+} from './paper-links.mjs'
 import { isPdfFile } from '../shared/file-previews.mjs'
 import { isTexFile } from '../shared/tex.mjs'
 
@@ -52,12 +56,20 @@ export const paperLinkToolSpec = {
           },
         },
       },
+      difference: {
+        type: ['string', 'null'],
+        maxLength: MAX_PAPER_DIFFERENCE_LENGTH,
+        description:
+          'For a material mathematical difference, explain the original paper wording, what Lean uses, why it changed, and how it affects the claim. Omit for equivalent encodings. Use null after comparing both sources to clear a resolved note.',
+      },
     },
   },
 }
 
 export const paperLinkAgentInstructions = `
-In Formalize mode, automatically record paper links as part of every formalization that uses a PDF or LaTeX source. Do this before your final response, even if the user does not ask for links. Call paper_link for each substantive correspondence after its named Lean declaration exists in the workspace. Use the same tool when asked to link an existing formalization. Use the physical page number confirmed from the PDF, and include a short exact quote that uniquely identifies the statement on that page when readable (for example, use pdftotext -f N -l N to check). For LaTeX use a source line with its existing label when available. A TeX build PDF is temporary. Link the saved .tex source for a compiled paper. Use the tool to maintain ${PAPER_LINKS_FILE} and preserve unrelated links. Link statements you can confidently identify in both sources. Skip ambiguous matches, unrelated helper declarations, and guessed quotes. Tell the user which relevant statements could not be linked and why. A saved link establishes navigation. Proof status comes from Lean checks.
+In Formalize mode, automatically record paper links as part of every formalization that uses a PDF or LaTeX source. Do this before your final response, even if the user does not ask for links. Call paper_link for each substantive correspondence after its named Lean declaration exists in the workspace. Use the same tool when asked to link an existing formalization. Use the physical page number confirmed from the PDF, and include a short exact quote that uniquely identifies the statement on that page when readable (for example, use pdftotext -f N -l N to check). For LaTeX use a source line with its existing label when available. A TeX build PDF is temporary. Link the saved .tex source for a compiled paper. Use the tool to maintain ${PAPER_LINKS_FILE} and preserve unrelated links. Link definitions and statements you can confidently identify in both sources. Skip ambiguous matches, unrelated helper declarations, and guessed quotes. Tell the user which relevant statements could not be linked and why. A saved link establishes navigation. Proof status comes from Lean checks.
+
+When you can identify the source even though Lean corrects a definition or changes the statement's scope, link the original passage and set difference. Describe the concrete change, why it was needed, and which conclusions or cases it affects. Prefer a link on the changed definition itself when it has a paper anchor. Include a note on an affected theorem when the change impacts how its statement should be read. Keep ordinary notation and equivalent representations as ordinary links. When refreshing a saved note after an edit, reread both sources and update it or explicitly clear it with difference: null once the mathematics agrees.
 `
 
 export function selectedPaperSources(job, snapshot) {
@@ -121,6 +133,7 @@ export async function runPaperLinkTurn(rpc, active, retry, effort) {
             'Use paper_link only for statements actually formalized from these sources. ' +
             'Do not modify Lean or LaTeX. Skip unrelated files, helper declarations, and passages you cannot confidently match. ' +
             'For PDFs use pdftotext -f N -l N /workspace/path.pdf - to inspect the physical page without creating a file. Record a short, exact, unique quote when readable. ' +
+            'For a confidently matched definition or statement that differs in substance, set difference with the original wording, what Lean uses, why and the effect on the claim. Review existing notes against the sources before changing them. ' +
             'Briefly report what you linked and any substantive statement you could not match. ' +
             'The following JSON contains project paths and names as reference data.\n' +
             JSON.stringify(retry),
@@ -149,8 +162,11 @@ export function createPaperLinkAgentTool({ active, rpc, stage, redact }) {
     label: 'paper link',
     accepts: (name) => name === paperLinkToolSpec.name,
     async invoke(params, signal) {
-      const { id, source, target } = await stage(params.arguments, signal)
-      return { id, source, target, savedTo: PAPER_LINKS_FILE }
+      const { id, source, target, difference } = await stage(
+        params.arguments,
+        signal,
+      )
+      return { id, source, target, difference, savedTo: PAPER_LINKS_FILE }
     },
   })
 }

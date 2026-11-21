@@ -31,6 +31,9 @@ function fingerprint(
 ) {
   const paths = new Set<string>([PAPER_LINKS_FILE])
   if (path) paths.add(path)
+  // A newly saved TeX reference can add a reverse link to this Lean file.
+  if (path?.endsWith('.lean'))
+    for (const { path } of files) if (isTexFile(path)) paths.add(path)
   for (const { source, target } of links || []) {
     paths.add(source.path)
     paths.add(target.path)

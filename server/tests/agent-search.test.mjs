@@ -14,7 +14,12 @@ import { EventStore } from '../events.mjs'
 import { WorkspaceStore } from '../workspaces.mjs'
 import { Runtime } from '../runtime.mjs'
 import { TexBuildManager } from '../tex-builds.mjs'
-import { projectTexPaperLinks } from '../paper-links.mjs'
+import {
+  makePaperLink,
+  PAPER_LINKS_FILE,
+  projectTexPaperLinks,
+  upsertPaperLink,
+} from '../paper-links.mjs'
 import { pdfSourceLinkMatches } from '../../client/src/studio/pdfSourceNavigation.ts'
 import { prepareInformalizationSources } from '../informalization.mjs'
 import net from 'node:net'
@@ -708,6 +713,13 @@ test('Informalize inserts the checked proof into an existing document for review
     name: 'keep',
     source: sourceProof,
   }
+  const original = 'Original.tex'
+  const difference =
+    'The paper asserts p. Lean proves p from an assumption that p holds.'
+  const draft = markdown.replace(
+    '\n\n**Proof.**',
+    `\n\n**Formalization note.** ${difference}\n\n**Proof.**`,
+  )
   const reply = 'Added the statement and proof to [Notes.md](Notes.md).'
   const f = await fixture(
     t,
@@ -718,8 +730,14 @@ test('Informalize inserts the checked proof into an existing document for review
       )
       assert.deepEqual(plan.declarations, [sourceEntry])
       assert.equal(plan.requestedPath, 'Notes.md')
+      assert.equal(plan.paperLinksFile, PAPER_LINKS_FILE)
+      const { links } = JSON.parse(
+        await fs.readFile(path.join(root, plan.paperLinksFile), 'utf8'),
+      )
+      assert.equal(links[0].difference, difference)
+      assert.equal(links[0].source.path, original)
       const notes = await fs.readFile(path.join(root, 'Notes.md'), 'utf8')
-      await fs.writeFile(path.join(root, 'Notes.md'), notes + markdown)
+      await fs.writeFile(path.join(root, 'Notes.md'), notes + draft)
     },
     { reply },
   )
@@ -749,6 +767,28 @@ test('Informalize inserts the checked proof into an existing document for review
     '# Results\n',
     null,
   )
+  await f.workspaces.writeFile(
+    f.project.id,
+    'alice',
+    original,
+    'Every proposition holds.\n',
+    null,
+  )
+  const link = await makePaperLink(
+    {
+      source: { path: original, line: 1 },
+      target: { path: target.path, line: 2, declaration: sourceEntry.name },
+      difference,
+    },
+    { readText: (file) => f.workspaces.readFile(f.project.id, 'alice', file) },
+  )
+  await f.workspaces.writeFile(
+    f.project.id,
+    'alice',
+    PAPER_LINKS_FILE,
+    upsertPaperLink(null, link),
+    null,
+  )
   const result = await f.execute('Insert the selected proof in Notes.md.', {
     mode: 'informalize',
     liveEdits: false,
@@ -774,7 +814,7 @@ test('Informalize inserts the checked proof into an existing document for review
   assert.equal((await f.manager.apply('alice', result.id)).status, 'applied')
   assert.equal(
     (await f.workspaces.readFile(f.project.id, 'alice', 'Notes.md')).content,
-    '# Results\n' + markdown,
+    '# Results\n' + draft,
   )
   assert.equal(
     (await f.workspaces.readFile(f.project.id, 'alice', target.path)).content,

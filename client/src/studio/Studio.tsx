@@ -681,9 +681,13 @@ export function Studio() {
     [files],
   )
   const texVisible = !!texLanguage(file?.path) && texFiles.length > 0
-  const hasPaperFiles = useMemo(
-    () => files.some(({ path }) => isPdfFile(path) || isTexFile(path)),
+  const hasTexSources = useMemo(
+    () => files.some(({ path }) => isTexFile(path)),
     [files],
+  )
+  const hasPaperFiles = useMemo(
+    () => hasTexSources || files.some(({ path }) => isPdfFile(path)),
+    [files, hasTexSources],
   )
   const paperLinkPath =
     !singleFileMode &&
@@ -710,7 +714,10 @@ export function Studio() {
     accountId: session?.user.id,
     projectId,
     path:
-      paperLinksOpen || hasPaperLinks || hasLeanReference
+      paperLinksOpen ||
+      hasPaperLinks ||
+      hasLeanReference ||
+      (hasTexSources && paperLinkPath?.endsWith('.lean'))
         ? paperLinkPath
         : null,
     files,
@@ -1890,7 +1897,7 @@ export function Studio() {
       id: ++chatDraftRequestId.current,
       projectId,
       contextFile: paperLinkPath,
-      text: `Find paper links for this existing formalization. ${comparison} Use paper_link to record clear matches. For a PDF, include a short exact excerpt from the matching page when its text is readable. Keep the paper and Lean sources unchanged and report any ambiguous matches.`,
+      text: `Find paper links for this existing formalization. ${comparison} Use paper_link to record clear correspondences. Include a difference note when a definition or statement changes the mathematics. For a PDF, include a short exact excerpt from the matching page when its text is readable. Keep the paper and Lean sources unchanged and report any ambiguous matches.`,
     })
     if (mobileLayout) closePaperLinks()
     setToolsOpen(true)

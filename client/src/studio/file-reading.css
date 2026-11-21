@@ -198,6 +198,19 @@
   margin: 4px 7px 6px;
   color: var(--muted);
 }
+.paper-link-difference {
+  margin: 4px 7px 6px;
+  padding-inline-start: 8px;
+  border-inline-start: 2px solid
+    color-mix(in srgb, var(--warning) 45%, transparent);
+  white-space: pre-line;
+}
+.paper-link-difference > strong {
+  display: block;
+  color: var(--warning);
+  font-size: 11px;
+  margin-bottom: 2px;
+}
 @container (max-width: 740px) {
   .paper-links-panel {
     grid-column: 1;

@@ -342,6 +342,7 @@ export interface PaperLink {
     | { path: string; line: number; label?: string }
   target: { path: string; line: number; declaration: string }
   status: 'current' | 'stale'
+  difference?: string
   renderRange?: { startLine: number; endLine: number }
 }
 export interface TexDiagnostic {

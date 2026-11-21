@@ -123,6 +123,7 @@ import {
 } from './paper-links.mjs'
 import { validateBinaryAsset } from './binary-assets.mjs'
 import {
+  isTexFile,
   safeTexPath,
   isTexInputFile,
   TEX_SOURCE_MAX_BYTES,
@@ -4423,6 +4424,7 @@ export class WorkspaceStore {
       dependencyRoot = root,
       includeLinks = false,
       foldersOnly = false,
+      fileFilter,
       limit = MAX_FILES,
       signal,
     } = {},
@@ -4484,7 +4486,11 @@ export class WorkspaceStore {
               result.push({ path: relative })
             }
             await visit(full, relative, depth + 1)
-          } else if (!foldersOnly && entry.isFile()) {
+          } else if (
+            !foldersOnly &&
+            entry.isFile() &&
+            (!fileFilter || fileFilter(relative))
+          ) {
             // lstat on the pinned parent cannot expose metadata through a
             // symlink swapped in after readdir returned its directory entries.
             const stat = await fs.lstat(anchored, { bigint: revisions })
@@ -4590,6 +4596,16 @@ export class WorkspaceStore {
     return (await this.#walk(project.root, { foldersOnly: true })).map(
       (folder) => folder.path,
     )
+  }
+
+  async texSourcePaths(id, owner, { signal } = {}) {
+    const project = this.get(id, owner)
+    const files = await this.#walk(project.root, {
+      fileFilter: isTexFile,
+      limit: TEX_SOURCE_MAX_FILES,
+      signal,
+    })
+    return files.map(({ path }) => path)
   }
 
   async createFolder(id, owner, input) {

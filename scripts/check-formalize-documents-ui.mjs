@@ -77,12 +77,15 @@ try {
   let paperLinksAvailable = false
   let paperLinkRequests = 0
   let holdPaperLinks
+  const difference =
+    'Lean restricts the statement to nonempty traces because the proof needs an initial state. The empty trace case remains open.'
   const paperLinks = [
     {
       id: 'trace-pdf',
-      source: { path: 'Paper.PDF', page: 1, quote: 'Fixture PDF' },
+      source: { path: 'Paper.PDF', page: 1, quote: 'PDF' },
       target,
       status: 'current',
+      difference,
     },
     {
       id: 'trace-tex',
@@ -312,7 +315,7 @@ try {
   )
   paperLinksAvailable = true
   await linkPanel.getByRole('button', { name: 'Refresh paper links' }).click()
-  await linkPanel.getByText('Fixture PDF', { exact: true }).waitFor()
+  await linkPanel.getByText('PDF', { exact: true }).waitFor()
   assert.equal(
     await linkPanel
       .getByRole('button', { name: 'Open Paper.PDF, page 2' })
@@ -419,11 +422,10 @@ try {
     .click()
   await page.getByRole('button', { name: 'Paper links', exact: true }).click()
   const inlinePdfLink = page.getByRole('button', {
-    name: 'Open trace_example in Lean',
+    name: 'Show formalization note for trace_example',
     exact: true,
   })
-  const pdfLeanBadge = inlinePdfLink.locator('.linked-pdf-lean-badge')
-  await pdfLeanBadge.waitFor()
+  await inlinePdfLink.waitFor()
   const zoom = page.getByLabel('PDF zoom')
   const pdfSheet = page.locator('.linked-pdf-sheet')
   const fitWidth = await pdfSheet.evaluate((sheet) => sheet.offsetWidth)
@@ -449,11 +451,40 @@ try {
       (await pdfSheet.evaluate((sheet) => sheet.offsetWidth)) === fitWidth,
     'fit-width PDF',
   )
-  await inlinePdfLink.hover()
-  await inlinePdfLink.getByText('Open in Lean', { exact: true }).click()
+  const passage = pdfSheet.locator('.linked-pdf-mark-part').first()
+  const markerBounds = await inlinePdfLink.boundingBox()
+  const textBounds = await pdfSheet
+    .locator('.linked-pdf-text span')
+    .first()
+    .boundingBox()
+  assert(
+    markerBounds &&
+      textBounds &&
+      markerBounds.x + markerBounds.width <= textBounds.x,
+    'A marker for a partial quote sits outside the full text run',
+  )
+  assert.equal(
+    await passage.evaluate((mark) => getComputedStyle(mark).pointerEvents),
+    'none',
+  )
+  assert.equal(
+    await passage.evaluate((mark) => getComputedStyle(mark).backgroundColor),
+    'rgba(0, 0, 0, 0)',
+  )
+  await inlinePdfLink.press('Enter')
+  const pdfNote = pdfSheet.locator('.paper-link-difference')
+  await pdfNote.filter({ hasText: difference }).waitFor()
+  await page.screenshot({ path: path.join(output, 'formalization-note.png') })
+  await inlinePdfLink.press('Escape')
+  await pdfNote.waitFor({ state: 'hidden' })
+  assert.equal(await inlinePdfLink.getAttribute('aria-expanded'), 'false')
+  await inlinePdfLink.click()
+  await pdfSheet
+    .getByRole('button', { name: 'Open trace_example in Lean' })
+    .click()
   await page.getByRole('tab', { name: 'Main.lean', selected: true }).waitFor()
   report.checks.push(
-    'Paper links navigate both directions, the uploaded PDF shows a visible Lean action with a hover preview, and stale links are disabled.',
+    'Uploaded PDF passages stay unobstructed. The note opens by pointer or keyboard and can jump to Lean. Stale links are disabled.',
   )
 
   await open('paper.tex')
@@ -469,12 +500,12 @@ try {
     (await editorJump.boundingBox())?.width >= 20,
     'The editor marker gives the jump arrow room to click',
   )
-  assert.notEqual(
+  assert.equal(
     await editorJump.evaluate(
       (marker) => getComputedStyle(marker).backgroundColor,
     ),
     'rgba(0, 0, 0, 0)',
-    'The editor marker has a visible fill before hover',
+    'An ordinary editor marker has no fill before hover',
   )
   const hover = page.locator('.monaco-hover')
   await page.locator('.paper-editor-anchor').first().hover()
@@ -485,12 +516,17 @@ try {
   await linkPanel
     .getByRole('button', { name: 'Open Appendix.pdf, page 1' })
     .waitFor()
+  await linkPanel
+    .locator('.paper-link-difference')
+    .filter({ hasText: difference })
+    .waitFor()
   await paperLinksButton.click()
   await page
     .locator('.paper-editor-anchor', { hasText: 'trace_example' })
     .first()
     .hover()
   await hover.getByText('Paper.PDF, page 1').waitFor()
+  await hover.getByText(difference).waitFor()
   await hover.getByText('thm:trace in paper.tex').waitFor()
   await hover.getByRole('link', { name: 'Open LaTeX source' }).click()
   await page.getByRole('tab', { name: 'paper.tex', selected: true }).waitFor()

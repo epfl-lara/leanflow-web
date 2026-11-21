@@ -57,7 +57,7 @@ export function PaperLinksPanel({
       ) : null}
       {links?.length ? (
         <ul className="paper-links-list">
-          {links.map(({ id, source, target, status }) => {
+          {links.map(({ id, source, target, status, difference }) => {
             const pdfSource = 'page' in source
             const sourceLocation = pdfSource
               ? `Page ${source.page}`
@@ -113,6 +113,12 @@ export function PaperLinksPanel({
                   </span>
                   <Icon name="arrow" size={14} />
                 </button>
+                {difference && (
+                  <p className="paper-link-difference">
+                    <strong>Formalization note</strong>
+                    {difference}
+                  </p>
+                )}
                 {(dirty || status === 'stale') && (
                   <p className="paper-link-stale">
                     {dirty

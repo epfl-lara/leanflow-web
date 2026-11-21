@@ -2,27 +2,17 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { PaperLink } from './api'
 import type { PdfPaperLink } from './LinkedPdfReader'
-import {
-  PdfLeanBadgeText,
-  PdfLeanPreview,
-  pdfLeanBadgePosition,
-} from './PdfLeanBadge'
+import { PdfLeanMark, type PdfMarkBounds } from './PdfLeanMark'
 import { indexPdfQuotes } from './pdfPaperQuotes'
 
-interface Bounds {
-  left: number
-  top: number
-  width: number
-  height: number
-}
-
 interface Placement {
-  link: PdfPaperLink
-  rectangles: Bounds[]
+  links: PdfPaperLink[]
+  rectangles: PdfMarkBounds[]
+  anchor: PdfMarkBounds
   width: number
 }
 
-function overlap(a: Bounds, b: Bounds) {
+function overlap(a: PdfMarkBounds, b: PdfMarkBounds) {
   const width =
     Math.min(a.left + a.width, b.left + b.width) - Math.max(a.left, b.left)
   const height =
@@ -40,11 +30,18 @@ function placeLinks(
 ) {
   const frame = sheet.element.getBoundingClientRect()
   const find = indexPdfQuotes(sheet.texts)
-  const placements: Placement[] = []
+  const matches = new Map<string, Placement>()
   for (const link of links) {
     const found = find(link.source.quote)
     if (!found) continue
-    const start = sheet.spans[found.start.item]?.firstChild
+    const key = JSON.stringify(found)
+    const existing = matches.get(key)
+    if (existing) {
+      existing.links.push(link)
+      continue
+    }
+    const firstSpan = sheet.spans[found.start.item]
+    const start = firstSpan?.firstChild
     const end = sheet.spans[found.end.item]?.firstChild
     if (
       !(start instanceof Text) ||
@@ -54,7 +51,7 @@ function placeLinks(
     )
       continue
     const range = document.createRange()
-    const rectangles: Bounds[] = []
+    const rectangles: PdfMarkBounds[] = []
     for (let item = found.start.item; item <= found.end.item; item++) {
       const node = sheet.spans[item]?.firstChild
       if (!(node instanceof Text) || !node.length) continue
@@ -77,11 +74,26 @@ function placeLinks(
           })
       }
     }
-    if (rectangles.length)
-      placements.push({ link, rectangles, width: frame.width })
+    const first = rectangles[0]
+    if (first) {
+      // Use the whole text run for placement when the quote starts mid-line.
+      const bounds = firstSpan.getBoundingClientRect()
+      const left = Math.max(0, Math.min(first.left, bounds.left - frame.left))
+      const right = Math.min(
+        frame.width,
+        Math.max(first.left + first.width, bounds.right - frame.left),
+      )
+      matches.set(key, {
+        links: [link],
+        rectangles,
+        anchor: { ...first, left, width: right - left },
+        width: frame.width,
+      })
+    }
   }
 
   // Let the page-level list disambiguate overlapping annotations.
+  const placements = [...matches.values()]
   return placements.filter(
     (placement) =>
       !placements.some(
@@ -118,47 +130,16 @@ export function PdfPassageMarks({
   if (placed?.sheet !== sheet || placed.links !== links) return null
 
   return createPortal(
-    placed.placements.map(({ link, rectangles: [first, ...rest], width }) => {
-      const { target } = link
-      const { style, below, alignEnd, side } = pdfLeanBadgePosition(
-        first,
-        width,
-      )
-      return (
-        <button
-          type="button"
-          key={link.id}
-          className="linked-pdf-passage"
-          style={first}
-          onClick={() => onOpen(target)}
-          aria-label={`Open ${target.declaration} in Lean`}
-        >
-          {rest.map((box, index) => (
-            <span
-              aria-hidden="true"
-              className="linked-pdf-passage-part"
-              key={index}
-              style={{
-                ...box,
-                left: box.left - first.left,
-                top: box.top - first.top,
-              }}
-            />
-          ))}
-          <span
-            className="linked-pdf-lean-badge"
-            style={style}
-            data-preview-below={below || undefined}
-            data-preview-align-end={alignEnd || undefined}
-            data-lean-badge-side={side}
-            aria-hidden="true"
-          >
-            <PdfLeanBadgeText />
-            <PdfLeanPreview target={target} />
-          </span>
-        </button>
-      )
-    }),
+    placed.placements.map(({ links, rectangles, anchor, width }) => (
+      <PdfLeanMark
+        key={links[0].id}
+        links={links}
+        rectangles={rectangles}
+        anchor={anchor}
+        pageWidth={width}
+        onOpen={onOpen}
+      />
+    )),
     sheet.element,
   )
 }
