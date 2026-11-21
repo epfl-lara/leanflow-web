@@ -685,9 +685,23 @@ test('worker home cache reuse copies exact lookup bytes and keeps artifact archi
     await fs.readFile(path.join(home, '.cache/lake/revisions/map')),
     bytes,
   )
+  const artifact = path.join(home, '.cache/lake/artifacts/fixture.ltar')
   assert.equal(
-    await fs.readlink(path.join(home, '.cache/lake/artifacts/fixture.ltar')),
+    await fs.readlink(artifact),
     '/opt/dependency-lake-cache/artifacts/fixture.ltar',
+  )
+
+  // Seeding additional shared artifacts must preserve a private artifact
+  // Lake created at the same path.
+  await fs.unlink(artifact)
+  await fs.writeFile(artifact, 'private artifact')
+  await fs.writeFile(path.join(cache, 'artifacts/added.ltar'), 'added artifact')
+  await fs.rm(path.join(home, '.cache/lake/.dependency-source'))
+  await runtime.home(root)
+  assert.equal(await fs.readFile(artifact, 'utf8'), 'private artifact')
+  assert.equal(
+    await fs.readlink(path.join(home, '.cache/lake/artifacts/added.ltar')),
+    '/opt/dependency-lake-cache/artifacts/added.ltar',
   )
 })
 

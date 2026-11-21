@@ -1271,16 +1271,19 @@ export class Runtime {
                   })) {
                     if (!file.isFile()) continue
                     const destination = `${directory}/${file.name}`
-                    try {
-                      fs.lstatSync(destination)
-                      continue
-                    } catch (error) {
-                      if (error.code !== 'ENOENT') throw error
-                    }
-                    fs.symlinkSync(
-                      `/opt/dependency-lake-cache/artifacts/${file.name}`,
-                      destination,
+                    if (
+                      !fresh &&
+                      fs.lstatSync(destination, { throwIfNoEntry: false })
                     )
+                      continue
+                    try {
+                      fs.symlinkSync(
+                        `/opt/dependency-lake-cache/artifacts/${file.name}`,
+                        destination,
+                      )
+                    } catch (error) {
+                      if (error.code !== 'EEXIST') throw error
+                    }
                   }
                 },
               )

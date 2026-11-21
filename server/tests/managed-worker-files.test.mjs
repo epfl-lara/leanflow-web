@@ -225,3 +225,33 @@ test('cache lookup copies reject a directory swapped after source listing', (t) 
   assert.equal(swapped, true)
   assert.deepEqual(fs.readdirSync(path.join(home, 'target')), [])
 })
+
+test('cache lookup copies keep writes in the opened destination during a directory swap', (t) => {
+  const { home, outside } = fixture(t)
+  const source = path.join(home, 'outputs'),
+    target = path.join(home, 'target'),
+    moved = path.join(home, 'old-target')
+  fs.mkdirSync(source)
+  fs.mkdirSync(target)
+  fs.writeFileSync(path.join(source, 'map'), 'cached lookup')
+  fs.writeFileSync(path.join(outside, 'map'), 'protected')
+  const original = fs.readdirSync
+  const mock = t.mock.method(fs, 'readdirSync', (...args) => {
+    const entries = original(...args)
+    if (fs.realpathSync(args[0]) === source) {
+      fs.renameSync(target, moved)
+      fs.symlinkSync(outside, target)
+    }
+    return entries
+  })
+  try {
+    copyManagedWorkerTree(home, 'outputs', home, 'target')
+  } finally {
+    mock.mock.restore()
+  }
+  assert.equal(fs.readFileSync(path.join(outside, 'map'), 'utf8'), 'protected')
+  assert.equal(
+    fs.readFileSync(path.join(moved, 'map'), 'utf8'),
+    'cached lookup',
+  )
+})
