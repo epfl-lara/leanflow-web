@@ -25,9 +25,12 @@ export function useRunStream(
   const callbacksRef = useRef(callbacks)
   callbacksRef.current = callbacks
   const [connection, setConnection] = useState('')
-  const [followingId, setFollowingId] = useState(id)
+  // Keep following a completed run until its final receipt arrives. A newer
+  // active run takes precedence immediately, even while that receipt settles.
+  const [lastId, setLastId] = useState(id)
+  const followingId = id || lastId
   useEffect(() => {
-    if (id) setFollowingId(id)
+    if (id) setLastId(id)
   }, [id])
   useEffect(() => {
     setConnection('')
@@ -42,10 +45,9 @@ export function useRunStream(
     let pending: RunEvent[] = [],
       revision: string | undefined
     let filesPending = false,
-      snapshotRequest = 0,
-      snapshotPending = false,
       refreshAgain = false,
       terminalPublished = false
+    let snapshotRequest: AbortController | undefined
     let historyRequest: Promise<void> | undefined
     let historyBase: Run | null = null
     let historyEvents: RunEvent[] = []
@@ -86,7 +88,7 @@ export function useRunStream(
         if (poll) clearInterval(poll)
         setConnection('')
         callbacksRef.current.onTerminal()
-        setFollowingId(null)
+        setLastId((previous) => (previous === runId ? null : previous))
       }
     }
     const recoverHistory = (snapshot: Run) => {
@@ -122,21 +124,27 @@ export function useRunStream(
           historyEvents = []
         })
     }
-    const refresh = async () => {
+    const refresh = async (finished = false) => {
       if (cancelled || terminalPublished) return
-      if (snapshotPending) {
+      if (snapshotRequest && !finished) {
         refreshAgain = true
         return
       }
-      snapshotPending = true
-      const request = ++snapshotRequest
+      // A terminal event needs a receipt captured after completion. A slow
+      // earlier poll cannot supply it and must not delay the final output.
+      snapshotRequest?.abort()
+      const request = new AbortController()
+      snapshotRequest = request
+      refreshAgain = false
       try {
         const snapshot = await api<RunReceipt>(
           `/api/runs/${encodeURIComponent(runId)}?view=metadata`,
-          { signal: historyController.signal },
+          {
+            signal: AbortSignal.any([historyController.signal, request.signal]),
+          },
         )
-        if (!cancelled) {
-          if (request === snapshotRequest) callbacksRef.current.onRecovered()
+        if (!cancelled && snapshotRequest === request) {
+          callbacksRef.current.onRecovered()
           publish(snapshot)
           recoverHistory(snapshot)
           if (
@@ -152,12 +160,9 @@ export function useRunStream(
         if (!cancelled && request === snapshotRequest)
           callbacksRef.current.onError(error)
       } finally {
-        snapshotPending = false
-        // Poll ticks and streamed updates share one request on a slow link.
-        // Replay one requested refresh so a final snapshot is never missed.
-        if (refreshAgain) {
-          refreshAgain = false
-          void refresh()
+        if (snapshotRequest === request) {
+          snapshotRequest = undefined
+          if (refreshAgain) void refresh()
         }
       }
     }
@@ -168,6 +173,7 @@ export function useRunStream(
       const batch = pending
       pending = []
       if (historyRequest) historyEvents.push(...batch)
+      const wasActive = runIsActive(current)
       current = appendRunEvents(current, batch)
       const value = current
       // Wait for a final metadata snapshot before publishing a terminal status.
@@ -183,7 +189,7 @@ export function useRunStream(
       if (
         batch.some((event) => ['status', 'files-updated'].includes(event.type))
       )
-        void refresh()
+        void refresh(wasActive && !runIsActive(value))
     }
     const connect = () => {
       if (!current || !Number.isSafeInteger(current.eventCursor)) return

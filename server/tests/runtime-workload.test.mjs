@@ -9,6 +9,7 @@ import { StorageCapacity } from '../storage-capacity.mjs'
 import { TexBuildManager } from '../tex-builds.mjs'
 import { createTexAgentTools } from '../tex-agent-tools.mjs'
 import { EventStore } from '../events.mjs'
+import { savedFileSetup } from '../project-file-cache.mjs'
 
 async function until(predicate) {
   const deadline = Date.now() + 5000
@@ -82,6 +83,45 @@ const kernelOptions = {
   writeLakeCache: true,
   freshHome: true,
 }
+
+test('different import builds in one project share a worker slot while another project can compile', async (t) => {
+  const { runtime, root, dataDir } = await fixture(t, { maxQueue: 3 })
+  const other = path.join(dataDir, 'other')
+  await fs.mkdir(other)
+  const setup = (file, signal) =>
+    savedFileSetup(runtime, root, file, null, signal).then(
+      (result) => ({ result }),
+      (error) => ({ error }),
+    )
+
+  const first = setup('First.lean')
+  await until(() => runtime.children.size === 1)
+  const [firstWorker] = runtime.children
+  const second = setup('Second.lean')
+  await until(() => runtime.queue.length + runtime.children.size === 2)
+  assert.equal(
+    runtime.children.size,
+    1,
+    'A compiler waiting for the same build lock must not consume a slot',
+  )
+  const cancel = new AbortController()
+  const third = setup('Third.lean', cancel.signal)
+  await until(() => runtime.queue.length === 2)
+  assert.equal((await setup('Overflow.lean')).error?.status, 503)
+  assert.equal((await runtime.run(other, ['quick'])).code, 0)
+  assert.equal(runtime.children.size, 1)
+  cancel.abort(new Error('Editor closed'))
+  assert.match((await third).error?.message, /Editor closed/)
+  assert.equal(runtime.queue.length, 1)
+  await stop(firstWorker)
+  await first
+  await until(() => runtime.queue.length === 0 && runtime.children.size === 1)
+  const [secondWorker] = runtime.children
+  assert.notEqual(secondWorker, firstWorker)
+  await stop(secondWorker)
+  await second
+  assert.equal(runtime.children.size, 0)
+})
 
 test('the 45-GiB coordinator queues a third assistant under competition editor load and preserves dependent compiler capacity', async (t) => {
   for (const small of [true, false]) {

@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { AgentManager } from '../agents.mjs'
 import { EventStore } from '../events.mjs'
+import { seedFileCheck } from '../project-file-cache.mjs'
 import { Runtime } from '../runtime.mjs'
 import { WorkspaceStore } from '../workspaces.mjs'
 
@@ -100,6 +103,92 @@ const start = (manager, project) =>
     files: ['Main.lean'],
     liveEdits: false,
   })
+
+test('another collaborator can capture sources and start a cold file check while the saved build is locked', async (t) => {
+  const f = await fixture(t)
+  await f.store.setMember(f.project.id, 'alice', 'bob', 'editor')
+  await f.store.writeFile(
+    f.project.id,
+    'alice',
+    'Common.lean',
+    'def common := 1\n',
+    null,
+  )
+  const cacheDir = path.join(f.project.root, '.lake/build/lib/lean')
+  await fs.mkdir(cacheDir, { recursive: true })
+  await fs.writeFile(
+    path.join(cacheDir, 'Common.olean'),
+    'partially written module',
+  )
+  await fs.writeFile(
+    path.join(f.project.root, '.lake/lakefile.olean'),
+    'in-progress configuration',
+  )
+  let seedAttempts = 0
+  const pinned = {
+    run: async () => ({
+      code: 0,
+      stdout: JSON.stringify({
+        importArts: {
+          Common: [['/workspace/.lake/build/lib/lean/Common.olean']],
+        },
+      }),
+    }),
+  }
+  f.runtime.seedFileCheck = (...args) => {
+    seedAttempts++
+    return seedFileCheck(pinned, ...args)
+  }
+  const writer = spawn('flock', [
+    '--exclusive',
+    '--no-fork',
+    f.project.root,
+    'cat',
+  ])
+  const closed = once(writer, 'close')
+  try {
+    const held = once(writer.stdout, 'data')
+    writer.stdin.write('locked\n')
+    await held
+    // Keep the lock until both readers have finished. The deadline catches
+    // regressions without leaving a blocked compiler or capture behind.
+    const signal = AbortSignal.timeout(3000)
+    const [capture, fileCheck] = await Promise.allSettled([
+      f.store.snapshot(f.project.id, 'bob', 'busy-build', { signal }),
+      f.store.withFileCheckWorkspace(
+        f.project.id,
+        'bob',
+        { signal, file: 'Main.lean' },
+        async (root) => {
+          assert.notEqual(root, f.project.root)
+          await assert.rejects(fs.stat(path.join(root, '.lake/build')), {
+            code: 'ENOENT',
+          })
+          return fs.readFile(path.join(root, 'Main.lean'), 'utf8')
+        },
+      ),
+    ])
+    assert.equal(capture.status, 'fulfilled', capture.reason?.message)
+    assert.equal(fileCheck.status, 'fulfilled', fileCheck.reason?.message)
+    assert.equal(seedAttempts, 1)
+    const saved = (await f.store.readFile(f.project.id, 'bob', 'Main.lean'))
+      .content
+    assert.equal(fileCheck.value, saved)
+    assert.equal(f.bindings.get(capture.value.root), f.project.root)
+    assert.equal(
+      await fs.readFile(path.join(capture.value.root, 'Main.lean'), 'utf8'),
+      saved,
+    )
+    for (const candidate of [
+      path.join(capture.value.root, '.lake/build'),
+      path.join(capture.value.root, '.lake/lakefile.olean'),
+    ])
+      await assert.rejects(fs.stat(candidate), { code: 'ENOENT' })
+  } finally {
+    writer.stdin.end()
+    await closed
+  }
+})
 
 test('optional snapshot revision does not queue behind an occupied editor worker', async (t) => {
   const f = await fixture(t)

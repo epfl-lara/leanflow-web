@@ -508,6 +508,33 @@ async function queuedManager(t, options = {}) {
   }
 }
 
+test('Stop during model lookup keeps the run stopped before project preparation', async (t) => {
+  const lookup = Promise.withResolvers()
+  const entered = Promise.withResolvers()
+  const f = await queuedManager(t, { maxConcurrent: 1 })
+  let lookups = 0
+  f.manager.config.modelsForUser = async () => {
+    if (++lookups === 2) {
+      entered.resolve()
+      await lookup.promise
+    }
+    return {}
+  }
+  const job = await f.start('alice', 'project')
+  await entered.promise
+  const stopped = f.manager.stop('alice', job.id)
+  lookup.resolve()
+  assert.equal((await stopped).status, 'cancelled')
+  await Promise.all([...f.manager.tasks])
+  assert.deepEqual(
+    f.events
+      .events(job.id)
+      .filter((event) => event.type === 'status')
+      .map((event) => event.data.status),
+    ['queued', 'stopping', 'cancelled'],
+  )
+})
+
 test('one account cannot fill the assistant waiting queue and cancelling restores its admission', async (t) => {
   const f = await queuedManager(t)
   const first = await f.start('alice', 'one')

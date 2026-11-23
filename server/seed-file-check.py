@@ -91,7 +91,9 @@ def seed(project, snapshot, groups, limit):
         handles.callback(os.close, root)
         dest = os.open(snapshot, DIR)
         handles.callback(os.close, dest)
-        fcntl.flock(root, fcntl.LOCK_SH)
+        # A new writer can start after setup-file reported these modules. The
+        # private check can compile its own imports while that writer finishes.
+        fcntl.flock(root, fcntl.LOCK_SH | fcntl.LOCK_NB)
         with directory(root, (".lake", "build")) as build:
             entries = os.listdir(build)
             if (

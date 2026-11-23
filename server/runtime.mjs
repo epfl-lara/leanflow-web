@@ -1504,8 +1504,23 @@ export class Runtime {
     )
   }
 
-  #batchHead() {
-    return this.queue.find((job) => job.options.workload === 'batch')
+  #importBuildBlocked(options) {
+    return (
+      options.savedImportRoot &&
+      [...this.children].some(
+        (child) => child.savedImportRoot === options.savedImportRoot,
+      )
+    )
+  }
+
+  #queueHead(workload) {
+    // A waiting import for an occupied project needs no worker yet. Keep
+    // unrelated projects and the normal weighted queue free to make progress.
+    return this.queue.find(
+      (job) =>
+        job.options.workload === workload &&
+        !this.#importBuildBlocked(job.options),
+    )
   }
 
   #canBypassBatchHead(options) {
@@ -1514,12 +1529,12 @@ export class Runtime {
       !this.#liveDependencyParent(options[dependentWorkerParent])
     )
       return false
-    const head = this.#batchHead()
+    const head = this.#queueHead('batch')
     return Boolean(head && !this.#hasCapacity(head.options))
   }
 
   #canBackfillBatchHead(options) {
-    const head = this.#batchHead()
+    const head = this.#queueHead('batch')
     if (
       !head?.options.kernelCheck ||
       options.workload !== 'batch' ||
@@ -1600,6 +1615,7 @@ export class Runtime {
     // Keep only one large export on disk, and charge its larger RAM/CPU budget
     // to the same pool as editors and ordinary workers.
     return (
+      !this.#importBuildBlocked(options) &&
       (!options.kernelCheck ||
         ![...this.children].some((child) => child.kernelCheck)) &&
       this.#usedSlots() + slots + compilerReserve <= this.#slotLimit() &&
@@ -1650,6 +1666,7 @@ export class Runtime {
       readOnlyWorkspace = false,
       writeLakeCache = false,
       writePrivateDependencyCache = false,
+      savedImportRoot,
       freshHome = false,
       retainHome = false,
       readOnlyHome = false,
@@ -1762,14 +1779,14 @@ export class Runtime {
       )
     const admission = {
       kernelCheck,
+      savedImportRoot,
       workload,
       editor,
       timeoutMs,
       [agentWorkerRole]: agentRole,
     }
     if (
-      (!scheduled &&
-        this.queue.some((job) => job.options.workload === workload)) ||
+      (!scheduled && this.#queueHead(workload)) ||
       !this.#hasCapacity(admission)
     )
       throw Object.assign(
@@ -2174,6 +2191,7 @@ export class Runtime {
       storageReservation,
       [agentWorkerRole]: agentRole,
     })
+    child.savedImportRoot = savedImportRoot
     if (shareLocalImports) {
       try {
         const close = serveEditorBuilds(home, (file, header, buildSignal) =>
@@ -2603,7 +2621,7 @@ export class Runtime {
         options.signal.reason || new Error('Worker job was cancelled'),
       )
     if (
-      (!this.queue.some((job) => job.options.workload === workload) ||
+      (!this.#queueHead(workload) ||
         ((this.#canBypassBatchHead(options) ||
           this.#canBackfillBatchHead(options)) &&
           !this.queue.some((job) =>
@@ -2729,7 +2747,7 @@ export class Runtime {
       this.#usedSlots() < this.#slotLimit() &&
       this.queue.length
     ) {
-      const batchHead = this.#batchHead()
+      const batchHead = this.#queueHead('batch')
       let index = -1
       // A live parent's child has priority over ordinary bounded backfill.
       // A ready weighted head keeps its place and cannot be overtaken.
@@ -2742,7 +2760,11 @@ export class Runtime {
       if (index < 0) {
         const seen = new Set()
         index = this.queue.findIndex((job) => {
-          if (seen.has(job.options.workload)) return false
+          if (
+            seen.has(job.options.workload) ||
+            this.#importBuildBlocked(job.options)
+          )
+            return false
           seen.add(job.options.workload)
           return this.#hasCapacity(job.options)
         })

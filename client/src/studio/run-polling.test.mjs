@@ -221,6 +221,53 @@ test('cancelling a pending metadata poll prevents publication and stream startup
   assert(fixture.cleared())
 })
 
+test('completion fetches the final receipt while an earlier poll is stalled', async (t) => {
+  const running = {
+    id: 'run',
+    status: 'running',
+    eventCursor: 1,
+    reasoningBlocks: [],
+  }
+  const completed = {
+    ...running,
+    status: 'completed',
+    eventCursor: 2,
+    message: 'Verified.',
+  }
+  const stalled = Promise.withResolvers()
+  const requests = [],
+    published = []
+  let terminals = 0
+  const fixture = harness(t, async (_url, { signal }) => {
+    requests.push(signal)
+    if (requests.length === 1) return running
+    if (requests.length === 2) return stalled.promise
+    return completed
+  })
+  fixture.useRunStream('run', {
+    onRun: (run) => published.push(run),
+    onFilesUpdated: async () => {},
+    onTerminal: () => terminals++,
+    onError: assert.fail,
+    onRecovered: () => {},
+  })
+  await settle()
+  fixture.poll()
+  fixture.streams[0].emit({
+    seq: 2,
+    type: 'status',
+    data: { status: 'completed' },
+  })
+  await settle()
+  assert.equal(published.at(-1).message, 'Verified.')
+  assert.equal(requests[1].aborted, true)
+  stalled.resolve(running)
+  await settle()
+  assert.equal(published.at(-1).status, 'completed')
+  assert.equal(terminals, 1)
+  assert.equal(requests.length, 3)
+})
+
 test('slow metadata requests coalesce polling and keep one trailing refresh', async (t) => {
   const requests = [],
     published = [],

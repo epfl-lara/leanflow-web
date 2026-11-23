@@ -584,6 +584,89 @@ try {
     },
   )
 
+  await record(
+    'overlapping collaborator file checks report their own saved revision and both can check again',
+    async () => {
+      const endpoint = `/api/projects/${fixture.project.id}/check`
+      const filename = 'Participants.lean'
+      const proof = (value) =>
+        `import Main.Other\n#eval IO.sleep 2000\nexample : nativeValue = ${value} := rfl\n`
+      const start = (actor) =>
+        json(actor, endpoint, {
+          method: 'POST',
+          body: { path: filename, scope: 'file' },
+        })
+      const finish = async (actor, job) => {
+        let result
+        await until(
+          async () => {
+            result = await json(actor, `/api/jobs/${job.id}`)
+            return ['completed', 'failed', 'cancelled'].includes(result.status)
+          },
+          'collaborator file check',
+          120_000,
+        )
+        return result
+      }
+      await save(proof(7), filename, 'editorA')
+      const first = await start('editorA')
+      await until(
+        () =>
+          [...fixture.runtime.children].some((child) =>
+            child.workspaceRoot?.startsWith(
+              path.join(fixture.dataDir, 'file-checks') + path.sep,
+            ),
+          ),
+        'first collaborator checking a captured workspace',
+        60_000,
+      )
+      await save('def nativeValue : Nat := 8\n', 'Main/Other.lean', 'editorB')
+      const second = await start('editorB')
+      assert.equal(
+        (await json('editorA', `/api/jobs/${first.id}`)).status,
+        'running',
+      )
+      const health = await json('viewer', '/health', {
+        signal: AbortSignal.timeout(5000),
+      })
+      assert(health.ok && health.runtime)
+      const [oldRevision, newRevision] = await Promise.all([
+        finish('editorA', first),
+        finish('editorB', second),
+      ])
+      assert.equal(oldRevision.status, 'completed', oldRevision.error)
+      assert.equal(oldRevision.result.sourceChanged, true)
+      assert.equal(newRevision.status, 'failed')
+      assert.match(newRevision.log, /rfl|type mismatch/i)
+      assert.ok(
+        oldRevision.result.checkedSnapshot &&
+          newRevision.result.checkedSnapshot,
+      )
+      assert.notEqual(
+        oldRevision.result.checkedSnapshot,
+        newRevision.result.checkedSnapshot,
+      )
+      await save(proof(8), filename, 'editorA')
+      const retried = await Promise.all(
+        ['editorA', 'editorB'].map(async (actor) =>
+          finish(actor, await start(actor)),
+        ),
+      )
+      for (const job of retried) {
+        assert.equal(job.status, 'completed', job.error)
+        assert.ok(job.result.checkedSnapshot)
+        assert.ok(!job.result.sourceChanged)
+      }
+      assert.equal(
+        retried[0].result.checkedSnapshot,
+        retried[1].result.checkedSnapshot,
+      )
+      // Leave the project's original default target compilable for later checks.
+      await save('def nativeValue : Nat := 7\n', 'Main/Other.lean')
+      await save(proof(7), filename, 'editorA')
+    },
+  )
+
   let recoveryRun
   await record(
     'simultaneous collaborator save preserves shell conflict copy and limits recovery to its caller',

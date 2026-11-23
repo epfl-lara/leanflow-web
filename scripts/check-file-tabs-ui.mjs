@@ -216,7 +216,45 @@ try {
   )
   await visit('Second.lean')
   await visit('Third.lean')
-  await visit('Main.lean')
+  const originalThird = state.files[projectId]['Third.lean']
+  const heldSave = Promise.withResolvers()
+  let submitted = false
+  state.onSave = async ({ save }) => {
+    submitted = true
+    await heldSave.promise
+    return save()
+  }
+  try {
+    await source().focus()
+    await page.keyboard.press('Control+Home')
+    await page.keyboard.insertText('-- REVERT_BEFORE_SAVE_RECEIPT\n')
+    await page.keyboard.press('Control+s')
+    await until(() => submitted, 'first save submitted')
+    await source().focus()
+    await page.keyboard.press('Control+a')
+    await page.keyboard.insertText(originalThird)
+    await expect(tab('Third.lean')).not.toHaveAccessibleDescription(
+      /Unsaved changes/,
+    )
+    await visit('Main.lean')
+  } finally {
+    state.onSave = normalSave
+    heldSave.resolve()
+  }
+  await until(
+    () =>
+      state.files[projectId]['Third.lean'].includes(
+        'REVERT_BEFORE_SAVE_RECEIPT',
+      ),
+    'first save applied',
+  )
+  await until(
+    () => state.files[projectId]['Third.lean'] === originalThird,
+    'reverted text saved after switching away during the first save',
+  )
+  report.checks.push(
+    'An edit reverted during a slow save stays reverted on disk after switching tabs.',
+  )
   await source().focus()
   await page.keyboard.press('Control+Home')
   for (let i = 0; i < 55; i++) await page.keyboard.press('ArrowDown')

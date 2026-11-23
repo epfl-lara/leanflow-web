@@ -224,7 +224,7 @@ async function fixture(
                   params: { turn: { id: turnId, status: 'completed' } },
                 })
               else if (request.method === 'turn/start')
-                void edit(workspace, request.params).then(
+                void edit(workspace, request.params, send).then(
                   () => {
                     send({
                       method: 'item/agentMessage/delta',
@@ -335,6 +335,32 @@ async function fixture(
     runtime,
   }
 }
+
+test('a burst of assistant output is delivered without reloading saved history for each fragment', async (t) => {
+  const fragments = Array.from({ length: 512 }, (_, index) => `word${index} `)
+  let readsDuringOutput
+  const f = await fixture(
+    t,
+    async (_workspace, _params, send) => {
+      const reads = t.mock.method(f.events, 'getMetadata')
+      for (const delta of fragments)
+        send({
+          method: 'item/agentMessage/delta',
+          params: { itemId: 'answer', delta },
+        })
+      readsDuringOutput = reads.mock.callCount()
+      reads.mock.restore()
+    },
+    { reply: '' },
+  )
+  const result = await f.execute('Explain this project.')
+  assert.equal(result.status, 'completed', result.error)
+  assert.equal(result.message, fragments.join(''))
+  assert.ok(
+    readsDuringOutput < 8,
+    `Read saved history ${readsDuringOutput} times`,
+  )
+})
 
 test('25 members run private proof and search chats in one shared project while worker and per-key limits hold', async (t) => {
   const release = Promise.withResolvers()

@@ -87,10 +87,23 @@ export class WorkspaceBuffers {
     removedPaths: [],
   }
   private retained = new Set<string>()
+  private savingPaths = new Map<string, ((path: string) => void) | undefined>()
+  setSaving = (files: readonly OpenFile[]) => {
+    const previous = this.savingPaths
+    this.savingPaths = new Map(files.map((file) => [file.path, undefined]))
+    for (const [path, recheck] of previous) recheck?.(path)
+  }
+  isSaving = (path: string) => this.savingPaths.has(path)
+  deferRefresh = (path: string, recheck?: (path: string) => void) => {
+    if (!this.savingPaths.has(path)) return false
+    if (recheck) this.savingPaths.set(path, recheck)
+    return true
+  }
   private listeners = new Set<() => void>()
   selectProject = (projectId: string | null) => {
     if (this.state.scope.projectId === projectId) return
     this.retained.clear()
+    this.savingPaths.clear()
     this.state = {
       ...this.state,
       scope: { projectId },
@@ -148,6 +161,7 @@ export class WorkspaceBuffers {
     if (file && file === previous && preview === undefined) return
     if (!file) {
       this.retained.clear()
+      this.savingPaths.clear()
       this.state = {
         ...this.state,
         openPaths: [],
@@ -186,6 +200,8 @@ export class WorkspaceBuffers {
       previous &&
       previous.path !== file.path &&
       previous.content === previous.savedContent &&
+      // Reverting to the old baseline still needs a write if the pending save commits.
+      !this.isSaving(previous.path) &&
       !this.retained.has(previous.path)
     )
       buffers.delete(previous.path)
@@ -195,6 +211,8 @@ export class WorkspaceBuffers {
   }
   // Closing a tab is navigation, never a discard or a filesystem deletion.
   closeFile = (path: string) => {
+    if (this.isSaving(path))
+      throw new Error('Wait for this file to finish saving before closing it.')
     const buffer = this.state.buffers.get(path)
     if (buffer && buffer.content !== buffer.savedContent)
       throw new Error('Save or discard this file’s changes before closing it.')

@@ -1284,7 +1284,8 @@ export function Studio() {
         const binary = isBinaryAssetFile(path)
         const cached = bufferStore.getSnapshot().buffers.get(path)
         let value =
-          cached && cached.content !== cached.savedContent
+          cached &&
+          (cached.content !== cached.savedContent || bufferStore.isSaving(path))
             ? cached
             : binary
               ? { content: '', hash: '', readOnly: true }
@@ -1543,6 +1544,7 @@ export function Studio() {
           paths,
           readFile,
           collaboration.manages,
+          recheck,
         ).then(({ pendingPaths }) => {
           const active = bufferStore.getSnapshot().file
           if (
@@ -1585,6 +1587,7 @@ export function Studio() {
               .filter((file) => !path || file.path === path)
             const snapshot = snapshots[0]
             if (!snapshot || snapshot.readOnly) return
+            bufferStore.setSaving(snapshots)
             if (
               snapshots.length > 1 ||
               (!path && snapshot.path !== fileRef.current?.path)
@@ -1637,6 +1640,7 @@ export function Studio() {
           .finally(() => {
             // A previous visit must never release a newer visit's save lock.
             if (savePromise.current === pending) {
+              bufferStore.setSaving([])
               setSaving(false)
               savePromise.current = null
             }
@@ -1990,7 +1994,10 @@ export function Studio() {
         bufferStore.closeFile(path)
       }
       const buffer = bufferStore.getSnapshot().buffers.get(path)
-      if (buffer && buffer.content !== buffer.savedContent)
+      if (
+        buffer &&
+        (buffer.content !== buffer.savedContent || bufferStore.isSaving(path))
+      )
         navigate(action, '', false, path)
       else void action().catch((error) => setError(errorText(error)))
     },
@@ -3674,7 +3681,7 @@ export function Studio() {
         </header>
         {projectId && (
           <TerminalRecoveries
-            key={`${session.user.id}:${projectId}`}
+            key={`terminal-recoveries:${session.user.id}:${projectId}`}
             projectId={projectId}
             active={terminalOpen && terminalActive}
             refreshKey={`${terminalRecoveryVersion}:${project?.accessRole || (project ? 'admin' : 'revoked')}`}
@@ -3815,7 +3822,7 @@ export function Studio() {
         )}
         {invitationNotice}
         <StorageStatus
-          key={session.user.id}
+          key={`storage:${session.user.id}`}
           initial={session.storage}
           enabled={!authRequired}
         />
@@ -3823,7 +3830,7 @@ export function Studio() {
           !project.fileRecoveryRequired &&
           (!project.accessRole || project.accessRole === 'admin') && (
             <LegacyRecoveryNotice
-              key={`${session.user.id}:${project.id}`}
+              key={`legacy-recovery:${session.user.id}:${project.id}`}
               project={project}
               onRecovered={(value) => {
                 if (!bufferStore.isCurrent(scope) || value.id !== project.id)
@@ -4559,7 +4566,7 @@ export function Studio() {
         )}
         {terminalOpen && project && (
           <TerminalPanel
-            key={`${session.user.id}:${project.id}`}
+            key={`terminal:${session.user.id}:${project.id}`}
             projectId={project.id}
             projectName={project.name}
             needsPreparation={project.status !== 'ready'}
@@ -4595,7 +4602,7 @@ export function Studio() {
             }}
           />
         )}
-        <WorkspaceStatusBar key={session.user.id}>
+        <WorkspaceStatusBar key={`status-bar:${session.user.id}`}>
           <span>
             <span
               className={`status-dot ${project?.status === 'ready' && leanState === 'Lean connected' ? '' : 'muted'}`}

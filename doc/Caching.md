@@ -20,6 +20,10 @@ system or share mutable Lean sessions between accounts.
   during a build invalidates the affected output, even if the edit is undone.
   The next build also recovers after an interrupted compiler. A cold import
   needs a free build slot. Already compiled modules remain available to editors.
+- When collaborators request imports for different files in one project, one
+  import worker runs at a time. Waiting requests leave slots available for other
+  projects. A terminal or assistant with separately mounted dependencies can
+  open its private copy while another participant builds the saved project.
 - The coordinator references protected managed files in place. It keeps a
   persistent index of their content hashes rather than duplicating their bytes
   in another VM cache. Workers receive only missing content hashes; interrupted

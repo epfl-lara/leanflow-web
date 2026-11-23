@@ -13,25 +13,36 @@ const lib = '/.lake/build/lib/lean/'
 // A private terminal or assistant starts with a copy of the saved build.
 // The echo comes back only after flock acquires the directory. Closing stdin
 // releases the reader, including when the server process goes away.
-export async function withBuildCacheRead(root, signal, copy) {
+export async function withBuildCacheRead(
+  root,
+  signal,
+  copy,
+  { skipBusy = false } = {},
+) {
   signal?.throwIfAborted()
-  const child = spawn('flock', ['--shared', '--no-fork', root, 'cat'], {
-    stdio: ['pipe', 'pipe', 'ignore'],
-  })
+  const args = skipBusy ? ['--nonblock', '--conflict-exit-code', '75'] : []
+  const child = spawn(
+    'flock',
+    ['--shared', ...args, '--no-fork', root, 'cat'],
+    {
+      stdio: ['pipe', 'pipe', 'ignore'],
+    },
+  )
   const closed = new Promise((resolve) => child.once('close', resolve))
   const abort = () => child.kill('SIGKILL')
   child.stdin.on('error', () => {})
-  const acquired = once(child.stdout, 'data')
+  const acquired = once(child.stdout, 'data').then(() => true)
   const failed = once(child, 'error').then(([error]) => {
     throw error
   })
   signal?.addEventListener('abort', abort, { once: true })
   try {
     child.stdin.write('ready\n')
-    await Promise.race([
+    const locked = await Promise.race([
       acquired,
       failed,
-      closed.then(() => {
+      closed.then((code) => {
+        if (skipBusy && code === 75) return false
         throw new Error(
           'Could not read the saved project build. Retry opening the workspace.',
         )
@@ -39,6 +50,7 @@ export async function withBuildCacheRead(root, signal, copy) {
     ])
     signal?.throwIfAborted()
     signal?.removeEventListener('abort', abort)
+    if (!locked) return await copy(false)
     let clean = false
     try {
       await fs.lstat(path.join(root, '.lake/build/.leanflow-pending-build'))
@@ -55,8 +67,8 @@ export async function withBuildCacheRead(root, signal, copy) {
   }
 }
 
-// Editors requesting the same configured file share an in-flight worker. Lake
-// resolves overlapping imports of different files under the on-disk build lock.
+// Editors requesting the same configured file share an in-flight worker.
+// Different files use the runtime queue and the same on-disk build lock.
 const activeSetups = new WeakMap()
 export async function savedFileSetup(runtime, root, file, header, signal) {
   const revision = (await fs.stat(root, { bigint: true })).ctimeNs.toString()
@@ -84,6 +96,7 @@ export async function savedFileSetup(runtime, root, file, header, signal) {
               network: 'none',
               readOnlyWorkspace: true,
               writeLakeCache: true,
+              savedImportRoot: root,
               freshHome: true,
               cleanHome: true,
               signal: sharedSignal,

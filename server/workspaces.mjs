@@ -516,7 +516,8 @@ async function copyWorkspace(
           isSecret(entry.name) ||
           omitFiles.includes(relative) ||
           (omitBuilds &&
-            (relative === '.lake/build' ||
+            ((omitDependencies && entry.name === '.lake') ||
+              relative === '.lake/build' ||
               relative.endsWith('/.lake/build'))) ||
           (omitDependencies && relative === '.lake/packages')
         ) {
@@ -6431,12 +6432,19 @@ export class WorkspaceStore {
       const reusableDependencies =
         project.status === 'ready' ||
         !!this.runtime.verifiedDependencyRoot?.(project.root)
-      await withBuildCacheRead(project.root, signal, (clean) =>
-        copyWorkspace(project.root, root, {
-          omitDependencies: inherit || !reusableDependencies,
-          omitBuilds: !clean,
-          signal,
-        }),
+      // When dependencies are mounted separately, a busy build is optional.
+      // Capture the sources without reading any in-progress Lake outputs.
+      const omitDependencies = inherit || !reusableDependencies
+      await withBuildCacheRead(
+        project.root,
+        signal,
+        (clean) =>
+          copyWorkspace(project.root, root, {
+            omitDependencies,
+            omitBuilds: !clean,
+            signal,
+          }),
+        { skipBusy: omitDependencies },
       )
       signal?.throwIfAborted()
       if (inherit && reusableDependencies)

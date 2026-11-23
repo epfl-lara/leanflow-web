@@ -1026,11 +1026,13 @@ export class AgentManager {
         return
       }
       provider = await providerFor(this.config, job.owner)
+      active.controller.signal.throwIfAborted()
       if (!this.providerReservations.get(id)?.matches(provider))
         throw new Error(
           'Your API key or provider changed while this run was queued. Start a new run with the connection you want to use.',
         )
       const modelConfig = await modelConfigFor(this.config, job.owner)
+      active.controller.signal.throwIfAborted()
       if (job.providerId && job.providerId !== modelConfig.providerId)
         throw new Error(
           'Your provider changed while this run was queued. Start a new run with the provider you want to use.',
@@ -1537,8 +1539,8 @@ export class AgentManager {
       })
       rpc.on('notification', ({ method, params }) => {
         if (
-          active.paperLinkPass?.signal.aborted ||
-          ['cancelled', 'stopping'].includes(this.events.getMetadata(id).status)
+          active.controller.signal.aborted ||
+          active.paperLinkPass?.signal.aborted
         )
           return
         if (active.previousTurnId && params?.turn?.id === active.previousTurnId)

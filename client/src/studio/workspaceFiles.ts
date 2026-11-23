@@ -8,12 +8,21 @@ export async function refreshChangedBuffers(
   paths: readonly string[],
   readFile: (path: string) => Promise<Pick<OpenFile, 'content' | 'hash'>>,
   manages: (path: string) => boolean = () => false,
+  recheck?: (path: string) => void,
 ) {
   const result: { pendingPaths: string[]; failedPaths: string[] } = {
     pendingPaths: [],
     failedPaths: [],
   }
   if (!store.isCurrent(scope)) return result
+  // A peer can write after our save commits but before its receipt arrives.
+  // Recheck that path once with the confirmed baseline and keep refreshing
+  // unrelated files in the meantime.
+  const deferSavingFile = (path: string) => {
+    if (!store.deferRefresh(path, recheck)) return false
+    if (!recheck) result.pendingPaths.push(path)
+    return true
+  }
   const affected = new Set(paths)
   const candidates = [...store.getSnapshot().buffers.values()].filter(
     (file) =>
@@ -25,6 +34,7 @@ export async function refreshChangedBuffers(
   for (const previous of candidates) {
     if (!store.isCurrent(scope)) return result
     if (manages(previous.path)) continue
+    if (deferSavingFile(previous.path)) continue
     let latest: Pick<OpenFile, 'content' | 'hash'>
     try {
       latest = await readFile(previous.path)
@@ -33,6 +43,7 @@ export async function refreshChangedBuffers(
       if (
         store.isCurrent(scope) &&
         !manages(previous.path) &&
+        !deferSavingFile(previous.path) &&
         current?.generation === previous.generation &&
         current.hash === previous.hash
       )
@@ -45,6 +56,7 @@ export async function refreshChangedBuffers(
       manages(previous.path) ||
       !current ||
       current.unavailable ||
+      deferSavingFile(previous.path) ||
       current.generation !== previous.generation ||
       current.hash !== previous.hash ||
       current.savedContent !== previous.savedContent

@@ -297,6 +297,72 @@ test('a failed reference refresh reports the file and preserves its editor basel
   assert.equal(store.getSnapshot(), before)
 })
 
+test('a file refresh during a pending save preserves an edit reverted to the old baseline', async () => {
+  const store = fixture()
+  store.setFile(file('Notes.md', 'original'))
+  store.change('Notes.md', 'submitted change')
+  const submitted = store.dirty()
+  store.setSaving(submitted)
+  store.change('Notes.md', 'original')
+  store.setFile(file('Main.lean'))
+  assert.throws(() => store.closeFile('Notes.md'), /finish saving/)
+
+  await refreshChangedBuffers(
+    store,
+    store.getSnapshot().scope,
+    ['Notes.md'],
+    async () => ({ content: 'submitted change', hash: 'b'.repeat(64) }),
+  )
+  store.saved(submitted, [{ path: 'Notes.md', hash: 'b'.repeat(64) }])
+  store.setSaving([])
+  const [reverted] = store.dirty()
+  assert.equal(reverted.path, 'Notes.md')
+  assert.equal(reverted.content, 'original')
+  assert.equal(reverted.savedContent, 'submitted change')
+  assert.equal(reverted.hash, 'b'.repeat(64))
+  assert.equal(store.getSnapshot().file.path, 'Main.lean')
+})
+
+for (const timing of ['before the refresh', 'during its read'])
+  test(`a peer edit is refreshed after a local save that starts ${timing}`, async () => {
+    const store = fixture()
+    store.setFile(file('Notes.md', 'original'))
+    const { scope } = store.getSnapshot()
+    store.change('Notes.md', 'our update')
+    const submitted = store.dirty()
+    const latest = { content: 'later peer edit', hash: 'c'.repeat(64) }
+    const rereads = []
+    const recheck = (path) => {
+      rereads.push(
+        refreshChangedBuffers(store, scope, [path], async () => latest),
+      )
+    }
+    if (timing === 'before the refresh') store.setSaving(submitted)
+    const reading = Promise.withResolvers()
+    const refresh = () =>
+      refreshChangedBuffers(
+        store,
+        scope,
+        ['Notes.md'],
+        () => reading.promise,
+        () => false,
+        recheck,
+      )
+    const first = refresh()
+    if (timing === 'during its read') store.setSaving(submitted)
+    reading.resolve(latest)
+    await first
+    await refresh()
+    assert.equal(rereads.length, 0)
+    store.saved(submitted, [{ path: 'Notes.md', hash: 'b'.repeat(64) }])
+    store.setSaving([])
+    await Promise.all(rereads)
+    assert.equal(rereads.length, 1)
+    assert.equal(store.getSnapshot().file.content, latest.content)
+    assert.equal(store.getSnapshot().file.hash, latest.hash)
+    assert.deepEqual(store.dirty(), [])
+  })
+
 test('confirmed missing clean tabs close even after their source buffer was released', async () => {
   const store = fixture()
   store.setFile(file('Old.lean'))

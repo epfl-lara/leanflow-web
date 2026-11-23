@@ -196,11 +196,19 @@ try {
     await page.getByLabel('Message Lemex').inputValue(),
     'Keep my private conversation draft.',
   )
+  const failureLog = page.getByRole('region', {
+    name: 'Failure log',
+    exact: true,
+  })
+  await page.getByRole('button', { name: 'Failure log', exact: true }).click()
+  await failureLog.waitFor()
   response = 'ready'
   await panel
     .getByRole('button', { name: 'Refresh storage status', exact: true })
     .click()
   await panel.waitFor({ state: 'hidden' })
+  assert.equal(await panel.count(), 0, 'Storage recovery clears every warning')
+  assert.equal(await failureLog.isVisible(), true, 'The failure log stays open')
   assert.equal(
     await page.evaluate(() => localStorage.getItem('lemex-project')),
     project.id,
