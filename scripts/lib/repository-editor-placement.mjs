@@ -34,8 +34,26 @@ export async function repositoryPlacements(
       '--format',
       '{{json .Config.Cmd}}\t{{json .Mounts}}',
       ...containers,
-    ])
-    for (const row of inspected.stdout.trimEnd().split('\n')) {
+    ]).catch((error) => {
+      // Closing an editor can remove its --rm container after "ps".
+      // Docker still prints records for the other containers in this batch.
+      const messages = String(error.stderr || '')
+        .trim()
+        .split('\n')
+      if (
+        error.code !== 1 ||
+        !messages.every((message) => {
+          const missing =
+            /^(?:error(?: response from daemon)?:\s*)?no such (?:object|container):\s*([0-9a-f]+)$/i.exec(
+              message,
+            )
+          return missing && containers.includes(missing[1])
+        })
+      )
+        throw error
+      return { stdout: error.stdout }
+    })
+    for (const row of inspected.stdout.trimEnd().split('\n').filter(Boolean)) {
       const [command, volumes] = row.split('\t').map((s) => JSON.parse(s))
       if (command?.slice(-3).join(' ') !== 'lake serve --') continue
       const project = mounts.get(

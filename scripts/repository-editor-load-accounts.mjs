@@ -5,10 +5,12 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { Auth } from '../server/auth.mjs'
 import { loadTestSetting } from './lib/compile-load-fixture.mjs'
+import { repositoryEditorScenario } from './lib/repository-editor-session.mjs'
 
 assert.equal(process.env.STUDIO_RUN_LIVE_LOAD_TEST, '1')
 const action = process.argv[2]
 assert(['prepare', 'clean'].includes(action), 'Choose prepare or clean.')
+const scenario = repositoryEditorScenario(process.argv.slice(3))
 const file = path.resolve(loadTestSetting('STUDIO_LOAD_FIXTURE'))
 const stat = await fs.lstat(path.dirname(file))
 assert(
@@ -27,7 +29,7 @@ if (action === 'prepare') {
   const accounts = []
   const json = () => JSON.stringify({ runTag, accounts }) + '\n'
   await fs.writeFile(file, json(), { mode: 0o600, flag: 'wx' })
-  for (let i = 1; i <= 20; i++) {
+  for (let i = 1; i <= scenario.accounts; i++) {
     const name = runTag + ' U' + String(i).padStart(2, '0')
     const result = await auth.createUser(
       { id: 'owner' },
@@ -59,7 +61,7 @@ if (action === 'prepare') {
   )
   const { runTag, accounts } = JSON.parse(await fs.readFile(file, 'utf8'))
   assert(/^LF load \d{8} [a-f0-9]{8}$/.test(runTag))
-  assert(Array.isArray(accounts) && accounts.length <= 20)
+  assert(Array.isArray(accounts) && accounts.length <= 23)
   const originURL = new URL(loadTestSetting('STUDIO_LOAD_ORIGIN'))
   assert(
     originURL.protocol === 'https:' ||

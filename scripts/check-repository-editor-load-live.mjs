@@ -1,4 +1,7 @@
 // Opt-in real API, collaboration and Lean protocol test. All projects are temporary.
+// For 22 live editors plus one waiting account, pass --queue-probe to account
+// preparation and each topology. The local version holds two editors plus one
+// waiter and requires an isolated server configured with two editor slots.
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
@@ -12,6 +15,7 @@ import {
 import { connectProjectDocumentPeer } from './lib/project-document-peer.mjs'
 import {
   RepositoryEditor,
+  repositoryEditorScenario,
   waitForEvidence,
 } from './lib/repository-editor-session.mjs'
 import {
@@ -21,11 +25,11 @@ import {
 
 const topology = process.argv[2]
 assert(['distinct', 'shared'].includes(topology), 'Choose distinct or shared')
-const localProbe = process.argv[3] === '--local-probe'
-assert.equal(process.argv.length, localProbe ? 4 : 3)
-const users = localProbe ? 2 : 20
+const { localProbe, queueProbe, users, accounts } = repositoryEditorScenario(
+  process.argv.slice(3),
+)
 const { state, directory, origin } = await compileLoadFixture({
-  users,
+  users: accounts,
   requireProjects: false,
 })
 if (localProbe)
@@ -47,12 +51,22 @@ const projects = [],
   sockets = new Set(),
   editors = [],
   participants = []
+let interrupted = false,
+  cleaning = false
+function interrupt() {
+  interrupted = true
+  for (const ws of [...sockets, ...editors.map((editor) => editor.socket)])
+    ws.terminate()
+}
+process.once('SIGINT', interrupt)
+process.once('SIGTERM', interrupt)
 const report = {
   topology,
   users,
   preset,
   toolchain,
   localProbe,
+  queueProbe,
   passed: false,
   importRefreshes: 0,
 }
@@ -81,6 +95,7 @@ async function api(
   method = body === undefined ? 'GET' : 'POST',
 ) {
   for (let retry = 0; ; retry++) {
+    if (interrupted && !cleaning) throw new Error('Load test interrupted')
     const res = await fetch(origin + endpoint, {
       method,
       headers: {
@@ -119,6 +134,21 @@ async function parallel(items, callback) {
   const result = await Promise.allSettled(items.map(callback))
   const rejection = result.find((r) => r.status === 'rejected')
   if (rejection) throw rejection.reason
+}
+
+function requireIdle(session) {
+  assert(session.runtime.ready, 'Lean workers must be ready for the rehearsal')
+  assert.equal(
+    session.runtime.active + session.runtime.queued,
+    0,
+    'A worker is busy',
+  )
+  const { active, queued } = session.capacity.editorAdmission
+  assert.equal(
+    active + queued,
+    0,
+    'A live or waiting editor still needs the service',
+  )
 }
 
 async function prepare(owner, number) {
@@ -162,15 +192,81 @@ function proves(diagnostics, expected) {
   )
 }
 
-async function placementBarrier(label) {
-  for (const e of editors) {
+function openEditor(p) {
+  const editor = new RepositoryEditor(origin, p.account, p.project, target(p.i))
+  editors.push(editor)
+  p.editor = editor
+  return editor
+}
+
+async function placementBarrier(label, active) {
+  for (const { editor: e } of active) {
     assert(
       !e.error && e.socket.readyState === WebSocket.OPEN,
       'Every editor must remain connected',
     )
   }
   const placed = await repositoryPlacements(dataDir, participants, !localProbe)
-  report[label] = summarizePlacements(placed, participants, requiredNodes)
+  assert.equal(placed.local.length + placed.remote.length, active.length)
+  report[label] = summarizePlacements(placed, active, requiredNodes)
+  if (queueProbe && !localProbe) {
+    assert.equal(placed.local.length, 4, 'Expected four coordinator editors')
+    assert.equal(placed.remote.length, 18, 'Expected eighteen remote editors')
+  }
+}
+
+async function verifyPromotion(active, waiter) {
+  const editor = openEditor(waiter)
+  const admission = editor.start()
+  admission.catch(() => {}) // The test may fail while initialization is pending.
+  await editor.wait(
+    () => editor.queue?.state === 'waiting',
+    'queue notification',
+  )
+  assert(!editor.initialized)
+  const position = editor.queue.position
+  assert.equal(position, 1)
+  const peer = await connectProjectDocumentPeer(
+    {
+      origin,
+      projectId: waiter.project.id,
+      token: waiter.account.token,
+      sockets,
+      timeoutMs: 30000,
+    },
+    { name: editor.file },
+  )
+  const queuedValue = 96822
+  const addition = '\n#eval ' + queuedValue + '\n'
+  const edit = peer.edit((text) => text.insert(text.length, addition))
+  assert.equal((await peer.ack(edit)).type, 'document')
+  const saved = (
+    await api(waiter.account, file(waiter.project.id, editor.file))
+  ).content
+  assert.equal(saved, source(waiter.i) + addition)
+  await placementBarrier('placementsWhileWaiting', active)
+  assert(!editor.initialized && editor.queue.state === 'waiting')
+  const releasedAt = performance.now()
+  active[0].editor.socket.close(1000, 'Fixture editor finished')
+  await admission
+  editor.open(saved)
+  const diagnostics = await editor.checked()
+  assert(
+    proves(diagnostics, queuedValue),
+    'The promoted session must elaborate the queued save',
+  )
+  await editor.goal(saved)
+  await placementBarrier('placementsAfterPromotion', [
+    ...active.slice(1),
+    waiter,
+  ])
+  report.overflow = {
+    position,
+    savedWhileWaiting: true,
+    sameSocketPromoted: true,
+    checkedQueuedSave: true,
+    promotedAndVerifiedMs: Math.round(performance.now() - releasedAt),
+  }
 }
 
 try {
@@ -180,6 +276,7 @@ try {
     assert.equal(session.user.name, account.name)
     assert.equal(session.user.role, 'user')
     assert.equal(session.lemex.configured, false)
+    if (queueProbe && i === 0) requireIdle(session)
     report.capacity ||= {
       editors: session.capacity.editors,
       perProject: session.capacity.editorsPerProject,
@@ -192,8 +289,8 @@ try {
       )
       if (topology === 'shared')
         assert(
-          report.capacity.perProject >= users,
-          'Shared project admission limit is below 20',
+          report.capacity.perProject >= accounts,
+          'Project-specific admission would constrain the shared-project test',
         )
     }
     const project =
@@ -208,7 +305,7 @@ try {
         { role: 'editor' },
         'PUT',
       )
-    const writer = state.accounts[(i + 1) % users]
+    const writer = state.accounts[(i + 1) % accounts]
     if (topology === 'distinct')
       await api(
         owner,
@@ -226,9 +323,9 @@ try {
   }
   assert.equal(
     new Set(participants.map((p) => p.project.id)).size,
-    topology === 'shared' ? 1 : users,
+    topology === 'shared' ? 1 : accounts,
   )
-  for (const [i, p] of participants.entries()) {
+  for (const p of participants) {
     const live = await api(p.account, scope(p.project.id))
     assert.equal(live.kind ?? 'project', 'project')
     assert.equal(live.name, p.project.name)
@@ -238,11 +335,11 @@ try {
         ? 'admin'
         : 'editor',
     )
-    const editor = new RepositoryEditor(origin, p.account, p.project, target(i))
-    editors.push(editor)
-    p.editor = editor
   }
-  await parallel(participants, async ({ editor, i }) => {
+  const active = participants.slice(0, users)
+  if (queueProbe) requireIdle(await api(active[0].account, '/api/session'))
+  for (const p of active) openEditor(p)
+  await parallel(active, async ({ editor, i }) => {
     await editor.initialize(source(i))
     const initialDiagnostics = await editor.checked()
     assert(
@@ -252,7 +349,7 @@ try {
     )
     await editor.goal(source(i))
   })
-  await placementBarrier('initialPlacements')
+  await placementBarrier('initialPlacements', active)
   report.allActiveMs = Math.round(performance.now() - started)
   console.log(
     users +
@@ -263,7 +360,7 @@ try {
 
   // The writer is always a different account from the consumer. Shared collaborators
   // append distinct declarations using Yjs; each consumer has its own proof file.
-  await parallel(participants, async (p) => {
+  await parallel(active, async (p) => {
     p.peer = await connectProjectDocumentPeer(
       {
         origin,
@@ -275,7 +372,7 @@ try {
       { name: common },
     )
   })
-  await parallel(participants, async ({ peer, i }) => {
+  await parallel(active, async ({ peer, i }) => {
     const id = peer.edit((text) =>
       text.insert(
         text.length,
@@ -285,7 +382,7 @@ try {
     const ack = await peer.ack(id)
     assert.equal(ack.type, 'document', ack.message)
   })
-  await parallel(participants, async ({ project, account, editor, i }) => {
+  await parallel(active, async ({ project, account, editor, i }) => {
     const helper = (await api(account, file(project.id, common))).content
     assert(
       helper.includes('def RepoLoad.' + witness(i) + ' : Nat := ' + value(i)),
@@ -327,12 +424,14 @@ try {
       corrected,
     )
   })
-  await placementBarrier('finalPlacements')
+  await placementBarrier('finalPlacements', active)
   report.verifiedSaves = users
   report.allVerifiedMs = Math.round(performance.now() - started)
+  if (queueProbe) await verifyPromotion(active, participants[users])
 } catch (error) {
   report.error = error.message
 } finally {
+  cleaning = true
   for (const socket of [...sockets, ...editors.map((e) => e.socket)])
     socket.terminate()
   const cleanupErrors = []

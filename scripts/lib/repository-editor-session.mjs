@@ -3,6 +3,17 @@ import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
 import { WebSocket } from 'ws'
 
+export function repositoryEditorScenario(flags) {
+  assert(
+    flags.every((flag) => ['--local-probe', '--queue-probe'].includes(flag)),
+  )
+  assert.equal(new Set(flags).size, flags.length)
+  const localProbe = flags.includes('--local-probe')
+  const queueProbe = flags.includes('--queue-probe')
+  const users = localProbe ? 2 : queueProbe ? 22 : 20
+  return { localProbe, queueProbe, users, accounts: users + Number(queueProbe) }
+}
+
 export async function waitForEvidence(check, label, timeout = 120_000) {
   const deadline = Date.now() + timeout
   do {
@@ -38,6 +49,7 @@ export class RepositoryEditor {
     })
     this.socket.on('message', (bytes) => {
       const m = JSON.parse(bytes.toString())
+      if (m.method === '$/leanflow/editorQueue') this.queue = m.params
       if (m.id !== undefined && m.method)
         return this.send({ id: m.id, result: null })
       if (m.id !== undefined) this.responses.set(m.id, m)
@@ -72,7 +84,7 @@ export class RepositoryEditor {
     if (response.error) throw new Error(method + ': ' + response.error.message)
     return response.result
   }
-  async initialize(text) {
+  async start() {
     await this.wait(
       () => this.socket.readyState === WebSocket.OPEN,
       'repository socket',
@@ -87,6 +99,10 @@ export class RepositoryEditor {
     })
     assert(result?.capabilities)
     this.send({ method: 'initialized', params: {} })
+    this.initialized = true
+  }
+  async initialize(text) {
+    await this.start()
     this.open(text)
   }
   open(text) {
