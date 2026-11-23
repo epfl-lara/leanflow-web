@@ -102,6 +102,14 @@ if (action === 'prepare') {
         'Remove remaining fixture work before revoking its account.',
       )
     }
+    await auth.refreshUsers()
+    const localUser = auth.users.find((u) => u.id === account.id)
+    assert.equal(
+      localUser?.name,
+      account.name,
+      'Fixture identity does not match the selected data directory.',
+    )
+    assert.equal(auth.public(localUser).role, 'user')
     const removed = await auth.removeUser(account.id)
     assert.equal(removed.id, account.id)
   }
