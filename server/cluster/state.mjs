@@ -50,6 +50,11 @@ export const sha256 = (value) =>
 
 export function executionDigest(value) {
   digest(value.sourceManifest)
+  if (
+    value.editorKind !== undefined &&
+    (value.operation !== 'lean.session' || value.editorKind !== 'repository')
+  )
+    throw clusterError('Invalid cluster editor kind.')
   if (value.dependencies) digest(value.dependencies)
   if (value.toolchain?.manifest) digest(value.toolchain.manifest)
   return sha256(
@@ -58,6 +63,7 @@ export function executionDigest(value) {
       dependencies: value.dependencies || null,
       toolchain: value.toolchain || null,
       operation: value.operation,
+      ...(value.editorKind ? { editorKind: value.editorKind } : {}),
       file: value.file || null,
       ...(value.editorSource
         ? { editorSource: digest(value.editorSource) }
@@ -281,6 +287,7 @@ export class ClusterState {
       epoch: value.epoch,
       inputDigest: value.inputDigest,
       operation: value.operation,
+      ...(value.editorKind ? { editorKind: value.editorKind } : {}),
       resources,
       actor: value.actor ?? null,
       projectId: value.projectId ?? null,

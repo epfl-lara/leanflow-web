@@ -495,6 +495,21 @@ time.sleep(4)
           })
           await placement
           report.capabilities.push('lean.session')
+          try {
+            report.checks.repositoryEditor = await editorConformance(
+              leanRuntime,
+              root,
+              {
+                ...options,
+                repository: true,
+                timeoutMs: 180000,
+                boundedScratchBytes: 2 * 1024 ** 3,
+              },
+            )
+            report.capabilities.push('lean.repositorySession')
+          } catch (error) {
+            report.failures.repositoryEditor = error.detail || error.message
+          }
         } catch (error) {
           report.failures.editor = error.detail || error.message
         }

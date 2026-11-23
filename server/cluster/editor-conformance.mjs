@@ -10,7 +10,11 @@ import { clusterError, sha256 } from './state.mjs'
 // Real pinned Lean, using the same chunk/ACK adapters as an SSH session. This
 // grants a capability only after invalid and corrected source both elaborate.
 export async function editorConformance(runtime, root, options) {
-  const prelude = options.prelude || ''
+  const repository = options.repository === true
+  const helper = 'ClusterConformance/EditorDependency.lean'
+  const prelude = repository
+    ? 'import ClusterConformance.EditorDependency\n'
+    : options.prelude || ''
   const upstream = new PassThrough(),
     downstream = new PassThrough()
   const node = new FramedRpc(upstream, downstream)
@@ -29,8 +33,9 @@ export async function editorConformance(runtime, root, options) {
     rpc: controller,
     id: 'editor-conformance',
     cancel: () => abort.abort(),
-    sync: (content, revision) =>
-      worker.sync({
+    sync: (content, revision, filename) =>
+      controller.request('editor.sync', {
+        ...(filename ? { path: filename } : {}),
         revision,
         hash: sha256(content),
         size: Buffer.byteLength(content),
@@ -67,11 +72,32 @@ export async function editorConformance(runtime, root, options) {
     return { ready: true }
   })
   node.handle('editor.input', (value) => worker.input(value))
+  node.handle('editor.sync', (value) => worker.sync(value))
+  if (repository) {
+    await fs.mkdir(path.dirname(path.join(root, helper)), { recursive: true })
+    await fs.writeFile(
+      path.join(root, helper),
+      'def mirrorRevision : Nat := 1\n',
+      { mode: 0o600 },
+    )
+  }
   await fs.writeFile(
     path.join(root, 'Main.lean'),
     prelude + 'example : True := by trivial\n',
   )
-  const run = worker.run(runtime, root, { ...options, signal })
+  const run = worker.run(
+    runtime,
+    root,
+    { ...options, signal },
+    repository
+      ? {
+          entries: ['Main.lean', helper].map((file) => ({
+            type: 'file',
+            path: file,
+          })),
+        }
+      : undefined,
+  )
   run.then(
     (result) => {
       if (!closing)
@@ -155,10 +181,14 @@ export async function editorConformance(runtime, root, options) {
     )
     const saved =
       prelude + '-- remote-editor-saved\nexample : True := by trivial\n'
-    await editor.syncMain(saved, 1)
+    if (repository) await editor.syncFile('Main.lean', saved, 1)
+    else await editor.syncMain(saved, 1)
     if ((await fs.readFile(path.join(root, 'Main.lean'), 'utf8')) !== saved)
       throw new Error('Editor save mirroring failed.')
-    const corrected = `${prelude}example : True := by trivial\n#eval do\n  let saved ← IO.FS.readFile "Main.lean"\n  unless saved == ${JSON.stringify(saved)} do throw (IO.userError "stale saved mirror")\n  IO.println "LEANFLOW_REMOTE_EDITOR_SAVED"\n`
+    const checkImport = repository
+      ? '  unless mirrorRevision == 1 do throw (IO.userError "missing initial import")\n'
+      : ''
+    const corrected = `${prelude}example : True := by trivial\n#eval do\n${checkImport}  let saved ← IO.FS.readFile "Main.lean"\n  unless saved == ${JSON.stringify(saved)} do throw (IO.userError "stale saved mirror")\n  IO.println "LEANFLOW_REMOTE_EDITOR_SAVED"\n`
     phase = 'corrected proof and saved-file read'
     editor.stdin.write(
       frame({
@@ -180,11 +210,53 @@ export async function editorConformance(runtime, root, options) {
           ),
       ),
     )
+    if (repository) {
+      phase = 'rebuilding a saved local dependency in the same editor'
+      await editor.syncFile(helper, 'def mirrorRevision : Nat := 2\n', 2)
+      const uri = 'file:///workspace/Main.lean'
+      editor.stdin.write(
+        frame({
+          jsonrpc: '2.0',
+          method: 'textDocument/didClose',
+          params: { textDocument: { uri } },
+        }),
+      )
+      editor.stdin.write(
+        frame({
+          jsonrpc: '2.0',
+          method: 'textDocument/didOpen',
+          params: {
+            textDocument: {
+              uri,
+              languageId: 'lean4',
+              version: 3,
+              text:
+                prelude +
+                '#eval do\n  unless mirrorRevision == 2 do throw (IO.userError "stale imported module")\n  IO.println "LEANFLOW_CHANGED_IMPORT_READY"\n',
+            },
+          },
+        }),
+      )
+      await wait(() =>
+        diagnostics.some(
+          (value) =>
+            value.uri === uri &&
+            value.version === 3 &&
+            value.diagnostics.some((item) =>
+              String(item.message).includes('LEANFLOW_CHANGED_IMPORT_READY'),
+            ) &&
+            !value.diagnostics.some((item) => item.severity === 1),
+        ),
+      )
+    }
     return {
       initialized: true,
       invalidDiagnostic: true,
       correctedDiagnostic: true,
       savedMirror: true,
+      ...(repository
+        ? { localImports: true, savedDependencyRebuilt: true }
+        : {}),
     }
   } finally {
     closing = true

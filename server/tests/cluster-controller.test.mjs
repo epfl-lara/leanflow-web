@@ -522,6 +522,117 @@ test('unsupported repository snapshots never start a remote editor', async (t) =
   assert.equal(f.workers.get('node-a').runtime.editorChildren.length, 0)
 })
 
+test('repository placement requires opt-in and the distinct worker certification', async (t) => {
+  const capable = [...ALL, 'lean.session', 'lean.repositorySession']
+  for (const [enabled, capabilities] of [
+    [false, capable],
+    [true, [...ALL, 'lean.session']],
+  ]) {
+    const f = await cluster(t, {
+      nodes: [editorNode({ capabilities })],
+      config: { editors: { placement: 'prefer', repositories: enabled } },
+    })
+    await f.ready()
+    await f.controller.prepareNode('node-a', f.input)
+    const input = { ...f.input, editorKind: 'repository' }
+    assert.equal(f.controller.canOpenEditor(input), false)
+    assert.equal(await f.controller.openEditor(input, options()), null)
+    assert.equal(f.controller.editorCapacity(input), 0)
+    assert.equal(f.controller.canOpenEditor(f.input), true)
+  }
+})
+
+test('repository preloading installs only the environment on compatible workers', async (t) => {
+  const f = await cluster(t, {
+    nodes: [
+      editorNode({
+        capabilities: [...ALL, 'lean.session', 'lean.repositorySession'],
+      }),
+      editorNode({ id: 'node-b' }),
+    ],
+    config: { editors: { placement: 'prefer', repositories: true } },
+  })
+  await f.ready()
+  await f.controller.prepareRepositoryEnvironment(
+    f.input,
+    new AbortController().signal,
+  )
+  assert.equal(
+    f.controller.canOpenEditor({ ...f.input, editorKind: 'repository' }),
+    true,
+  )
+  assert.equal(
+    f.workers.get('node-b').worker.status().assets.toolchains[VERSION],
+    undefined,
+  )
+  const source = await f.blobs.manifest(f.input.sourceManifest, 'source')
+  const hash = source.entries.find((entry) => entry.path === 'Main.lean').hash
+  assert.deepEqual(await f.workers.get('node-a').worker.blobs.has([hash]), [])
+  assert.equal(
+    f.transport.requests.some((request) => request.method === 'attempt.start'),
+    false,
+  )
+})
+
+test('a repository without Main mirrors an imported module on a separately certified worker', async (t) => {
+  const f = await cluster(t, {
+    nodes: [
+      editorNode({
+        capabilities: [...ALL, 'lean.session', 'lean.repositorySession'],
+      }),
+    ],
+    config: { editors: { placement: 'prefer', repositories: true } },
+    files: {
+      'Helper.lean': 'def value := 1\n',
+      'Proof.lean': 'import Helper\n#check value\n',
+      'lakefile.toml': 'name = "Example"\n[[lean_lib]]\nname = "Proof"\n',
+      'lake-manifest.json':
+        '{"version":"1.1.0","packages":[],"name":"Example","lakeDir":".lake"}\n',
+    },
+  })
+  await f.ready()
+  await f.controller.prepareNode('node-a', f.input)
+  const input = { ...f.input, editorKind: 'repository' }
+  assert.equal(
+    f.controller.canOpenEditor({
+      editorKind: 'repository',
+      toolchain: { version: VERSION },
+    }),
+    true,
+  )
+  assert.equal(
+    f.controller.canOpenEditor({
+      ...input,
+      toolchain: { ...input.toolchain, manifest: 'f'.repeat(64) },
+    }),
+    false,
+  )
+  assert.equal(f.controller.anyEditorAdmissionCapacity(f.input), 2)
+  const editor = await f.controller.openEditor(input, options())
+  assert.ok(editor)
+  editor.stdout.resume()
+  editor.stderr.resume()
+  try {
+    const changed = 'def value := 2\n'
+    await editor.syncFile('Helper.lean', changed, 1)
+    const workspace =
+      f.workers.get('node-a').runtime.editorChildren[0].workspace
+    assert.equal(
+      await fsp.readFile(path.join(workspace, 'Helper.lean'), 'utf8'),
+      changed,
+    )
+    const start = f.transport.requests.find(
+      (request) => request.method === 'attempt.start',
+    )
+    assert.equal(start.params.editorKind, 'repository')
+    assert.equal(start.params.file, undefined)
+    assert.equal(start.params.resources.scratchBytes, 2 * 1024 ** 3)
+  } finally {
+    editor.kill()
+    await editor.workerReleased
+  }
+})
+
 test('a cold editor environment falls back without uploading assets on the browser path', async (t) => {
   const f = await cluster(t, { nodes: [editorNode()] })
   await f.ready()

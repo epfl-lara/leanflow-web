@@ -39,6 +39,61 @@ export class ClusterChecks {
     this.closing = false
     this.editors = new Set()
     this.editorWarmup = null
+    this.repositoryWarmups = new Map()
+    this.recentRepositoryWarmups = new Map()
+    this.repositoryLane = Promise.resolve()
+  }
+
+  prepareRepository(project, { afterSetup = false } = {}) {
+    if (
+      this.closing ||
+      this.mode !== 'serve' ||
+      project.kind === 'single-file' ||
+      project.status !== 'ready' ||
+      !this.controller.status?.().editors?.repositories ||
+      this.repositoryWarmups.has(project.root) ||
+      this.repositoryWarmups.size >= this.maxQueue ||
+      (!afterSetup &&
+        Date.now() - (this.recentRepositoryWarmups.get(project.root) ?? 0) <
+          5 * 60_000)
+    )
+      return
+    const abort = new AbortController()
+    const root = project.root
+    const task = this.repositoryLane
+      .then(async () => {
+        abort.signal.throwIfAborted()
+        const environment = await this.inputs.repositoryEnvironment(
+          root,
+          abort.signal,
+        )
+        if (environment)
+          await this.controller.prepareRepositoryEnvironment(
+            environment,
+            abort.signal,
+          )
+      })
+      .catch(() => {
+        if (!this.closing)
+          this.#record({
+            mode: this.mode,
+            reason: 'repository-editor-preload-unavailable',
+          })
+      })
+      .finally(() => {
+        this.background.delete(task)
+        this.repositoryWarmups.delete(root)
+        this.recentRepositoryWarmups.delete(root)
+        this.recentRepositoryWarmups.set(root, Date.now())
+        if (this.recentRepositoryWarmups.size > this.maxQueue)
+          this.recentRepositoryWarmups.delete(
+            this.recentRepositoryWarmups.keys().next().value,
+          )
+      })
+    this.repositoryWarmups.set(root, task)
+    this.background.set(task, abort)
+    this.repositoryLane = task
+    return task
   }
 
   isRemoteResult(result) {
@@ -59,16 +114,29 @@ export class ClusterChecks {
   }
 
   canOpenEditor(project) {
+    if (this.closing || this.mode !== 'serve') return false
+    if (project.kind !== 'single-file')
+      return (
+        this.controller.canRun?.('lean.session', undefined, 'repository') ===
+          true &&
+        this.controller.canOpenEditor?.({
+          editorKind: 'repository',
+          ...(project.toolchain
+            ? { toolchain: { version: project.toolchain } }
+            : {}),
+        }) === true
+      )
     return (
-      !this.closing &&
-      this.mode === 'serve' &&
       this.editorsReady() &&
-      project.kind === 'single-file' &&
       this.controller.canOpenEditor?.(this.editorWarmup?.environment) === true
     )
   }
 
   editorAdmissionCapacity() {
+    if (this.mode === 'serve' && this.controller.anyEditorAdmissionCapacity)
+      return this.controller.anyEditorAdmissionCapacity(
+        this.editorsReady() ? this.editorWarmup?.environment : null,
+      )
     return this.mode === 'serve' && this.editorsReady()
       ? (this.controller.editorAdmissionCapacity?.(
           this.editorWarmup?.environment,
@@ -117,7 +185,7 @@ export class ClusterChecks {
           )
         if (!result && !this.closing)
           console.warn(
-            '[LeanFlow cluster] Remote editors remain local: prepare and protect the public Mathlib environment before enabling placement.',
+            '[LeanFlow cluster] Managed single-file editors remain local until the public Mathlib environment is prepared and protected.',
           )
       },
       () => {
@@ -131,9 +199,9 @@ export class ClusterChecks {
     )
   }
 
-  captureEditor(root, signal) {
+  captureEditor(root, signal, editorKind) {
     return this.#capture(signal, () =>
-      this.inputs.capture(root, { signal, editor: true }),
+      this.inputs.capture(root, { signal, editor: true, editorKind }),
     )
   }
 

@@ -33,6 +33,7 @@ import { StorageCapacity } from '../storage-capacity.mjs'
 import {
   WorkerEditor,
   editorSource as editorSourceManifest,
+  repositorySaveReserve,
 } from './worker-editor.mjs'
 
 const execute = promisify(execFile)
@@ -258,7 +259,10 @@ export class WorkerNode {
           ? 'ready'
           : 'unavailable',
       capabilities: certified
-        ? certification.capabilities.filter((value) => operations.has(value))
+        ? certification.capabilities.filter(
+            (value) =>
+              operations.has(value) || value === 'lean.repositorySession',
+          )
         : [],
       budget: {
         memoryBytes: this.config.budgetBytes,
@@ -929,9 +933,20 @@ export class WorkerNode {
         throw clusterError('Editor channel changed.', 'editor_protocol', 409)
       return this.state.create({ ...value, state: 'assigned' }).attempt
     }
+    const repository = value.editorKind === 'repository'
     if (
+      value.editorKind !== undefined &&
+      (!repository ||
+        value.operation !== 'lean.session' ||
+        value.file != null ||
+        value.editorSource != null)
+    )
+      throw clusterError('Invalid repository editor request.')
+    if (
+      !operations.has(value.operation) ||
       status.status !== 'ready' ||
-      !status.capabilities.includes(value.operation)
+      !status.capabilities.includes(value.operation) ||
+      (repository && !status.capabilities.includes('lean.repositorySession'))
     )
       throw clusterError(
         'This worker has not certified the required operation.',
@@ -952,7 +967,7 @@ export class WorkerNode {
     const slots = value.operation === 'check.kernel' ? 3 : 1
     const resources = resourceVector(value.resources)
     const editor = value.operation === 'lean.session'
-    if (editor && value.dependencies) {
+    if (editor && !repository && value.dependencies) {
       const key = `${value.toolchain?.manifest}:${value.dependencies}:${value.editorSource}`
       if (!this.editorEnvironments.has(key))
         throw clusterError(
@@ -983,7 +998,7 @@ export class WorkerNode {
       (!peer ||
         peer.closed ||
         !this.config.maxEditors ||
-        value.file !== 'Main.lean' ||
+        (!repository && value.file !== 'Main.lean') ||
         editors.length >= this.config.maxEditors ||
         (editors.length + 1) * resources.memoryBytes +
           this.config.editorBatchMemoryBytes >
@@ -1069,20 +1084,23 @@ export class WorkerNode {
       const source = await this.blobs.manifest(value.sourceManifest, 'source')
       if (source.kind !== 'source')
         throw clusterError('Invalid source manifest kind.')
-      if (record.editor && !editorSourceManifest(source))
+      if (record.editor && !editorSourceManifest(source, value.editorKind))
         throw clusterError(
           'This project requires a local repository editor.',
           'editor_unsupported',
           409,
         )
-      if (source.totalBytes + 16 * 1024 ** 2 > value.resources.scratchBytes)
+      const sourceReserve =
+        source.totalBytes +
+        (value.editorKind === 'repository' ? repositorySaveReserve : 0)
+      if (sourceReserve + 16 * 1024 ** 2 > value.resources.scratchBytes)
         throw clusterError(
           'The source snapshot exceeds its scratch grant.',
           'scratch_exceeded',
           413,
         )
       record.diskReservation = await this.storage.reserve({
-        bytes: source.totalBytes,
+        bytes: sourceReserve,
         signal: record.controller.signal,
       })
       await this.blobs.materialize(value.sourceManifest, workspace, {
@@ -1130,7 +1148,7 @@ export class WorkerNode {
         freshHome: true,
         cleanHome: true,
         maxOutputBytes: this.config.maxOutputBytes,
-        boundedScratchBytes: value.resources.scratchBytes - source.totalBytes,
+        boundedScratchBytes: value.resources.scratchBytes - sourceReserve,
         ...(value.file &&
         ['check.build', 'check.kernel'].includes(value.operation)
           ? { postCheckFile: value.file }
@@ -1174,10 +1192,15 @@ export class WorkerNode {
         },
       }
       let result = record.editor
-        ? await record.editor.run(this.runtime, workspace, {
-            ...options,
-            onOutput: undefined,
-          })
+        ? await record.editor.run(
+            this.runtime,
+            workspace,
+            {
+              ...options,
+              onOutput: undefined,
+            },
+            value.editorKind === 'repository' ? source : undefined,
+          )
         : value.operation === 'check.kernel'
           ? await this.runtime.checkProject(workspace, options)
           : await this.runtime.run(

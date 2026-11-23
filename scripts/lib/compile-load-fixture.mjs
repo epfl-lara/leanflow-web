@@ -41,7 +41,10 @@ export function loadTestSetting(name) {
 
 // These scripts create check jobs and the browser test edits fixture sources.
 // Require explicit opt-in, distinct non-admin fixture identities and private tokens.
-export async function compileLoadFixture({ users = 10 } = {}) {
+export async function compileLoadFixture({
+  users = 10,
+  requireProjects = true,
+} = {}) {
   assert(Number.isSafeInteger(users) && users >= 1 && users <= 64)
   assert.equal(
     process.env.STUDIO_RUN_LIVE_LOAD_TEST,
@@ -69,6 +72,7 @@ export async function compileLoadFixture({ users = 10 } = {}) {
       state.runTag + ' U' + String(index + 1).padStart(2, '0'),
     )
     assert(/^[A-Za-z0-9_-]{40,100}$/.test(account.token))
+    if (!requireProjects) continue
     for (const kind of ['native', 'mathlib']) {
       const project = account.projects[kind]
       assert(/^[a-f0-9-]{36}$/.test(project.id))

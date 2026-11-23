@@ -31,12 +31,29 @@ See [25 participants in a shared project](releases/2026-11-18-shared-competition
 
 ## Eligible editors
 
-The initial remote class is a managed single-file workspace with `Main.lean`,
+The managed single-file editor uses a workspace with `Main.lean`,
 an installed official Lean toolchain, and verified public dependencies. Mathlib
 is supported when its exact public environment has been preloaded. Source
 snapshots containing private files, symbolic links, additional Lean modules or
-more than 16 MiB stay local. Repository editors stay local while their project
-module build-cache synchronization is developed.
+more than 16 MiB stay local under this single-file policy.
+
+To distribute interactive editors for multi-file repositories, set
+`editors.repositories` to `true` alongside `"placement": "prefer"` after
+qualifying the workers. Each worker must report `lean.repositorySession`.
+Qualification opens a proof importing a project-local module, changes that
+module, reopens the proof on the same live connection and checks its new value.
+Both editor types share the worker's CPU, RAM and slot budget.
+
+Project setup preloads the pinned Lean toolchain and transferable, verified
+dependencies in the background. Opening an older project can start the same
+preparation. A repository needs a complete Lake configuration and package lock,
+a source snapshot the worker can reproduce, and installed copies of its exact
+toolchain and dependencies. Workspaces that rely on private local packages,
+or exceed the worker's limits, use the coordinator. Each admitted session
+builds its project imports in its own bounded workspace. Ordinary saves to
+existing Lean modules are mirrored to active sessions. Refresh imports to
+re-elaborate an open proof against a changed dependency. Changes to the file tree
+or project configuration require a new snapshot.
 
 Participants can submit **Check File** from a multi-file project while waiting
 for an editor. Shared check workers can compile a saved file when the project
@@ -316,6 +333,49 @@ the browser report. Require worker placement, all diagnostics and distinct saves
 mixed checks and confirmed cleanup. Purge only the fixture's projects, revoke its
 accounts and remove plaintext tokens after the run. Keep sanitized results in
 the repository; retain private receipts separately.
+
+### Measure concurrent full repository editors
+
+Run this opt-in test on the coordinator after the enrolled workers have the
+repository capability, the exact pinned environment, and enough approved slots.
+Use an idle test window. The driver uses ordinary authenticated editor and
+collaboration connections. It creates and permanently removes its own temporary
+repositories and writes a private aggregate report for each scenario.
+
+Set the origin, live data directory, exact enrolled worker IDs and toolchain
+for your deployment. The account setup command creates 20 disposable ordinary
+accounts. Keep their generated token manifest in the private directory.
+
+```sh
+export STUDIO_RUN_LIVE_LOAD_TEST=1
+export STUDIO_LOAD_ORIGIN=https://your-leanflow.example
+export STUDIO_LOAD_DATA_DIR=/path/to/leanflow-data
+export STUDIO_LOAD_TOOLCHAIN=leanprover/lean4:v4.35.0
+export STUDIO_LOAD_WORKERS=worker-a,worker-b,worker-c
+STUDIO_LOAD_OUTPUT=$(mktemp -d)
+export STUDIO_LOAD_OUTPUT
+export STUDIO_LOAD_FIXTURE="$STUDIO_LOAD_OUTPUT/accounts.json"
+node scripts/repository-editor-load-accounts.mjs prepare
+node scripts/check-repository-editor-load-live.mjs distinct
+node scripts/check-repository-editor-load-live.mjs shared
+node scripts/repository-editor-load-accounts.mjs clean
+```
+
+The first case uses 20 separate repositories. The second uses independent
+proof files in one shared repository. Both hold all 20 connections open.
+Every participant must receive real Lean diagnostics and an interactive goal,
+see a different collaborator's saved helper declaration take effect in their
+dependent proof, and read their own saved proof back from the server. The
+report counts any document reopen equivalent to **Refresh imports**. The same
+Lean connection must remain live. A waiting editor cannot complete the test.
+
+The driver checks actual local `lake serve` containers and running, project-
+and account-matched remote repository receipts twice, then verifies cleanup.
+Its report records the effective account, project and overall admission
+limits. Set `STUDIO_LOAD_PRESET=mathlib` to repeat the scenarios for an exact
+prepared Mathlib configuration. A two-account private loopback fixture can run
+the same protocol with `--local-probe`. That result records its two-user scope.
+The existing browser checks cover the client UI separately.
 
 Each session owns one SSH channel and a leased attempt. Output is acknowledged
 in bounded chunks; LSP text is not persisted in the check-event journal. The

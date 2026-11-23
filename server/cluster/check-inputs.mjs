@@ -4,6 +4,7 @@ import { constants } from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { captureTree } from './blobs.mjs'
+import { readDependencyConfiguration } from '../shared-dependencies.mjs'
 import { sourceFingerprint } from '../source-fingerprint.mjs'
 import { clusterError, sha256 } from './state.mjs'
 import {
@@ -322,11 +323,100 @@ export class CheckInputs {
     return { toolchain, dependencies: dependencies || null, templateBound }
   }
 
-  async capture(root, { signal, fingerprint, editor = false } = {}) {
+  // A repository uses its own Lake configuration. A local packages tree is
+  // never uploaded by this path. Bound trees must be verified by the runtime
+  // against their protected preset or the project's prepared shared binding.
+  async #repositoryAssets(root, signal, wait = false) {
     signal?.throwIfAborted()
+    const configuration = readDependencyConfiguration(root)
+    const version = configuration['lean-toolchain']?.trim()
+    const toolchainRoot =
+      TOOLCHAIN.test(version) && this.runtime.toolchains?.get(version)
+    if (
+      !toolchainRoot ||
+      !(configuration['lakefile.toml'] || configuration['lakefile.lean'])
+    )
+      return null
+    // Setup materializes the lockfile even for a Core project with no packages.
+    // An incomplete tree can make Lake silently start a plain Lean server.
+    let lock
+    try {
+      lock = JSON.parse(configuration['lake-manifest.json'])
+    } catch {
+      return null
+    }
+    if (
+      !Array.isArray(lock?.packages) ||
+      (lock.packagesDir && lock.packagesDir !== '.lake/packages') ||
+      (lock.lakeDir && lock.lakeDir !== '.lake')
+    )
+      return null
+    const dependenciesRoot = await this.runtime.dependencyRoot(root)
+    if (this.runtime.dependencyPreparationReason(root)) return null
+    if (dependenciesRoot) {
+      if (
+        dependenciesRoot === root ||
+        this.runtime.transferableDependencyRoot?.(root) !== dependenciesRoot
+      )
+        return null
+      // Shared bindings verify the project configuration digest. For a public
+      // template, verify that the project's own configuration still matches it.
+      if (
+        path.dirname(dependenciesRoot) !==
+        path.join(this.runtime.runtimeDir, 'shared-dependencies')
+      ) {
+        const template = readDependencyConfiguration(dependenciesRoot)
+        if (
+          PROJECT_CONFIGURATION_FILES.some(
+            (name) => configuration[name] !== template[name],
+          )
+        )
+          return null
+      }
+    } else if (lock.packages.length) return null
+    signal?.throwIfAborted()
+    const asset = (assetRoot, kind) =>
+      wait
+        ? waitFor(this.#asset(assetRoot, kind), signal)
+        : this.#ready(assetRoot, kind, true)
+    const toolchain = await asset(toolchainRoot, 'toolchain')
+    const dependencies =
+      dependenciesRoot &&
+      (await asset(
+        path.join(dependenciesRoot, '.lake/packages'),
+        'dependencies',
+      ))
+    if (!toolchain || (dependenciesRoot && !dependencies)) return null
+    return {
+      environment: {
+        toolchain: { version, manifest: toolchain.hash },
+        dependencies: dependencies?.hash ?? null,
+      },
+      configuration,
+      dependenciesRoot,
+    }
+  }
+
+  async repositoryEnvironment(root, signal) {
+    const assets = await this.#repositoryAssets(root, signal, true)
+    return assets?.environment ?? null
+  }
+
+  async capture(
+    root,
+    { signal, fingerprint, editor = false, editorKind } = {},
+  ) {
+    signal?.throwIfAborted()
+    const repository = editor && editorKind === 'repository'
+    const repositoryAssets =
+      repository && (await this.#repositoryAssets(root, signal))
     // Live configuration only avoids snapshots that cannot be sent now. The
     // frozen copy below still decides every input that is transferred.
-    if (!(await this.#environment(root, await this.#livePin(root), editor)))
+    if (
+      repository
+        ? !repositoryAssets
+        : !(await this.#environment(root, await this.#livePin(root), editor))
+    )
       return null
     const before = fingerprint || (await sourceFingerprint(root, { signal }))
     const source = await captureTree(this.blobs, root, {
@@ -342,6 +432,24 @@ export class CheckInputs {
       )
     // Private files and unsupported snapshot inputs stay on the coordinator.
     if (manifestFingerprint(source.manifest) !== before) return null
+    if (repository) {
+      const { environment, configuration, dependenciesRoot } = repositoryAssets
+      const frozen = configurationHashes(source.manifest)
+      if (
+        PROJECT_CONFIGURATION_FILES.some(
+          (name, index) =>
+            frozen[index] !==
+            (configuration[name] === undefined
+              ? null
+              : sha256(configuration[name])),
+        ) ||
+        (await this.runtime.dependencyRoot(root)) !== dependenciesRoot ||
+        (dependenciesRoot &&
+          this.runtime.transferableDependencyRoot?.(root) !== dependenciesRoot)
+      )
+        return null
+      return { sourceManifest: source.hash, ...environment, editorKind }
+    }
     const pin = source.manifest.entries.find(
       (entry) => entry.path === 'lean-toolchain',
     )

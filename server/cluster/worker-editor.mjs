@@ -1,11 +1,16 @@
 import fs from 'node:fs/promises'
+import { constants } from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { LspFrames, frame, validateClientUris } from '../rpc.mjs'
 import {
   sourceFileByteLimit,
   MAX_SOURCE_JSON_BYTES,
+  MAX_SOURCE_UPLOAD_BYTES,
+  MAX_SOURCE_FILE_BYTES,
 } from '../../shared/source-limits.mjs'
+import { PROJECT_CONFIGURATION_FILES } from '../../shared/project-configuration.mjs'
+import { relativeFile } from '../workspace-paths.mjs'
 import { clusterError, sha256 } from './state.mjs'
 import {
   EDITOR_CHUNK_BYTES,
@@ -13,9 +18,50 @@ import {
   writeEditorBytes,
 } from './editor-stream.mjs'
 
-// The initial serving class has exactly one editable Lean module. Repository
-// editors need a separate import/build synchronization contract before admission.
-export function editorSource(manifest) {
+// Reserve growth of existing source files and one temporary atomic save inside
+// the session's grant. A larger import or bulk edit gets a fresh snapshot.
+export const repositorySaveReserve =
+  MAX_SOURCE_UPLOAD_BYTES + MAX_SOURCE_FILE_BYTES
+
+export function editableRepositoryModule(filename) {
+  if (
+    !filename.endsWith('.lean') ||
+    PROJECT_CONFIGURATION_FILES.includes(path.posix.basename(filename))
+  )
+    return false
+  try {
+    return relativeFile(filename, { write: true }) === filename
+  } catch {
+    return false
+  }
+}
+
+export function repositoryEditorSource(manifest) {
+  if (
+    manifest.kind !== 'source' ||
+    manifest.entries.some(
+      (entry) =>
+        entry.type === 'symlink' || entry.path.split('/').includes('.lake'),
+    )
+  )
+    return false
+  const files = new Set(
+    manifest.entries
+      .filter((entry) => entry.type === 'file')
+      .map((entry) => entry.path),
+  )
+  return (
+    files.has('lean-toolchain') &&
+    files.has('lake-manifest.json') &&
+    (files.has('lakefile.lean') || files.has('lakefile.toml')) &&
+    manifest.entries.some(
+      (entry) => entry.type === 'file' && editableRepositoryModule(entry.path),
+    )
+  )
+}
+
+export function editorSource(manifest, editorKind) {
+  if (editorKind === 'repository') return repositoryEditorSource(manifest)
   return (
     manifest.kind === 'source' &&
     manifest.totalBytes <= 16 * 1024 ** 2 &&
@@ -44,7 +90,7 @@ export class WorkerEditor {
       validateClientUris(message)
       // Definition navigation opens read-only dependency and configuration
       // buffers too. The same URI policy as the VM applies to all LSP traffic;
-      // only the canonical disk-mirroring API is restricted to Main.lean.
+      // canonical disk mirroring is restricted to captured editable sources.
       this.messages.push(frame(message))
     }, MAX_SOURCE_JSON_BYTES)
   }
@@ -95,12 +141,17 @@ export class WorkerEditor {
   }
 
   sync(value) {
+    const filename = value?.path ?? 'Main.lean'
     if (
+      (this.repositoryModules
+        ? !this.repositoryModules.has(value?.path)
+        : filename !== 'Main.lean') ||
+      this.syncWriting ||
       !Number.isSafeInteger(value?.revision) ||
       value.revision !== this.revision + 1 ||
       !Number.isSafeInteger(value.size) ||
       value.size < 0 ||
-      value.size > sourceFileByteLimit('Main.lean') ||
+      value.size > sourceFileByteLimit(filename) ||
       !/^[a-f0-9]{64}$/.test(value.hash) ||
       !this.workspace ||
       !this.child ||
@@ -118,6 +169,7 @@ export class WorkerEditor {
         ? Buffer.alloc(0)
         : editorChunk(value.data)
     this.pendingSync ||= {
+      filename,
       revision: value.revision,
       hash: value.hash,
       size: value.size,
@@ -127,6 +179,7 @@ export class WorkerEditor {
     const pending = this.pendingSync
     if (
       pending.revision !== value.revision ||
+      pending.filename !== filename ||
       pending.hash !== value.hash ||
       pending.size !== value.size ||
       value.offset !== pending.bytes ||
@@ -141,43 +194,103 @@ export class WorkerEditor {
     pending.chunks.push(bytes)
     if (pending.bytes < pending.size) return { offset: pending.bytes }
     this.pendingSync = null
-    this.revision++
     const content = Buffer.concat(pending.chunks, pending.size)
     if (sha256(content) !== value.hash)
       throw clusterError('Editor source hash changed.', 'editor_protocol', 409)
-    const task = this.syncQueue.then(async () => {
-      this.abort.signal.throwIfAborted()
-      if (this.closed)
-        throw clusterError('Editor stopped.', 'editor_closed', 409)
-      const filename = path.join(this.workspace, 'Main.lean')
-      const current = await fs.lstat(filename)
-      if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1)
-        throw clusterError(
-          'The disposable source changed unexpectedly.',
-          'editor_protocol',
-          409,
-        )
-      const temporary = path.join(
-        this.workspace,
-        '.editor-save-' + randomUUID(),
-      )
-      try {
-        await fs.writeFile(temporary, content, { mode: 0o600, flag: 'wx' })
+    this.revision++
+    const receipt = {
+      revision: value.revision,
+      hash: value.hash,
+      offset: value.size,
+    }
+    if (this.repositoryModules?.get(filename) === value.hash) return receipt
+    this.syncWriting = true
+    const task = this.syncQueue
+      .then(async () => {
         this.abort.signal.throwIfAborted()
         if (this.closed)
           throw clusterError('Editor stopped.', 'editor_closed', 409)
-        await fs.rename(temporary, filename)
-      } finally {
-        await fs.rm(temporary, { force: true })
-      }
-      return { revision: value.revision, hash: value.hash, offset: value.size }
-    })
+        const parent = path.join(this.workspace, path.dirname(filename))
+        const directory = await fs.open(
+          parent,
+          constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        )
+        const pinned = '/proc/self/fd/' + directory.fd
+        const target = path.join(pinned, path.basename(filename))
+        const temporary = path.join(pinned, '.editor-save-' + randomUUID())
+        try {
+          if ((await fs.realpath(pinned)) !== parent)
+            throw clusterError(
+              'The disposable source directory changed.',
+              'editor_protocol',
+              409,
+            )
+          const current = await fs.lstat(target)
+          if (
+            !current.isFile() ||
+            current.isSymbolicLink() ||
+            current.nlink !== 1
+          )
+            throw clusterError(
+              'The disposable source changed unexpectedly.',
+              'editor_protocol',
+              409,
+            )
+          const growth =
+            (this.sourceGrowth || 0) + content.length - current.size
+          if (this.repositoryModules && growth > MAX_SOURCE_UPLOAD_BYTES)
+            throw clusterError(
+              'Reopen the editor to capture the larger project.',
+              'editor_source_changed',
+              409,
+            )
+          await fs.writeFile(temporary, content, { mode: 0o600, flag: 'wx' })
+          this.abort.signal.throwIfAborted()
+          if (this.closed)
+            throw clusterError('Editor stopped.', 'editor_closed', 409)
+          await fs.rename(temporary, target)
+          this.sourceGrowth = growth
+          if (this.repositoryModules) {
+            this.repositoryModules.set(filename, value.hash)
+            const uri =
+              'file:///workspace/' +
+              filename.split('/').map(encodeURIComponent).join('/')
+            await writeEditorBytes(
+              this.child.stdin,
+              frame({
+                jsonrpc: '2.0',
+                method: 'workspace/didChangeWatchedFiles',
+                params: { changes: [{ uri, type: 2 }] },
+              }),
+            )
+          }
+        } finally {
+          try {
+            await fs.rm(temporary, { force: true })
+          } finally {
+            await directory.close()
+          }
+        }
+        return receipt
+      })
+      .finally(() => {
+        this.syncWriting = false
+      })
     this.syncQueue = task.catch((error) => this.abort.abort(error))
     return task
   }
 
-  async run(runtime, workspace, options) {
+  async run(runtime, workspace, options, repositoryManifest) {
     this.workspace = workspace
+    if (repositoryManifest)
+      this.repositoryModules = new Map(
+        repositoryManifest.entries
+          .filter(
+            (entry) =>
+              entry.type === 'file' && editableRepositoryModule(entry.path),
+          )
+          .map((entry) => [entry.path, entry.hash]),
+      )
     const child = runtime.spawn(workspace, ['lake', 'serve', '--'], {
       ...options,
       workload: 'interactive',

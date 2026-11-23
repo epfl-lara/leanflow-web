@@ -439,12 +439,20 @@ export function controllerConfig(value) {
   const editorPlacement = value.editors?.placement || 'off'
   if (!['off', 'prefer'].includes(editorPlacement))
     throw clusterError('Invalid remote editor placement policy.')
+  if (
+    value.editors?.repositories !== undefined &&
+    typeof value.editors.repositories !== 'boolean'
+  )
+    throw clusterError('Invalid repository editor placement policy.')
   return {
     version: 1,
     lineage: value.lineage,
     mode,
     executionProfile,
-    editors: { placement: editorPlacement },
+    editors: {
+      placement: editorPlacement,
+      repositories: value.editors?.repositories === true,
+    },
     nodes,
     allowReserve: value.allowReserve === true,
     maxQueue: positive(value.maxQueue, 128, 'cluster queue limit'),

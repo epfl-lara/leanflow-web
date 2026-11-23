@@ -347,6 +347,8 @@ export async function createStudio({
   const workspaces = new WorkspaceStore({
     dataDir: workspaceDataDir,
     runtime,
+    onRepositoryReady: (project) =>
+      clusterChecks?.prepareRepository?.(project, { afterSetup: true }),
     setupBuildTimeoutMs: capacity.setupBuildTimeoutMs,
     storage,
     referenceUpdateCapacity: {
@@ -1917,6 +1919,9 @@ export async function createStudio({
           )
         return current
       }
+      // Existing projects may predate remote repository support. This bounded
+      // background preparation never holds the WebSocket or an editor slot.
+      clusterChecks?.prepareRepository?.(currentProject())
       const localEditor = (fallback) => {
         if (fallback?.unsupported) remoteAllowed = false
         const current = currentProject()

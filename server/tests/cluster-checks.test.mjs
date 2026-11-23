@@ -4,6 +4,37 @@ import { ClusterChecks } from '../cluster/checks.mjs'
 
 const result = { code: 0, stdout: 'verified', stderr: '' }
 
+test('concurrent opens share a background repository preload and fresh setup can replace it', async () => {
+  const finish = Promise.withResolvers()
+  const inputs = []
+  const environment = {
+    toolchain: { version: 'leanprover/lean4:v4.36.0' },
+    dependencies: null,
+  }
+  const checks = new ClusterChecks({
+    mode: 'serve',
+    controller: {
+      status: () => ({ editors: { repositories: true } }),
+      prepareRepositoryEnvironment: async (value) => {
+        inputs.push(value)
+        await finish.promise
+      },
+    },
+    inputs: { repositoryEnvironment: async () => environment },
+  })
+  const project = { root: '/fixture/project', status: 'ready' }
+  const first = checks.prepareRepository(project)
+  for (let i = 0; i < 20; i++) checks.prepareRepository(project)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(inputs, [environment])
+  finish.resolve()
+  await first
+  await checks.prepareRepository(project)
+  assert.equal(inputs.length, 1)
+  await checks.prepareRepository(project, { afterSetup: true })
+  assert.deepEqual(inputs, [environment, environment])
+})
+
 test('service-owned editor warm-up keeps admission local and does not delay local opens', async () => {
   const gate = Promise.withResolvers()
   let observedEnvironment,
@@ -388,4 +419,39 @@ test('a file-only request uses the existing worker single-file operation only fo
   await f.executor.execute(context, f.local)
   assert.equal(f.calls[0].options.operation, 'lean.file')
   assert.equal(f.calls[0].options.file, 'Main.lean')
+})
+
+test('repository admission requires its own capability and matching pin independently of managed editor warm-up', () => {
+  const gate = { capable: true, pin: 'leanprover/lean4:v4.36.0' }
+  const calls = []
+  const checks = new ClusterChecks({
+    mode: 'serve',
+    inputs: {},
+    controller: {
+      canRun: (operation, file, kind) =>
+        operation === 'lean.session' &&
+        file === undefined &&
+        kind === 'repository' &&
+        gate.capable,
+      canOpenEditor(environment) {
+        calls.push(environment)
+        return environment?.toolchain.version === gate.pin
+      },
+      anyEditorAdmissionCapacity: (environment) => (environment ? 6 : 4),
+    },
+  })
+  checks.editorWarmup = { state: 'warming' }
+  assert.equal(checks.canOpenEditor({ kind: 'single-file' }), false)
+  assert.equal(checks.canOpenEditor({ toolchain: gate.pin }), true)
+  assert.deepEqual(calls.pop(), {
+    editorKind: 'repository',
+    toolchain: { version: gate.pin },
+  })
+  assert.equal(
+    checks.canOpenEditor({ toolchain: 'leanprover/lean4:v4.35.0' }),
+    false,
+  )
+  assert.equal(checks.editorAdmissionCapacity(), 4)
+  gate.capable = false
+  assert.equal(checks.canOpenEditor({ toolchain: gate.pin }), false)
 })

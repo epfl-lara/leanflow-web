@@ -2,7 +2,7 @@
   "version": 1,
   "lineage": "replace-with-controller-lineage",
   "mode": "off",
-  "editors": { "placement": "off" },
+  "editors": { "placement": "off", "repositories": false },
   "allowReserve": false,
   "maxQueue": 128,
   "maxPerActor": 8,

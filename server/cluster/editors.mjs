@@ -1,26 +1,34 @@
 import { randomUUID } from 'node:crypto'
 import { DeferredEditor } from './editor-stream.mjs'
 import { clusterError } from './state.mjs'
-import { editorSource } from './worker-editor.mjs'
+import { editableRepositoryModule, editorSource } from './worker-editor.mjs'
 
 // Auth, collaboration and canonical writes stay on the coordinator. Only a
-// disposable mirror of an eligible single-file workspace crosses this boundary.
+// disposable mirror of the selected project's validated inputs reaches the worker.
 export function clusterEditor(checks, { project, actor, workspaces }, local) {
+  const repository = project.kind !== 'single-file'
+  const editorKind = repository ? 'repository' : undefined
   if (
     checks.closing ||
     checks.mode !== 'serve' ||
-    checks.editorsReady?.() === false ||
-    checks.editorCapacity?.() === 0 ||
-    project.kind !== 'single-file' ||
-    !checks.controller.canRun('lean.session', 'Main.lean')
+    (!repository &&
+      (checks.editorsReady?.() === false || checks.editorCapacity?.() === 0)) ||
+    !checks.controller.canRun(
+      'lean.session',
+      repository ? undefined : 'Main.lean',
+      editorKind,
+    )
   )
     return local()
   return new DeferredEditor(async (signal) => {
     let child,
-      dirty = true,
+      sources,
       syncTask = null,
       revision = 0,
       stopped = false
+    // Subscribe before capture. Saves during capture or remote startup must
+    // reach the worker before the first browser message can use its mirror.
+    const dirty = new Set(repository ? [] : ['Main.lean'])
     const abort = new AbortController()
     const combined = AbortSignal.any([signal, abort.signal])
     const stop = () => {
@@ -40,7 +48,8 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
       if (
         value.root !== project.root ||
         value.status !== 'ready' ||
-        value.kind !== 'single-file'
+        value.kind !== project.kind ||
+        value.toolchain !== project.toolchain
       )
         throw new Error('Editor workspace changed.')
       return value
@@ -50,18 +59,27 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
       if (syncTask) return syncTask
       syncTask = Promise.resolve().then(async () => {
         try {
-          while (dirty && !stopped) {
-            dirty = false
+          while (dirty.size && !stopped) {
+            const filename = dirty.values().next().value
+            dirty.delete(filename)
             combined.throwIfAborted()
             current()
             const source = await workspaces.readFile(
               project.id,
               actor,
-              'Main.lean',
+              filename,
             )
             combined.throwIfAborted()
             current()
-            await child.syncMain(source.content, ++revision)
+            if (repository) {
+              if (!sources.has(filename))
+                throw new Error('Source tree changed.')
+              if (source.hash && sources.get(filename) === source.hash) continue
+              await child.syncFile(filename, source.content, ++revision)
+              sources.set(filename, source.hash)
+            } else {
+              await child.syncMain(source.content, ++revision)
+            }
           }
         } catch {
           stop()
@@ -83,13 +101,18 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
         if (
           event.removedPaths?.length ||
           event.moves?.length ||
-          event.paths.some((filename) => filename !== 'Main.lean')
+          (repository && event.kind === 'files' && !event.paths.length) ||
+          (repository && event.kind === 'editor-imports') ||
+          event.paths.some((filename) =>
+            repository
+              ? !editableRepositoryModule(filename) ||
+                (sources && !sources.has(filename))
+              : filename !== 'Main.lean',
+          )
         )
           return stop()
-        if (event.paths.includes('Main.lean')) {
-          dirty = true
-          void sync()
-        }
+        for (const filename of event.paths) dirty.add(filename)
+        if (dirty.size) void sync()
       } catch {
         stop()
       }
@@ -114,12 +137,27 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
       120000,
     )
     timer.unref?.()
-    let fallback
+    let fallback,
+      attemptedRemote = false
     try {
       current()
-      const input = await checks.captureEditor(project.root, combined)
+      const capture = () =>
+        checks.captureEditor(project.root, combined, editorKind)
+      const input = await capture().catch((error) => {
+        // A collaborator can commit a normal save between fingerprint reads.
+        // Try one fresh capture before falling back during sustained writes.
+        if (!repository || error.code !== 'source_changed') throw error
+        combined.throwIfAborted()
+        current()
+        return capture()
+      })
       combined.throwIfAborted()
-      const warm = checks.editorWarmup?.environment
+      const manifest =
+        input &&
+        (await checks.inputs.blobs.manifest(input.sourceManifest, 'source'))
+      combined.throwIfAborted()
+      current()
+      const warm = !repository && checks.editorWarmup?.environment
       if (
         !input ||
         (warm &&
@@ -127,13 +165,26 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
             input.toolchain?.manifest !== warm.toolchain.manifest ||
             input.dependencies !== warm.dependencies ||
             input.editorSource !== warm.editorSource)) ||
-        !editorSource(
-          await checks.inputs.blobs.manifest(input.sourceManifest, 'source'),
-        )
+        !editorSource(manifest, editorKind)
       ) {
         fallback = { unsupported: true }
+      } else if (repository && !checks.controller.canOpenEditor(input)) {
+        if (!checks.controller.editorCapacity?.(input))
+          fallback = { unsupported: true }
       } else {
+        if (repository) {
+          sources = new Map(
+            manifest.entries
+              .filter(
+                (entry) =>
+                  entry.type === 'file' && editableRepositoryModule(entry.path),
+              )
+              .map((entry) => [entry.path, entry.hash]),
+          )
+          if ([...dirty].some((filename) => !sources.has(filename))) stop()
+        }
         combined.throwIfAborted()
+        attemptedRemote = true
         child = await checks.controller.openEditor(input, {
           actor,
           projectId: project.id,
@@ -146,7 +197,6 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
       if (child) {
         child.once('close', unsubscribe)
         child.beforeInput = sync
-        dirty = true
         await sync()
         combined.throwIfAborted()
         return child
@@ -174,6 +224,7 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
             )
           : reason
       }
+      if (repository && !attemptedRemote) fallback = { unsupported: true }
     } finally {
       clearTimeout(timer)
     }

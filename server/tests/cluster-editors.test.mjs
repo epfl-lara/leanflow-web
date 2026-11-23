@@ -24,6 +24,10 @@ function child() {
     await value.sync(content, revision)
     value.saved.push({ content, revision })
   }
+  value.syncFile = async (path, content, revision) => {
+    await value.sync(content, revision)
+    value.saved.push({ path, content, revision })
+  }
   value.stdin = new Writable({
     write(bytes, _encoding, callback) {
       Promise.resolve()
@@ -48,13 +52,20 @@ function child() {
   return value
 }
 
-function fixture(t, patch = {}, startLocal = (worker) => worker) {
+function fixture(
+  t,
+  patch = {},
+  startLocal = (worker) => worker,
+  { repository = false } = {},
+) {
   const remote = child(),
     local = child()
   const project = {
     id: 'project',
     root: '/private/fixture',
-    kind: 'single-file',
+    ...(repository
+      ? { toolchain: 'leanprover/lean4:v4.35.0' }
+      : { kind: 'single-file' }),
     status: 'ready',
   }
   const data = {
@@ -71,8 +82,8 @@ function fixture(t, patch = {}, startLocal = (worker) => worker) {
       if (data.denied) throw new Error('No access.')
       return project
     },
-    async readFile() {
-      return { content: data.content }
+    async readFile(_id, _actor, path) {
+      return data.files?.get(path) || { content: data.content }
     },
     subscribeChanges(listener) {
       listeners.add(listener)
@@ -88,17 +99,38 @@ function fixture(t, patch = {}, startLocal = (worker) => worker) {
           return {
             kind: 'source',
             totalBytes: 100,
-            entries: [{ type: 'file', path: 'Main.lean' }],
+            entries: (repository
+              ? [
+                  'lean-toolchain',
+                  'lakefile.toml',
+                  'lake-manifest.json',
+                  'Lib/Imported.lean',
+                  'Lib/Proof.lean',
+                ]
+              : ['Main.lean']
+            ).map((path) => ({ type: 'file', path, hash: 'initial-hash' })),
           }
         },
       },
     },
     async captureEditor() {
-      return { sourceManifest: 'snapshot' }
+      return {
+        sourceManifest: 'snapshot',
+        ...(repository
+          ? {
+              editorKind: 'repository',
+              toolchain: { version: project.toolchain, manifest: 'pin' },
+              dependencies: null,
+            }
+          : {}),
+      }
     },
     controller: {
-      canRun: () => true,
-      async openEditor() {
+      canRun: (_operation, _file, kind) =>
+        kind === (repository ? 'repository' : undefined),
+      canOpenEditor: (input) => input.editorKind === 'repository',
+      async openEditor(input) {
+        if (repository) assert.equal(input.editorKind, 'repository')
         data.remoteStarts++
         return remote
       },
@@ -288,4 +320,103 @@ test('disconnect while a remote launch is pending kills its late child', async (
   assert.equal(f.remote.killed, true)
   assert.equal(f.listeners.size, 0)
   assert.equal(f.data.localStarts, 0)
+})
+
+test('a repository synchronizes collaborator saves in different modules through startup and overlapping acknowledgements', async (t) => {
+  const captured = Promise.withResolvers()
+  const f = fixture(t, { captureEditor: () => captured.promise }, undefined, {
+    repository: true,
+  })
+  f.data.files = new Map()
+  const imported = 'Lib/Imported.lean'
+  const proof = 'Lib/Proof.lean'
+  const save = (path, content, hash = content) => {
+    f.data.files.set(path, { content, hash })
+    f.change({ paths: [path] })
+  }
+  await until(() => f.listeners.size === 1)
+  save(proof, 'already captured', 'initial-hash')
+  save(imported, 'after capture')
+  f.result.stdin.write('initialize with unsaved document')
+  captured.resolve({ sourceManifest: 'snapshot', editorKind: 'repository' })
+  await f.result.ready
+  await until(() => f.remote.input.length === 1)
+  assert.deepEqual(f.remote.saved, [
+    { path: imported, content: 'after capture', revision: 1 },
+  ])
+  const saving = Promise.withResolvers()
+  let started = false
+  f.remote.sync = async () => {
+    started = true
+    await saving.promise
+  }
+  save(imported, 'pending')
+  await until(() => started)
+  save(proof, 'participant version')
+  save(imported, 'newest')
+  f.result.stdin.write('check after saves')
+  await delay(10)
+  assert.equal(f.remote.input.length, 1)
+  saving.resolve()
+  await until(() => f.remote.input.length === 2)
+  assert.deepEqual(f.remote.saved.slice(1), [
+    { path: imported, content: 'pending', revision: 2 },
+    { path: proof, content: 'participant version', revision: 3 },
+    { path: imported, content: 'newest', revision: 4 },
+  ])
+  assert.equal(f.data.remoteStarts, 1)
+  assert.equal(f.data.localStarts, 0)
+})
+
+for (const [label, event] of [
+  ['new module', { paths: ['Extra.lean'] }],
+  [
+    'renamed module',
+    {
+      paths: ['Lib/Imported.lean', 'Lib/After.lean'],
+      moves: [{ from: 'Lib/Imported.lean', to: 'Lib/After.lean' }],
+    },
+  ],
+  [
+    'package removal',
+    { paths: ['Lib/Imported.lean'], removedPaths: ['Lib/Imported.lean'] },
+  ],
+  ['updated environment', { paths: ['lakefile.lean'] }],
+  ['newly prepared imports', { kind: 'editor-imports' }],
+  ['unknown bulk change', {}],
+])
+  test(`a live repository releases its old mirror after a ${label}`, async (t) => {
+    const f = fixture(t, {}, undefined, { repository: true })
+    await f.result.ready
+    f.change(event)
+    await until(() => f.remote.killed)
+    assert.equal(f.listeners.size, 0)
+  })
+
+test('repository placement never invokes a single-file-only worker and marks unavailable captured pins local-only', async (t) => {
+  const old = fixture(
+    t,
+    { controller: { canRun: (_op, _file, kind) => kind !== 'repository' } },
+    undefined,
+    { repository: true },
+  )
+  assert.equal(old.result, old.local)
+  assert.equal(old.data.remoteStarts, 0)
+  const missing = fixture(
+    t,
+    {
+      controller: {
+        canRun: () => true,
+        canOpenEditor: () => false,
+        editorCapacity: () => 0,
+      },
+    },
+    (local, fallback) => {
+      assert.deepEqual(fallback, { unsupported: true })
+      return local
+    },
+    { repository: true },
+  )
+  assert.equal(await missing.result.ready, missing.local)
+  assert.equal(missing.listeners.size, 0)
 })

@@ -540,3 +540,123 @@ test('preset preloading uses the protected toolchain directory registered by the
     /exact official/,
   )
 })
+
+const repositoryOptions = { editor: true, editorKind: 'repository' }
+async function prepareCoreProject(f) {
+  await fs.writeFile(
+    path.join(f.root, 'lakefile.toml'),
+    'name = "CustomProofs"\n[[lean_lib]]\nname = "Library"\n',
+  )
+  await fs.writeFile(
+    path.join(f.root, 'lake-manifest.json'),
+    JSON.stringify({
+      name: 'CustomProofs',
+      packages: [],
+      packagesDir: '.lake/packages',
+    }),
+  )
+  await fs.mkdir(path.join(f.root, 'Library'))
+  await fs.writeFile(
+    path.join(f.root, 'Library', 'Dependency.lean'),
+    'def number := 42\n',
+  )
+}
+
+test('a prepared Core repository uses its own pin, Lake settings and nested source independently of managed single-file warm-up', async (t) => {
+  const f = await fixture(t)
+  await prepareCoreProject(f)
+  f.inputs.editorEnvironment = {
+    toolchain: { version: 'other', manifest: 'unrelated' },
+    dependencies: 'another dependency',
+    editorSource: 'preset',
+  }
+  let captures = 0
+  const capture = f.inputs.captureAsset.bind(f.inputs)
+  f.inputs.captureAsset = (...args) => {
+    captures++
+    return capture(...args)
+  }
+  assert.equal(
+    await f.inputs.capture(f.root, repositoryOptions),
+    null,
+    'the first request uses local capacity while immutable inputs are prepared',
+  )
+  const environment = await f.inputs.repositoryEnvironment(f.root)
+  assert.deepEqual(Object.keys(environment).sort(), [
+    'dependencies',
+    'toolchain',
+  ])
+  assert.equal(environment.dependencies, null)
+  assert.equal(environment.toolchain.version, 'leanprover/lean4:v4.35.0')
+  const input = await f.inputs.capture(f.root, repositoryOptions)
+  assert.deepEqual(input, {
+    sourceManifest: input.sourceManifest,
+    ...environment,
+    editorKind: 'repository',
+  })
+  const snapshot = await f.blobs.manifest(input.sourceManifest, 'source')
+  const settings = snapshot.entries.find((e) => e.path === 'lakefile.toml')
+  assert.match((await f.blobs.read(settings.hash)).toString(), /CustomProofs/)
+  assert(snapshot.entries.some((e) => e.path === 'Library/Dependency.lean'))
+  assert.equal(captures, 1)
+  await fs.writeFile(path.join(f.root, '.env'), 'private fixture')
+  assert.equal(await f.inputs.capture(f.root, repositoryOptions), null)
+})
+
+test('repository sources and dependency preparation both decline unbound private packages, unrepresented bindings and incomplete setup', async (t) => {
+  const f = await fixture(t)
+  await prepareCoreProject(f)
+  const expected = async () => {
+    assert.equal(await f.inputs.repositoryEnvironment(f.root), null)
+    assert.equal(await f.inputs.capture(f.root, repositoryOptions), null)
+  }
+  const lock = path.join(f.root, 'lake-manifest.json')
+  await fs.unlink(lock)
+  await expected()
+  await fs.writeFile(lock, 'invalid')
+  await expected()
+  await fs.writeFile(
+    lock,
+    JSON.stringify({ packages: [{ name: 'Unrepresented' }] }),
+  )
+  await expected()
+  f.runtime.dependencyRoot = () => f.root
+  await expected()
+  f.runtime.dependencyRoot = () => path.join(f.directory, 'private-packages')
+  await expected()
+  await fs.writeFile(
+    lock,
+    JSON.stringify({ packages: [], packagesDir: '../sibling/packages' }),
+  )
+  f.runtime.dependencyRoot = () => null
+  await expected()
+  assert.equal(f.inputs.assets.size, 0)
+})
+
+test('a verified shared binding supplies frozen dependencies alongside custom Lake configuration, and is checked again at capture', async (t) => {
+  const f = await fixture(t)
+  await prepareCoreProject(f)
+  const root = path.join(
+    f.runtime.runtimeDir,
+    'shared-dependencies',
+    'prepared',
+  )
+  await fs.mkdir(path.join(root, '.lake/packages'), { recursive: true })
+  await fs.writeFile(
+    path.join(root, '.lake/packages', 'compiled-artifact'),
+    'prepared',
+  )
+  await fs.writeFile(path.join(root, 'lake-manifest.json'), '{"packages":[]}')
+  f.runtime.dependencyRoot = () => root
+  f.runtime.transferableDependencyRoot = () => root
+  const assets = await f.inputs.repositoryEnvironment(f.root)
+  assert(assets.dependencies)
+  const first = await f.inputs.capture(f.root, repositoryOptions)
+  assert.equal(first.dependencies, assets.dependencies)
+  assert.equal(first.editorSource, undefined)
+  let validations = 0
+  f.runtime.transferableDependencyRoot = () =>
+    ++validations === 1 ? root : null
+  assert.equal(await f.inputs.capture(f.root, repositoryOptions), null)
+  assert.equal(validations, 2)
+})

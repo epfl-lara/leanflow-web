@@ -830,6 +830,7 @@ export class WorkspaceStore {
     runtime,
     resolveHost = lookup,
     gitCredentials = async () => null,
+    onRepositoryReady,
     setupRepair,
     setupBuildTimeoutMs = 1800000,
     storage,
@@ -849,6 +850,7 @@ export class WorkspaceStore {
     this.setupBuildTimeoutMs = validateSetupBuildTimeout(setupBuildTimeoutMs)
     this.resolveHost = resolveHost
     this.gitCredentials = gitCredentials
+    this.onRepositoryReady = onRepositoryReady
     this.setupRepair = setupRepair
     this.projectsDir = path.join(this.dataDir, 'projects')
     this.snapshotsDir = path.join(this.dataDir, 'candidates')
@@ -2640,6 +2642,8 @@ export class WorkspaceStore {
           }
           await this.#prepareProject(project, credentials)
         }
+        if (project.status === 'ready' && project.kind !== 'single-file')
+          this.onRepositoryReady?.(project)
       })
       .catch(async (error) => {
         error = storageFailure(error)

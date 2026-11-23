@@ -490,7 +490,8 @@ export class ClusterController {
     if (this.#config.mode === 'off' || !this.#accepting) return null
     const request = this.#request(input, options)
     request.signal?.throwIfAborted()
-    if (!this.canRun(request.operation, request.file)) return null
+    if (!this.canRun(request.operation, request.file, request.editorKind))
+      return null
     const { actor } = request
     const loads =
       request.operation === 'lean.session' ? this.#editorLoad : this.#actorLoad
@@ -572,7 +573,7 @@ export class ClusterController {
     const task = this.run(input, {
       ...options,
       operation: 'lean.session',
-      file: 'Main.lean',
+      file: input.editorKind === 'repository' ? null : 'Main.lean',
       onSession: (child) => {
         editor = child
         ready.resolve(child)
@@ -596,7 +597,8 @@ export class ClusterController {
         (node) =>
           this.#ready(node) &&
           node.status.capabilities.includes('lean.session') &&
-          (!environment || this.#warmEditor(node, environment)),
+          this.#supportsEditor(node, environment?.editorKind) &&
+          (!environment?.toolchain || this.#warmEditor(node, environment)),
       )
       .reduce(
         (sum, node) => sum + (node.status.editorResources?.maxConcurrent || 0),
@@ -612,7 +614,7 @@ export class ClusterController {
       !!this.#place({
         ...environment,
         operation: 'lean.session',
-        file: 'Main.lean',
+        file: environment?.editorKind === 'repository' ? null : 'Main.lean',
         sourceBytes: 0,
       })
     )
@@ -628,15 +630,79 @@ export class ClusterController {
       return (
         !node ||
         !this.#ready(node) ||
-        (environment && !this.#warmEditor(node, environment))
+        !this.#supportsEditor(node, environment?.editorKind) ||
+        (environment?.toolchain && !this.#warmEditor(node, environment))
       )
     }).length
     return this.editorCapacity(environment) + unavailable
   }
 
+  anyEditorAdmissionCapacity(publicEnvironment) {
+    if (this.#config.editors.placement !== 'prefer') return 0
+    const available = new Set()
+    let capacity = 0
+    for (const node of this.#nodes.values()) {
+      if (
+        !this.#ready(node) ||
+        !node.status.capabilities.includes('lean.session')
+      )
+        continue
+      if (
+        !this.#supportsEditor(node, 'repository') &&
+        !(publicEnvironment && this.#warmEditor(node, publicEnvironment))
+      )
+        continue
+      capacity += node.status.editorResources?.maxConcurrent || 0
+      available.add(node.config.id)
+    }
+    for (const grant of this.#grants.values()) {
+      if (grant.operation === 'lean.session' && !available.has(grant.nodeId))
+        capacity++
+    }
+    return capacity
+  }
+
   // Uploads a pinned environment to one worker and, when asked, has the worker
   // certify itself with that toolchain. Capabilities come only from the
   // worker's own report.
+  async prepareRepositoryEnvironment({ toolchain, dependencies }, signal) {
+    if (
+      !this.#accepting ||
+      !this.#config.editors.repositories ||
+      this.#config.editors.placement !== 'prefer' ||
+      this.#config.mode !== 'serve'
+    )
+      return
+    // Preload the immutable environment only. Project sources cross to a worker
+    // only after an authorized session has obtained a grant.
+    const input = { toolchain, dependencies, editorKind: 'repository' }
+    const failures = []
+    for (const node of this.#nodes.values()) {
+      signal.throwIfAborted()
+      if (
+        !this.#ready(node) ||
+        !this.#supportsEditor(node, 'repository') ||
+        this.#warmEditor(node, input) ||
+        (node.config.role === 'reserve' && !this.#config.allowReserve)
+      )
+        continue
+      try {
+        await this.prepareNode(
+          node.config.id,
+          { toolchain, dependencies },
+          { signal },
+        )
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+    if (failures.length)
+      throw new AggregateError(
+        failures,
+        'Some repository editor environments are still unavailable.',
+      )
+  }
+
   async prepareNode(nodeId, input, { certify = false, signal } = {}) {
     if (this.#config.mode === 'off')
       throw clusterError('Cluster execution is off.', 'cluster_off', 409)
@@ -740,13 +806,14 @@ export class ClusterController {
       ready: workers.filter((worker) => worker.state === 'ready').length,
       editors: {
         placement: this.#config.editors.placement,
+        repositories: this.#config.editors.repositories,
         capacity: this.editorCapacity(),
       },
       workers,
     }
   }
 
-  canRun(operation, file) {
+  canRun(operation, file, editorKind) {
     if (
       operation === 'lean.session' &&
       this.#config.editors.placement !== 'prefer'
@@ -760,7 +827,7 @@ export class ClusterController {
           node.status.capabilities.includes(operation) &&
           this.#fits(
             node,
-            { operation, file, sourceBytes: 0 },
+            { operation, file, editorKind, sourceBytes: 0 },
             this.#persistentGrants(),
           ) &&
           (!file?.endsWith('.lean') ||
@@ -939,6 +1006,9 @@ export class ClusterController {
       toolchain: pinnedToolchain(input.toolchain),
       operation,
       file: null,
+      ...(input.editorKind !== undefined
+        ? { editorKind: input.editorKind }
+        : {}),
       ...(input.editorSource != null
         ? { editorSource: digest(input.editorSource) }
         : {}),
@@ -1007,7 +1077,10 @@ export class ClusterController {
   // receives inputs that disagree with their pinned toolchain.
   async #environment(request) {
     const source = await this.#localManifest(request.sourceManifest, 'source')
-    if (request.operation === 'lean.session' && !editorSource(source))
+    if (
+      request.operation === 'lean.session' &&
+      !editorSource(source, request.editorKind)
+    )
       throw invalidRequest('This project requires a local repository editor.')
     const pin = source.entries.find((entry) => entry.path === 'lean-toolchain')
     let pinned = null
@@ -1149,13 +1222,13 @@ export class ClusterController {
   // Kernel checks reserve three worker slots. Writable scratch is a sized
   // tmpfs charged to the job's RAM; host source copies also fit this grant
   // and the administrator's aggregate filesystem boundary.
-  #grantFor(node, { operation, sourceBytes }) {
+  #grantFor(node, { operation, sourceBytes, editorKind }) {
     if (operation === 'lean.session')
       return {
         memoryBytes: node.status.editorResources.memoryBytes,
         cpus: node.status.editorResources.cpus,
         scratchBytes: Math.max(
-          256 * 1024 ** 2,
+          editorKind === 'repository' ? 2 * 1024 ** 3 : 256 * 1024 ** 2,
           sourceBytes * 2 + 16 * 1024 ** 2,
         ),
       }
@@ -1177,7 +1250,8 @@ export class ClusterController {
     if (node.badInputs.has(request.inputDigest)) return null
     if (request.operation === 'lean.session') {
       const policy = node.status.editorResources
-      if (!policy) return null
+      if (!policy || !this.#supportsEditor(node, request.editorKind))
+        return null
       if (request.toolchain && !this.#warmEditor(node, request)) return null
       const editors = grants.filter(
         (grant) =>
@@ -1211,6 +1285,16 @@ export class ClusterController {
   }
 
   #warmEditor(node, input) {
+    if (input.editorKind === 'repository') {
+      const assets = node.status?.assets
+      const manifest = assets?.toolchains[input.toolchain.version]
+      return (
+        !!manifest &&
+        (!input.toolchain.manifest || manifest === input.toolchain.manifest) &&
+        (!input.dependencies ||
+          assets.dependencies.includes(input.dependencies))
+      )
+    }
     return (
       node.status?.assets?.toolchains[input.toolchain.version] ===
         input.toolchain.manifest &&
@@ -1223,6 +1307,15 @@ export class ClusterController {
               environment.dependencies === input.dependencies &&
               environment.editorSource === input.editorSource,
           )))
+    )
+  }
+
+  #supportsEditor(node, kind) {
+    return (
+      kind === undefined ||
+      (kind === 'repository' &&
+        this.#config.editors.repositories &&
+        node.status.capabilities.includes('lean.repositorySession'))
     )
   }
 
@@ -1288,6 +1381,7 @@ export class ClusterController {
       bundleDigest: this.#bundleDigest,
       imageDigest: this.#nodeImageDigest(node),
       sourceManifest: request.sourceManifest,
+      ...(request.editorKind ? { editorKind: request.editorKind } : {}),
       ...(request.editorSource ? { editorSource: request.editorSource } : {}),
       dependencies: request.dependencies,
       toolchain: request.toolchain,
@@ -1428,7 +1522,11 @@ export class ClusterController {
           rpc: job.editorRpc,
           id: job.id,
           cancel: () => this.#halt(job, failure('worker_stopped')),
-          sync: async (content, revision) => {
+          sync: async (content, revision, path) => {
+            if (path !== undefined && job.payload.editorKind !== 'repository')
+              throw invalidRequest(
+                'File mirroring requires a repository editor.',
+              )
             const hash = createHash('sha256').update(content).digest('hex')
             const bytes = Buffer.from(content)
             for (
@@ -1439,6 +1537,7 @@ export class ClusterController {
               const chunk = bytes.subarray(offset, offset + EDITOR_CHUNK_BYTES)
               const reply = await job.editorRpc.request('editor.sync', {
                 id: job.id,
+                ...(path !== undefined ? { path: contentPath(path) } : {}),
                 revision,
                 hash,
                 size: bytes.length,
@@ -2291,7 +2390,11 @@ export class ClusterController {
         ? value.capabilities
         : []
     const capabilities = [
-      ...new Set(claimed.filter((name) => operations.has(name))),
+      ...new Set(
+        claimed.filter(
+          (name) => operations.has(name) || name === 'lean.repositorySession',
+        ),
+      ),
     ]
     return {
       nodeEpoch: value.nodeEpoch,

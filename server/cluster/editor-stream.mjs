@@ -107,6 +107,10 @@ export class RemoteEditor extends EventEmitter {
     return this.sync(content, revision)
   }
 
+  syncFile(path, content, revision) {
+    return this.sync(content, revision, path)
+  }
+
   kill() {
     if (this.closed || this.stopping) return false
     this.stopping = true
