@@ -176,18 +176,19 @@ async function altDefinition(
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })
   await editor().focus()
   state.definitionLocations = locations
-  const previous = report.requests.filter((r) => r.method === 'LSP').length
   const target = await identifierTarget(name)
-  await page.mouse.move(0, 0)
+  // Monaco uses the last editor mouse target when Alt is pressed. Point at the
+  // identifier first so the preview and click refer to the same word.
+  await target.line.hover({ position: target.position })
+  const previous = report.requests.filter((r) => r.method === 'LSP').length
   await page.keyboard.down('Alt')
   try {
-    await target.line.hover({ position: target.position })
     await until(
       () => report.requests.filter((r) => r.method === 'LSP').length > previous,
       'Alt-hover requests a Lean definition',
     )
     if (locations.length && previewAvailable)
-      await page.locator('.goto-definition-link').waitFor()
+      await target.line.locator('.goto-definition-link').waitFor()
     await target.line.click({ position: target.position })
   } finally {
     await page.keyboard.up('Alt')
@@ -203,6 +204,9 @@ try {
   )
   await page.keyboard.insertText('-- unsaved navigation marker\n')
   await until(() => save.isEnabled(), 'unsaved editor')
+  // The first rejected autosave adds a banner above Monaco. Start pointer
+  // gestures after it appears so the identifier stays under the mouse.
+  await page.getByText(/Autosave will retry: Fixture save capacity/).waitFor()
   await definition(location('file:///workspace/Main.lean', 1))
   await until(
     () =>
