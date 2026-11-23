@@ -15,6 +15,11 @@ import { KernelStorageBudget } from './kernel-storage-budget.mjs'
 import { dependencyBuildPlan } from './dependency-targets.mjs'
 import { memoryBytes, workerMemoryCapacity } from './worker-memory.mjs'
 import { projectImportRequirements } from './editor-imports.mjs'
+import { seedFileCheck } from './project-file-cache.mjs'
+import {
+  serveEditorBuilds,
+  prepareEditorBuild,
+} from './editor-build-request.mjs'
 import {
   managedWorkerDirectory,
   managedWorkerFile,
@@ -101,29 +106,40 @@ function writableLakeCache(root, { mountedPackages = false } = {}) {
     const relative = pending.pop()
     if (relative.split('/').length > 65)
       throw new Error('Writable Lake cache nesting exceeds 64 levels')
-    managedWorkerDirectory(root, relative, (directory) => {
-      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-        if (++entries > 200000)
-          throw new Error('Writable Lake cache contains too many entries')
-        if (
-          mountedPackages &&
-          relative === '.lake' &&
-          entry.name === 'packages'
-        )
-          continue
-        const stat = fs.lstatSync(`${directory}/${entry.name}`)
-        if (
-          (entry.isDirectory() && !stat.isDirectory()) ||
-          (entry.isFile() && !stat.isFile())
-        )
-          throw new Error('Writable Lake cache changed during inspection')
-        if (stat.isDirectory()) pending.push(`${relative}/${entry.name}`)
-        else if (stat.isFile() && stat.nlink > 1)
-          throw new Error(
-            'Writable Lake cache must not contain hardlinked files',
+    try {
+      managedWorkerDirectory(root, relative, (directory) => {
+        for (const entry of fs.readdirSync(directory, {
+          withFileTypes: true,
+        })) {
+          if (++entries > 200000)
+            throw new Error('Writable Lake cache contains too many entries')
+          if (
+            mountedPackages &&
+            relative === '.lake' &&
+            entry.name === 'packages'
           )
-      }
-    })
+            continue
+          const stat = fs.lstatSync(`${directory}/${entry.name}`, {
+            throwIfNoEntry: false,
+          })
+          if (!stat) continue
+          if (
+            (entry.isDirectory() && !stat.isDirectory()) ||
+            (entry.isFile() && !stat.isFile())
+          )
+            throw new Error('Writable Lake cache changed during inspection')
+          if (stat.isDirectory()) pending.push(`${relative}/${entry.name}`)
+          else if (stat.isFile() && stat.nlink > 1)
+            throw new Error(
+              'Writable Lake cache must not contain hardlinked files',
+            )
+        }
+      })
+    } catch (error) {
+      // Another worker may already have renamed or removed a temporary file
+      // or directory. The stable mount itself must still be present.
+      if (error.code !== 'ENOENT' || relative === '.lake') throw error
+    }
   }
   return cache
 }
@@ -1099,6 +1115,35 @@ export class Runtime {
     this.#reloadDependencies()
     return this.#prepareHome(root)
   }
+
+  noteProjectSourceChange(root) {
+    // Broadcast saves (including nested edits and undo) to build processes
+    // without waiting behind a compiler. File descriptors in all workers see
+    // the same directory ctime, even when edits restore the original bytes.
+    const directory = fs.openSync(
+      this.#root(root),
+      fs.constants.O_RDONLY |
+        fs.constants.O_DIRECTORY |
+        fs.constants.O_NOFOLLOW,
+    )
+    try {
+      const now = new Date()
+      fs.futimesSync(directory, now, now)
+    } finally {
+      fs.closeSync(directory)
+    }
+  }
+
+  seedFileCheck(projectRoot, snapshot, file, options) {
+    const source = this.#root(projectRoot)
+    const target = this.#root(snapshot)
+    if (
+      !source.startsWith(path.join(this.dataDir, 'projects') + path.sep) ||
+      path.dirname(target) !== path.join(this.dataDir, 'file-checks')
+    )
+      throw new Error('Invalid file check cache workspace.')
+    return seedFileCheck(this, source, target, file, options)
+  }
   async homeForRoot(root) {
     return this.home(root)
   }
@@ -1768,13 +1813,46 @@ export class Runtime {
     const privatePackages = lakeCache
       ? ensurePrivateDirectory(actual, '.lake/packages')
       : null
+    const savedProject =
+      !gitOnly &&
+      !initialClone &&
+      boundedScratchBytes === undefined &&
+      actual.startsWith(path.join(this.dataDir, 'projects') + path.sep)
+    const projectEditor =
+      savedProject && args[0] === 'lake' && args[1] === 'serve'
+    let editorPin, editorToolchain, publishedBuild
+    const shareLocalImports = projectEditor && !editor
+    const guardedBuild =
+      savedProject && !projectEditor && readOnlyWorkspace && writeLakeCache
+    const helpers = path.join(projectDir, 'server/project-cache-worker')
+    if (projectEditor) {
+      if (writePrivateDependencyCache || repository)
+        throw new Error(
+          'Editors require read-only project dependencies and a single workspace mount.',
+        )
+      freshHome = true
+      cleanHome = true
+      readOnlyWorkspace = true
+    }
+    // Managed single-file editors already have immutable public imports.
+    if (shareLocalImports) {
+      editorPin = managedWorkerFile(actual, 'lean-toolchain', {
+        maxBytes: 256,
+      })?.trim()
+      editorToolchain = this.toolchains.get(editorPin)
+      if (!editorToolchain)
+        throw new Error(
+          'Prepare the pinned Lean environment before opening the editor.',
+        )
+      publishedBuild = ensurePrivateDirectory(actual, '.lake/build')
+    }
     const writablePrivatePackages =
       writePrivateDependencyCache &&
       (!dependencySource || dependencySource === actual)
-    if (writeLakeCache)
+    if (writeLakeCache && !projectEditor)
       writableLakeCache(actual, { mountedPackages: !writablePrivatePackages })
     const localCaches = []
-    if (writePrivateDependencyCache) {
+    if (writePrivateDependencyCache || guardedBuild) {
       const configuration = readDependencyConfiguration(actual)
       const manifest = configuration['lake-manifest.json']
         ? JSON.parse(configuration['lake-manifest.json'])
@@ -1792,6 +1870,17 @@ export class Runtime {
       clean: cleanHome,
       gitOnly,
     })
+    const editorLake = projectEditor
+      ? ensurePrivateDirectory(home, 'editor-lake')
+      : null
+    if (editorLake) {
+      ensurePrivateDirectory(editorLake, 'packages')
+      if (shareLocalImports)
+        fs.symlinkSync(
+          '/opt/leanflow-saved-build',
+          path.join(editorLake, 'build'),
+        )
+    }
     const kernelTemp =
       kernelCheck && boundedScratchBytes === undefined
         ? ensurePrivateDirectory(home, 'kernel-check-tmp')
@@ -1934,13 +2023,46 @@ export class Runtime {
       ])
         dockerArgs.push(
           '--mount',
-          `type=bind,src=${lakeCache},dst=${alias}/.lake${readonly}`,
+          `type=bind,src=${editorLake || lakeCache},dst=${alias}/.lake${editorLake ? '' : readonly}`,
         )
     }
     for (const [toolchain, source] of gitOnly ? [] : this.toolchains) {
       dockerArgs.push(
         '--mount',
         `type=bind,src=${source},dst=/opt/lean-toolchains/${toolchainName(toolchain)},readonly`,
+      )
+    }
+    if (guardedBuild || shareLocalImports)
+      dockerArgs.push(
+        '--mount',
+        `type=bind,src=${helpers},dst=/opt/leanflow-project-cache,readonly`,
+      )
+    if (guardedBuild) {
+      if (localCaches.length)
+        dockerArgs.push(
+          '--env',
+          'LEANFLOW_LOCAL_PACKAGES=' +
+            JSON.stringify(localCaches.map(({ relative }) => relative)),
+        )
+      const build = ensurePrivateDirectory(actual, '.lake/build')
+      dockerArgs.push(
+        '--mount',
+        `type=bind,src=${build},dst=/workspace/.lake/build`,
+      )
+    }
+    if (shareLocalImports) {
+      // Retain Lake's own serve command, project options and pinned compiler.
+      // Only editor setup-file invocations take the build lock, so idle and
+      // already elaborating editors never keep another participant waiting.
+      dockerArgs.push(
+        '--mount',
+        `type=bind,src=${editorToolchain},dst=/opt/leanflow-editor-toolchain,readonly`,
+        '--mount',
+        `type=bind,src=${helpers}/lean,dst=/opt/lean-toolchains/${toolchainName(editorPin)}/bin/lean,readonly`,
+        '--env',
+        `ELAN_TOOLCHAIN=${editorPin}`,
+        '--mount',
+        `type=bind,src=${publishedBuild},dst=/opt/leanflow-saved-build,readonly`,
       )
     }
     if (lakeCache) {
@@ -2015,6 +2137,14 @@ export class Runtime {
     }
     dockerArgs.push(
       this.imageId || this.image,
+      ...(savedProject &&
+      !projectEditor &&
+      !projectCheck &&
+      (args[0] === 'lake' || writeLakeCache)
+        ? guardedBuild
+          ? ['python3', '-I', '/opt/leanflow-project-cache/build_lock.py']
+          : ['flock', '--exclusive', '--no-fork', '/workspace']
+        : []),
       ...(boundedScratchBytes === undefined
         ? args
         : [
@@ -2028,7 +2158,7 @@ export class Runtime {
           ]),
     )
     if (kernelTemp) storageReservation?.track(kernelTemp)
-    return this.#launchWorker(root, dockerArgs, {
+    const child = this.#launchWorker(root, dockerArgs, {
       childEnv,
       home,
       name,
@@ -2044,6 +2174,18 @@ export class Runtime {
       storageReservation,
       [agentWorkerRole]: agentRole,
     })
+    if (shareLocalImports) {
+      try {
+        const close = serveEditorBuilds(home, (file, header, buildSignal) =>
+          prepareEditorBuild(this, actual, file, header, buildSignal),
+        )
+        child.once('close', close)
+      } catch (error) {
+        child.kill()
+        throw error
+      }
+    }
+    return child
   }
 
   #launchWorker(

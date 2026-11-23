@@ -1,5 +1,7 @@
 """Export project declarations in isolation, then use the pinned native checker."""
 
+from contextlib import nullcontext
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -11,11 +13,23 @@ import tempfile
 HELPER = Path(__file__).resolve().parent / "ProjectCheck.lean"
 
 
+def project_build_lock(project):
+    # Remote bounded jobs and private verification copies own their writable
+    # cache. Only the saved-project worker has the shared build helper mounted.
+    helper = Path("/opt/leanflow-project-cache/build_lock.py")
+    if not helper.is_file():
+        return nullcontext((None, []))
+    spec = importlib.util.spec_from_file_location("build_lock", helper)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.locked_build(project)
+
+
 def exit_code(result):
     return result.returncode if result.returncode >= 0 else 128 - result.returncode
 
 
-def sandbox(command, project, prefix, environment):
+def sandbox(command, project, prefix, environment, local_caches):
     # Match Lake's inner sandbox. The project/config/export process cannot read
     # the outer worker home or temporary export, write source, or use a network.
     args = [
@@ -55,6 +69,8 @@ def sandbox(command, project, prefix, environment):
         str(project / ".lake"),
         str(project / ".lake"),
     ]
+    for cache in local_caches:
+        args.extend(["--bind", str(cache), str(cache)])
     for key, value in environment.items():
         if key != "HOME":
             args.extend(["--setenv", key, value])
@@ -138,27 +154,52 @@ def main():
         "Building the default targets and exporting all project declarations with their dependencies.",
         flush=True,
     )
-    resolved = subprocess.run(
-        sandbox([lake, "resolve-deps"], project, prefix, environment),
-        env=environment,
-        stdout=sys.stderr,
-        stderr=sys.stderr,
-    )
-    if resolved.returncode:
-        return exit_code(resolved)
     with tempfile.TemporaryDirectory(
         prefix="leanflow-project-kernel-", dir="/tmp"
     ) as directory:
         exported = Path(directory) / "project.ndjson"
-        with exported.open("wb") as output:
-            built = subprocess.run(
-                sandbox([*helper, "export"], project, prefix, environment),
-                env=environment,
-                stdout=output,
-                stderr=sys.stderr,
-            )
-        if built.returncode:
-            return exit_code(built)
+        # Only the build/export reads and writes the project's Lake artifacts.
+        # Other editors can prepare imports throughout independent kernel replay.
+        try:
+            with project_build_lock(project) as (lock, local_caches):
+                inherited = (lock,) if lock is not None else ()
+                resolved = subprocess.run(
+                    sandbox(
+                        [lake, "resolve-deps"],
+                        project,
+                        prefix,
+                        environment,
+                        local_caches,
+                    ),
+                    pass_fds=inherited,
+                    env=environment,
+                    stdout=sys.stderr,
+                    stderr=sys.stderr,
+                )
+                if resolved.returncode:
+                    raise subprocess.CalledProcessError(
+                        resolved.returncode, "lake resolve-deps"
+                    )
+                with exported.open("wb") as output:
+                    built = subprocess.run(
+                        sandbox(
+                            [*helper, "export"],
+                            project,
+                            prefix,
+                            environment,
+                            local_caches,
+                        ),
+                        pass_fds=inherited,
+                        env=environment,
+                        stdout=output,
+                        stderr=sys.stderr,
+                    )
+                    if built.returncode:
+                        raise subprocess.CalledProcessError(
+                            built.returncode, "project export"
+                        )
+        except subprocess.CalledProcessError as error:
+            return exit_code(error)
         if not exported.stat().st_size:
             print("The project exporter produced no declarations.", file=sys.stderr)
             return 1
@@ -190,7 +231,7 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(
             f"Independent project checking could not complete: {error}", file=sys.stderr
         )

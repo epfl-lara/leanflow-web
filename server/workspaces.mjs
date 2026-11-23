@@ -1,4 +1,5 @@
 import { removeDisposableTree } from './temporary-workspaces.mjs'
+import { withBuildCacheRead } from './project-file-cache.mjs'
 import { durableSourceWrite } from './durable-source-write.mjs'
 import { SaveEvents } from './save-events.mjs'
 import { ReferenceUpdateAdmission } from './reference-update-admission.mjs'
@@ -77,7 +78,7 @@ import {
 import { singleFileSource, availablePlaygroundName } from './single-files.mjs'
 import { sourceFingerprint } from './source-fingerprint.mjs'
 import { FileCheckSlots } from './file-check-slots.mjs'
-import { SharedSourceRead } from './shared-source-read.mjs'
+import { SharedSourceRead, waitFor } from './shared-source-read.mjs'
 import { validateDependencyLayout } from './dependency-layout.mjs'
 import { preparePrivateSetupDependencies } from './setup-dependencies.mjs'
 import { checkEditorImports } from './editor-imports.mjs'
@@ -470,10 +471,17 @@ const unsupportedFileCheckCopy = Symbol('unsupported file check input')
 async function copyWorkspace(
   source,
   target,
-  { omitDependencies = false, omitFiles = [], signal, checkSourceBytes } = {},
+  {
+    omitDependencies = false,
+    omitFiles = [],
+    omitBuilds = false,
+    signal,
+    checkSourceBytes,
+  } = {},
 ) {
   let entries = 0,
-    bytes = 0
+    bytes = 0,
+    leanSources = 0
   const visit = async (from, to, prefix = '', depth = 0) => {
     signal?.throwIfAborted()
     if (depth > 64) {
@@ -495,7 +503,8 @@ async function copyWorkspace(
       for (const entry of await fs.readdir(anchor, { withFileTypes: true })) {
         signal?.throwIfAborted()
         const relative = prefix ? `${prefix}/${entry.name}` : entry.name
-        // Match the source fingerprint, never share prior project build output.
+        // Start with just the fingerprinted sources. Only Lake-selected
+        // imports may later seed an isolated file check.
         if (
           checkSourceBytes !== undefined &&
           ['.git', '.lake'].includes(entry.name)
@@ -506,6 +515,9 @@ async function copyWorkspace(
           entry.name === '.ready.json' ||
           isSecret(entry.name) ||
           omitFiles.includes(relative) ||
+          (omitBuilds &&
+            (relative === '.lake/build' ||
+              relative.endsWith('/.lake/build'))) ||
           (omitDependencies && relative === '.lake/packages')
         ) {
           if (checkSourceBytes !== undefined) throw unsupportedFileCheckCopy
@@ -513,6 +525,8 @@ async function copyWorkspace(
         }
         if (checkSourceBytes !== undefined && ++entries > MAX_FILES)
           throw unsupportedFileCheckCopy
+        if (entry.name.endsWith('.lean') && entry.name !== 'lakefile.lean')
+          leanSources++
         const original = path.join(from, entry.name)
         const anchored = path.join(anchor, entry.name)
         const destination = path.join(to, entry.name)
@@ -573,6 +587,7 @@ async function copyWorkspace(
     }
   }
   await visit(source, target)
+  return { leanSources, bytes }
 }
 
 // TeX receives a bounded immutable copy, never the editable project or candidate.
@@ -1435,6 +1450,17 @@ export class WorkspaceStore {
     return () => this.changeListeners.delete(listener)
   }
 
+  watchSourceChanges(id, changed) {
+    return this.subscribeChanges((event) => {
+      if (
+        event.projectId === id &&
+        event.kind === 'files' &&
+        event.paths.length
+      )
+        changed()
+    })
+  }
+
   invalidateFileListing(projectId) {
     this.fileListings.delete(projectId)
     this.fileListings.delete(`${projectId}:project`)
@@ -1451,6 +1477,8 @@ export class WorkspaceStore {
     originRunId,
   ) {
     this.invalidateFileListing(projectId)
+    if (kind === 'files' && paths.length)
+      this.runtime.noteProjectSourceChange?.(this.#record(projectId).root)
     // Listeners enqueue their own work. Never await a socket, agent or another
     // workspace operation while the nonreentrant project write queue is held.
     if (kind === 'access') {
@@ -3842,9 +3870,10 @@ export class WorkspaceStore {
     ) {
       // Only one rebuild may write to a project's Lake cache at a time.
       // After it releases the cache, fingerprint the latest saved files.
-      await (
-        pending.build.active ? pending.build.wait(signal) : pending.build.task
-      ).catch(() => {})
+      await waitFor(
+        pending.build.task.catch(() => {}),
+        signal,
+      )
       fingerprint = await this.checkFingerprint(id, owner, { signal })
       pending = this.editorImportBuilds.get(id)
     }
@@ -3888,6 +3917,27 @@ export class WorkspaceStore {
     // Build saved sources in their own cache. Candidate artifacts are untrusted
     // inputs and belong to a different workspace. Keep the source mount read only
     // and do not hold a workspace lock while waiting for a worker or compiler.
+    let changed = false
+    const stopWatching = this.watchSourceChanges(id, () => {
+      changed = true
+    })
+    try {
+      return await this.#compileEditorImports(project, fingerprint, {
+        signal,
+        onOutput,
+        changed: () => changed,
+      })
+    } finally {
+      stopWatching()
+    }
+  }
+
+  async #compileEditorImports(
+    project,
+    fingerprint,
+    { signal, onOutput, changed },
+  ) {
+    const id = project.id
     let readiness
     try {
       const requiredImports = await this.runtime.projectImportRequirements?.(
@@ -3942,7 +3992,10 @@ export class WorkspaceStore {
       if (current.archivedAt || project.root !== current.root)
         fail('Project not found', 404)
       this.#ready(current)
-      if (fingerprint !== (await sourceFingerprint(current.root, { signal })))
+      if (
+        changed() ||
+        fingerprint !== (await sourceFingerprint(current.root, { signal }))
+      )
         readiness = {
           ready: false,
           message:
@@ -3950,9 +4003,10 @@ export class WorkspaceStore {
         }
       signal?.throwIfAborted()
       current.setupBuildStatus = readiness.ready ? 'passed' : 'warnings'
-      current.editorImportsVersion = (current.editorImportsVersion || 0) + 1
-      if (readiness.ready) delete current.buildWarning
-      else current.buildWarning = readiness.message
+      if (readiness.ready) {
+        current.editorImportsVersion = (current.editorImportsVersion || 0) + 1
+        delete current.buildWarning
+      } else current.buildWarning = readiness.message
       this.#save(current)
       this.#event(
         current,
@@ -3961,7 +4015,12 @@ export class WorkspaceStore {
           ? 'Saved project modules are ready for editor imports.\n'
           : readiness.message + '\n',
       )
-      this.#notifyChanges({ projectId: id, paths: [], kind: 'editor-imports' })
+      if (readiness.ready)
+        this.#notifyChanges({
+          projectId: id,
+          paths: [],
+          kind: 'editor-imports',
+        })
       return readiness
     })
   }
@@ -6165,7 +6224,7 @@ export class WorkspaceStore {
     }
   }
 
-  async withFileCheckWorkspace(id, actor, { signal }, check) {
+  async withFileCheckWorkspace(id, actor, { signal, file }, check) {
     return this.fileCheckSlots.run(signal, async (holdThroughCleanup) => {
       const parent = path.join(this.dataDir, 'file-checks')
       await fs.mkdir(parent, { recursive: true, mode: 0o700 })
@@ -6173,7 +6232,17 @@ export class WorkspaceStore {
         fail('Invalid file check directory.', 403)
       const root = await fs.mkdtemp(path.join(parent, 'check-'))
       let claimed = false,
-        workerReleased
+        workerReleased,
+        captured,
+        copied,
+        changed = false
+      const stopWatching = this.watchSourceChanges(id, () => {
+        changed = true
+      })
+      const maxBytes = Math.min(
+        this.storage?.allocationBytes ?? Infinity,
+        128 * 1024 ** 2,
+      )
       try {
         await this.runtime.claimTemporaryWorkspace?.(root)
         claimed = true
@@ -6183,24 +6252,51 @@ export class WorkspaceStore {
           signal?.throwIfAborted()
           const project = this.get(id, actor)
           this.#ready(project)
-          await copyWorkspace(project.root, root, {
+          copied = await copyWorkspace(project.root, root, {
             signal,
-            checkSourceBytes: Math.min(
-              this.storage?.allocationBytes ?? Infinity,
-              128 * 1024 ** 2,
-            ),
+            checkSourceBytes: maxBytes,
           })
           await this.runtime.inheritDependencies?.(project.root, root)
+          captured = project
+          changed = false
         })
         const fingerprint = await sourceFingerprint(root, { signal })
         signal?.throwIfAborted()
         this.get(id, actor)
+        if (
+          file &&
+          !changed &&
+          captured.kind !== 'single-file' &&
+          copied.leanSources > 1 &&
+          copied.bytes < maxBytes &&
+          this.runtime.seedFileCheck
+        ) {
+          const seeded = await this.runtime.seedFileCheck(
+            captured.root,
+            root,
+            file,
+            { signal, maxBytes: maxBytes - copied.bytes },
+          )
+          if (
+            seeded &&
+            (fingerprint !==
+              (await this.checkFingerprint(id, actor, { signal })) ||
+              changed)
+          )
+            for (const packageDir of seeded)
+              await removeDisposableTree(
+                path.join(root, packageDir, '.lake/build'),
+              )
+          signal?.throwIfAborted()
+          this.get(id, actor)
+        }
         return await check(root, fingerprint, (child) => {
           workerReleased = child.workerReleased
         })
       } catch (error) {
         if (error !== unsupportedFileCheckCopy) throw error
       } finally {
+        stopWatching()
         if (claimed && this.runtime.releaseTemporaryWorkspace) {
           const removed = await this.runtime.releaseTemporaryWorkspace(root)
           if (removed === false && workerReleased)
@@ -6335,10 +6431,13 @@ export class WorkspaceStore {
       const reusableDependencies =
         project.status === 'ready' ||
         !!this.runtime.verifiedDependencyRoot?.(project.root)
-      await copyWorkspace(project.root, root, {
-        omitDependencies: inherit || !reusableDependencies,
-        signal,
-      })
+      await withBuildCacheRead(project.root, signal, (clean) =>
+        copyWorkspace(project.root, root, {
+          omitDependencies: inherit || !reusableDependencies,
+          omitBuilds: !clean,
+          signal,
+        }),
+      )
       signal?.throwIfAborted()
       if (inherit && reusableDependencies)
         await this.runtime.inheritDependencies(project.root, root)

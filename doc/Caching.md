@@ -10,6 +10,16 @@ system or share mutable Lean sessions between accounts.
   Containers mount them read-only. Their `.olean`, `.ilean`, `.olean.private`,
   `.olean.server`, `.trace` and hash files retain their timestamps. Containers
   on the same host can share the operating system's file cache.
+- In a shared repository project, one successful build of a saved module
+  supplies its `.olean` files to everyone working in that project. For
+  example, if Alice and Bob open different files importing `Common`, Lake
+  builds a changed `Common.lean` once. Both editors read the completed
+  artifacts. Each editor still checks the file its participant is editing.
+- Editors, import rebuilds and local project checks coordinate writes to the
+  same build directory. Saving remains available during compilation. A save
+  during a build invalidates the affected output, even if the edit is undone.
+  The next build also recovers after an interrupted compiler. A cold import
+  needs a free build slot. Already compiled modules remain available to editors.
 - The coordinator references protected managed files in place. It keeps a
   persistent index of their content hashes rather than duplicating their bytes
   in another VM cache. Workers receive only missing content hashes; interrupted
@@ -124,8 +134,9 @@ transfer time. The roughly two-second correction/save/readback p95 included
 save-throttle retries. See the [30-editor acceptance record](releases/2026-11-17-primary-workers.md).
 
 Fresh proof checks reuse compiled dependencies but retain independent source
-and kernel validation. Proof verdicts are not cached. Private project build
-artifacts are not shared between users or retained as a new worker cache.
+and kernel validation. Each proof check produces its own verdict. A project's compiled modules stay
+with that project on the coordinator. Remote playground editors reuse the
+public libraries installed on their worker.
 SSH channel pooling and lighter worker bridges need measurements before a
 worker upgrade. Selective object retention is still future work; monitor the
 bounded stores rather than routinely clearing installed environments with a

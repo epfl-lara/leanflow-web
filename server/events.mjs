@@ -497,6 +497,10 @@ export class JobManager {
       ...(fileOnly && { checkScope: 'file', checkMethod: 'lean-file' }),
     })
     const controller = new AbortController()
+    let savedDuringCheck = false
+    const stopWatching = this.workspaces.watchSourceChanges?.(projectId, () => {
+      savedDuringCheck = true
+    })
     this.controllers.set(job.id, controller)
     const task = Promise.resolve()
       .then(async () => {
@@ -572,7 +576,7 @@ export class JobManager {
                 ? this.workspaces.withFileCheckWorkspace(
                     projectId,
                     owner,
-                    { signal: controller.signal },
+                    { signal: controller.signal, file },
                     check,
                   )
                 : check(project.root)
@@ -631,11 +635,12 @@ export class JobManager {
             : undefined
           const checkedFingerprint = checkedSnapshot ?? fingerprint
           const sourceChanged =
-            checkedFingerprint !== undefined &&
-            checkedFingerprint !==
-              (await this.workspaces.checkFingerprint(projectId, owner, {
-                signal: controller.signal,
-              }))
+            (checkedFingerprint !== undefined &&
+              checkedFingerprint !==
+                (await this.workspaces.checkFingerprint(projectId, owner, {
+                  signal: controller.signal,
+                }))) ||
+            (!checkedSnapshot && !remoteResult && savedDuringCheck)
           result = {
             ...result,
             hasWarnings: hasLeanWarnings(result),
@@ -691,6 +696,7 @@ export class JobManager {
         }
       })
       .finally(() => {
+        stopWatching?.()
         this.active.delete(job.id)
         this.controllers.delete(job.id)
       })

@@ -155,6 +155,20 @@ async function fixture(
         await fs.mkdir(path.join(workspace, '.git'), { recursive: true })
       if (args[0] === 'git' && args.includes('rev-parse'))
         return { code: 1, stdout: '', stderr: '' }
+      if (
+        args[0] === 'lake' &&
+        args[1] === '--keep-toolchain' &&
+        args[2] === 'env' &&
+        args[3] === 'python3'
+      )
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            ready: true,
+            message: 'Project imports are ready.',
+          }),
+          stderr: '',
+        }
       if (args[0] === 'lake' && args[1] === 'env')
         return { code: 0, stdout: JSON.stringify(auditEnv), stderr: '' }
       if (args[0] === 'lake' && args[1] === 'build' && buildFails)

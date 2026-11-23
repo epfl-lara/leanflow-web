@@ -1,3 +1,17 @@
+// Stops one caller's wait. The shared task keeps running for other callers.
+export function waitFor(task, signal) {
+  if (!signal) return task
+  let abort
+  return Promise.race([
+    task,
+    new Promise((_, reject) => {
+      abort = () => reject(signal.reason)
+      signal.addEventListener('abort', abort, { once: true })
+      if (signal.aborted) abort()
+    }),
+  ]).finally(() => signal.removeEventListener('abort', abort))
+}
+
 // Several authorized checks can wait for the same in-flight filesystem read.
 // The last cancellation stops the helper and waits for it to release its slot.
 export class SharedSourceRead {
@@ -17,18 +31,9 @@ export class SharedSourceRead {
   async wait(signal) {
     signal?.throwIfAborted()
     this.waiters++
-    let abort
     try {
-      if (!signal) return await this.task
-      return await Promise.race([
-        this.task,
-        new Promise((_, reject) => {
-          abort = () => reject(signal.reason)
-          signal.addEventListener('abort', abort, { once: true })
-        }),
-      ])
+      return await waitFor(this.task, signal)
     } finally {
-      signal?.removeEventListener('abort', abort)
       this.waiters--
       if (!this.waiters && this.active) {
         this.controller.abort(signal?.reason)

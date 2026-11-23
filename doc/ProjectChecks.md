@@ -46,6 +46,13 @@ Run **Check File** again for the current version.
 
 On the coordinator, available worker capacity sets how many file checks can take private source copies, up to six. Each copy can hold up to 128 MiB of source or the lower configured storage allowance. The compiler reuses the project’s prepared dependencies. If the project contains too much source, excluded private files or links that cannot be copied faithfully, Lean checks the saved project in place. Run an in-place check again if someone edits the project before it finishes.
 
+When two participants check files importing the same saved module, Lake can
+build that module once for the project. **Check File** takes a private copy
+of the configured import artifacts and their build traces, then checks the
+selected file against its captured sources. If those imports change during
+preparation or exceed the copy allowance, Lean rebuilds them in the private
+check. Each participant receives a result for the file they checked.
+
 Checks run offline, with source and toolchains read only and the project's
 private `.lake` build cache writable. If files change during a check, its result
 cannot be accepted as a check of the new files: run the check again. Use

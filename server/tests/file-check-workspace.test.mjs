@@ -170,6 +170,63 @@ test('waiting checks allocate no source copies, cancel promptly and remove faile
   assert.deepEqual(await fs.readdir(scratch), [])
 })
 
+test('a file check discards compiled imports when a collaborator saves during preparation, even if the text is restored', async (t) => {
+  const { store, project, runtime } = await fixture(t)
+  const prepared = Promise.withResolvers(),
+    resume = Promise.withResolvers()
+  const file = await store.readFile(project.id, 'owner', 'Main.lean')
+  await fs.writeFile(
+    path.join(project.root, 'Helper.lean'),
+    'def helper := 1\n',
+  )
+  runtime.seedFileCheck = async (source, target) => {
+    assert.equal(source, project.root)
+    await fs.mkdir(path.join(target, '.lake/build'), { recursive: true })
+    await fs.writeFile(
+      path.join(target, '.lake/build/earlier.olean'),
+      'generated',
+    )
+    prepared.resolve()
+    await resume.promise
+    return ['']
+  }
+  const check = store.withFileCheckWorkspace(
+    project.id,
+    'viewer',
+    { file: 'Main.lean' },
+    async (root) => {
+      assert.notEqual(root, project.root)
+      assert.equal(
+        await fs.readFile(path.join(root, 'Main.lean'), 'utf8'),
+        file.content,
+      )
+      await assert.rejects(fs.stat(path.join(root, '.lake/build')), {
+        code: 'ENOENT',
+      })
+    },
+  )
+  try {
+    await prepared.promise
+    const later = await store.writeFile(
+      project.id,
+      'owner',
+      'Main.lean',
+      file.content + '-- edit\n',
+      file.hash,
+    )
+    await store.writeFile(
+      project.id,
+      'owner',
+      'Main.lean',
+      file.content,
+      later.hash,
+    )
+  } finally {
+    resume.resolve()
+    await check
+  }
+})
+
 test('source links and size limits do not certify an incomplete copy', async (t) => {
   const { store, project, scratch } = await fixture(t)
   const run = (operation) =>

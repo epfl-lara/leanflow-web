@@ -39,6 +39,56 @@ const mounts = (argv) =>
   argv.flatMap((value, index) => (value === '--mount' ? [argv[index + 1]] : []))
 const cacheOptions = { readOnlyWorkspace: true, writeLakeCache: true }
 
+test('shared editors see read-only published modules and write only to their own Lake directories', async (t) => {
+  const { dataDir, runtime } = await fixture(t)
+  const root = path.join(dataDir, 'projects', 'example')
+  const pin = 'leanprover/lean4:v4.34.1'
+  await fs.mkdir(root, { recursive: true })
+  await fs.writeFile(path.join(root, 'lean-toolchain'), pin)
+  runtime.toolchains.set(pin, path.join(dataDir, 'tools'))
+  const editor = () =>
+    runtime.run(root, ['lake', 'serve', '--'], {
+      ...cacheOptions,
+      freshHome: true,
+      cleanHome: true,
+      workload: 'interactive',
+    })
+  const [alice, bob] = await Promise.all([editor(), editor()])
+  const personal = []
+  for (const result of [alice, bob]) {
+    const args = JSON.parse(result.stdout)
+    const bindings = mounts(args)
+    assert(bindings.includes(`type=bind,src=${root},dst=/workspace,readonly`))
+    assert(
+      bindings.includes(
+        `type=bind,src=${root}/.lake/build,dst=/opt/leanflow-saved-build,readonly`,
+      ),
+    )
+    assert(
+      bindings
+        .filter((mount) => mount.startsWith(`type=bind,src=${root}/`))
+        .every((mount) => mount.endsWith(',readonly')),
+    )
+    personal.push(
+      bindings.find((mount) =>
+        mount.endsWith('/editor-lake,dst=/workspace/.lake'),
+      ),
+    )
+  }
+  assert(personal.every(Boolean))
+  assert.notEqual(personal[0], personal[1])
+  const args = JSON.parse(
+    (await runtime.run(root, ['lake', 'build'], cacheOptions)).stdout,
+  )
+  assert.deepEqual(args.slice(-5), [
+    'python3',
+    '-I',
+    '/opt/leanflow-project-cache/build_lock.py',
+    'lake',
+    'build',
+  ])
+})
+
 test('fresh verification homes are removed after success or failure without deleting the persistent home', async (t) => {
   const { runtime, root, dataDir } = await fixture(t)
   const home = await runtime.home(root)

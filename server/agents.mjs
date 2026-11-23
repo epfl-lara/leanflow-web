@@ -714,7 +714,10 @@ export class AgentManager {
       }
     }
     signal?.throwIfAborted()
-    if (!result.ready) this.#log(job.id, result.message + '\n')
+    if (!result.ready) {
+      this.#log(job.id, result.message + '\n')
+      return
+    }
     this.events.updateMetadata(job.id, {
       liveRevision: (this.events.getMetadata(job.id).liveRevision || 0) + 1,
     })

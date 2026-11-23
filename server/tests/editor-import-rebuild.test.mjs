@@ -268,8 +268,8 @@ test('a newer saved revision waits for the running rebuild and then compiles the
   finish.resolve()
   assert.equal((await alice).ready, false)
   assert.equal((await bob).ready, true)
-  assert.deepEqual(revisions, [undefined, 1])
-  assert.equal(store.get(project.id, 'bob').editorImportsVersion, 2)
+  assert.deepEqual(revisions, [undefined, undefined])
+  assert.equal(store.get(project.id, 'bob').editorImportsVersion, 1)
   assert.equal(store.get(project.id, 'bob').setupBuildStatus, 'passed')
 })
 
@@ -291,14 +291,23 @@ test('building imports leaves editing responsive and reports saved-source change
     file.content + '-- user edit\n',
     file.hash,
   )
+  const edited = await store.readFile(project.id, 'alice', 'Main.lean')
+  await store.writeFile(
+    project.id,
+    'alice',
+    'Main.lean',
+    file.content,
+    edited.hash,
+  )
   finish.resolve()
   const result = await refresh
   assert.equal(result.ready, false)
   assert.match(result.message, /changed while/)
-  assert.match(
-    (await store.readFile(project.id, 'alice', 'Main.lean')).content,
-    /user edit/,
+  assert.equal(
+    (await store.readFile(project.id, 'alice', 'Main.lean')).hash,
+    file.hash,
   )
+  assert.equal(store.get(project.id, 'alice').editorImportsVersion, undefined)
   assert.equal(store.get(project.id, 'alice').setupBuildStatus, 'warnings')
 })
 

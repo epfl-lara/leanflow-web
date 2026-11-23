@@ -180,6 +180,7 @@ async function checkFixture(
     selectedResult = { code: 1, stdout: '', stderr: 'selected file error' },
     changed = false,
     changedDuringProbe = false,
+    saveThenUndo = false,
     scope,
     remote = false,
     kind = 'project',
@@ -196,10 +197,17 @@ async function checkFixture(
     path.join(root, 'Main.lean'),
     'theorem example_one : True := by trivial\n',
   )
+  let onSave
   const manager = new JobManager({
     events,
     workspaces: {
       get: () => ({ root, status: 'ready', kind }),
+      watchSourceChanges(_id, change) {
+        onSave = change
+        return () => {
+          onSave = undefined
+        }
+      },
       readFile: async () => {},
       markDependencyPreparation: (...args) => preparation.push(args),
       checkFingerprint: () => sourceFingerprint(root),
@@ -216,6 +224,14 @@ async function checkFixture(
       async run(root, args, options) {
         calls.push({ args, options })
         if (changed) await fs.writeFile(path.join(root, 'Main.lean'), 'changed')
+        if (saveThenUndo) {
+          const file = path.join(root, 'Main.lean')
+          const original = await fs.readFile(file)
+          await fs.writeFile(file, 'changed')
+          onSave()
+          await fs.writeFile(file, original)
+          onSave()
+        }
         if (file && args.includes(file)) return selectedResult
         return result
       },
@@ -333,6 +349,13 @@ test('selected files outside default targets still compile and changed source ca
   })
   assert.equal(changedToolchain.job.status, 'failed')
   assert.equal(changedToolchain.job.result.sourceChanged, true)
+})
+
+test('a live project check cannot certify sources edited and restored during the build', async (t) => {
+  const { job } = await checkFixture(t, { saveThenUndo: true })
+  assert.equal(job.status, 'failed')
+  assert.equal(job.result.sourceChanged, true)
+  assert.match(job.error, /files changed/)
 })
 
 test('explicit file checks use the pinned dependency-aware compiler without starting a project check', async (t) => {

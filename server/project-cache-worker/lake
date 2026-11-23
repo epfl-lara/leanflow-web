@@ -1,0 +1,165 @@
+#!/usr/bin/python3 -I
+"""Run the pinned editor import build and retain its local module parts together."""
+
+import fcntl
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+
+
+def pin_imports(setup):
+    # Public packages and the toolchain already have read-only, stable paths.
+    # New builds may replace the local olean and its server/private companions
+    # after setup-file exits but before the language server opens all of them.
+    project = Path("/workspace")
+    packages = project / ".lake/packages"
+    published = Path("/opt/leanflow-saved-build")
+    cache = Path.home() / ".cache/leanflow-editor-imports"
+    copied = {}
+
+    def pin(value):
+        if isinstance(value, list):
+            return [pin(item) for item in value]
+        if isinstance(value, dict):
+            return {key: pin(item) for key, item in value.items()}
+        if not isinstance(value, str):
+            return value
+        file = Path(value)
+        if not file.is_absolute():
+            file = project / file
+        if file.is_relative_to(packages) or not (
+            file.is_relative_to(project) or file.is_relative_to(published)
+        ):
+            return value
+        file = file.resolve()
+        if not (
+            file.is_relative_to(project) or file.is_relative_to(published)
+        ) or file.is_relative_to(packages):
+            return value
+        if file in copied:
+            return copied[file]
+        # Local source saves and builds use different files even when the name
+        # is the same. Share a copy across documents in this editor until exit.
+        with file.open("rb") as source:
+            stat = os.fstat(source.fileno())
+            target = (
+                cache
+                / f"{stat.st_dev}-{stat.st_ino}-{stat.st_ctime_ns}-{stat.st_size}"
+                / file.name
+            )
+            if not target.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    dir=target.parent, delete=False
+                ) as temp:
+                    try:
+                        fcntl.ioctl(
+                            temp.fileno(), 0x40049409, source.fileno()
+                        )  # FICLONE
+                    except OSError:
+                        shutil.copyfileobj(source, temp)
+                os.replace(temp.name, target)
+        copied[file] = str(target)
+        return str(target)
+
+    if "importArts" in setup:
+        setup["importArts"] = pin(setup["importArts"])
+
+
+def request_saved_build(file, header):
+    try:
+        relative = Path(file).resolve().relative_to("/workspace")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(185)
+            client.connect(str(Path.home() / ".leanflow-build.sock"))
+            request = {
+                "file": str(relative),
+                "header": json.loads(header) if header else None,
+            }
+            client.sendall(json.dumps(request).encode())
+            client.shutdown(socket.SHUT_WR)
+            return json.loads(client.makefile("rb").read(65536))
+    except ValueError:
+        return {"status": "private"}
+    except OSError:
+        return {
+            "status": "error",
+            "message": "The shared import worker is unavailable. Restart Lean to retry.",
+        }
+
+
+def main():
+    lake = str(Path(os.environ["LEAN_SYSROOT"]) / "bin/lake")
+    args = sys.argv[1:]
+    if len(args) < 2 or args[0] != "setup-file":
+        os.execv(lake, [lake, *args])
+    header = sys.stdin.buffer.readline() if "-" in args else None
+    # Different document workers in this editor can request setup together.
+    # Only this editor can write its configuration and private fallback.
+    private = os.open("/workspace/.lake", os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(private, fcntl.LOCK_EX)
+    lock = os.open("/workspace", os.O_RDONLY | os.O_DIRECTORY)
+    build = Path("/workspace/.lake/build")
+    shared = Path("/opt/leanflow-saved-build")
+
+    def run(options):
+        result = subprocess.run([lake, *options], input=header, capture_output=True)
+        if result.returncode == 0:
+            setup = json.loads(result.stdout)
+            pin_imports(setup)
+            json.dump(setup, sys.stdout)
+        return result
+
+    def read_published():
+        # A writer may already be preparing a newer revision. Pin every part
+        # from the same completed build before releasing this reader.
+        fcntl.flock(lock, fcntl.LOCK_SH)
+        try:
+            if (
+                not (shared / ".leanflow-cache-v1").is_file()
+                or (shared / ".leanflow-pending-build").exists()
+            ):
+                return subprocess.CompletedProcess(
+                    [], 3, b"", b"Shared imports need rebuilding.\n"
+                )
+            return run([*args, "--no-build", "--no-cache"])
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+    if build.is_symlink() and build.readlink() == shared:
+        result = read_published()
+        # A save between the producer and this reader can invalidate the first
+        # result. Ask the shared builder again before reporting the new state.
+        for _ in range(2):
+            if not result.returncode or "--no-build" in args:
+                break
+            reply = request_saved_build(args[1], header)
+            if reply["status"] == "private":
+                # Documents outside the saved project use this editor's Lake.
+                build.unlink()
+                build.mkdir()
+                result = run(args)
+                break
+            if reply["status"] != "ready":
+                print(
+                    reply.get("message")
+                    or "The shared imports need a build slot. Close an idle editor or run Check Project, then restart Lean.",
+                    file=sys.stderr,
+                )
+                return 1
+            result = read_published()
+    else:
+        result = run(args)
+    sys.stderr.buffer.write(result.stderr)
+    if result.returncode:
+        sys.stdout.buffer.write(result.stdout)
+    return result.returncode if result.returncode >= 0 else 128 - result.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -6,7 +6,7 @@ import { AgentRpc, LspFrames } from '../../server/rpc.mjs'
 import { runPinnedLake } from '../../server/pinned-lake.mjs'
 import { providerRequestConfig } from '../../server/provider-requests.mjs'
 
-// Exercise the editor with read-only sources and a writable Lake cache.
+// Exercise the editor with the same project and cache mounts as a participant.
 // A successful initialize alone does not prove that imports or goals work.
 export async function checkSetupEditor(
   runtime,
@@ -17,7 +17,9 @@ export async function checkSetupEditor(
   const text = await fs.readFile(path.join(root, file), 'utf8')
   const child = runtime.spawn(root, ['lake', 'serve', '--'], {
     network: 'none',
+    workload: 'interactive',
     cleanHome: true,
+    freshHome: true,
     readOnlyWorkspace: true,
     writeLakeCache: true,
   })

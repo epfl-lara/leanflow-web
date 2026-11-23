@@ -1,0 +1,7 @@
+#!/bin/sh
+# lake serve sets LAKE when launching Lean. Set the per-import entry point here
+# so it also covers opens and restarts initiated inside the language server.
+if [ "${1-}" = "--server" ]; then
+  export LAKE=/opt/leanflow-project-cache/lake
+fi
+exec /opt/leanflow-editor-toolchain/bin/lean "$@"

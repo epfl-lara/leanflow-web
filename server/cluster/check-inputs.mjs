@@ -1,3 +1,4 @@
+import { waitFor } from '../shared-source-read.mjs'
 import fs from 'node:fs/promises'
 import { constants } from 'node:fs'
 import path from 'node:path'
@@ -99,20 +100,6 @@ export function manifestFingerprint(manifest) {
     (value) => '\\u' + value.charCodeAt(0).toString(16).padStart(4, '0'),
   )
   return createHash('sha256').update(text).digest('hex')
-}
-
-// Stops one caller's wait. The shared task keeps running for other callers.
-function waitFor(task, signal) {
-  if (!signal) return task
-  let abort
-  return Promise.race([
-    task,
-    new Promise((_, reject) => {
-      abort = () => reject(signal.reason)
-      signal.addEventListener('abort', abort, { once: true })
-      if (signal.aborted) abort()
-    }),
-  ]).finally(() => signal.removeEventListener('abort', abort))
 }
 
 export class CheckInputs {
