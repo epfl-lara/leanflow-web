@@ -716,7 +716,7 @@ try {
     'Profile confirmation stays mandatory',
   )
   await keyless
-    .getByRole('button', { name: 'Save profile and continue', exact: true })
+    .getByRole('button', { name: 'Continue without a key', exact: true })
     .click()
   await keyless.locator('.monaco-editor textarea').first().waitFor()
   await until(
@@ -744,12 +744,24 @@ try {
   )
   assert.equal(keylessUpgrade.status, 200)
   await keylessUpgrade.json()
-  await keyless.getByLabel('Your Lemex API key', { exact: true }).waitFor()
-  assert.equal(
-    await keyless.locator('.monaco-editor textarea').count(),
-    0,
-    'Keyless Editor retains provider setup requirement',
+  const keylessTerminal = keyless.getByRole('button', {
+    name: 'Terminal',
+    exact: true,
+  })
+  await keylessTerminal.waitFor()
+  await keyless
+    .getByRole('button', { name: 'Set up API key', exact: true })
+    .waitFor()
+  const editorRun = await fixture.request(
+    'keylessViewer',
+    `/api/projects/${fixture.project.id}/runs`,
+    {
+      method: 'POST',
+      body: { mode: 'search', prompt: 'Keyless editor request' },
+    },
   )
+  assert.equal(editorRun.status, 428)
+  assert.match((await editorRun.json()).error, /API key/)
   for (let cycle = 0; cycle < 3; cycle++) {
     const downgrade = await fixture.request(
       'admin',
@@ -758,6 +770,7 @@ try {
     )
     assert.equal(downgrade.status, 200)
     await downgrade.json()
+    await keylessTerminal.waitFor({ state: 'hidden' })
     await keyless.locator('.monaco-editor textarea').first().waitFor()
     // Promote as soon as the editor mounts, including pending Lean startup.
     const upgrade = await fixture.request(
@@ -767,7 +780,9 @@ try {
     )
     assert.equal(upgrade.status, 200)
     await upgrade.json()
-    await keyless.getByLabel('Your Lemex API key', { exact: true }).waitFor()
+    await keylessTerminal.waitFor()
+    await keyless.locator('.monaco-editor textarea').first().waitFor()
+    assert.equal(await keyless.getByLabel('Message Lemex').count(), 0)
   }
   record(
     'Keyless invited Viewer confirms their profile, reads without an API key, and survives repeated Editor promotion and Viewer reopen during Lean startup',
@@ -780,12 +795,7 @@ try {
   assert.equal(viewerReturnGrant.status, 200)
   await viewerReturnGrant.json()
   await keyless.reload()
-  await keyless
-    .getByRole('button', {
-      name: `Open viewer project: ${fixture.privateProject.name}`,
-      exact: true,
-    })
-    .click()
+  await select(keyless, fixture.privateProject.name)
   await until(
     async () =>
       (await keyless.locator('.workspace-title').innerText()).includes(
@@ -799,7 +809,7 @@ try {
     0,
   )
   record(
-    'A keyless account can return from Editor setup to a Viewer project without adding credentials',
+    'A keyless account can switch between Editor and Viewer projects from the workspace',
   )
 
   // Use a new account/context after restart; no browser-side mocked state can restore data.

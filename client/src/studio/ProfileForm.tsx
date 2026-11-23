@@ -9,12 +9,14 @@ export function ProfileForm({
   onBusyChange,
   disabled = false,
   firstLogin = false,
+  onSetUpProvider,
 }: {
   user: Account
   onSaved: (user: Account) => void
   onBusyChange?: (busy: boolean) => void
   disabled?: boolean
   firstLogin?: boolean
+  onSetUpProvider?: () => void
 }) {
   const nameId = useId()
   const accountId = useId()
@@ -28,6 +30,9 @@ export function ProfileForm({
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (locked || !name.trim()) return
+    const setUpProvider =
+      event.nativeEvent instanceof SubmitEvent &&
+      event.nativeEvent.submitter?.getAttribute('value') === 'set-up-provider'
     setBusy(true)
     onBusyChange?.(true)
     setError('')
@@ -41,6 +46,7 @@ export function ProfileForm({
       setSavedName(result.user.name)
       setSaved(true)
       onSaved(result.user)
+      if (setUpProvider) onSetUpProvider?.()
     } catch (error) {
       setError(errorText(error))
     } finally {
@@ -96,6 +102,13 @@ export function ProfileForm({
           <output>Profile saved.</output>
         </div>
       )}
+      {onSetUpProvider && (
+        <p className="field-help">
+          A personal API key is optional. You can edit projects and check Lean
+          proofs without one. Add a key now or later from the Lemex panel to use
+          the assistant.
+        </p>
+      )}
       <div className="dialog-actions">
         <button
           className="button primary"
@@ -105,10 +118,22 @@ export function ProfileForm({
         >
           {busy
             ? 'Saving profile…'
-            : firstLogin
-              ? 'Save profile and continue'
-              : 'Save profile'}
+            : onSetUpProvider
+              ? 'Continue without a key'
+              : firstLogin
+                ? 'Save profile and continue'
+                : 'Save profile'}
         </button>
+        {onSetUpProvider && (
+          <button
+            type="submit"
+            value="set-up-provider"
+            className="button secondary"
+            disabled={locked || !name.trim()}
+          >
+            Set up API key
+          </button>
+        )}
       </div>
     </form>
   )

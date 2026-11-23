@@ -98,6 +98,8 @@ await page.route('**/api/**', async (route) => {
   }
   if (endpoint === '/api/provider') {
     if (method === 'PUT') {
+      if (route.request().postDataJSON().apiKey === 'fixture-invalid-key')
+        return respond({ error: 'Lemex did not accept this API key.' }, 400)
       assert.equal(
         route.request().postDataJSON().apiKey,
         'fixture-provider-key',
@@ -156,12 +158,16 @@ try {
   await login()
   await page.getByLabel('Display name', { exact: true }).waitFor()
   assert.equal(await page.getByLabel('Your Lemex API key').count(), 0)
+  await page.getByText(/A personal API key is optional/).waitFor()
+  await page
+    .getByRole('button', { name: 'Set up API key', exact: true })
+    .waitFor()
   await page
     .getByLabel('Display name', { exact: true })
     .fill('Invited user draft')
   expireProfile = true
   await page
-    .getByRole('button', { name: 'Save profile and continue', exact: true })
+    .getByRole('button', { name: 'Continue without a key', exact: true })
     .click()
   const recovery = page.getByRole('dialog', {
     name: 'Sign in to continue',
@@ -180,7 +186,7 @@ try {
   )
   await page.getByLabel('Display name', { exact: true }).fill('Invited user')
   await page
-    .getByRole('button', { name: 'Save profile and continue', exact: true })
+    .getByRole('button', { name: 'Continue without a key', exact: true })
     .click()
   await page
     .getByRole('alert')
@@ -192,7 +198,7 @@ try {
   )
   holdProfile = true
   await page
-    .getByRole('button', { name: 'Save profile and continue', exact: true })
+    .getByRole('button', { name: 'Continue without a key', exact: true })
     .click()
   await until(() => !!releaseProfile, 'profile save pending')
   assert.equal(
@@ -204,16 +210,68 @@ try {
   releaseProfile()
   holdProfile = false
   releaseProfile = undefined
-  await page.getByLabel('Your Lemex API key').waitFor()
+  const connect = page
+    .getByRole('complementary', { name: 'Lemex assistant' })
+    .getByRole('button', { name: 'Set up API key', exact: true })
+  await connect.waitFor()
   assert.equal(state.session.user.name, 'Invited user')
   assert.equal(state.session.user.profileComplete, true)
-  await page.getByLabel('Your Lemex API key').fill('fixture-provider-key')
+  assert.equal(providerSaves, 0)
+  assert.equal(await page.getByLabel('Message Lemex').count(), 0)
+  await page.locator('.monaco-editor textarea').first().focus()
+  await page.keyboard.insertText('-- Written without a provider key\n')
+  await until(
+    () =>
+      state.files['profile-project']['Main.lean'].includes(
+        'Written without a provider key',
+      ),
+    'keyless editor autosaves',
+  )
+  await page.getByRole('button', { name: 'Sign out', exact: true }).click()
+  await login()
+  await connect.waitFor()
   await page
+    .getByRole('button', { name: 'Close tools panel', exact: true })
+    .click()
+  await page.getByRole('button', { name: 'Lemex', exact: true }).click()
+  await connect.click()
+  const keyField = settings().getByLabel('Your Lemex API key')
+  await keyField.waitFor()
+  const connectionHeading = settings().getByRole('heading', {
+    name: 'API connection',
+  })
+  assert(
+    await connectionHeading.evaluate(
+      (heading) => heading === document.activeElement,
+    ),
+  )
+  await keyField.fill('fixture-invalid-key')
+  await settings().getByRole('button', { name: 'Save connection' }).click()
+  await settings()
+    .getByRole('alert')
+    .filter({ hasText: 'Lemex did not accept this API key.' })
+    .waitFor()
+  await settings().getByRole('button', { name: 'Close dialog' }).click()
+  await connect.waitFor()
+  assert.equal(await page.getByLabel('Message Lemex').count(), 0)
+  assert.equal(
+    report.requests.some(({ endpoint }) =>
+      /\/(chats|runs)(\/|$)/.test(endpoint),
+    ),
+    false,
+  )
+  await connect.click()
+  await keyField.fill('fixture-provider-key')
+  await settings()
     .getByRole('button', { name: 'Save connection', exact: true })
     .click()
-  await page.locator('.monaco-editor').waitFor()
+  await settings()
+    .getByText('Provider and key saved.', { exact: false })
+    .waitFor()
+  await settings().getByRole('button', { name: 'Close dialog' }).click()
+  await page.getByLabel('Message Lemex').waitFor()
   report.checks.push(
-    'Landing page offers email access requests; invitation login confirms the profile before API setup, supports unchanged names and save retry, and blocks sign-out during saving.',
+    'First sign-in offers an optional key. Continuing without one allows editing, autosave and returning visits. Reopening Lemex offers key setup, rejects an invalid key, and unlocks chat after a valid save.',
   )
 
   await page

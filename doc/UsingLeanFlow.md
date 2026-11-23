@@ -1,5 +1,7 @@
 # Use LeanFlow Web
 
+At first sign-in, confirm your name and choose **Continue without a key** to start editing and checking proofs. To use the assistant, choose **Set up API key** at sign-in or open the **Lemex** panel later.
+
 ## Start in Mathlib Playground
 
 Choose **Mathlib Playground** on the welcome screen, or expand **Playgrounds** in the sidebar and choose **New playground**. It opens a private scratch file with `import Mathlib`, using the prepared Lean and Mathlib versions. New playgrounds have distinct names such as `Scratch.lean` and `Scratch2.lean`. Paste your code; files save automatically after a short pause. **Save** or **Ctrl+S** (**Cmd+S** on macOS) saves immediately.

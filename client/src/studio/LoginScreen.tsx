@@ -125,8 +125,8 @@ export function LoginScreen({
           <div className="lf-login__help">
             <p>
               Access tokens are personal and come with an invitation from an
-              administrator. On your first visit, confirm your name and connect
-              your own Lemex API key.
+              administrator. Confirm your name to open your workspace. You can
+              add an API key whenever you want to use Lemex.
             </p>
             <p>
               {epflAvailable

@@ -21,7 +21,7 @@ chmod 600 .env
 
 Accounts, projects, and caches go in `.data` by default. To use a separate volume, set `STUDIO_DATA_DIR` in `.env` to an absolute directory owned by your user **before preparing libraries**. See [storage and capacity](Hosting.md#storage-and-capacity).
 
-RCP is the default provider. Each account adds its own API key at first sign-in and can change its key or provider in Assistant settings. Another provider must support the Responses API and authenticated model listing. No shared server API key is needed.
+RCP is the default provider for Lemex. People who want to use the assistant can add their own key in Assistant settings. Another provider must support the Responses API and authenticated model listing.
 
 ### 3. Prepare the worker and libraries
 
@@ -69,8 +69,8 @@ cat .data/auth/owner.token
 
 If you set `STUDIO_DATA_DIR`, read `auth/owner.token` inside that directory instead.
 
-Sign in with the token, then save your own provider API key. For the default EPFL RCP provider, create or find it in the [RCP key portal](https://portal.rcp.epfl.ch/aiaas/keys) while on EPFL/VPN. LeanFlow discovers the models that key can use; refresh its access in Assistant settings after permissions change. See [accounts and personal keys](Configuration.md#accounts-and-personal-api-keys) for invitations and roles.
+Sign in with the token and confirm your display name. Choose **Continue without a key** to open the workspace, then **Import or create project** to start working.
 
-After saving your key, choose **Import or create project**. Keep your token, API key, and `.env` private.
+To use the Lemex assistant, choose **Set up API key** during sign-in or in the Lemex panel later. For the default EPFL RCP provider, get your key from the [RCP key portal](https://portal.rcp.epfl.ch/aiaas/keys) while on EPFL/VPN. Saving the key loads the models available to your account. Keep your token, API key, and `.env` private. See [accounts and personal keys](Configuration.md#accounts-and-personal-api-keys) for invitations and roles.
 
 To open the app from another computer, follow [Hosting](Hosting.md) for a shared HTTPS address or optional private SSH access. For proof selection, chats, uploads, and Git, see [Using LeanFlow Web](UsingLeanFlow.md).

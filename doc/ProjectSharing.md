@@ -18,7 +18,7 @@ A link grants ongoing account membership when redeemed. Revoking the link stops 
 
 ## Personal conversations and credentials
 
-Project membership shares project files. Each account keeps its own chats, prompts, reasoning, run history, API key, provider, model, reasoning effort, Git connections, and commit identity. A Viewer confirms their profile but does not need an API key to read a shared project. An Admin cannot open another member's conversations or keys through sharing.
+Project membership shares project files. Each account keeps its own chats, prompts, reasoning, run history, API key, provider, model, reasoning effort, Git connections, and commit identity. Without an API key, Viewers can read shared files, and Editors and Admins can also edit them and check proofs. An Admin cannot open another member's conversations or keys through sharing.
 
 Each browser tab stays bound to the account that opened it. Signing into another account in a second tab does not move drafts, private history, or assistant requests into that account. The original tab asks you to sign in again as its account. Older tabs must copy or download unsaved work and reload before continuing.
 

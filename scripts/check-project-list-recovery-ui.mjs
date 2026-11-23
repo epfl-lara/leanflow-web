@@ -30,7 +30,7 @@ try {
         models: [{ id: 'fixture', name: 'Fixture' }],
         defaultModel: 'fixture',
         runtime: { ready: true },
-        lemex: { configured: mode !== 'viewer-without-key' },
+        lemex: { configured: mode === 'returning-user' },
       },
       projects: [
         {
@@ -95,17 +95,7 @@ try {
     try {
       await page.goto(base)
       await until(() => !!releaseFirst, 'initial project list request')
-      if (mode === 'viewer-without-key')
-        await page
-          .getByRole('heading', {
-            name: 'Welcome, Recovery fixture.',
-            exact: true,
-          })
-          .waitFor()
-      else
-        await page
-          .getByText('Loading your projects…', { exact: true })
-          .waitFor()
+      await page.getByText('Loading your projects…', { exact: true }).waitFor()
       assert.equal(
         await page
           .getByRole('heading', {
@@ -116,13 +106,12 @@ try {
         0,
       )
       releaseFirst()
-      if (mode !== 'viewer-without-key')
-        await page
-          .getByRole('heading', {
-            name: 'Your projects could not load',
-            exact: true,
-          })
-          .waitFor()
+      await page
+        .getByRole('heading', {
+          name: 'Your projects could not load',
+          exact: true,
+        })
+        .waitFor()
       await page
         .getByRole('alert')
         .filter({ hasText: 'Project list is temporarily unavailable.' })
@@ -160,6 +149,20 @@ try {
           })
           .waitFor()
         assert.equal(await page.locator('.monaco-editor').count(), 0)
+        await page
+          .getByRole('button', { name: 'Set up API key', exact: true })
+          .waitFor()
+        await page
+          .getByRole('button', {
+            name: 'Import or create project',
+            exact: true,
+          })
+          .first()
+          .click()
+        await page
+          .getByRole('dialog')
+          .getByRole('button', { name: 'Cancel', exact: true })
+          .click()
       }
       assert(attempts >= 2)
       assert.equal(

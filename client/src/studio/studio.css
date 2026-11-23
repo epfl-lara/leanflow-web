@@ -3325,14 +3325,6 @@ body.panel-resizing iframe {
   gap: 12px;
   margin-top: 20px;
 }
-.account-viewer-projects {
-  margin-top: 20px;
-}
-.account-viewer-projects .button {
-  width: 100%;
-  margin-top: 8px;
-  white-space: normal;
-}
 .account-setup-footer .button {
   min-height: 44px;
 }

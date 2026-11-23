@@ -339,7 +339,7 @@ export function ProjectModal({
               <span className="field-help">
                 {repairAvailable
                   ? "We'll show when it starts, keep the original configuration, and check the result."
-                  : 'Lemex setup repair is unavailable on this server. Automatic Lean and library setup still runs. You can edit setup files and retry if needed.'}
+                  : 'Add your API key in Assistant settings to enable Lemex repairs. Lean and library setup can run without a key.'}
               </span>
             </span>
           </label>

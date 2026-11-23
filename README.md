@@ -24,7 +24,7 @@ Self-host LeanFlow Web for yourself or trusted collaborators on Linux with Node.
 - **[Host for a team](doc/Hosting.md):** add persistent storage, a service, and an HTTPS address.
 - **[Use LeanFlow Web](doc/UsingLeanFlow.md):** work with projects, proofs, and Lemex.
 
-Each collaborator has an individual account and saves their own provider API key; EPFL RCP is the default. Instances can use invitation tokens or optional [EPFL sign-in](doc/EPFLSignIn.md). Existing token users should link EPFL from Assistant settings to keep their projects. Before inviting a team, complete the short [installation verification](doc/Verification.md).
+Each collaborator can use the Lean workspace without an API key. To use Lemex, choose **Set up API key** at first sign-in or in the Lemex panel later. EPFL RCP is the default provider. Instances can use invitation tokens or optional [EPFL sign-in](doc/EPFLSignIn.md). Existing token users should link EPFL from Assistant settings to keep their projects. Before inviting a team, complete the short [installation verification](doc/Verification.md).
 
 ## Contributions and issues
 

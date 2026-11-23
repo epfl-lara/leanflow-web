@@ -14,7 +14,7 @@ The generated `.runtime/lemex/manifest.json` records the exact resolved version,
 integrity, and file hashes. The bundle supplies both the worker and account model
 discovery. Only release assets and the web app's RCP defaults are included.
 Host credentials, personal configuration, sessions, and hooks are never copied.
-Each web account enters its own provider key after signing in.
+People who use Lemex add their own provider key to their web account.
 
 The worker also includes Lean, LeanProbe, LeanExplore, and the Lean language
 server tools. Its first Docker build can take several minutes.

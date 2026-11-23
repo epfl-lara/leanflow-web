@@ -288,21 +288,16 @@ try {
   assert(await repairChoice.isDisabled())
   assert.equal(await repairChoice.isChecked(), false)
   await dialog
-    .getByText(/Lemex setup repair is unavailable on this server/)
+    .getByText(/Add your API key in Assistant settings to enable Lemex repairs/)
     .waitFor()
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   f.state.session.lemex = { configured: false }
   await f.page.reload()
+  await f.page.locator('.monaco-editor').waitFor()
   await f.page
-    .getByRole('heading', { name: 'Welcome, Fixture.', exact: true })
+    .getByRole('button', { name: 'Set up API key', exact: true })
     .waitFor()
-  await f.page
-    .getByText(
-      'Connect your account to Lemex to open your workspace. Click your account in the sidebar to update your profile, API key, or settings.',
-      { exact: true },
-    )
-    .waitFor()
-  assert.equal(await f.page.locator('.monaco-editor').count(), 0)
+  assert.equal(await f.page.getByLabel('Message Lemex').count(), 0)
   f.assertClean()
   f.report.checks.push(
     'Setup shows clone, RCP-key waiting and repair progress, Stop and Retry, a version/revision/build summary and contextual output; Refresh setup explains cache reuse; dependency warnings block new checks; unavailable repair is disabled and an unconfigured account is guided to key setup.',

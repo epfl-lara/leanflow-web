@@ -106,6 +106,11 @@ await page.route('**/api/settings', (route) =>
     }),
   }),
 )
+await page.route('**/api/profile', (route) => {
+  assert.equal(route.request().method(), 'PUT')
+  state.session.user.profileComplete = true
+  return route.fulfill({ json: { user: state.session.user } })
+})
 await page.route('**/api/models', (route) =>
   route.fulfill({
     contentType: 'application/json',
@@ -199,10 +204,17 @@ try {
     .getByRole('button', { name: 'Close dialog', exact: true })
     .click()
   state.session.lemex = { configured: false }
+  state.session.user.profileComplete = false
+  provider = { configured: false, provider: 'rcp' }
   await page.reload()
   await page
     .getByRole('heading', { name: 'Welcome, Provider Fixture.' })
     .waitFor()
+  await page
+    .getByRole('button', { name: 'Set up API key', exact: true })
+    .click()
+  await dialog.getByLabel('Your Lemex API key').waitFor()
+  assert.equal(state.session.user.profileComplete, true)
   assert.equal(
     await page.getByLabel('Provider', { exact: true }).inputValue(),
     'rcp',
@@ -217,7 +229,9 @@ try {
   await page
     .getByRole('button', { name: 'Save connection', exact: true })
     .click()
-  await page.locator('.monaco-editor').waitFor()
+  await dialog.getByText('Provider and key saved.', { exact: false }).waitFor()
+  await dialog.getByRole('button', { name: 'Close dialog' }).click()
+  await page.getByLabel('Message Lemex').waitFor()
   assert.equal(saved.length, 3)
   report.checks.push(
     'Escape closes the model picker while keeping account settings open',

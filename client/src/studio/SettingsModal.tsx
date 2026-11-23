@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   api,
   errorText,
@@ -32,6 +32,7 @@ export function SettingsModal({
   onClose,
   onSaved,
   user,
+  focusProvider,
   onProviderSaved,
   onProfileSaved,
   onModelsUpdated,
@@ -39,12 +40,17 @@ export function SettingsModal({
   onClose: () => void
   onSaved: () => void
   user: Account
+  focusProvider: boolean
   onProviderSaved: () => void
   onProfileSaved?: (user: Account) => void
   onModelsUpdated: (access: ModelAccessStatus) => void
 }) {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [provider, setProvider] = useState<ProviderStatus | null>(null)
+  const providerHeading = useRef<HTMLHeadingElement>(null)
+  useEffect(() => {
+    if (focusProvider) providerHeading.current?.focus()
+  }, [focusProvider])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [providerBusy, setProviderBusy] = useState(false)
@@ -147,7 +153,13 @@ export function SettingsModal({
           )}
         </details>
       </section>
-      <h3 className="account-settings-heading">API connection</h3>
+      <h3
+        className="account-settings-heading"
+        ref={providerHeading}
+        tabIndex={-1}
+      >
+        API connection
+      </h3>
       {provider && (
         <ProviderKeyForm
           initial={provider}

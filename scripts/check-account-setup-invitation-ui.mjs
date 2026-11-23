@@ -32,7 +32,7 @@ try {
         id: 'viewer-user',
         name: 'Viewer User',
         role: 'user',
-        profileComplete: true,
+        profileComplete: false,
       },
       templates: [],
       models: [],
@@ -44,8 +44,12 @@ try {
     chats: [{ id: 'viewer-chat', projectId: project.id, title: 'Viewer chat' }],
     runs: [],
   })
-  const { page, report } = fixture
+  const { page, state, report } = fixture
   let joins = 0
+  await page.route('**/api/profile', (route) => {
+    state.session.user.profileComplete = true
+    return route.fulfill({ json: { user: state.session.user } })
+  })
   await page.route('**/api/project-invitations/join', (route) => {
     joins++
     return route.fulfill({
@@ -75,12 +79,6 @@ try {
     dismiss: await page
       .getByRole('button', { name: 'Dismiss', exact: true })
       .count(),
-    viewerProjectButton: await page
-      .getByRole('button', {
-        name: 'Open viewer project: Accessible viewer project',
-        exact: true,
-      })
-      .count(),
     projectListRequests: report.requests.filter(
       (r) => r.endpoint === '/api/projects',
     ).length,
@@ -91,7 +89,6 @@ try {
   assert.equal(snapshot.errorVisible, 1)
   assert.equal(snapshot.retryInvitation, 1)
   assert.equal(snapshot.dismiss, 1)
-  assert.equal(snapshot.viewerProjectButton, 0)
   assert.equal(snapshot.projectListRequests, 0)
   result.checks.push(snapshot)
   // Both recovery choices remain available before a provider key is configured.
@@ -105,6 +102,9 @@ try {
     })
     .waitFor()
   await page.getByRole('button', { name: 'Dismiss', exact: true }).click()
+  await page
+    .getByRole('button', { name: 'Continue without a key', exact: true })
+    .click()
   await page.locator('.monaco-editor').waitFor()
   assert(
     (

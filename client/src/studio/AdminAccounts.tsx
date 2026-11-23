@@ -61,7 +61,7 @@ export function AdminAccounts({
           <li key={account.id}>
             {account.name} · {account.role}
             {account.role === 'owner' ? ' / admin' : ''} ·{' '}
-            {account.lemex.configured ? 'API key saved' : 'API key needed'}
+            {account.lemex.configured ? 'API key saved' : 'No API key'}
           </li>
         ))}
       </ul>

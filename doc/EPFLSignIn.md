@@ -126,8 +126,8 @@ set `STUDIO_ENTRA_ALLOW_SIGNUP=true` to allow approved, unlinked identities to
 create regular accounts on first sign-in. Users who already have a token
 account should link it before using this flow to avoid a separate account.
 Review [hosting capacity](Configuration.md#worker-capacity) before expanding
-access. EPFL SSO does not remove the service's network/VPN restriction or
-provide users with RCP inference keys; personal provider setup still applies.
+access. The service still requires its usual network or VPN. People can use the
+Lean workspace after signing in and add a personal provider key to use Lemex.
 
 Deployment remains a separate step. Wait for active proof runs, checks, and
 project setup to finish before any service restart. To disable SSO later, set

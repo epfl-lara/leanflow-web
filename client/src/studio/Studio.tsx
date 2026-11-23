@@ -410,7 +410,9 @@ export function Studio() {
   const [convertingSingleFile, setConvertingSingleFile] = useState(false)
   const [stoppingSetup, setStoppingSetup] = useState(false)
   const [setupDetails, setSetupDetails] = useState(false)
-  const [settingsModal, setSettingsModal] = useState(false)
+  const [settingsModal, setSettingsModal] = useState<
+    'account' | 'provider' | null
+  >(null)
   const [gitConnectionsOpen, setGitConnectionsOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
@@ -3093,45 +3095,18 @@ export function Studio() {
         }}
       />
     )
-  if (
-    session &&
-    (session.user.profileComplete === false ||
-      (session.lemex?.configured === false &&
-        project?.accessRole !== 'viewer' &&
-        !project?.fileRecoveryRequired &&
-        !(
-          project?.legacyRecoveryReviewAvailable &&
-          (!project.accessRole || project.accessRole === 'admin')
-        )))
-  )
+  if (session?.user.profileComplete === false)
     return (
       <>
         <AccountSetup
           session={session}
-          refreshError={startupError}
-          refreshing={sessionRefreshing}
-          onRetry={() => void loadSession()}
-          onSaved={() => {
-            void loadSession()
-          }}
           onProfileSaved={acceptProfile}
+          onSetUpProvider={() => setSettingsModal('provider')}
           onLogout={async () => {
             const result = await navigate(logout)
             if (result) throw result.error
           }}
           invitationNotice={invitationNotice}
-          projectListNotice={projectListNotice}
-          viewerProjects={
-            session.user.profileComplete === false
-              ? []
-              : projects.filter((item) => item.accessRole === 'viewer')
-          }
-          onOpenViewer={(id) =>
-            navigate(async () => {
-              writeStoredValue('local', 'lemex-project', id)
-              setProjectId(id)
-            })
-          }
         />
         {draftNavigationDialog}
         {authRequired && <SessionRecovery user={session.user} />}
@@ -3508,7 +3483,7 @@ export function Studio() {
             className="account-button"
             aria-label="Account settings"
             title="Account settings · Profile, API key, and assistant preferences"
-            onClick={() => setSettingsModal(true)}
+            onClick={() => setSettingsModal('account')}
           >
             <span className="user-avatar">
               {session.user.name?.[0]?.toUpperCase() || 'U'}
@@ -3674,7 +3649,7 @@ export function Studio() {
               className="icon-button"
               aria-label="Assistant settings"
               title="Assistant settings"
-              onClick={() => setSettingsModal(true)}
+              onClick={() => setSettingsModal('account')}
             >
               <Icon name="settings" size={17} />
             </button>
@@ -4692,9 +4667,22 @@ export function Studio() {
         </header>
         <div className="tools-content" aria-labelledby="lemex-panel-title">
           <div className="tool-view">
-            {assistantProjectAvailable ? (
+            {session.lemex?.configured === false ? (
+              <div className="tool-idle">
+                <Icon name="bot" size={30} />
+                <h2>Connect Lemex</h2>
+                <p>Add your personal API key to open the Lemex assistant.</p>
+                <button
+                  type="button"
+                  className="button primary"
+                  onClick={() => setSettingsModal('provider')}
+                >
+                  Set up API key
+                </button>
+              </div>
+            ) : assistantProjectAvailable ? (
               <AssistantPanel
-                onOpenSettings={() => setSettingsModal(true)}
+                onOpenSettings={() => setSettingsModal('provider')}
                 onOpenPdf={(pdf) =>
                   setPaperPdf({ ...pdf, scope, userId: session.user.id })
                 }
@@ -5011,12 +4999,13 @@ export function Studio() {
       {settingsModal && (
         <SettingsModal
           user={session.user}
+          focusProvider={settingsModal === 'provider'}
           onProfileSaved={acceptProfile}
           onModelsUpdated={acceptModels}
           onProviderSaved={() => {
             void loadSession()
           }}
-          onClose={() => setSettingsModal(false)}
+          onClose={() => setSettingsModal(null)}
           onSaved={() => setNotice('Assistant settings saved')}
         />
       )}

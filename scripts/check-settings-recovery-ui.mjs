@@ -63,6 +63,11 @@ await page.route('**/api/**', async (route) => {
     })
   if (endpoint === '/api/session' && failSession)
     return respond({ error: 'Temporary fixture connection problem.' }, 503)
+  if (endpoint === '/api/profile') {
+    assert.equal(method, 'PUT')
+    state.session.user.profileComplete = true
+    return respond({ user: state.session.user })
+  }
   if (endpoint === '/api/logout' && failLogout) {
     failLogout = false
     await new Promise((resolve) => {
@@ -219,6 +224,8 @@ try {
   )
 
   state.session.lemex = { configured: false }
+  state.session.user.profileComplete = false
+  provider = { configured: false, provider: 'rcp' }
   holdProvider = false
   await page.reload()
   await page
@@ -249,33 +256,40 @@ try {
   )
   holdProvider = true
   releaseProvider = undefined
-  await page.getByLabel('Your Lemex API key').fill('fixture-onboarding-key')
   await page
+    .getByRole('button', { name: 'Set up API key', exact: true })
+    .click()
+  await settings()
+    .getByLabel('Your Lemex API key')
+    .fill('fixture-onboarding-key')
+  await settings()
     .getByRole('button', { name: 'Save connection', exact: true })
     .click()
   await until(() => !!releaseProvider, 'pending onboarding save')
-  assert.equal(
-    await page
-      .getByRole('button', { name: 'Sign out', exact: true })
-      .isDisabled(),
-    true,
-  )
+  await assertPendingDialog()
   releaseProvider()
-  await page
-    .getByRole('button', { name: 'Retry opening workspace', exact: true })
+  await settings()
+    .getByText('Provider and key saved.', { exact: false })
     .waitFor()
-  assert.equal(await page.getByLabel('Your Lemex API key').inputValue(), '')
+  assert.equal(
+    await settings().getByLabel('Your Lemex API key').inputValue(),
+    '',
+  )
+  await close().click()
+  const retryRefresh = page.getByRole('button', {
+    name: 'Retry workspace refresh',
+    exact: true,
+  })
+  await retryRefresh.waitFor()
   await page.screenshot({
     path: new URL('onboarding-refresh-retry.png', directory).pathname,
   })
   failSession = false
-  await page
-    .getByRole('button', { name: 'Retry opening workspace', exact: true })
-    .click()
-  await page.locator('.monaco-editor').waitFor()
+  await retryRefresh.click()
+  await page.getByLabel('Message Lemex').waitFor()
   assert.equal(providerSaves, 2)
   report.checks.push(
-    'Onboarding blocks sign-out during key save; a saved connection survives refresh failure and Retry opens the workspace without re-entering the key',
+    'First-login key setup protects the pending save. Retrying a failed workspace refresh unlocks Lemex without re-entering the saved key.',
   )
   fixture.assertClean()
   report.inferenceRequests = 0

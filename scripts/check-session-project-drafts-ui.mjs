@@ -244,14 +244,14 @@ try {
     'A fresh reload with an inaccessible remembered project selects an accessible fallback.',
   )
 
-  const setupMarker = '-- KEEP_DRAFT_THROUGH_ACCOUNT_SETUP\n'
+  const setupMarker = '-- KEEP_DRAFT_WITHOUT_PROVIDER\n'
   const ownSavedSource = state.files[own.id]['Main.lean']
   await page.locator('.monaco-editor textarea').first().focus()
   await page.keyboard.press(editorShortcuts.documentEnd)
   await page.keyboard.insertText(setupMarker)
   await until(
     () => editorText().then((text) => text.includes(setupMarker.trim())),
-    'draft before account setup reappears',
+    'draft before the key status refreshes',
   )
   let logoutRequests = 0
   await page.route('**/api/logout', (route) => {
@@ -277,9 +277,14 @@ try {
   await settings
     .getByRole('button', { name: 'Save connection', exact: true })
     .click()
-  const setup = page.locator('.account-setup')
-  await setup.waitFor()
-  const signOut = setup.getByRole('button', { name: 'Sign out', exact: true })
+  await settings.getByRole('button', { name: 'Close dialog' }).click()
+  const setupKey = page.getByRole('button', {
+    name: 'Set up API key',
+    exact: true,
+  })
+  await setupKey.waitFor()
+  assert((await editorText()).includes(setupMarker.trim()))
+  const signOut = page.getByRole('button', { name: 'Sign out', exact: true })
   const signOutConfirmation = page.getByRole('dialog', {
     name: 'Save your changes?',
     exact: true,
@@ -287,12 +292,12 @@ try {
   await signOut.click()
   await until(
     async () => logoutRequests > 0 || (await signOutConfirmation.isVisible()),
-    'account setup sign-out decision',
+    'keyless workspace sign-out decision',
   )
   assert.equal(
     logoutRequests,
     0,
-    'account setup must preserve unsaved work before issuing logout',
+    'the keyless workspace must preserve unsaved work before issuing logout',
   )
   const setupDownload = page.waitForEvent('download')
   await signOutConfirmation
@@ -307,17 +312,17 @@ try {
     .click()
   await signOutConfirmation.waitFor({ state: 'hidden' })
   assert.equal(logoutRequests, 0)
-  await setup.waitFor()
+  await setupKey.waitFor()
   await signOut.click()
   await signOutConfirmation.waitFor()
   await signOutConfirmation
     .getByRole('button', { name: 'Discard edits', exact: true })
     .click()
   await until(() => logoutRequests === 1, 'explicit discard permits sign-out')
-  await setup.waitFor({ state: 'hidden' })
+  await page.getByLabel('Access token', { exact: true }).waitFor()
   assert.equal(state.files[own.id]['Main.lean'], ownSavedSource)
   checks.push(
-    'Account setup sign-out keeps unsaved work downloadable, Cancel preserves the draft without logout, and only explicit discard permits sign-out.',
+    'Losing a provider key keeps the editor and its draft available. Sign-out offers download, cancel, and explicit discard.',
   )
   fixture.assertClean()
   await fs.writeFile(
