@@ -71,6 +71,10 @@ export class ProofDiagnostics {
   private generation = 0
   private listeners = new Set<(uri?: string) => void>()
 
+  hasOpenDocument(uri: string) {
+    return this.documents.has(uri)
+  }
+
   subscribe(listener: (uri?: string) => void) {
     this.listeners.add(listener)
     return () => {
@@ -88,7 +92,7 @@ export class ProofDiagnostics {
     this.changed()
   }
 
-  openConnection() {
+  openConnection(onDidOpen?: (uri: string) => void) {
     this.reset()
     const generation = this.generation
     return {
@@ -118,6 +122,7 @@ export class ProofDiagnostics {
             confirmed: false,
           })
         } else return
+        if (method === 'textDocument/didOpen') onDidOpen?.(doc.uri)
         this.changed(doc.uri)
       },
       received: (method: string, params: unknown) => {

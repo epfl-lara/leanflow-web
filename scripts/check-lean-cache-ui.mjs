@@ -93,15 +93,35 @@ try {
       documents.set(uri, message.params.textDocument.version)
     }
   }
-  await page.route('**/api/projects/*/files', (route) => {
+  // The collaboration handshake can start its scan before the initial scan
+  // has returned. Let the first response open the editor, then install the
+  // second listing after its Lean document is already running.
+  const handshakeScan = Promise.withResolvers()
+  const installBaseline = Promise.withResolvers()
+  let listingCount = 0
+  let includeRevisions = true
+  let nextScan
+  await page.route('**/api/projects/*/files', async (route) => {
     if (route.request().method() !== 'GET') return route.fallback()
     const id = new URL(route.request().url()).pathname.split('/')[3]
+    const scan = ++listingCount
+    if (scan === 2) state.files[id]['Handshake.md'] = ''
     const files = Object.entries(state.files[id]).map(([path, content]) => ({
       path,
       size: content.length,
-      revision: hash(content),
+      ...(includeRevisions && { revision: hash(content) }),
       ...(path.startsWith('.lake/') && { readOnly: true }),
     }))
+    if (scan === 1) await handshakeScan.promise
+    if (scan === 2) {
+      handshakeScan.resolve()
+      await installBaseline.promise
+    }
+    const gate = nextScan
+    if (gate) {
+      nextScan = undefined
+      await gate.release.promise
+    }
     return route.fulfill({
       json:
         route.request().headers()['x-leanflow-file-listing'] === 'project'
@@ -157,6 +177,16 @@ try {
           message.params.textDocument.uri === 'file:///workspace/Main.lean',
       ),
     'initial file ready',
+  )
+  installBaseline.resolve()
+  await page.locator('.file-item[title="Handshake.md"]').waitFor()
+  assert.equal(
+    await page.locator('.lean-import-notice').count(),
+    0,
+    'Installing the first accepted revisioned listing after the proof opens must not report stale imports',
+  )
+  report.checks.push(
+    'A late initial file listing leaves freshly opened goals current.',
   )
   const initialOpens = notifications('didOpen', 'Main.lean').length
   const initialCloses = notifications('didClose', 'Main.lean').length
@@ -301,20 +331,24 @@ try {
   await reloaded
   await opened('Third.lean', 'cachedC')
   await page.waitForTimeout(300)
+  const reusedStaleWorker =
+    notifications('didOpen', 'Third.lean').length === thirdOpens
   assert.equal(
     await refreshImports.isVisible(),
-    true,
-    'Reloading unchanged source cannot certify that its imports were refreshed',
+    reusedStaleWorker,
+    'Reloading the same text only refreshes imports when Lean actually reopens its document',
   )
   const beforeStaleReturn = notifications('didOpen', 'Third.lean').length
   await visit('Second.lean', 'cachedB')
   assert.equal(notifications('didOpen', 'Second.lean').length, openedSecond + 1)
   await visit('Third.lean', 'cachedC')
-  assert.equal(
-    notifications('didOpen', 'Third.lean').length,
-    beforeStaleReturn + 1,
-    'An unchanged reload cannot re-cache a worker with stale imports',
-  )
+  const reopenedThird = notifications('didOpen', 'Third.lean').length
+  if (reusedStaleWorker)
+    assert.equal(
+      reopenedThird,
+      beforeStaleReturn + 1,
+      'An unchanged reload cannot re-cache a worker with stale imports',
+    )
   assert.equal(await refreshImports.isVisible(), false)
   const secondBeforeRefresh = notifications('didOpen', 'Second.lean').length
   state.files[projectId]['Main.lean'] += '-- ANOTHER_IMPORT_CHANGE\n'
@@ -322,7 +356,7 @@ try {
   await refreshImports.waitFor()
   assert.equal(
     notifications('didOpen', 'Third.lean').length,
-    beforeStaleReturn + 1,
+    reopenedThird,
     'A later foreign edit still must not automatically restart the proof',
   )
   const beforeExplicitRefresh = notifications('didOpen', 'Third.lean').length
@@ -354,7 +388,7 @@ try {
     secondBeforeRefresh + 1,
   )
   report.checks.push(
-    'Foreign changes mark current goals stale without restarting them. An unchanged reload keeps the notice. An actual reopen, including after an automatic import rebuild, clears it.',
+    'Foreign changes mark current goals stale without restarting them. Reusing a document keeps the notice. An actual reopen, including after an automatic import rebuild, clears it.',
   )
 
   const thirdCloses = notifications('didClose', 'Third.lean').length
@@ -426,6 +460,67 @@ try {
   )
   report.checks.push(
     'Project switching disposes the recent-file cache and does not reuse same-named sources across projects.',
+  )
+  const dependency = '.lake/packages/library/Basic.lean'
+  const dependencyItem = page.locator(`.file-item[title="${dependency}"]`)
+  if (!(await dependencyItem.isVisible()))
+    await page.getByRole('button', { name: /^Dependencies/ }).click()
+  const finishOpen = Promise.withResolvers()
+  let reads = 0
+  await page.route('**/api/projects/*/file?*', async (route) => {
+    if (
+      new URL(route.request().url()).searchParams.get('path') === dependency &&
+      ++reads === 2
+    ) {
+      // The Studio GET selected the file. Its read-only Monaco model has
+      // now requested the source, but no Lean document has opened for it.
+      await finishOpen.promise
+    }
+    return route.fallback()
+  })
+  await dependencyItem.click()
+  await until(() => reads >= 2, 'read-only model source request')
+  assert.equal(notifications('didOpen', dependency).length, 0)
+  state.files[projectId]['Main.lean'] += '-- DURING_FILE_SWITCH\n'
+  state.files[projectId]['Switch.md'] = ''
+  await changedProjectFile('Main.lean')
+  await page.locator('.file-item[title="Switch.md"]').waitFor()
+  assert.equal(
+    await refreshImports.isVisible(),
+    false,
+    'An unopened document cannot have stale goals',
+  )
+  finishOpen.resolve()
+  await opened(dependency, 'externalValue')
+  assert.equal(await refreshImports.isVisible(), false)
+  report.checks.push(
+    'A dependency change during navigation is picked up when the newly selected Lean document opens.',
+  )
+
+  includeRevisions = false
+  await refreshListing()
+  await refreshListing()
+  assert.equal(
+    await refreshImports.isVisible(),
+    false,
+    'Repeated unversioned listings without file changes must leave the visible goals current',
+  )
+  // A superseding manual scan must retain the earlier collaboration signal,
+  // even though the older server supplies no revision and the size is equal.
+  const source = state.files[projectId]['Main.lean']
+  state.files[projectId]['Main.lean'] = source.replace('cachedA', 'cachedZ')
+  assert.equal(state.files[projectId]['Main.lean'].length, source.length)
+  const gate = { release: Promise.withResolvers() }
+  nextScan = gate
+  fixture.sendCollaboration({ type: 'files', paths: ['Main.lean'] })
+  await until(() => !nextScan, 'collaboration file listing')
+  await refreshListing()
+  await refreshImports.waitFor()
+  gate.release.resolve()
+  await refreshImports.click()
+  await refreshImports.waitFor({ state: 'hidden' })
+  report.checks.push(
+    'Incomplete metadata keeps ordinary opens clear and still warns about a reported same-size import edit across overlapping scans.',
   )
   assert.deepEqual(violations, [])
   assert(

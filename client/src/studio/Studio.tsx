@@ -45,6 +45,7 @@ import { ToolbarAction } from './ToolbarAction'
 import { WorkspaceStatusBar } from './WorkspaceStatusBar'
 import { recordFailure } from './failureLog'
 import { LazyLeanWorkspace as LeanWorkspace } from './LazyLeanWorkspace'
+import type { WorkspaceFileListing } from './leanFileRevisions'
 import { FileTabs } from './FileTabs'
 import { WorkspaceBuffers, type WorkspaceScope } from './workspaceBuffers'
 import { useAutosave } from './useAutosave'
@@ -207,6 +208,7 @@ function checkOutcome(job: Job) {
 }
 
 const INVITATION_STORAGE_KEY = 'lemex-project-invitation'
+const emptyFiles: FileEntry[] = []
 
 // Removes one invitation from the address fragment. Other fragment parameters
 // and a different invitation stay exactly as they were.
@@ -321,7 +323,10 @@ export function Studio() {
   const [projectListError, setProjectListError] = useState('')
   const [projectListAttempt, setProjectListAttempt] = useState(0)
   const [projectId, setSelectedProjectId] = useState<string | null>(null)
-  const [files, setFiles] = useState<FileEntry[]>([])
+  const [fileListing, setFileListing] = useState<WorkspaceFileListing | null>(
+    null,
+  )
+  const files = fileListing?.files ?? emptyFiles
   const [folders, setFolders] = useState<string[]>([])
   const [foldersAvailable, setFoldersAvailable] = useState<boolean | null>(null)
   const [createdFolder, setCreatedFolder] = useState<string | null>(null)
@@ -545,6 +550,7 @@ export function Studio() {
     path: string
   } | null>(null)
   const filesRequest = useRef(0)
+  const pendingListingChanges = useRef<Set<string> | null>(new Set())
   const dependencyListing = useRef<{
     scope: WorkspaceScope
     files: FileEntry[]
@@ -797,12 +803,13 @@ export function Studio() {
       projectIdRef.current = id
       fileRef.current = null
       filesRef.current = []
+      pendingListingChanges.current = new Set()
       dependencyListing.current = null
       ++openRequest.current
       pendingFileOpen.current = null
       pendingReload.current = null
       savePromise.current = null
-      setFiles([])
+      setFileListing(null)
       setFolders([])
       setFoldersAvailable(null)
       setCreatedFolder(null)
@@ -1127,10 +1134,22 @@ export function Studio() {
       id: string,
       onFiles?: (entries: FileEntry[]) => void,
       projectFilesOnly = false,
+      reportedChanges?: WorkspaceFileListing['reportedChanges'],
     ) => {
       const expected = bufferStore.getSnapshot().scope
       const request = ++filesRequest.current
       const base = `/api/projects/${encodeURIComponent(id)}`
+      // A manual refresh can supersede a collaboration scan. Carry its
+      // evidence through failures and races until a listing is installed.
+      if (expected.projectId === id) {
+        if (reportedChanges === null) pendingListingChanges.current = null
+        else if (reportedChanges && pendingListingChanges.current) {
+          for (const path of reportedChanges)
+            pendingListingChanges.current.add(path)
+          if (pendingListingChanges.current.size > 128)
+            pendingListingChanges.current = null
+        }
+      }
       const previous = dependencyListing.current
       const dependencies =
         projectFilesOnly &&
@@ -1171,8 +1190,20 @@ export function Studio() {
                 : null
             else if (listing.files.some((file) => !file.revision))
               dependencyListing.current = null
-            setFiles(entries)
-          }
+            const changes = pendingListingChanges.current
+            pendingListingChanges.current = new Set()
+            setFileListing({
+              files: entries,
+              reportedChanges: changes && [...changes],
+            })
+          } else if (
+            onFiles &&
+            bufferStore.isCurrent(expected) &&
+            expected.projectId === id
+          )
+            // The startup callback below can open a file while a newer scan
+            // is in flight. Establish the same baseline that supplied it.
+            setFileListing((latest) => latest ?? { files: entries })
           onFiles?.(entries)
           return entries
         }),
@@ -1514,6 +1545,7 @@ export function Studio() {
       affected,
       recheck,
       projectFilesOnly,
+      reportedChanges,
     ): Promise<void> => {
       const id = scope.projectId
       if (!id) return
@@ -1530,13 +1562,14 @@ export function Studio() {
           `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
         )
       await Promise.allSettled([
-        loadFiles(id, undefined, projectFilesOnly).then((listing) =>
-          reconcileMissingBuffers(
-            bufferStore,
-            scope,
-            listing.map((entry) => entry.path),
-            readFile,
-          ),
+        loadFiles(id, undefined, projectFilesOnly, reportedChanges).then(
+          (listing) =>
+            reconcileMissingBuffers(
+              bufferStore,
+              scope,
+              listing.map((entry) => entry.path),
+              readFile,
+            ),
         ),
         refreshChangedBuffers(
           bufferStore,
@@ -2307,10 +2340,13 @@ export function Studio() {
         },
       )
       if (!bufferStore.isCurrent(expected)) return
-      setFiles((current) =>
-        current.some((entry) => entry.path === path)
+      setFileListing((current) =>
+        current?.files.some((entry) => entry.path === path)
           ? current
-          : [...current, { path, size: 0 }],
+          : {
+              files: [...(current?.files ?? []), { path, size: 0 }],
+              reportedChanges: [path],
+            },
       )
       setFileFilter('')
       try {
@@ -2867,7 +2903,7 @@ export function Studio() {
         if (active) {
           ++openRequest.current
           setFile(null)
-          setFiles([])
+          setFileListing(null)
           setFolders([])
           setGit(null)
           setProjectId(null)
@@ -4261,7 +4297,7 @@ export function Studio() {
                     }
                     key={`editor:${project.id}`}
                     projectId={project.id}
-                    files={files}
+                    fileListing={fileListing}
                     file={binaryPreview ? null : file}
                     joining={!!file && collaboration.joining(file.path)}
                     buffers={buffers}
@@ -4309,10 +4345,11 @@ export function Studio() {
                       setToolsOpen(true)
                       setSidebarOpen(false)
                     }}
-                    onState={(state) => {
+                    onState={(state, failureReason) => {
                       if (!bufferStore.isCurrent(scope)) return
                       setLeanState(state)
                       if (
+                        failureReason ||
                         state === 'Lean connection failed' ||
                         state === 'Editor update failed'
                       )
@@ -4320,6 +4357,7 @@ export function Studio() {
                           action: 'Lean editor',
                           code: state,
                           message:
+                            failureReason ||
                             'Use Restart Lean to reconnect. Your open edits are kept.',
                         })
                     }}

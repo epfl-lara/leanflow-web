@@ -19,9 +19,12 @@ const cancellableSocket = `const pendingSignal = lcConfig.leanflowPendingSignal;
                     };
                     pendingSignal.addEventListener('abort', cancelPending, { once: true });
                     disposeSignal.addEventListener('abort', close, { once: true });
-                    webSocket.addEventListener('close', () => {
+                    const reportClose = lcConfig.leanflowSocketOpened?.();
+                    webSocket.addEventListener('close', (event) => {
                         pendingSignal.removeEventListener('abort', cancelPending);
                         disposeSignal.removeEventListener('abort', close);
+                        if (!pendingSignal.aborted && !disposeSignal.aborted)
+                            reportClose?.(event.code, event.reason);
                     }, { once: true });
                     const started = resolve;
                     resolve = () => {

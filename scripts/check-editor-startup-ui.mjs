@@ -101,9 +101,14 @@ try {
   await page.locator('.monaco-editor textarea').first().waitFor()
   await page
     .getByText(
-      /Lean could not connect\. Check your connection or close unused project tabs, then wait a moment and use Restart Lean\./,
+      'The Lean server stopped. Use Restart Lean to reconnect. You can keep editing.',
+      { exact: true },
     )
     .waitFor()
+  assert.equal(
+    await page.getByText('Isolated initialization failure').count(),
+    0,
+  )
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })
   assert.equal(await page.locator('.editor-failure').count(), 0)
   await page.locator('.monaco-editor textarea').first().focus()
@@ -117,7 +122,7 @@ try {
     'typing saved after failed Lean initialization',
   )
   report.checks.push(
-    'An initial Lean connection rejection offers connection, tab capacity and retry guidance while Monaco typing and live saves stay available.',
+    'A server error during initialization shows safe recovery guidance while Monaco typing and live saves stay available.',
   )
   document
     .getText('source')

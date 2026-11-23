@@ -1,22 +1,12 @@
+import { editorAdmissionReasons } from '../shared/editor-queue.mjs'
+
 const refusal = (message, status) =>
   Object.assign(new Error(message), { status })
-const queueFull = () =>
-  refusal(
-    'Lean editors are busy and the waiting list is full. Close unused editor tabs or try again shortly.',
-    429,
-  )
+const queueFull = () => refusal(editorAdmissionReasons.queueFull, 429)
 const accountQueueFull = () =>
-  refusal(
-    'You already have the most Lean editor tabs allowed to wait. Close one or wait for an editor to start.',
-    429,
-  )
-const expired = () =>
-  refusal(
-    'No Lean editor became free in time. Reopen the file to join the waiting list again.',
-    429,
-  )
-const closing = () =>
-  refusal('LeanFlow is restarting. Reopen the file in a moment.', 503)
+  refusal(editorAdmissionReasons.accountQueueFull, 429)
+const expired = () => refusal(editorAdmissionReasons.expired, 429)
+const closing = () => refusal(editorAdmissionReasons.closing, 503)
 
 const decrement = (counts, key) => {
   const remaining = counts.get(key) - 1

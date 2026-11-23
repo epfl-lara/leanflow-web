@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// A rejected Lean payload must preserve editing and avoid a reconnect loop.
+// Exercise startup rejection, recovery and an oversized source in the real editor.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
@@ -21,7 +21,7 @@ const f = await chatBrowserFixture({
     runtime: { ready: true },
   },
   projects: [{ id, name: 'Lean payload fixture', status: 'ready' }],
-  files: { [id]: { 'Main.lean': source } },
+  files: { [id]: { 'Main.lean': source, 'Second.lean': '-- second module\n' } },
   chats: [
     {
       id: 'oversize-chat',
@@ -67,7 +67,83 @@ await f.page.route(
   },
 )
 try {
-  await f.ready()
+  const queueReason =
+    'No Lean editor became free in time. Reopen the file to join the waiting list again.'
+  let rejectStartup = true
+  let admitRetry, initializeRetry
+  f.state.onLeanMessage = (message, _url, socket) => {
+    if (message.method !== 'initialize') return
+    if (rejectStartup) {
+      socket.close({ code: 1013, reason: queueReason })
+    } else {
+      const notify = (params) =>
+        socket.send(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            method: '$/leanflow/editorQueue',
+            params,
+          }),
+        )
+      notify({ state: 'waiting', position: 1, total: 1 })
+      admitRetry = () => notify({ state: 'active' })
+      initializeRetry = () =>
+        socket.send(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: {
+              capabilities: { textDocumentSync: 1 },
+              serverInfo: { name: 'Browser fixture', version: '0.2.0' },
+            },
+          }),
+        )
+    }
+    return true
+  }
+  await f.page.goto(process.env.STUDIO_TEST_URL || 'http://127.0.0.1:4173')
+  const startupAlert = f.page.getByRole('alert').getByText(queueReason)
+  const goals = f.page.locator('.infoview-host')
+  await startupAlert.waitFor({ timeout: 60000 })
+  await f.page
+    .getByText('Live goals are unavailable while Lean is disconnected.')
+    .waitFor()
+  assert(await goals.isHidden())
+  const connected = f.page.locator('.statusbar').getByText('Lean connected')
+  rejectStartup = false
+  await f.page.locator('.file-item[title="Second.lean"]').dblclick()
+  const queueNotice = f.page.locator('[data-editor-queue="waiting"]')
+  await queueNotice.waitFor()
+  assert(
+    await startupAlert.isHidden(),
+    'The current queue position takes priority over the previous failure',
+  )
+  assert(
+    await goals.isHidden(),
+    'A queued reconnection cannot show stale goals',
+  )
+  admitRetry()
+  await queueNotice.waitFor({ state: 'hidden' })
+  assert(await goals.isHidden(), 'Admission alone cannot restore live goals')
+  initializeRetry()
+  await connected.waitFor()
+  await startupAlert.waitFor({ state: 'hidden' })
+  await goals.waitFor({ state: 'visible' })
+  await f.page.getByRole('button', { name: 'Failure log', exact: true }).click()
+  const log = f.page.getByRole('region', { name: 'Failure log' })
+  await log.getByText(queueReason, { exact: true }).waitFor()
+  assert.equal(await log.locator('li').count(), 1)
+  await log.getByRole('button', { name: 'Close failure log' }).click()
+  await f.page.locator('.file-item[title="Main.lean"]').dblclick()
+  await until(
+    async () =>
+      (await f.page.locator('.monaco-editor .view-lines').innerText()).includes(
+        'True',
+      ),
+    'original file after automatic recovery',
+  )
+  f.report.checks.push(
+    'A rejection before initialization shows the worker queue timeout and hides stale goals. Opening another Lean file reconnects automatically, restores goals and clears the alert.',
+  )
   await f.page.locator('.monaco-editor textarea').focus()
   await f.page.keyboard.press(
     process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End',
@@ -124,6 +200,16 @@ try {
   )
   f.assertClean()
   f.report.passed = true
+} catch (error) {
+  f.report.failure = String(error)
+  f.report.status = await f.page
+    .locator('.statusbar')
+    .textContent()
+    .catch(() => '')
+  f.report.notices = await f.page
+    .locator('.lean-connection-notice')
+    .allTextContents()
+  throw error
 } finally {
   await fs.writeFile(
     path.join(reportDir, 'result.json'),

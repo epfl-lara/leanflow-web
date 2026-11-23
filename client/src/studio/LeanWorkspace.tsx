@@ -22,7 +22,7 @@ import {
   useState,
   type CSSProperties,
 } from 'react'
-import type { FileEntry, OpenFile, PaperLink } from './api'
+import type { OpenFile, PaperLink } from './api'
 import { sessionBoundUrl } from './api'
 import { connectInfoviewTheme } from './infoviewTheme'
 import { leanEditorTheme } from './leanEditorTheme'
@@ -37,6 +37,10 @@ import { initializeLeanEditor } from './leanEditorServices'
 import { DefinitionPreviewFiles } from './definitionPreviewFiles'
 import { WorkspaceEditor } from './workspaceEditor'
 import { installLeanClientLifecycle } from './leanClientLifecycle'
+import {
+  leanConnectionCloseMessage,
+  leanConnectionFailed,
+} from './leanConnectionIssue'
 import { watchEditorIdle } from './editorIdle'
 import {
   editorQueueNotice,
@@ -47,7 +51,11 @@ import { CollaboratorCursors } from './collaboratorCursors'
 import { LeanCommentImagePreviews } from './leanCommentImagePreviews'
 import type { ProjectPeer, ProjectSelection } from './projectPresence'
 import { LeanModelCache } from './leanModelCache'
-import { changedLeanFiles } from './leanFileRevisions'
+import {
+  affectsLean,
+  changedLeanFiles,
+  type WorkspaceFileListing,
+} from './leanFileRevisions'
 import type { RenameSource } from './workspaceBuffers'
 import { installLeanRenameMiddleware } from './leanRenameMiddleware'
 import { LEAN_EDIT_DISABLED_MESSAGE } from '../../../shared/lean-edit-policy.mjs'
@@ -72,6 +80,7 @@ import {
 
 class BrowserLeanMonaco extends LeanMonaco {
   readonly proofDiagnostics = new ProofDiagnostics()
+  onDocumentOpened?: (uri: string) => void
   private readonly pendingConnections = new AbortController()
   private readonly disposedConnections = new AbortController()
 
@@ -89,7 +98,7 @@ class BrowserLeanMonaco extends LeanMonaco {
   showVisibleDocument: () => Promise<boolean> = async () => false
   refreshVisibleDocument: () => Promise<boolean> = async () => false
   constructor(
-    private readonly onConnectionIssue: (message: string) => void,
+    private readonly onSocketClosed: (code: number, reason: string) => void,
     private readonly onProcessingNotice: (
       message: string,
       uri?: string,
@@ -116,11 +125,12 @@ class BrowserLeanMonaco extends LeanMonaco {
       ProofDiagnostics['openConnection']
     >
     leanflowQueue: (params: unknown) => void
+    leanflowSocketOpened: () => (code: number, reason: string) => void
     leanflowPendingSignal: AbortSignal
     leanflowDisposeSignal: AbortSignal
   } {
     const settings = super.getWebSocketOptions(options)
-    const onConnectionIssue = this.onConnectionIssue
+    let latestSocket = 0
     const onProcessingNotice = this.onProcessingNotice
     const onRenameIssue = this.onRenameIssue
     const onEditorQueue = this.onEditorQueue
@@ -135,9 +145,16 @@ class BrowserLeanMonaco extends LeanMonaco {
     const prepareRenameSources = this.prepareRenameSources
     return {
       ...settings,
-      leanflowProofDiagnostics: () => this.proofDiagnostics.openConnection(),
+      leanflowProofDiagnostics: () =>
+        this.proofDiagnostics.openConnection(this.onDocumentOpened),
       leanflowPendingSignal: this.pendingConnections.signal,
       leanflowDisposeSignal: this.disposedConnections.signal,
+      leanflowSocketOpened: () => {
+        const socket = ++latestSocket
+        return (code, reason) => {
+          if (socket === latestSocket) this.onSocketClosed(code, reason)
+        }
+      },
       leanflowQueue(params: unknown) {
         const notice = editorQueueNotice(params)
         if (notice) onEditorQueue(notice)
@@ -191,13 +208,6 @@ class BrowserLeanMonaco extends LeanMonaco {
                 /socket reconnect: code = 1009\b/.test(error.message)
               ) {
                 sourceTooLarge = true
-                const reason = /reason = ([\s\S]*)$/
-                  .exec(error.message)?.[1]
-                  ?.trim()
-                onConnectionIssue(
-                  reason ||
-                    'The Lean message is too large. Reduce the source or split it into smaller modules.',
-                )
                 return { action: ErrorAction.Continue, handled: true }
               }
               return previous.error(error, message, count)
@@ -267,7 +277,7 @@ interface ConnectionClient {
 export function LeanWorkspace({
   projectId,
   queuedFileCheck,
-  files,
+  fileListing,
   file,
   buffers,
   retainedPaths,
@@ -303,7 +313,7 @@ export function LeanWorkspace({
 }: {
   projectId: string
   queuedFileCheck?: { submit: () => void; inProgress: boolean }
-  files: readonly FileEntry[]
+  fileListing: WorkspaceFileListing | null
   file: OpenFile | null
   buffers: ReadonlyMap<string, OpenFile>
   retainedPaths: readonly string[]
@@ -320,7 +330,7 @@ export function LeanWorkspace({
   onCollaborativeSelection?: (selection: ProjectSelection | null) => void
   theme: 'light' | 'dark'
   onChange: (path: string, content: string) => void
-  onState: (state: string) => void
+  onState: (state: string, failureReason?: string) => void
   showInfoview: boolean
   onOpenFile: (path: string, line?: number, column?: number) => void
   onOpenLibrary: (request: SourceRequest) => void
@@ -351,7 +361,7 @@ export function LeanWorkspace({
   const editorEl = useRef<HTMLDivElement>(null)
   const infoEl = useRef<HTMLDivElement>(null)
   const runtime = useRef<Runtime | null>(null)
-  const listedFiles = useRef<readonly FileEntry[] | undefined>(undefined)
+  const listedFiles = useRef<WorkspaceFileListing | null>(null)
   const fileRef = useRef(file)
   const paperLinkActions = useRef({ onOpenPaperLink, onShowPaperLinks })
   paperLinkActions.current = { onOpenPaperLink, onShowPaperLinks }
@@ -402,6 +412,7 @@ export function LeanWorkspace({
   const [markdownIssue, setMarkdownIssue] = useState('')
   const [texIssue, setTexIssue] = useState('')
   const [connectionIssue, setConnectionIssue] = useState('')
+  const [transportIssue, setTransportIssue] = useState('')
   const [restarting, setRestarting] = useState(false)
   const [sleeping, setSleeping] = useState(false)
   const [editorQueue, setEditorQueue] = useState<EditorQueueNotice | null>(null)
@@ -415,6 +426,21 @@ export function LeanWorkspace({
   }, [])
   const [refreshingImports, setRefreshingImports] = useState(false)
   const importsRevision = useRef(0)
+  const markOpenImportsStale = useCallback(
+    (active: Runtime) => {
+      const path = fileRef.current?.path
+      if (
+        path?.endsWith('.lean') &&
+        active.lean.proofDiagnostics.hasOpenDocument(
+          new FileUri('/workspace/' + path).toString(),
+        )
+      ) {
+        importsRevision.current++
+        setImportsStale(path)
+      }
+    },
+    [setImportsStale],
+  )
   const refreshVisibleImports = useCallback(
     async (active: Runtime) => {
       const file = fileRef.current
@@ -450,6 +476,7 @@ export function LeanWorkspace({
     refreshingImports ||
     editorQueue ||
     connectionIssue ||
+    transportIssue ||
     failure ||
     (file?.path && importsStale === file.path)
   )
@@ -502,9 +529,27 @@ export function LeanWorkspace({
   useEffect(() => {
     let cancelled = false
     let own: Runtime | null = null
+    let lastConnectionIssue = ''
+    const reportConnectionFailure = (
+      message = lastConnectionIssue || leanConnectionFailed,
+    ) => {
+      if (
+        cancelled ||
+        own?.sourceTooLarge ||
+        own?.clientLifecycle?.sleeping ||
+        lastConnectionIssue === message
+      )
+        return
+      lastConnectionIssue = message
+      editorQueueRef.current = null
+      setEditorQueue(null)
+      setTransportIssue(message)
+      onStateRef.current('Lean connection failed', message)
+    }
     setFailure('')
     setMarkdownIssue('')
     setConnectionIssue('')
+    setTransportIssue('')
     setRequestIssue('')
     setRestartIssue('')
     setImportsStale(null)
@@ -518,11 +563,17 @@ export function LeanWorkspace({
     void serialize(async () => {
       if (cancelled || !editorEl.current || !infoEl.current) return
       const lean = new BrowserLeanMonaco(
-        (message) => {
-          if (cancelled) return
-          if (own) own.sourceTooLarge = true
-          setConnectionIssue(message)
-          onStateRef.current('Lean paused: source too large')
+        (code, reason) => {
+          if (cancelled || own?.clientLifecycle?.sleeping) return
+          const message = leanConnectionCloseMessage(code, reason)
+          if (!message) return
+          if (code === 1009) {
+            setEditorQueue(null)
+            editorQueueRef.current = null
+            if (own) own.sourceTooLarge = true
+            setConnectionIssue(message)
+            onStateRef.current('Lean paused: source too large', message)
+          } else reportConnectionFailure(message)
         },
         (message, uri) => {
           if (
@@ -563,11 +614,22 @@ export function LeanWorkspace({
           if (!queued && editorQueueRef.current) own?.idle?.resetDeadline()
           editorQueueRef.current = queued
           setEditorQueue(queued)
-          if (notice.state === 'waiting')
+          if (notice.state === 'waiting') {
             onStateRef.current(`Waiting for Lean: position ${notice.position}`)
-          else onStateRef.current('Connecting to Lean')
+          } else onStateRef.current('Connecting to Lean')
         },
       )
+      lean.onDocumentOpened = (uri) => {
+        const stale = importsStaleRef.current
+        // didOpen starts a fresh Lean worker, including during a file switch
+        // or reconnect. A model rerender without didOpen keeps its old notice.
+        if (
+          !cancelled &&
+          stale &&
+          new FileUri('/workspace/' + stale).toString() === uri
+        )
+          setImportsStale(null)
+      }
       own = {
         lean,
         virtualFiles: new Set(),
@@ -634,14 +696,7 @@ export function LeanWorkspace({
               provider,
               new FileUri('/workspace'),
               (error) => {
-                if (!cancelled) {
-                  setEditorQueue(null)
-                  editorQueueRef.current = null
-                  setRequestIssue(
-                    'Lean could not connect. Check your connection or close unused project tabs, then wait a moment and use Restart Lean. You can keep editing.',
-                  )
-                  onStateRef.current('Lean connection failed')
-                }
+                reportConnectionFailure()
                 console.warn(
                   '[LeanFlow Web] Lean connection ended during startup or shutdown.',
                   error,
@@ -705,22 +760,32 @@ export function LeanWorkspace({
                   client.restarted(() => {
                     if (!cancelled && !active.clientLifecycle?.sleeping) {
                       const connected = client.isRunning()
-                      if (connected) setRestartIssue('')
-                      onStateRef.current(
-                        connected ? 'Lean connected' : 'Lean connection failed',
-                      )
+                      if (connected) {
+                        lastConnectionIssue = ''
+                        setTransportIssue('')
+                        setRestartIssue('')
+                        onStateRef.current('Lean connected')
+                      } else reportConnectionFailure()
                     }
                   }),
                   client.restarting(() => {
-                    if (!cancelled) onStateRef.current('Restarting Lean')
+                    if (!cancelled) {
+                      lastConnectionIssue = ''
+                      onStateRef.current('Restarting Lean')
+                    }
                   }),
                   client.serverFailed(() => {
-                    if (!cancelled) onStateRef.current('Lean connection failed')
+                    reportConnectionFailure()
                   }),
                 )
               }),
               provider.clientStopped(() => {
-                if (!cancelled && !active.clientLifecycle?.sleeping)
+                if (
+                  !cancelled &&
+                  !active.clientLifecycle?.sleeping &&
+                  !active.sourceTooLarge &&
+                  !lastConnectionIssue
+                )
                   onStateRef.current('Lean server stopped')
               }),
             )
@@ -851,64 +916,40 @@ export function LeanWorkspace({
 
   useLayoutEffect(() => {
     const previous = listedFiles.current
-    const changed = changedLeanFiles(previous, files)
-    listedFiles.current = files
-    if (changed?.length === 0) return
+    listedFiles.current = fileListing
+    if (!previous || !fileListing) return
+    const { changed, uncertain, unknownChange } = changedLeanFiles(
+      previous.files,
+      fileListing,
+    )
     const active = runtime.current
-    // Unknown metadata cannot prove that cached imports are still current.
-    // Keep the older-server fallback conservative, including the active cache
-    // reference so revisiting this file reopens its imports.
-    if (changed === null) {
-      active?.modelCache.clear()
-      if (previous && active?.visibleReadyPath?.endsWith('.lean')) {
-        importsRevision.current++
-        setImportsStale(active.visibleReadyPath)
-      }
-      return
-    }
-    if (changed.some((path) => path !== fileRef.current?.path)) {
-      // Do not restart every peer on each shared save. The current worker may
-      // finish, but cannot be reused on a later visit until imports are fresh.
-      active?.modelCache.clear()
-      if (fileRef.current?.path.endsWith('.lean')) {
-        importsRevision.current++
-        setImportsStale(fileRef.current.path)
-      }
-    } else active?.modelCache.invalidate()
-  }, [projectId, files])
+    if (!active) return
+    const foreignChange =
+      unknownChange ||
+      [...changed].some((path) => path !== fileRef.current?.path)
+    if (foreignChange) markOpenImportsStale(active)
+    // An incomplete listing cannot certify cached workers for a future visit.
+    // A refresh without evidence of a change can leave the visible proof running.
+    if (uncertain || foreignChange) active.modelCache.clear()
+    else if (changed.size) active.modelCache.invalidate()
+  }, [fileListing, markOpenImportsStale])
 
   useLayoutEffect(() => {
     runtime.current?.renameModels?.synchronize(buffersRef.current)
   }, [bufferDiscardVersion, buffers])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const active = runtime.current
+    if (!active || !savedPaths.some(affectsLean)) return
+    const path = fileRef.current?.path
+    if (savedPaths.some((saved) => affectsLean(saved) && saved !== path)) {
+      active.modelCache.clear()
+      markOpenImportsStale(active)
+    } else active.modelCache.invalidate()
     let cancelled = false
     void serialize(async () => {
-      if (cancelled) return
-      const active = runtime.current
-      const path = fileRef.current?.path
-      if (
-        savedPaths.some(
-          (saved) =>
-            saved.endsWith('.lean') ||
-            ['lean-toolchain', 'lakefile.toml', 'lake-manifest.json'].includes(
-              saved,
-            ),
-        )
-      ) {
-        active?.modelCache.invalidate()
-        await active?.lean.closeHiddenDocuments()
-      }
-      // Another saved Lean module can invalidate the visible file's imports.
-      // Saving this proof still preserves its own incremental snapshots.
-      if (
-        path?.endsWith('.lean') &&
-        savedPaths.some((saved) => saved.endsWith('.lean') && saved !== path)
-      ) {
-        active?.modelCache.clear()
-        importsRevision.current++
-        setImportsStale(path)
-      }
+      if (!cancelled && runtime.current === active)
+        await active.lean.closeHiddenDocuments()
     }).catch(() => {
       if (!cancelled)
         setRestartIssue(
@@ -918,7 +959,7 @@ export function LeanWorkspace({
     return () => {
       cancelled = true
     }
-  }, [bufferSaveVersion, projectId, savedPaths])
+  }, [bufferSaveVersion, projectId, savedPaths, markOpenImportsStale])
 
   useEffect(() => {
     if (!editorImportsVersion) return
@@ -1911,23 +1952,25 @@ export function LeanWorkspace({
             </p>
           </div>
         )}
-        {restartIssue && (
+        {restartIssue && !transportIssue && !connectionIssue && (
           <div className="lean-connection-notice" role="alert">
             {restartIssue}
           </div>
         )}
-        {requestIssue && (
-          <div className="lean-connection-notice" role="alert">
-            <p>{requestIssue}</p>
-            <button
-              className="button small secondary"
-              onClick={() => void restartLean()}
-              disabled={restarting || !!editorQueue}
-            >
-              {restarting ? 'Restarting…' : 'Restart Lean'}
-            </button>
-          </div>
-        )}
+        {(requestIssue || transportIssue) &&
+          !connectionIssue &&
+          !editorQueue && (
+            <div className="lean-connection-notice" role="alert">
+              <p>{transportIssue || requestIssue}</p>
+              <button
+                className="button small secondary"
+                onClick={() => void restartLean()}
+                disabled={restarting || !!editorQueue}
+              >
+                {restarting ? 'Restarting…' : 'Restart Lean'}
+              </button>
+            </div>
+          )}
         {renameIssue && (
           <div className="lean-connection-notice" role="alert">
             <p>{renameIssue}</p>
@@ -2004,7 +2047,11 @@ export function LeanWorkspace({
           >
             {restarting ? 'Restarting…' : 'Restart Lean'}
           </button>
-          <span className="caption-hint">Move the cursor to inspect</span>
+          <span className="caption-hint">
+            {transportIssue || connectionIssue || failure
+              ? 'Live goals are unavailable while Lean is disconnected.'
+              : 'Move the cursor to inspect'}
+          </span>
         </div>
         {importsStale === file?.path && file?.path.endsWith('.lean') && (
           <output className="lean-import-notice">
@@ -2018,7 +2065,11 @@ export function LeanWorkspace({
             </button>
           </output>
         )}
-        <div ref={infoEl} className="infoview-host" />
+        <div
+          ref={infoEl}
+          className="infoview-host"
+          hidden={!!(transportIssue || connectionIssue || failure)}
+        />
       </section>
     </div>
   )

@@ -124,6 +124,7 @@ export function useProjectCollaboration({
     affected: (path: string) => boolean,
     recheck: (path: string) => void,
     projectFilesOnly: boolean,
+    reportedChanges: readonly string[] | null,
   ) => void | Promise<void>
   onFilesMoved?: (move: PathMove) => void
   onProjectChanged?: () => void | Promise<void>
@@ -239,6 +240,8 @@ export function useProjectCollaboration({
     let listingDeadline = 0
     let refreshingFiles = false
     let changedPaths: Set<string> | null = new Set()
+    let reportedChanges: Set<string> | null = new Set()
+    let hasConnected = false
     let sendTimer: ReturnType<typeof setTimeout> | undefined
     let presenceTimer: ReturnType<typeof setTimeout> | undefined
     let lastPresence = ''
@@ -323,7 +326,9 @@ export function useProjectCollaboration({
           listingTimer = undefined
           if (!current()) return
           const paths = changedPaths
+          const reported = reportedChanges
           changedPaths = new Set()
+          reportedChanges = new Set()
           refreshingFiles = true
           try {
             await callbacks.current.onFilesChanged?.(
@@ -331,9 +336,10 @@ export function useProjectCollaboration({
                 !paths ||
                 paths.has(path) ||
                 parentFolders(path).some((parent) => paths.has(parent)),
-              (path) => filesChanged([path]),
+              (path) => filesChanged([path], false),
               !!paths?.size &&
                 [...paths].every((path) => path !== '.lake' && liveFile(path)),
+              reported && [...reported],
             )
           } catch {
             // A subsequent change or reconnect will refresh the listing again.
@@ -345,15 +351,18 @@ export function useProjectCollaboration({
         Math.max(0, Math.min(350, listingDeadline - Date.now())),
       )
     }
-    const filesChanged = (paths?: unknown) => {
-      if (!Array.isArray(paths) || !paths.length) changedPaths = null
-      else if (changedPaths)
+    const filesChanged = (paths: unknown, report: boolean) => {
+      if (!Array.isArray(paths) || !paths.length) {
+        changedPaths = null
+        if (report) reportedChanges = null
+      } else
         for (const path of paths) {
-          if (typeof path === 'string') changedPaths.add(path)
-          if (changedPaths.size > 128) {
-            changedPaths = null
-            break
-          }
+          if (typeof path !== 'string') continue
+          changedPaths?.add(path)
+          if (report) reportedChanges?.add(path)
+          if (changedPaths && changedPaths.size > 128) changedPaths = null
+          if (reportedChanges && reportedChanges.size > 128)
+            reportedChanges = null
         }
       scheduleFileRefresh()
     }
@@ -958,7 +967,9 @@ export function useProjectCollaboration({
         }
         publishLocal()
         schedulePresence()
-        filesChanged()
+        // First admission requests a baseline. A reconnect may have missed writes.
+        filesChanged(undefined, hasConnected)
+        hasConnected = true
         notify()
         return
       }
@@ -977,7 +988,7 @@ export function useProjectCollaboration({
               (path): path is string => typeof path === 'string',
             ),
           )
-        filesChanged('paths' in message ? message.paths : undefined)
+        filesChanged('paths' in message ? message.paths : undefined, true)
         return
       }
       if (
@@ -985,7 +996,7 @@ export function useProjectCollaboration({
         message.type === 'project' ||
         message.type === 'editor-imports'
       ) {
-        if (message.type === 'project') filesChanged()
+        if (message.type === 'project') filesChanged(undefined, false)
         void Promise.resolve(callbacks.current.onProjectChanged?.()).catch(
           () => {},
         )
