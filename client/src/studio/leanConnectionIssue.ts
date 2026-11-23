@@ -13,6 +13,19 @@ const startupReasons = [
   'Lean connection is busy. Reopen the project to reconnect.',
 ]
 
+export function transientLeanStartupClose(code: number, reason: string) {
+  if (code === 1006 || code === 1011) return true
+  if (code === 1012)
+    return reason !== 'Project configuration changed. Retry setup.'
+  if (code !== 1013) return false
+  return !startupReasons.some(
+    (message) =>
+      message !== editorAdmissionReasons.closing &&
+      message !== 'Lean connection is busy. Reopen the project to reconnect.' &&
+      reason === message.slice(0, 100),
+  )
+}
+
 export function leanConnectionCloseMessage(code: number, reason: string) {
   switch (code) {
     case 1000:

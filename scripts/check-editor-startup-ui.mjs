@@ -22,6 +22,8 @@ const base = `http://127.0.0.1:${server.address().port}`
 const projectId = 'editor-startup-project'
 let fixture
 let connections = 0
+let persistentFailure = false
+let openDocument
 const document = new Y.Doc()
 document.getText('source').insert(0, 'example : True := by trivial\n')
 let collaborationSocket
@@ -79,25 +81,47 @@ try {
       socket.send(JSON.stringify({ type: 'ready' }))
     },
   )
-  await page.routeWebSocket(
-    (url) => url.pathname === `/websocket/${projectId}`,
-    (socket) => {
-      assert.equal(
-        new URL(socket.url()).searchParams.get('expectedUserId'),
-        'fixture-owner',
-      )
-      connections++
-      socket.onMessage((raw) => {
-        const message = JSON.parse(String(raw))
-        if (message.method === 'initialize')
-          socket.close({
-            code: 1011,
-            reason: 'Isolated initialization failure',
-          })
-      })
-    },
-  )
+  state.onLeanMessage = (message, url, socket) => {
+    if (message.method === 'textDocument/didOpen')
+      openDocument = message.params.textDocument
+    if (message.method !== 'initialize') return
+    assert.equal(
+      new URL(url).searchParams.get('expectedUserId'),
+      'fixture-owner',
+    )
+    connections++
+    if (connections === 1 || persistentFailure) {
+      socket.close({ code: 1011, reason: 'Isolated initialization failure' })
+      return true
+    }
+  }
   await page.goto(base)
+  const status = page.locator('.statusbar')
+  await status.getByText('Reconnecting to Lean', { exact: true }).waitFor()
+  assert.equal(
+    await page.locator('.lean-connection-notice[role="alert"]').count(),
+    0,
+  )
+  await status.getByText('Lean connected', { exact: true }).waitFor()
+  await until(
+    () => openDocument?.uri === 'file:///workspace/Main.lean',
+    'same visible proof opened on the new worker',
+  )
+  assert.equal(openDocument.text, state.files[projectId]['Main.lean'])
+  assert.equal(connections, 2)
+  assert.equal(
+    await page.locator('.failure-log-toggle').getAttribute('data-has-failures'),
+    'false',
+  )
+  assert.equal(
+    await page.locator('.lean-connection-notice[role="alert"]').count(),
+    0,
+  )
+  report.checks.push(
+    'A transient startup failure recovers the same open proof without a click, file switch, failure alert or Failure log entry.',
+  )
+  persistentFailure = true
+  await page.reload()
   await page.locator('.monaco-editor textarea').first().waitFor()
   await page
     .getByText(
@@ -111,6 +135,11 @@ try {
   )
   await page.locator('.editor-loading').waitFor({ state: 'hidden' })
   assert.equal(await page.locator('.editor-failure').count(), 0)
+  assert.equal(
+    connections,
+    5,
+    'A persistent failure receives exactly two automatic retries',
+  )
   await page.locator('.monaco-editor textarea').first().focus()
   await page.keyboard.press(editorShortcuts.documentEnd)
   await page.keyboard.insertText('-- SAVED_AFTER_INITIALIZATION_FAILURE\n')
@@ -138,12 +167,22 @@ try {
   report.checks.push(
     'A live collaborator source update still reaches Monaco after failed Lean initialization.',
   )
+  await page.waitForTimeout(5000)
+  const beforeManualRestart = connections
+  assert.equal(
+    beforeManualRestart,
+    5,
+    'Automatic retries stop after exhaustion',
+  )
   await page
     .getByRole('button', { name: 'Restart Lean', exact: true })
     .first()
     .click()
-  await until(() => connections > 1, 'Restart Lean retries a failed startup')
-  report.restartConnectionAttempts = connections - 1
+  await until(
+    () => connections > beforeManualRestart,
+    'Restart Lean retries a failed startup',
+  )
+  report.restartConnectionAttempts = connections - beforeManualRestart
   await page.locator('.monaco-editor textarea').first().focus()
   await page.keyboard.press(editorShortcuts.documentEnd)
   await page.keyboard.insertText('-- SAVED_AFTER_RESTART_FAILURE\n')

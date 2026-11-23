@@ -269,6 +269,31 @@ test('auto recovery leaves a hidden or sleeping editor stopped', async () => {
   await f.lifecycle.close()
 })
 
+test('a scheduled retry recreates a missing client after failed startup cleanup and shares concurrent recovery', async () => {
+  const f = fixture()
+  const first = f.provider.ensureClient('root')
+  const retry = f.lifecycle.recover(() => true, 'root')
+  assert.equal(
+    f.lifecycle.recover(() => true, 'root'),
+    retry,
+  )
+  let starts = 0
+  f.provider.setupClient = async () => {
+    assert.equal(f.erased, 1)
+    starts++
+    return f.raw
+  }
+  f.gate.reject(new Error('first initialize refused'))
+  await first
+  await retry
+  assert.equal(starts, 1)
+  assert.equal(f.raw.isRunning(), true)
+  await f.lifecycle.recover(() => true, 'root')
+  assert.equal(starts, 1, 'A live worker keeps its connection')
+  assert.equal(f.restarts, 0)
+  await f.lifecycle.close()
+})
+
 test('sleep requested during a pending wake waits for it and then releases its worker', async () => {
   const f = fixture()
   f.gate.resolve(f.raw)

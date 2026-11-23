@@ -20,14 +20,16 @@ const cancellableSocket = `const pendingSignal = lcConfig.leanflowPendingSignal;
                     pendingSignal.addEventListener('abort', cancelPending, { once: true });
                     disposeSignal.addEventListener('abort', close, { once: true });
                     const reportClose = lcConfig.leanflowSocketOpened?.();
+                    let initialized = false;
                     webSocket.addEventListener('close', (event) => {
                         pendingSignal.removeEventListener('abort', cancelPending);
                         disposeSignal.removeEventListener('abort', close);
                         if (!pendingSignal.aborted && !disposeSignal.aborted)
-                            reportClose?.(event.code, event.reason);
+                            reportClose?.(event.code, event.reason, initialized);
                     }, { once: true });
                     const started = resolve;
                     resolve = () => {
+                        initialized = true;
                         pendingSignal.removeEventListener('abort', cancelPending);
                         started();
                     };

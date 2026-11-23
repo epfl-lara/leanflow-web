@@ -40,6 +40,7 @@ import { installLeanClientLifecycle } from './leanClientLifecycle'
 import {
   leanConnectionCloseMessage,
   leanConnectionFailed,
+  transientLeanStartupClose,
 } from './leanConnectionIssue'
 import { watchEditorIdle } from './editorIdle'
 import {
@@ -98,7 +99,11 @@ class BrowserLeanMonaco extends LeanMonaco {
   showVisibleDocument: () => Promise<boolean> = async () => false
   refreshVisibleDocument: () => Promise<boolean> = async () => false
   constructor(
-    private readonly onSocketClosed: (code: number, reason: string) => void,
+    private readonly onSocketClosed: (
+      code: number,
+      reason: string,
+      initialized: boolean,
+    ) => void,
     private readonly onProcessingNotice: (
       message: string,
       uri?: string,
@@ -125,7 +130,11 @@ class BrowserLeanMonaco extends LeanMonaco {
       ProofDiagnostics['openConnection']
     >
     leanflowQueue: (params: unknown) => void
-    leanflowSocketOpened: () => (code: number, reason: string) => void
+    leanflowSocketOpened: () => (
+      code: number,
+      reason: string,
+      initialized: boolean,
+    ) => void
     leanflowPendingSignal: AbortSignal
     leanflowDisposeSignal: AbortSignal
   } {
@@ -151,8 +160,9 @@ class BrowserLeanMonaco extends LeanMonaco {
       leanflowDisposeSignal: this.disposedConnections.signal,
       leanflowSocketOpened: () => {
         const socket = ++latestSocket
-        return (code, reason) => {
-          if (socket === latestSocket) this.onSocketClosed(code, reason)
+        return (code, reason, initialized) => {
+          if (socket === latestSocket)
+            this.onSocketClosed(code, reason, initialized)
         }
       },
       leanflowQueue(params: unknown) {
@@ -256,6 +266,7 @@ interface Runtime {
   outlineCleanup?: () => void
   visibleReadyPath?: string
   sourceTooLarge?: boolean
+  retryStartupWhenVisible?: () => boolean
   renameModels?: RenameModels
   modelCache: LeanModelCache
   viewStates: Map<string, monacoEditor.ICodeEditorViewState>
@@ -413,6 +424,7 @@ export function LeanWorkspace({
   const [texIssue, setTexIssue] = useState('')
   const [connectionIssue, setConnectionIssue] = useState('')
   const [transportIssue, setTransportIssue] = useState('')
+  const [retryingStartup, setRetryingStartup] = useState(false)
   const [restarting, setRestarting] = useState(false)
   const [sleeping, setSleeping] = useState(false)
   const [editorQueue, setEditorQueue] = useState<EditorQueueNotice | null>(null)
@@ -477,6 +489,7 @@ export function LeanWorkspace({
     editorQueue ||
     connectionIssue ||
     transportIssue ||
+    retryingStartup ||
     failure ||
     (file?.path && importsStale === file.path)
   )
@@ -503,6 +516,7 @@ export function LeanWorkspace({
   onFocusProofRef.current = onFocusProof
 
   const recoverVisibleConnection = useCallback((active: Runtime) => {
+    if (active.retryStartupWhenVisible?.()) return
     const canRecover = () => {
       const path = fileRef.current?.path
       return (
@@ -530,11 +544,23 @@ export function LeanWorkspace({
     let cancelled = false
     let own: Runtime | null = null
     let lastConnectionIssue = ''
+    let startupIssue = ''
+    let retryCount = 0
+    let retryDue = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    const rootDocument = new FileUri('/workspace/__lemex_client__.lean')
+    const clearStartupRetry = () => {
+      clearTimeout(retryTimer)
+      retryDue = false
+      startupIssue = ''
+      setRetryingStartup(false)
+    }
     const reportConnectionFailure = (
       message = lastConnectionIssue || leanConnectionFailed,
     ) => {
       if (
         cancelled ||
+        startupIssue ||
         own?.sourceTooLarge ||
         own?.clientLifecycle?.sleeping ||
         lastConnectionIssue === message
@@ -546,6 +572,43 @@ export function LeanWorkspace({
       setTransportIssue(message)
       onStateRef.current('Lean connection failed', message)
     }
+    const canRetryStartup = () => {
+      const path = fileRef.current?.path
+      return !!(
+        !cancelled &&
+        startupIssue &&
+        own?.clientLifecycle &&
+        !own.clientLifecycle.sleeping &&
+        !document.hidden &&
+        !editorQueueRef.current &&
+        path?.endsWith('.lean') &&
+        own.visibleReadyPath === path
+      )
+    }
+    const retryStartupWhenVisible = () => {
+      if (!startupIssue) return false
+      if (retryDue && canRetryStartup()) {
+        retryDue = false
+        const attempt = retryCount
+        void own?.clientLifecycle
+          ?.recover(canRetryStartup, rootDocument)
+          .then(() => {
+            // Eligibility is checked again after draining the previous start.
+            // Keep a deferred attempt available when the tab was hidden meanwhile.
+            if (startupIssue && attempt === retryCount) retryDue = true
+          })
+          .catch(() => {
+            // Another socket close can already have scheduled the next attempt.
+            if (cancelled || !startupIssue || attempt !== retryCount) return
+            const message = startupIssue
+            clearStartupRetry()
+            reportConnectionFailure(message)
+          })
+      }
+      return true
+    }
+    document.addEventListener('visibilitychange', retryStartupWhenVisible)
+    setRetryingStartup(false)
     setFailure('')
     setMarkdownIssue('')
     setConnectionIssue('')
@@ -563,10 +626,36 @@ export function LeanWorkspace({
     void serialize(async () => {
       if (cancelled || !editorEl.current || !infoEl.current) return
       const lean = new BrowserLeanMonaco(
-        (code, reason) => {
+        (code, reason, initialized) => {
           if (cancelled || own?.clientLifecycle?.sleeping) return
           const message = leanConnectionCloseMessage(code, reason)
-          if (!message) return
+          if (!message) {
+            clearStartupRetry()
+            return
+          }
+          if (
+            !initialized &&
+            transientLeanStartupClose(code, reason) &&
+            retryCount < 2
+          ) {
+            startupIssue = message
+            setRetryingStartup(true)
+            setEditorQueue(null)
+            editorQueueRef.current = null
+            onStateRef.current('Reconnecting to Lean')
+            clearTimeout(retryTimer)
+            retryDue = false
+            retryCount++
+            retryTimer = setTimeout(
+              () => {
+                retryDue = true
+                retryStartupWhenVisible()
+              },
+              retryCount === 1 ? 1500 : 4000,
+            )
+            return
+          }
+          clearStartupRetry()
           if (code === 1009) {
             setEditorQueue(null)
             editorQueueRef.current = null
@@ -632,6 +721,7 @@ export function LeanWorkspace({
       }
       own = {
         lean,
+        retryStartupWhenVisible,
         virtualFiles: new Set(),
         viewStates: new Map(),
         modelCache: new LeanModelCache(() => {
@@ -689,14 +779,22 @@ export function LeanWorkspace({
             // route them to one client so nested modules/dependencies share the
             // same root, document selector, and WebSocket connection.
             const ensureClient = provider.ensureClient.bind(provider)
-            const rootDocument = new FileUri('/workspace/__lemex_client__.lean')
             provider.ensureClient = (uri) =>
               ensureClient(uri.scheme === 'file' ? rootDocument : uri)
             own.clientLifecycle = installLeanClientLifecycle(
               provider,
               new FileUri('/workspace'),
               (error) => {
-                reportConnectionFailure()
+                // A handshake error may reject the factory just before the
+                // browser delivers its close code. Give the socket handler
+                // the first opportunity to classify that failure.
+                setTimeout(() => {
+                  if (
+                    !cancelled &&
+                    !provider.getClients().some((client) => client.isRunning())
+                  )
+                    reportConnectionFailure()
+                }, 0)
                 console.warn(
                   '[LeanFlow Web] Lean connection ended during startup or shutdown.',
                   error,
@@ -709,6 +807,7 @@ export function LeanWorkspace({
               infoEl.current,
               () => {
                 if (cancelled || runtime.current !== active) return
+                clearStartupRetry()
                 setSleeping(true)
                 onStateRef.current('Lean editor sleeping')
                 void active.clientLifecycle?.suspend().catch(() => {
@@ -755,12 +854,16 @@ export function LeanWorkspace({
             own.connectionSubscriptions.push(
               provider.clientAdded((client: ConnectionClient) => {
                 if (cancelled) return
-                onStateRef.current('Connecting to Lean')
+                onStateRef.current(
+                  startupIssue ? 'Reconnecting to Lean' : 'Connecting to Lean',
+                )
                 own?.connectionSubscriptions?.push(
                   client.restarted(() => {
                     if (!cancelled && !active.clientLifecycle?.sleeping) {
                       const connected = client.isRunning()
                       if (connected) {
+                        clearStartupRetry()
+                        retryCount = 0
                         lastConnectionIssue = ''
                         setTransportIssue('')
                         setRestartIssue('')
@@ -771,7 +874,11 @@ export function LeanWorkspace({
                   client.restarting(() => {
                     if (!cancelled) {
                       lastConnectionIssue = ''
-                      onStateRef.current('Restarting Lean')
+                      onStateRef.current(
+                        startupIssue
+                          ? 'Reconnecting to Lean'
+                          : 'Restarting Lean',
+                      )
                     }
                   }),
                   client.serverFailed(() => {
@@ -784,6 +891,7 @@ export function LeanWorkspace({
                   !cancelled &&
                   !active.clientLifecycle?.sleeping &&
                   !active.sourceTooLarge &&
+                  !startupIssue &&
                   !lastConnectionIssue
                 )
                   onStateRef.current('Lean server stopped')
@@ -836,6 +944,8 @@ export function LeanWorkspace({
     }).catch(() => undefined)
     return () => {
       cancelled = true
+      clearTimeout(retryTimer)
+      document.removeEventListener('visibilitychange', retryStartupWhenVisible)
       own?.lean.cancelPendingConnections()
       own?.idle?.dispose()
       void serialize(async () => {
@@ -1869,7 +1979,8 @@ export function LeanWorkspace({
 
   async function restartLean() {
     const active = runtime.current
-    if (!active?.clientLifecycle || restarting || failure) return
+    if (!active?.clientLifecycle || restarting || retryingStartup || failure)
+      return
     setRestarting(true)
     setSleeping(false)
     setRestartIssue('')
@@ -2039,6 +2150,7 @@ export function LeanWorkspace({
             disabled={
               loading ||
               restarting ||
+              retryingStartup ||
               !!connectionIssue ||
               !!failure ||
               !!editorQueue
@@ -2048,7 +2160,7 @@ export function LeanWorkspace({
             {restarting ? 'Restarting…' : 'Restart Lean'}
           </button>
           <span className="caption-hint">
-            {transportIssue || connectionIssue || failure
+            {transportIssue || connectionIssue || failure || retryingStartup
               ? 'Live goals are unavailable while Lean is disconnected.'
               : 'Move the cursor to inspect'}
           </span>
@@ -2068,7 +2180,9 @@ export function LeanWorkspace({
         <div
           ref={infoEl}
           className="infoview-host"
-          hidden={!!(transportIssue || connectionIssue || failure)}
+          hidden={
+            !!(transportIssue || connectionIssue || failure || retryingStartup)
+          }
         />
       </section>
     </div>

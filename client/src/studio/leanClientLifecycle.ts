@@ -147,21 +147,22 @@ export function installLeanClientLifecycle(
     restart(uri: ClientUri) {
       return activate(uri, !sleeping && !recovery)
     },
-    recover(visible: () => boolean) {
+    recover(visible: () => boolean, missingClientUri?: ClientUri) {
       if (
         closing ||
         sleeping ||
         !visible() ||
-        !provider.getClients().some((client) => !client.isRunning())
+        (!missingClientUri &&
+          !provider.getClients().some((client) => !client.isRunning()))
       )
         return Promise.resolve()
       if (recovery) return recovery
       const pending = enqueue(async () => {
         await Promise.allSettled([...starts, ...factories])
         if (closing || sleeping || !visible()) return
-        // An unopened file is started by the provider. Here we repair only the
-        // cached client that can no longer open the visible document.
-        await connect()
+        // The provider removes failed starts. A scheduled startup retry can
+        // create a fresh client once the failed factory and cleanup finish.
+        await connect(missingClientUri)
       })
       recovery = pending
       const forget = () => {
