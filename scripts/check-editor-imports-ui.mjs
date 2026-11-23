@@ -129,7 +129,7 @@ try {
   await until(
     async () =>
       (await f.page.locator('.statusbar').innerText()).includes(
-        'Lean server stopped',
+        'Lean connection failed',
       ),
     'editor worker stopped',
   )
