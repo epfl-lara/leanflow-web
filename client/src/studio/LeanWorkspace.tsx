@@ -45,6 +45,7 @@ import {
 import { watchEditorIdle } from './editorIdle'
 import {
   editorQueueNotice,
+  REPOSITORY_TREE_CHANGED,
   type EditorQueueNotice,
 } from '../../../shared/editor-queue.mjs'
 import { installCollaborativeEditorUndo } from './collaborativeEditorUndo'
@@ -546,6 +547,7 @@ export function LeanWorkspace({
     let lastConnectionIssue = ''
     let startupIssue = ''
     let retryCount = 0
+    let recentTreeRetries: number[] = []
     let retryDue = false
     let retryTimer: ReturnType<typeof setTimeout> | undefined
     const rootDocument = new FileUri('/workspace/__lemex_client__.lean')
@@ -633,11 +635,22 @@ export function LeanWorkspace({
             clearStartupRetry()
             return
           }
+          const treeChanged =
+            code === 1012 && reason === REPOSITORY_TREE_CHANGED
+          const now = performance.now()
+          if (treeChanged)
+            recentTreeRetries = recentTreeRetries.filter(
+              (time) => now - time < 60_000,
+            )
           if (
-            !initialized &&
-            transientLeanStartupClose(code, reason) &&
+            (treeChanged
+              ? recentTreeRetries.length < 2
+              : !initialized && transientLeanStartupClose(code, reason)) &&
             retryCount < 2
           ) {
+            // Repeated tree changes can follow successful initializations. Keep
+            // this limit across reconnects so a bulk import cannot loop here.
+            if (treeChanged) recentTreeRetries.push(now)
             startupIssue = message
             setRetryingStartup(true)
             setEditorQueue(null)

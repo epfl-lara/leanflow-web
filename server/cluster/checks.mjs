@@ -45,13 +45,14 @@ export class ClusterChecks {
   }
 
   prepareRepository(project, { afterSetup = false } = {}) {
+    const pending = this.repositoryWarmups.get(project.root)
+    if (pending) return pending
     if (
       this.closing ||
       this.mode !== 'serve' ||
       project.kind === 'single-file' ||
       project.status !== 'ready' ||
       !this.controller.status?.().editors?.repositories ||
-      this.repositoryWarmups.has(project.root) ||
       this.repositoryWarmups.size >= this.maxQueue ||
       (!afterSetup &&
         Date.now() - (this.recentRepositoryWarmups.get(project.root) ?? 0) <

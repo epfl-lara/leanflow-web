@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import * as Y from 'yjs'
+import { REPOSITORY_TREE_CHANGED } from '../shared/editor-queue.mjs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import express from 'express'
@@ -27,6 +28,8 @@ let openDocument
 const document = new Y.Doc()
 document.getText('source').insert(0, 'example : True := by trivial\n')
 let collaborationSocket
+let leanSocket
+let pendingUpdates
 const hash = (content) => createHash('sha256').update(content).digest('hex')
 try {
   fixture = await chatBrowserFixture({
@@ -74,6 +77,7 @@ try {
         if (message.type === 'open')
           sendDocument({ openRequestId: message.requestId })
         if (message.type === 'update') {
+          if (pendingUpdates) return pendingUpdates.push(message)
           Y.applyUpdate(document, Buffer.from(message.update, 'base64'))
           sendDocument({ ack: message.requestId })
         }
@@ -82,6 +86,7 @@ try {
     },
   )
   state.onLeanMessage = (message, url, socket) => {
+    leanSocket = socket
     if (message.method === 'textDocument/didOpen')
       openDocument = message.params.textDocument
     if (message.method !== 'initialize') return
@@ -195,6 +200,49 @@ try {
   )
   report.checks.push(
     'Restart Lean opens a fresh connection after failed initialization and keeps subsequent typing saved when retry also fails.',
+  )
+  persistentFailure = false
+  await page.reload()
+  await status.getByText('Lean connected', { exact: true }).waitFor()
+  const baseline = connections
+  pendingUpdates = []
+  await page.locator('.monaco-editor textarea').first().focus()
+  await page.keyboard.press(editorShortcuts.documentEnd)
+  await page.keyboard.insertText('-- UNACKNOWLEDGED_TREE_CHANGE_DRAFT\n')
+  await until(
+    () => pendingUpdates.length > 0,
+    'draft pending collaboration acknowledgement',
+  )
+  const original = state.files[projectId]['Main.lean']
+  assert.ok(!original.includes('UNACKNOWLEDGED_TREE_CHANGE_DRAFT'))
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    openDocument = undefined
+    await leanSocket.close({ code: 1012, reason: REPOSITORY_TREE_CHANGED })
+    await until(
+      () =>
+        connections === baseline + attempt &&
+        openDocument?.text?.includes('UNACKNOWLEDGED_TREE_CHANGE_DRAFT'),
+      'new Lean reads unacknowledged Monaco draft',
+    )
+    assert.equal(openDocument.uri, 'file:///workspace/Main.lean')
+    assert.equal(state.files[projectId]['Main.lean'], original)
+  }
+  await leanSocket.close({ code: 1012, reason: REPOSITORY_TREE_CHANGED })
+  await page
+    .getByText(
+      'Project files changed. Use Restart Lean to check your current draft.',
+      { exact: true },
+    )
+    .waitFor()
+  await page.waitForTimeout(4500)
+  assert.equal(connections, baseline + 2)
+  assert.equal(state.files[projectId]['Main.lean'], original)
+  assert.match(
+    await page.locator('.monaco-editor .view-lines').first().innerText(),
+    /UNACKNOWLEDGED_TREE_CHANGE_DRAFT/,
+  )
+  report.checks.push(
+    'A repository tree change opens the visible unsaved draft on fresh Lean; repeated tree changes stop after two automatic reconnects within a minute, without overwriting the saved file.',
   )
   fixture.assertClean()
   report.ok = true

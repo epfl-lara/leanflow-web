@@ -37,7 +37,10 @@ import { LspFrames, validateClientUris } from './rpc.mjs'
 import { leanTransport } from './lean-transport.mjs'
 import { EditorAdmission } from './editor-admission.mjs'
 import { editorStopped, queuedEditor } from './queued-editor.mjs'
-import { EDITOR_QUEUE_METHOD } from '../shared/editor-queue.mjs'
+import {
+  EDITOR_QUEUE_METHOD,
+  REPOSITORY_TREE_CHANGED,
+} from '../shared/editor-queue.mjs'
 import { LeanRequests } from './lean-requests.mjs'
 import { LeanProgress } from './lean-progress.mjs'
 import { LeanEditPolicy } from './lean-edit-policy.mjs'
@@ -1921,9 +1924,20 @@ export async function createStudio({
       }
       // Existing projects may predate remote repository support. This bounded
       // background preparation never holds the WebSocket or an editor slot.
-      clusterChecks?.prepareRepository?.(currentProject())
+      let preload = clusterChecks?.prepareRepository?.(currentProject())
       const localEditor = (fallback) => {
-        if (fallback?.unsupported) remoteAllowed = false
+        if (fallback?.unsupported) {
+          remoteAllowed = false
+          // A previously cold binding can become eligible while this socket
+          // waits in the local queue. Retry placement once after its preload.
+          preload?.then(
+            () => {
+              remoteAllowed = true
+            },
+            () => {},
+          )
+          preload = undefined
+        }
         const current = currentProject()
         if (activity.isStopping(actor, project.id))
           throw Object.assign(
@@ -1987,7 +2001,13 @@ export async function createStudio({
             clusterChecks &&
             (clusterChecks.canOpenEditor?.(current) ?? true)
             ? clusterChecks.openEditor(
-                { project: current, actor, workspaces },
+                {
+                  project: current,
+                  actor,
+                  workspaces,
+                  onRepositoryTreeChanged: () =>
+                    ws.close(1012, REPOSITORY_TREE_CHANGED),
+                },
                 localEditor,
               )
             : localEditor()

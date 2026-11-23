@@ -1,3 +1,5 @@
+export const REPOSITORY_TREE_CHANGED =
+  'Project files were added, removed or renamed.'
 export const EDITOR_QUEUE_METHOD = '$/leanflow/editorQueue'
 
 export const editorAdmissionReasons = {

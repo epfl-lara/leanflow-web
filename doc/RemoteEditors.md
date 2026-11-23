@@ -52,8 +52,10 @@ toolchain and dependencies. Workspaces that rely on private local packages,
 or exceed the worker's limits, use the coordinator. Each admitted session
 builds its project imports in its own bounded workspace. Ordinary saves to
 existing Lean modules are mirrored to active sessions. Refresh imports to
-re-elaborate an open proof against a changed dependency. Changes to the file tree
-or project configuration require a new snapshot.
+re-elaborate an open proof against a changed dependency. Adding, deleting or
+renaming files reconnects the editor to a fresh snapshot with its draft intact.
+After two such reconnects in a minute, use **Restart Lean** when the changes
+finish. A change to the project configuration can require setup again.
 
 Participants can submit **Check File** from a multi-file project while waiting
 for an editor. Shared check workers can compile a saved file when the project

@@ -73,6 +73,7 @@ function fixture(
     denied: false,
     localStarts: 0,
     remoteStarts: 0,
+    treeChanges: 0,
   }
   const listeners = new Set()
   const workspaces = {
@@ -104,6 +105,7 @@ function fixture(
                   'lean-toolchain',
                   'lakefile.toml',
                   'lake-manifest.json',
+                  'README.md',
                   'Lib/Imported.lean',
                   'Lib/Proof.lean',
                 ]
@@ -139,7 +141,12 @@ function fixture(
   }
   const result = clusterEditor(
     checks,
-    { project, actor: 'alice', workspaces },
+    {
+      project,
+      actor: 'alice',
+      workspaces,
+      onRepositoryTreeChanged: () => data.treeChanges++,
+    },
     (fallback) => {
       data.localStarts++
       return startLocal(local, fallback)
@@ -298,6 +305,7 @@ test('access revocation stops the remote child immediately', async (t) => {
   f.data.denied = true
   f.change({ kind: 'access' })
   await until(() => f.remote.killed)
+  assert.equal(f.data.treeChanges, 0)
   assert.equal(f.listeners.size, 0)
 })
 
@@ -368,18 +376,22 @@ test('a repository synchronizes collaborator saves in different modules through 
   assert.equal(f.data.localStarts, 0)
 })
 
-for (const [label, event] of [
-  ['new module', { paths: ['Extra.lean'] }],
+for (const [label, event, reconnect] of [
+  ['new module', { paths: ['Extra.lean'] }, true],
+  ['new directory', { paths: ['Extra'] }, true],
+  ['existing documentation edit', { paths: ['README.md'] }, false],
   [
     'renamed module',
     {
       paths: ['Lib/Imported.lean', 'Lib/After.lean'],
       moves: [{ from: 'Lib/Imported.lean', to: 'Lib/After.lean' }],
     },
+    true,
   ],
   [
     'package removal',
     { paths: ['Lib/Imported.lean'], removedPaths: ['Lib/Imported.lean'] },
+    true,
   ],
   ['updated environment', { paths: ['lakefile.lean'] }],
   ['newly prepared imports', { kind: 'editor-imports' }],
@@ -390,6 +402,7 @@ for (const [label, event] of [
     await f.result.ready
     f.change(event)
     await until(() => f.remote.killed)
+    assert.equal(f.data.treeChanges, reconnect ? 1 : 0)
     assert.equal(f.listeners.size, 0)
   })
 

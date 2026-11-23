@@ -24,7 +24,8 @@ test('concurrent opens share a background repository preload and fresh setup can
   })
   const project = { root: '/fixture/project', status: 'ready' }
   const first = checks.prepareRepository(project)
-  for (let i = 0; i < 20; i++) checks.prepareRepository(project)
+  for (let i = 0; i < 20; i++)
+    assert.equal(checks.prepareRepository(project), first)
   await new Promise((resolve) => setImmediate(resolve))
   assert.deepEqual(inputs, [environment])
   finish.resolve()

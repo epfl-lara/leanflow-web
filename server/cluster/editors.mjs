@@ -1,11 +1,17 @@
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
+import { PROJECT_CONFIGURATION_FILES } from '../../shared/project-configuration.mjs'
 import { DeferredEditor } from './editor-stream.mjs'
 import { clusterError } from './state.mjs'
 import { editableRepositoryModule, editorSource } from './worker-editor.mjs'
 
 // Auth, collaboration and canonical writes stay on the coordinator. Only a
 // disposable mirror of the selected project's validated inputs reaches the worker.
-export function clusterEditor(checks, { project, actor, workspaces }, local) {
+export function clusterEditor(
+  checks,
+  { project, actor, workspaces, onRepositoryTreeChanged },
+  local,
+) {
   const repository = project.kind !== 'single-file'
   const editorKind = repository ? 'repository' : undefined
   if (
@@ -31,8 +37,10 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
     const dirty = new Set(repository ? [] : ['Main.lean'])
     const abort = new AbortController()
     const combined = AbortSignal.any([signal, abort.signal])
-    const stop = () => {
+    const stop = (recapture = false) => {
+      if (stopped) return
       stopped = true
+      if (recapture) onRepositoryTreeChanged?.()
       unsubscribe()
       abort.abort(
         clusterError(
@@ -109,8 +117,23 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
                 (sources && !sources.has(filename))
               : filename !== 'Main.lean',
           )
-        )
-          return stop()
+        ) {
+          const structural =
+            repository &&
+            event.kind === 'files' &&
+            event.paths.length > 0 &&
+            event.paths.every(
+              (filename) =>
+                !PROJECT_CONFIGURATION_FILES.includes(
+                  path.posix.basename(filename),
+                ),
+            ) &&
+            (event.removedPaths?.length ||
+              event.moves?.length ||
+              (sources &&
+                event.paths.some((filename) => !sources.has(filename))))
+          return stop(structural)
+        }
         for (const filename of event.paths) dirty.add(filename)
         if (dirty.size) void sync()
       } catch {
@@ -174,14 +197,9 @@ export function clusterEditor(checks, { project, actor, workspaces }, local) {
       } else {
         if (repository) {
           sources = new Map(
-            manifest.entries
-              .filter(
-                (entry) =>
-                  entry.type === 'file' && editableRepositoryModule(entry.path),
-              )
-              .map((entry) => [entry.path, entry.hash]),
+            manifest.entries.map((entry) => [entry.path, entry.hash]),
           )
-          if ([...dirty].some((filename) => !sources.has(filename))) stop()
+          if ([...dirty].some((filename) => !sources.has(filename))) stop(true)
         }
         combined.throwIfAborted()
         attemptedRemote = true

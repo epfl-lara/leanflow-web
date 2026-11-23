@@ -1,4 +1,7 @@
-import { editorAdmissionReasons } from '../../../shared/editor-queue.mjs'
+import {
+  editorAdmissionReasons,
+  REPOSITORY_TREE_CHANGED,
+} from '../../../shared/editor-queue.mjs'
 
 export const leanConnectionFailed =
   'Lean could not connect. Check your connection and use Restart Lean to retry. You can keep editing.'
@@ -46,6 +49,8 @@ export function leanConnectionCloseMessage(code: number, reason: string) {
         ? reason
         : 'The Lean message is too large. Reduce the source or split it into smaller modules.'
     case 1012:
+      if (reason === REPOSITORY_TREE_CHANGED)
+        return 'Project files changed. Use Restart Lean to check your current draft.'
       return reason === 'Project configuration changed. Retry setup.'
         ? reason
         : 'LeanFlow is restarting. Wait a moment, then use Restart Lean.'
