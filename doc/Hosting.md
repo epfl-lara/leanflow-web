@@ -58,6 +58,14 @@ systemctl --user enable --now leanflow-web.service
 
 The service reads `.data/server.env`; edit that file for subsequent configuration changes. `STUDIO_DATA_DIR` inside it can point to your separate volume. Ask the server administrator to enable lingering for this account so the service starts at boot and continues after logout.
 
+Before switching to a staged release, verify its Lemex runtime while the current service is still running. The release archive includes the public runtime in `.runtime/lemex`. If you stage from Git, include those assets from the matching release archive along with `release-manifest.json`. Use the service's `LEMEX_HOME` setting if it has one.
+
+```sh
+node scripts/ci/check-discovery-runtime.mjs /path/to/staged-release
+```
+
+The check compares the native executable to the release manifest and requests a model list from a local fixture. It needs no account key. If it fails, repair the staged release before switching services.
+
 Check status and logs with:
 
 ```sh
