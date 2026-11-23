@@ -89,6 +89,8 @@ jobs:
     name: Browser / ${{ matrix.group }}
     needs: checks
     runs-on: ubuntu-24.04
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -107,7 +109,14 @@ jobs:
         with:
           name: client-dist
           path: client/dist
-      - run: npx --no-install playwright install --with-deps chromium
+      - name: Verify the Playwright browser image matches the package
+        run: |
+          node <<'JS'
+          const fs = require('node:fs')
+          const { driverVersion } = JSON.parse(fs.readFileSync('/ms-playwright/.docker-info', 'utf8'))
+          const version = require('playwright-core/package.json').version
+          require('node:assert/strict').equal(driverVersion, version, 'Update the pinned Playwright image to ' + version)
+          JS
       - name: Check isolated browser flows
         run: node scripts/ci/check-browser.mjs --group=${{ matrix.group }}
       - name: Save fixture reports

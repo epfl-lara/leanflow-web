@@ -20,6 +20,8 @@ Use Linux and Node.js 24 or newer for the full server suite; containment checks 
 
 For browser checks on Linux, install Chromium with `npx --no-install playwright install --with-deps chromium`, then run `node scripts/ci/check-browser.mjs`. The runner serves the built client and mocks APIs, Lean, the PDF compiler, and providers. CI runs separate **chat** and **workspace** groups, covering accounts, models, RCP waiting, readable chats, autosave, cache invalidation, files, Git, books, downloads, and PDF workflows. Reports and screenshots are saved under `.runtime/` and uploaded by CI.
 
+The hosted jobs use Chromium from the official Playwright image. When updating Playwright, update the image tag and digest in `.github/workflows/ci.yml` to match the version in `package-lock.json`.
+
 To focus a run, append `--group=chat`, `--group=workspace`, or individual suite names such as `rcp-queue autosave lean-cache`. The [installation checks](Verification.md) separately verify real Docker workers, prepared libraries, and the optional PDF compiler.
 
 ## Prepare a release
