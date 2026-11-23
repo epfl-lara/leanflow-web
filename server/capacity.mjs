@@ -36,6 +36,7 @@ export function validateSetupBuildTimeout(
 }
 
 export function loadCapacity(env = process.env) {
+  const totalEditors = positiveNumber(env, 'STUDIO_MAX_TOTAL_EDITORS')
   const workerMemory = env.STUDIO_WORKER_MEMORY?.trim() || '4g'
   memoryBytes(workerMemory, 'STUDIO_WORKER_MEMORY')
   const workerMemoryBudget = env.STUDIO_WORKER_MEMORY_BUDGET?.trim() || null
@@ -60,6 +61,7 @@ export function loadCapacity(env = process.env) {
     ),
     batchWorkers: nonnegativeInteger(env, 'STUDIO_RESERVED_BATCH_WORKERS', 3),
     editors: positiveNumber(env, 'STUDIO_MAX_EDITORS', 4),
+    ...(totalEditors && { totalEditors }),
     editorQueue: positiveNumber(env, 'STUDIO_MAX_EDITOR_QUEUE', 128),
     editorQueuePerUser: positiveNumber(
       env,

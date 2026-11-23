@@ -462,12 +462,15 @@ export async function createStudio({
     socketProjects = new Map(),
     socketActors = new Map()
   let localEditors = 0
+  const totalEditorCapacity = (remoteSlots) =>
+    Math.min(capacity.editors + remoteSlots, capacity.totalEditors ?? Infinity)
   const editorAdmission = new EditorAdmission({
     capacity: () =>
-      capacity.editors +
-      (clusterChecks?.editorAdmissionCapacity?.() ??
-        clusterChecks?.editorCapacity() ??
-        0),
+      totalEditorCapacity(
+        clusterChecks?.editorAdmissionCapacity?.() ??
+          clusterChecks?.editorCapacity() ??
+          0,
+      ),
     maxPerUser: capacity.editorsPerUser ?? capacity.editors,
     maxPerProject: capacity.editorsPerProject,
     maxQueued: capacity.editorQueue ?? 128,
@@ -745,7 +748,7 @@ export async function createStudio({
         process.env.STUDIO_EVENT_TRANSPORT === 'poll' ? 'poll' : 'sse',
       capacity: {
         ...capacity,
-        editors: capacity.editors + (clusterChecks?.editorCapacity() || 0),
+        editors: totalEditorCapacity(clusterChecks?.editorCapacity() ?? 0),
         editorAdmission: editorAdmission.info(),
       },
       runtime: runtime.info(),

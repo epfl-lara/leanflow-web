@@ -230,14 +230,16 @@ Never commit `.env`, `.data`, tokens, or certificate keys. Use trusted collabora
 
 ## Editor capacity and memory
 
-Set `STUDIO_MAX_EDITORS` for language-server connections, not signed-in people.
-This is the local admission ceiling. Explicitly enabled, certified remote editor
-slots add to it; see [remote editor operation](RemoteEditors.md). Unavailable,
-disabled and unenrolled workers add nothing. Actual local/remote RAM and CPU
-admission still applies to every connection.
+Set `STUDIO_MAX_EDITORS` for simultaneous Lean editors on the coordinator.
+Enabled, certified workers add editor slots. To limit active editors site-wide,
+set `STUDIO_MAX_TOTAL_EDITORS` to a positive integer. For example, with a limit
+of 22, a 23rd eligible connection waits for an editor to finish. Leaving the
+variable unset uses the sum of local and remote capacity. Each editor still
+needs a worker with enough CPU and memory for its project.
+See [remote editor operation](RemoteEditors.md).
 Each open project can start a Lean language server. `STUDIO_MAX_EDITORS_PER_USER`
 and `STUDIO_MAX_EDITORS_PER_PROJECT` keep one account or project from consuming
-all connections. The per-user default is the global editor maximum. Files opened
+all connections. The per-user default is `STUDIO_MAX_EDITORS`. Files opened
 in the same project and browser tab share a connection. A second browser tab
 can start its own. For a group working in one project, size the per-project
 limit for the group. A connected, authorized participant can keep their place

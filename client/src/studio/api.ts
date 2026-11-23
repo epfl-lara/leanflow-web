@@ -80,6 +80,7 @@ export interface Session {
     interactiveWorkers: number
     batchWorkers: number
     editors: number
+    totalEditors?: number
     editorsPerProject: number
     editorsPerUser: number
     editorQueue: number

@@ -18,7 +18,7 @@ editor slots after its reviewed upgrade and acceptance. The
 records the earlier 32-slot configuration and concurrency tests. The preceding
 [PC06 rollout](releases/2026-11-16-remote-editors.md) records the initial integration.
 
-The installation now configures 27 editor slots across four machines. The VM
+The four machines have 27 configured editor slots in total. The VM
 and PC06 have nine each, PC2 has five, and PC05 has four. PC05 uses 6.75 GiB per
 editor and reserves 18 GiB for proof checks within its 45 GiB memory budget.
 On 20 November, an isolated cold Mathlib editor check on PC05 timed out after
@@ -135,9 +135,11 @@ guarantee a native check on every PC instead, reduce that PC's editor allocation
 until its full native grant fits alongside all admitted editors.
 
 Per-user and per-project editor limits apply across local and remote processes.
-`STUDIO_MAX_EDITORS` supplies the local admission ceiling; certified, enabled
-remote editor slots add to it. Unavailable, disabled and unenrolled nodes add
-nothing. These ceilings describe admission, not a measured concurrency promise.
+`STUDIO_MAX_EDITORS` supplies the local admission ceiling. Certified, enabled
+workers add their editor slots. Set `STUDIO_MAX_TOTAL_EDITORS=22` to admit up to
+22 editors across those machines and queue additional connections. Leave it
+unset to use the existing local and remote limits. The number that can start
+also depends on worker availability, project eligibility, CPU and memory.
 
 ## Waiting for an editor
 

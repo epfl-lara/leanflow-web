@@ -9,7 +9,7 @@ import path from 'node:path'
 import http from 'node:http'
 import { randomUUID, createHash } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import { PassThrough } from 'node:stream'
 import WebSocket from 'ws'
 import { loadCapacity } from '../capacity.mjs'
@@ -21,6 +21,7 @@ test('invalid capacity settings fail before startup rather than disabling admiss
     'STUDIO_MAX_WORKERS',
     'STUDIO_MAX_WORKER_QUEUE',
     'STUDIO_MAX_EDITORS',
+    'STUDIO_MAX_TOTAL_EDITORS',
     'STUDIO_MAX_EDITORS_PER_PROJECT',
     'STUDIO_MAX_EDITORS_PER_USER',
     'STUDIO_MAX_EDITOR_QUEUE',
@@ -92,6 +93,7 @@ async function fixture(
   extraCapacity = {},
   runtimeInfo = {},
   providerLimits = { get: async () => 1, current: () => 1 },
+  clusterChecks,
 ) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leanflow-capacity-'))
   const children = new Set()
@@ -130,6 +132,7 @@ async function fixture(
   const studio = await createStudio({
     modelDiscoverer: fixtureModelDiscovery,
     providerLimits,
+    clusterChecks,
     dataDir,
     runtime,
     capacity,
@@ -254,6 +257,88 @@ test('six editors stay active while project and global overflow queue and promot
     editorAdmission: { active: 6, queued: 0, maxQueued: 2 },
   })
 })
+
+for (const ceiling of [22, undefined]) {
+  test(`shared-project sockets follow ready workers and the ${ceiling ?? 'uncapped'} site-wide editor policy`, async (t) => {
+    const local = 9,
+      remote = new Set()
+    let ready = 0
+    const clusterChecks = {
+      editorCapacity: () => ready,
+      editorAdmissionCapacity: () => Math.max(ready, remote.size),
+      canOpenEditor: () => remote.size < ready,
+      openEditor({ project }) {
+        const child = f.studio.runtime.spawn(project.root, [
+          'lake',
+          'serve',
+          '--',
+        ])
+        remote.add(child)
+        child.once('close', () => remote.delete(child))
+        return child
+      },
+      close() {},
+    }
+    const f = await fixture(
+      t,
+      {
+        STUDIO_MAX_EDITORS: String(local),
+        ...(ceiling && { STUDIO_MAX_TOTAL_EDITORS: String(ceiling) }),
+        STUDIO_MAX_EDITORS_PER_PROJECT: '32',
+        STUDIO_MAX_EDITORS_PER_USER: '32',
+        STUDIO_MAX_EDITOR_QUEUE_PER_USER: '32',
+      },
+      {},
+      undefined,
+      clusterChecks,
+    )
+    const sessionCapacity = async () => {
+      const response = await fetch(f.base + '/api/session', {
+        headers: f.headers,
+      })
+      assert.equal(response.status, 200)
+      return (await response.json()).capacity
+    }
+    const max = ceiling ?? 27
+    const sockets = []
+    for (let i = 0; i <= max; i++) sockets.push(await f.connect(f.projects[0]))
+    const last = sockets.at(-1)
+    assert(last instanceof WebSocket)
+    await waitFor(() =>
+      last.messages.some((m) => m.params?.position === max + 1 - local),
+    )
+    assert.equal(f.children.size, local)
+    let status = await sessionCapacity()
+    assert.equal(status.editors, local)
+    assert.equal(status.totalEditors, ceiling)
+    assert.equal(status.editorAdmission.queued, max + 1 - local)
+
+    ready = 18
+    await waitFor(() => last.messages.some((m) => m.params?.position === 1))
+    status = await sessionCapacity()
+    assert.equal(status.editors, max)
+    assert.equal(status.editorAdmission.active, max)
+    assert.equal(status.editorAdmission.queued, 1)
+    assert.equal(f.children.size, max)
+    assert.equal(remote.size, max - local)
+
+    // In-flight remote workers keep their grants when the node stops taking
+    // new sessions. The next waiter can still use a newly freed local slot.
+    ready = 0
+    assert.equal((await sessionCapacity()).editors, local)
+    const closed = once(sockets[0], 'close')
+    sockets[0].close()
+    await closed
+    await waitFor(() => last.messages.some((m) => m.params?.state === 'active'))
+    assert.equal(last.readyState, WebSocket.OPEN)
+    assert.equal(f.children.size, max)
+    assert.equal(remote.size, max - local)
+    ready = 18
+    status = await sessionCapacity()
+    assert.equal(status.editors, max)
+    assert.equal(status.editorAdmission.queued, 0)
+  })
+}
 
 test('configured assistant queue rejects overflow and releases a place when a queued task is cancelled', async (t) => {
   const f = await fixture(t),
