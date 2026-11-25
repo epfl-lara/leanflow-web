@@ -3,20 +3,25 @@ import profiles from '../server/lemex-models.json' with { type: 'json' }
 // All API calls are fixtures; serve the client on STUDIO_TEST_URL.
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { catalogModels } from '../server/config.mjs'
 import { DEFAULT_MODEL, rcpModelCatalog } from '../server/model-catalog.mjs'
+import { ModelPreferences } from '../server/model-preferences.mjs'
 import { chatBrowserFixture, until } from './lib/chat-browser-fixture.mjs'
 
 const reportDir = new URL('../.runtime/model-options-ui/', import.meta.url)
 await fs.mkdir(reportDir, { recursive: true })
 const projectId = 'model-options-fixture'
+const accountId = 'model-options-user'
+const kimi = 'moonshotai/Kimi-K3.1-Pro'
 const catalog = rcpModelCatalog({
   models: [
     DEFAULT_MODEL,
     'Qwen/Qwen3.8-27B',
     'zai-org/GLM-5.3-Flash',
     'moonshotai/Kimi-K2.7-Code',
+    kimi,
   ].map(
     (slug) =>
       profiles.models.find((model) => model.slug === slug) || {
@@ -26,19 +31,21 @@ const catalog = rcpModelCatalog({
       },
   ),
 })
+const access = {
+  models: [
+    ...catalogModels(catalog, DEFAULT_MODEL),
+    { id: 'provider/extra', name: 'Extra available model' },
+  ],
+  defaultModel: DEFAULT_MODEL,
+}
 const fixture = await chatBrowserFixture({
   launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
     ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
     : {},
   session: {
-    user: { id: 'model-options-user', name: 'Fixture' },
+    ...access,
+    user: { id: accountId, name: 'Fixture' },
     templates: [],
-    models: [
-      ...catalogModels(catalog, DEFAULT_MODEL),
-      { id: 'provider/extra', name: 'Extra available model' },
-    ],
-    savedModels: catalog.models.map((model) => model.slug),
-    defaultModel: DEFAULT_MODEL,
     runtime: { ready: true },
     lemex: { available: true },
   },
@@ -69,7 +76,17 @@ async function openOptions() {
     element.open = true
   })
 }
+const preferenceRoot = await fs.mkdtemp(
+  path.join(os.tmpdir(), 'leanflow-model-options-'),
+)
 try {
+  const preferences = new ModelPreferences(preferenceRoot)
+  await preferences.save(
+    accountId,
+    catalog.models.map(({ slug }) => slug).filter((slug) => slug !== kimi),
+    { ...access, models: access.models.filter(({ id }) => id !== kimi) },
+  )
+  state.session.savedModels = await preferences.get(accountId, access)
   await page.addInitScript(
     ({ projectId, defaultModel }) => {
       const key = `lemex-chat-options:model-options-user:${projectId}`
@@ -102,13 +119,13 @@ try {
   await fixture.ready()
   await page.route('**/api/models/preferences', async (route) => {
     const body = route.request().postDataJSON()
-    state.session.savedModels = body.savedModels
+    await preferences.save(accountId, body.savedModels, access)
+    state.session.savedModels = await preferences.get(accountId, access)
     return route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
-        models: state.session.models,
-        savedModels: body.savedModels,
-        defaultModel: DEFAULT_MODEL,
+        ...access,
+        savedModels: state.session.savedModels,
       }),
     })
   })
@@ -183,7 +200,9 @@ try {
     await page.locator('.chat-options').getByRole('searchbox').count(),
     0,
   )
-  assert.equal(await model.locator('option').count(), 4)
+  assert.equal(await model.locator('option').count(), 5)
+  const kimiOption = model.locator(`option[value="${kimi}"]`)
+  assert.equal(await kimiOption.count(), 1)
   assert.equal(await model.locator('option[value="provider/extra"]').count(), 0)
   await page.getByRole('button', { name: 'Add models…', exact: true }).click()
   const library = page.getByRole('dialog', { name: 'Your models', exact: true })
@@ -205,7 +224,7 @@ try {
   assert.equal(await model.inputValue(), DEFAULT_MODEL)
   assert.equal(await effort.inputValue(), 'max')
   assert.equal(await model.locator('option[value="provider/extra"]').count(), 1)
-  assert.equal(await model.locator('option').count(), 5)
+  assert.equal(await model.locator('option').count(), 6)
   report.checks.push(
     'Main picker only shows saved models; adding from the searchable library preserves model and effort',
   )
@@ -253,6 +272,34 @@ try {
     .waitFor()
   report.checks.push(
     'Qwen and GLM offer their own levels; fixed reasoning models disable the selector',
+  )
+
+  for (const enabled of [false, true]) {
+    await page.getByRole('button', { name: 'Add models…', exact: true }).click()
+    await search.fill('Kimi-K3.1-Pro')
+    await library.getByRole('checkbox').setChecked(enabled)
+    await library
+      .getByRole('button', { name: 'Save models', exact: true })
+      .click()
+    await library.waitFor({ state: 'hidden' })
+    assert.equal(await kimiOption.count(), enabled ? 1 : 0)
+  }
+  await model.selectOption(kimi)
+  assert.equal(await effort.inputValue(), 'max')
+  assert.deepEqual(await levels(), ['', 'low', 'high', 'max'])
+  await effort.selectOption('low')
+  const kimiPrompt = 'Check the fixture proof with Kimi.'
+  await page.getByLabel('Message Lemex').fill(kimiPrompt)
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await until(
+    () => state.runs.some((run) => run.prompt === kimiPrompt),
+    'Kimi run request',
+  )
+  const kimiRun = state.runs.find((run) => run.prompt === kimiPrompt)
+  assert.equal(kimiRun.model, kimi)
+  assert.equal(kimiRun.effort, 'low')
+  report.checks.push(
+    'Kimi is enabled for an existing account, can be removed and added again, and sends the selected reasoning effort',
   )
 
   await page.reload()
@@ -304,5 +351,8 @@ try {
     new URL('result.json', reportDir),
     JSON.stringify(report, null, 2),
   )
-  await browser.close()
+  await Promise.all([
+    browser.close(),
+    fs.rm(preferenceRoot, { recursive: true, force: true }),
+  ])
 }

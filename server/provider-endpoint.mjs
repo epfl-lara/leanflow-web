@@ -169,12 +169,18 @@ export async function fetchProvider(
   })
 }
 
-export function providerToml(provider) {
+export function providerToml(provider, { useAccountCatalog = false } = {}) {
   const base = providerEndpoint(provider.LEMEX_BASE_URL || RCP_BASE_URL)
-  const id = isRcpEndpoint(base) ? 'rcp' : 'leanflow'
+  const id = !useAccountCatalog && isRcpEndpoint(base) ? 'rcp' : 'leanflow'
+  const name = useAccountCatalog
+    ? 'LeanFlow'
+    : id === 'rcp'
+      ? 'RCP'
+      : 'Custom provider'
   return [
     `model_provider = "${id}"`,
     // Inline table keeps following model/context options at the TOML root.
-    `model_providers.${id} = { name = "${id === 'rcp' ? 'RCP' : 'Custom provider'}", base_url = ${JSON.stringify(base)}, env_key = "LEMEX_API_KEY", wire_api = "responses", requires_openai_auth = false, supports_websockets = false, supports_standalone_web_search = false }`,
+    `model_providers.${id} = { name = "${name}", base_url = ${JSON.stringify(base)}, env_key = "LEMEX_API_KEY", wire_api = "responses", requires_openai_auth = false, supports_websockets = false, supports_standalone_web_search = false }`,
+    ...(useAccountCatalog ? ['features.api_key_model_discovery = false'] : []),
   ]
 }

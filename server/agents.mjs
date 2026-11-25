@@ -1,14 +1,11 @@
-import { writeModelCatalog } from './model-catalog.mjs'
+import { workerModelConfig, writeModelCatalog } from './model-catalog.mjs'
 import { providerFor } from './providers.mjs'
-import { providerToml } from './provider-endpoint.mjs'
 import {
   providerRequestsFor,
-  providerRequestConfig,
   providerLimitMessage,
   RCP_WAIT_MESSAGE,
 } from './provider-requests.mjs'
 import { modelConfigFor } from './model-discovery.mjs'
-import { modelContextConfig } from './model-catalog.mjs'
 import {
   modelSupportsImages,
   agentImageInstructions,
@@ -1308,12 +1305,7 @@ export class AgentManager {
       if (setupContext) contextSections.push(setupContext)
       const config =
         [
-          ...providerToml(provider),
-          ...providerRequestConfig(provider),
-          `model = ${JSON.stringify(job.model)}`,
-          'model_catalog_json = "models.json"',
-          'web_search = "disabled"',
-          ...modelContextConfig(modelConfig.modelCatalog, job.model),
+          ...workerModelConfig(provider, modelConfig.modelCatalog, job.model),
           `show_raw_agent_reasoning = ${preferences.showReasoning !== false}`,
           '[mcp_servers.lean]',
           'command = "/opt/tools/bin/lean-lsp-mcp"',

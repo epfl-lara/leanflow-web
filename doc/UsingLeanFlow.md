@@ -255,6 +255,8 @@ so switching modes does not carry an Ask & Search setting into a proof task.
 
 The **Model** dropdown shows your saved models. Choose **Add models…** to browse everything available with your API key, select or remove models, then choose **Save models**. This list is saved to your account across projects, browsers, and sign-ins. Editing it keeps your current model, reasoning effort, and default. Models that your key no longer allows stay marked unavailable until you remove them. You can also edit the list in **Assistant settings → Edit saved models**.
 
+Kimi K3.1 Pro appears in your saved models by default when your key offers it. On RCP, choose **low**, **high**, or **max** under **Reasoning effort**. Remove Kimi from **Add models…** to hide it from the picker.
+
 Use **Send update** for extra instructions or **Stop** to interrupt. Updates show whether they were accepted. Runs continue until finished or stopped; send another message afterward to continue.
 
 Open **New chat** to start independent work while another chat runs, including in the same project. Switch chats to read their output, send an update, or stop their work. When several chats are active, their count and links appear above the conversation. Work on different files when possible. If another chat or a person changes a file a chat is editing, its live updates pause and preserve the saved file; the chat's separate candidate remains available.

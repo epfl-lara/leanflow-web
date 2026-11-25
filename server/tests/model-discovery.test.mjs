@@ -213,10 +213,13 @@ test('fresh catalogs are account scoped, prefer the Lemex default only when avai
   assert.equal((await f.discovery.get('bob')).defaultModel, 'limited-model')
 })
 
-test('RCP live discovery repairs only the verified vision profile while custom capability metadata remains authoritative', async (t) => {
+test('RCP live discovery fills known capability gaps and uses advertised reasoning levels when provided', async (t) => {
+  const kimi = 'moonshotai/Kimi-K3.1-Pro'
+  let kimiProfile = profile(kimi, null, 2)
   const f = await fixture(t, async () => ({
     models: [
       { ...profile(DEFAULT_MODEL, 'max', 1), input_modalities: ['text'] },
+      kimiProfile,
       { ...profile('unverified/text-model'), input_modalities: ['text'] },
     ],
   }))
@@ -230,16 +233,32 @@ test('RCP live discovery repairs only the verified vision profile while custom c
     'text',
     'image',
   ])
-  assert.deepEqual(rcp.modelCatalog.models[1].input_modalities, ['text'])
+  assert.deepEqual(rcp.modelCatalog.models[2].input_modalities, ['text'])
   assert.equal(rcp.defaultModel, DEFAULT_MODEL)
   assert.equal(rcp.models[0].defaultReasoningEffort, 'max')
+  const kimiModel = (access) => access.models.find((model) => model.id === kimi)
+  assert.deepEqual(
+    kimiModel(rcp).reasoningEfforts.map(({ id }) => id),
+    ['low', 'high', 'max'],
+  )
+  assert.equal(kimiModel(rcp).defaultReasoningEffort, 'max')
+
+  kimiProfile = profile(kimi, 'high', 2)
+  const refreshed = await f.discovery.get('alice', { refresh: true })
+  assert.deepEqual(kimiModel(refreshed).reasoningEfforts, [
+    { id: 'high', description: 'high' },
+  ])
+  assert.equal(kimiModel(refreshed).defaultReasoningEffort, 'high')
+
   await f.providers.save(
     'alice',
     'custom-fixture',
     'https://provider.example/v1',
   )
+  kimiProfile = profile(kimi, null, 2)
   const custom = await f.discovery.get('alice')
   assert.deepEqual(custom.modelCatalog.models[0].input_modalities, ['text'])
+  assert.deepEqual(kimiModel(custom).reasoningEfforts, [])
 })
 
 test('discovery coalesces same-account requests and fails closed after a refresh error or key race', async (t) => {

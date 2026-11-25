@@ -1,13 +1,10 @@
-import { writeModelCatalog } from './model-catalog.mjs'
+import { workerModelConfig, writeModelCatalog } from './model-catalog.mjs'
 import { providerFor } from './providers.mjs'
-import { providerToml } from './provider-endpoint.mjs'
 import {
   providerRequestsFor,
-  providerRequestConfig,
   providerLimitMessage,
 } from './provider-requests.mjs'
 import { modelConfigFor } from './model-discovery.mjs'
-import { modelContextConfig } from './model-catalog.mjs'
 import * as fs from 'node:fs/promises'
 import path from 'node:path'
 import { AgentRpc } from './rpc.mjs'
@@ -101,12 +98,11 @@ export async function repairProjectSetup({
     await fs.writeFile(
       path.join(home, '.lemex/config.toml'),
       [
-        ...providerToml(provider),
-        ...providerRequestConfig(provider),
-        `model = ${JSON.stringify(config.defaultModel)}`,
-        'model_catalog_json = "models.json"',
-        'web_search = "disabled"',
-        ...modelContextConfig(config.modelCatalog, config.defaultModel),
+        ...workerModelConfig(
+          provider,
+          config.modelCatalog,
+          config.defaultModel,
+        ),
         '[analytics]',
         'enabled = false',
         '[feedback]',
